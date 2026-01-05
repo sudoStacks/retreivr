@@ -5,11 +5,14 @@ __pycache__/
 
 # Local config and secrets
 config/config.json
+config/config_mac.json
 config/partial_config.json
+config/config_mac_no_auth.json
 config/Notes.md
 tokens/
 tgbot_token.txt
 rename.sh
+update_yt_dlp.sh
 
 # State / outputs
 database/
@@ -17,6 +20,7 @@ logs/
 temp_downloads/
 downloads/
 backups/
+tmp/
 
 # Editor / OS
 .DS_Store

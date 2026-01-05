@@ -16,6 +16,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import urllib.parse
 import urllib.request
@@ -28,7 +29,6 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from yt_dlp import YoutubeDL
-
 
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
@@ -45,6 +45,7 @@ DB_PATH = "database/db.sqlite"
 
 MAX_VIDEO_RETRIES = 4        # Hard cap per video
 EXTRACTOR_RETRIES = 2        # Times to retry each extractor before moving on
+_RUNTIME_WARNED = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,6 +129,8 @@ def build_youtube_clients(accounts, config):
     Any account that fails auth is skipped (logged) to avoid aborting the run.
     """
     clients = {}
+    if not isinstance(accounts, dict):
+        return clients
     for name, acc in accounts.items():
         token_path = acc.get("token")
         if not token_path:
@@ -143,8 +146,29 @@ def build_youtube_clients(accounts, config):
     return clients
 
 
-def resolve_js_runtime(config):
-    runtime = config.get("js_runtime") or os.environ.get("YT_DLP_JS_RUNTIME")
+def normalize_js_runtime(js_runtime):
+    """Accept bare binary names or paths; return 'name:/full/path' or None."""
+    if not js_runtime:
+        return None
+    if ":" in js_runtime:
+        return js_runtime
+    path = shutil.which(js_runtime)
+    prefix = "node"
+    if path and "deno" in os.path.basename(path).lower():
+        prefix = "deno"
+    elif path and "node" in os.path.basename(path).lower():
+        prefix = "node"
+    elif os.path.exists(js_runtime):
+        path = js_runtime
+        prefix = "deno" if "deno" in os.path.basename(js_runtime).lower() else "node"
+    if path:
+        return f"{prefix}:{path}"
+    return None
+
+
+def resolve_js_runtime(config, override=None):
+    runtime = override or config.get("js_runtime") or os.environ.get("YT_DLP_JS_RUNTIME")
+    runtime = normalize_js_runtime(runtime)
     if runtime:
         return runtime
 
@@ -185,7 +209,7 @@ def get_video_metadata(youtube, video_id):
     resp = youtube.videos().list(
         part="snippet,contentDetails",
         id=video_id,
-    ).execute()
+    ).execute(num_retries=2)
 
     items = resp.get("items")
     if not items:
@@ -204,6 +228,7 @@ def get_video_metadata(youtube, video_id):
     )
 
     return {
+        "video_id": video_id,
         "title": snip.get("title"),
         "channel": snip.get("channelTitle"),
         "upload_date": upload_date,
@@ -212,6 +237,116 @@ def get_video_metadata(youtube, video_id):
         "url": f"https://www.youtube.com/watch?v={video_id}",
         "thumbnail_url": thumb_url,
     }
+
+
+def extract_video_id(url):
+    """Best-effort video ID extraction from a YouTube URL."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.netloc and "youtu.be" in parsed.netloc and parsed.path:
+            return parsed.path.strip("/").split("/")[0]
+        qs = urllib.parse.parse_qs(parsed.query or "")
+        if "v" in qs and qs["v"]:
+            return qs["v"][0]
+    except Exception:
+        pass
+    return None
+
+
+def get_playlist_videos_fallback(playlist_id):
+    """Fetch playlist entries without OAuth (yt-dlp extract_flat).
+    Returns (videos, had_error).
+    """
+    playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+    opts = {
+        "quiet": True,
+        "skip_download": True,
+        "extract_flat": True,
+        "forceipv4": True,
+    }
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(playlist_url, download=False)
+            entries = info.get("entries") or []
+            vids = []
+            for entry in entries:
+                vid = entry.get("id") or entry.get("url")
+                if vid:
+                    vids.append({"videoId": vid})
+            return vids, False
+    except Exception:
+        logging.exception("yt-dlp playlist fallback failed for %s", playlist_id)
+        return [], True
+
+
+def get_video_metadata_fallback(video_id_or_url):
+    """Metadata without OAuth using yt-dlp (no download)."""
+    if video_id_or_url.startswith("http"):
+        video_url = video_id_or_url
+        vid = extract_video_id(video_id_or_url) or video_id_or_url
+    else:
+        video_url = f"https://www.youtube.com/watch?v={video_id_or_url}"
+        vid = video_id_or_url
+
+    opts = {
+        "quiet": True,
+        "skip_download": True,
+        "forceipv4": True,
+    }
+
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+    except Exception:
+        logging.exception("yt-dlp metadata fallback failed for %s", video_url)
+        return None
+
+    if not info:
+        return None
+
+    upload_date = info.get("upload_date") or ""
+    thumb_url = (
+        (info.get("thumbnail") or "")
+    )
+    return {
+        "video_id": vid,
+        "title": info.get("title"),
+        "channel": info.get("uploader"),
+        "upload_date": upload_date,
+        "description": info.get("description") or "",
+        "tags": info.get("tags") or [],
+        "url": video_url,
+        "thumbnail_url": thumb_url,
+    }
+
+
+def resolve_video_metadata(yt_client, video_id, allow_public_fallback=True):
+    """Try OAuth API first, then yt-dlp fallback (if allowed), then stub metadata."""
+    meta = None
+    if yt_client:
+        try:
+            meta = get_video_metadata(yt_client, video_id)
+        except HttpError:
+            logging.exception("Metadata fetch failed %s", video_id)
+        except RefreshError as e:
+            logging.error("OAuth refresh failed while fetching video %s: %s", video_id, e)
+    if not meta and allow_public_fallback:
+        meta = get_video_metadata_fallback(video_id)
+
+    if not meta:
+        vid = extract_video_id(video_id) or video_id
+        base_url = video_id if isinstance(video_id, str) and str(video_id).startswith("http") else f"https://www.youtube.com/watch?v={vid}"
+        meta = {
+            "video_id": vid,
+            "title": vid,
+            "channel": "",
+            "upload_date": "",
+            "description": "",
+            "tags": [],
+            "url": base_url,
+            "thumbnail_url": None,
+        }
+    return meta
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,6 +451,8 @@ def embed_metadata(local_file, meta, video_id):
 
     # Keep the same container extension to avoid invalid remuxes (e.g., MP4 into WebM)
     base_ext = os.path.splitext(local_file)[1] or ".webm"
+    ext_lower = base_ext.lower()
+    audio_only = ext_lower in [".mp3", ".m4a", ".opus", ".aac", ".flac"]
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=f".tagged{base_ext}", dir=os.path.dirname(local_file))
     os.close(tmp_fd)
 
@@ -328,7 +465,7 @@ def embed_metadata(local_file, meta, video_id):
         ]
 
         # Attach thumbnail as Matroska attachment if we have one
-        if thumb_path and os.path.exists(thumb_path):
+        if thumb_path and os.path.exists(thumb_path) and not audio_only:
             cmd.extend([
                 "-attach", thumb_path,
                 "-metadata:s:t", "mimetype=image/jpeg",
@@ -382,8 +519,12 @@ def embed_metadata(local_file, meta, video_id):
 # ─────────────────────────────────────────────────────────────────────────────
 # yt-dlp (WEBM + MP4 fallback)
 # ─────────────────────────────────────────────────────────────────────────────
-def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=None):
-    vid = video_url.split("v=")[-1]
+def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=None,
+                        target_format=None, audio_only=False):
+    vid = extract_video_id(video_url) or (video_url.split("v=")[-1] if "v=" in video_url else "video")
+    if meta and meta.get("video_id"):
+        vid = meta.get("video_id")
+    js_runtime = normalize_js_runtime(js_runtime)
 
     FORMAT_WEBM = (
         # Preferred: WebM (VP9/Opus)
@@ -393,6 +534,23 @@ def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=
         "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
         "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
     )
+
+    audio_formats = {"mp3", "m4a", "aac", "opus", "flac"}
+    inherited_fmt = None
+    if not target_format and config:
+        inherited_fmt = config.get("final_format")
+    target_fmt = (target_format or inherited_fmt or "").lower() or None
+    audio_mode = audio_only or (target_fmt in audio_formats)
+    preferred_exts = []
+
+    if audio_mode:
+        format_selector = "bestaudio/best"
+        preferred_exts.append(target_fmt or "mp3")
+    else:
+        format_selector = FORMAT_WEBM
+        if target_fmt:
+            preferred_exts.append(target_fmt)
+        preferred_exts.extend(["webm", "mp4", "mkv", "m4a", "opus"])
 
     extractor_chain = [
         ("android", {
@@ -411,6 +569,11 @@ def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=
             "Accept-Language": "en-US,en;q=0.9",
         }),
     ]
+
+    global _RUNTIME_WARNED
+    if not js_runtime and not _RUNTIME_WARNED:
+        logging.warning("No JS runtime configured/detected; set js_runtime in config or pass --js-runtime to reduce SABR/missing format issues.")
+        _RUNTIME_WARNED = True
 
     for attempt in range(MAX_VIDEO_RETRIES):
         logging.info(f"[{vid}] Download attempt {attempt+1}/{MAX_VIDEO_RETRIES}")
@@ -431,7 +594,7 @@ def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=
                 opts = {
                     "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
                     "paths": {"temp": "/tmp/yt-dlp"},
-                    "format": FORMAT_WEBM,
+                    "format": format_selector,
                     "quiet": True,
                     "continuedl": True,
                     "socket_timeout": 120,
@@ -442,12 +605,29 @@ def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=
                     "remote_components": ["ejs:github"],
                 }
 
-                # Allow caller to inject/override yt-dlp options via config
+                if audio_mode:
+                    opts["postprocessors"] = [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": target_fmt or "mp3",
+                        "preferredquality": "0",
+                    }]
+
+                # Allow caller to inject/override yt-dlp options via config (non-critical settings)
                 if config and config.get("yt_dlp_opts"):
                     try:
-                        opts.update(config.get("yt_dlp_opts") or {})
+                        user_opts = config.get("yt_dlp_opts") or {}
+                        opts.update(user_opts)
                     except Exception:
                         logging.exception("Failed to merge yt_dlp_opts from config")
+
+                # Enforce the format selector even if user opts provided their own format
+                opts["format"] = format_selector
+                if audio_mode:
+                    opts["postprocessors"] = [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": target_fmt or "mp3",
+                        "preferredquality": "0",
+                    }]
 
                 if js_runtime:
                     runtime_name, runtime_path = js_runtime.split(":", 1)
@@ -460,19 +640,23 @@ def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=
                     logging.warning(f"[{vid}] {client_name} failed: {e}")
                     continue
 
+                vid_for_files = info.get("id") or vid
+
                 if not info:
                     logging.warning(f"[{vid}] No info returned from extractor {client_name}")
                     continue
 
                 # Prefer .webm if present, else accept mp4
                 chosen = None
-                for f in os.listdir(temp_dir):
-                    if f.startswith(vid) and f.endswith(".webm"):
-                        chosen = os.path.join(temp_dir, f)
+                search_exts = preferred_exts + ["webm", "mp4", "mkv", "m4a", "opus", "mp3", "aac", "flac"]
+                for ext in search_exts:
+                    candidate = os.path.join(temp_dir, f"{vid_for_files}.{ext}")
+                    if os.path.exists(candidate):
+                        chosen = candidate
                         break
                 if not chosen:
                     for f in os.listdir(temp_dir):
-                        if f.startswith(vid) and f.endswith(".mp4"):
+                        if f.startswith(vid_for_files) and not f.endswith(".part"):
                             chosen = os.path.join(temp_dir, f)
                             break
 
@@ -483,8 +667,8 @@ def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=
                     embed_metadata(chosen, meta, vid)
 
                     # Post-processing final format conversion (if needed)
-                    desired_ext = config.get("final_format") if config else None
-                    if desired_ext:
+                    desired_ext = target_fmt or (config.get("final_format") if config else None)
+                    if desired_ext and not audio_mode:
                         current_ext = os.path.splitext(chosen)[1].lstrip(".").lower()
                         # Avoid container mismatch: don't force mp4 -> webm without re-encode
                         if current_ext == "mp4" and desired_ext == "webm":
@@ -515,6 +699,56 @@ def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=
 # ─────────────────────────────────────────────────────────────────────────────
 # Main pipeline
 # ─────────────────────────────────────────────────────────────────────────────
+def run_single_download(config, video_url, destination=None, final_format_override=None):
+    """Download a single URL (no OAuth required)."""
+    js_runtime = resolve_js_runtime(config)
+    meta = resolve_video_metadata(None, extract_video_id(video_url) or video_url)
+
+    vid = meta.get("video_id") or extract_video_id(video_url) or "video"
+    temp_dir = os.path.join("temp_downloads", vid)
+
+    dest_dir = os.path.expanduser(destination or config.get("single_download_folder") or "downloads")
+    os.makedirs(dest_dir, exist_ok=True)
+
+    local_file = download_with_ytdlp(
+        video_url,
+        temp_dir,
+        js_runtime,
+        meta,
+        config,
+        target_format=final_format_override,
+    )
+    if not local_file:
+        logging.error("Download FAILED: %s", video_url)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return False
+
+    ext = os.path.splitext(local_file)[1].lstrip(".") or final_format_override or config.get("final_format") or "webm"
+
+    template = config.get("filename_template")
+    if template:
+        try:
+            cleaned_name = template % {
+                "title": sanitize_for_filesystem(meta.get("title") or vid),
+                "uploader": sanitize_for_filesystem(meta.get("channel") or ""),
+                "upload_date": meta.get("upload_date") or "",
+                "ext": ext
+            }
+        except Exception:
+            cleaned_name = f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}_{vid[:8]}.{ext}"
+    else:
+        cleaned_name = f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}_{vid[:8]}.{ext}"
+
+    final_path = os.path.join(dest_dir, cleaned_name)
+    os.makedirs(os.path.dirname(final_path), exist_ok=True)
+
+    shutil.copy2(local_file, final_path)
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    logging.info("Direct download saved to %s", final_path)
+    return True
+
+
 def run_once(config):
     LOCK_FILE = "/tmp/yt_archiver.lock"
 
@@ -531,39 +765,64 @@ def run_once(config):
     conn = init_db()
     cur = conn.cursor()
 
-    accounts = config["accounts"]
-    playlists = config["playlists"]
+    accounts = config.get("accounts", {}) or {}
+    playlists = config.get("playlists", []) or []
     js_runtime = resolve_js_runtime(config)
+    global_final_format = config.get("final_format")
 
     pending_copies = []
-    yt_clients = build_youtube_clients(accounts, config)
+    yt_clients = build_youtube_clients(accounts, config) if accounts else {}
 
     try:
         for pl in playlists:
-            playlist_id = pl["playlist_id"]
-            target_folder = pl["folder"]
-            account = pl["account"]
+            playlist_id = pl.get("playlist_id") or pl.get("id")
+            target_folder = pl.get("folder") or pl.get("directory")
+            account = pl.get("account")
             remove_after = pl.get("remove_after_download", False)
+            playlist_format = pl.get("final_format") or global_final_format
 
-            yt = yt_clients.get(account)
-            if yt is None:
+            if not playlist_id or not target_folder:
+                logging.error("Playlist entry missing id or folder: %s", pl)
+                continue
+
+            yt = yt_clients.get(account) if account else None
+            allow_public = not account
+
+            videos = []
+            fetch_error = False
+            fallback_error = False
+            if account and not yt:
                 logging.error("No valid YouTube client for account '%s'; skipping playlist %s", account, playlist_id)
                 run_failures.append(f"{playlist_id} (auth)")
                 continue
 
-            try:
-                videos = get_playlist_videos(yt, playlist_id)
-            except HttpError:
-                logging.exception("Playlist fetch failed %s", playlist_id)
-                continue
-            except RefreshError as e:
-                logging.error("OAuth refresh failed for account %s while fetching playlist %s: %s", account, playlist_id, e)
-                run_failures.append(f"{playlist_id} (auth)")
-                yt_clients[account] = None
+            if yt:
+                try:
+                    videos = get_playlist_videos(yt, playlist_id)
+                except HttpError:
+                    logging.exception("Playlist fetch failed %s", playlist_id)
+                    fetch_error = True
+                    run_failures.append(f"{playlist_id} (auth)")
+                    continue
+                except RefreshError as e:
+                    logging.error("OAuth refresh failed for account %s while fetching playlist %s: %s", account, playlist_id, e)
+                    run_failures.append(f"{playlist_id} (auth)")
+                    yt_clients[account] = None
+                    continue
+
+            if not videos and allow_public:
+                videos, fallback_error = get_playlist_videos_fallback(playlist_id)
+
+            if not videos:
+                if fetch_error or fallback_error:
+                    logging.error("No videos found for playlist %s (auth or public fetch failed)", playlist_id)
+                    run_failures.append(f"{playlist_id} (auth)")
+                else:
+                    logging.info("Playlist %s is empty; skipping.", playlist_id)
                 continue
 
             for entry in videos:
-                vid = entry.get("videoId")
+                vid = entry.get("videoId") or entry.get("id")
                 if not vid:
                     continue
 
@@ -571,36 +830,29 @@ def run_once(config):
                 if cur.fetchone():
                     continue
 
-                try:
-                    meta = get_video_metadata(yt, vid)
-                except HttpError:
-                    logging.exception("Metadata fetch failed %s", vid)
-                    continue
-                except RefreshError as e:
-                    logging.error("OAuth refresh failed for account %s while fetching video %s: %s", account, vid, e)
-                    run_failures.append(f"{vid} (auth)")
-                    yt_clients[account] = None
-                    break
-                if not meta:
-                    logging.warning("Skipping %s: no metadata", vid)
-                    continue
+                meta = resolve_video_metadata(yt, vid, allow_public_fallback=allow_public)
 
-                logging.info("START download: %s (%s)", vid, meta["title"])
+                logging.info("START download: %s (%s)", vid, meta.get("title"))
 
-                video_url = meta["url"]
+                video_url = meta.get("url") or f"https://www.youtube.com/watch?v={vid}"
                 temp_dir = os.path.join("temp_downloads", vid)
 
-                local_file = download_with_ytdlp(video_url, temp_dir, js_runtime, meta, config)
+                local_file = download_with_ytdlp(
+                    video_url,
+                    temp_dir,
+                    js_runtime,
+                    meta,
+                    config,
+                    target_format=playlist_format,
+                )
                 if not local_file:
                     logging.warning("Download FAILED: %s", vid)
-                    run_failures.append(meta["title"])
+                    run_failures.append(meta.get("title") or vid)
                     shutil.rmtree(temp_dir, ignore_errors=True)
                     continue
 
-                # Determine extension based on config final_format
-                ext = config.get("final_format")
-                if not ext:
-                    ext = os.path.splitext(local_file)[1].lstrip(".") or "webm"
+                # Determine extension based on the resulting file or playlist/default format
+                ext = os.path.splitext(local_file)[1].lstrip(".") or playlist_format or "webm"
 
                 # Build filename using filename_template if present
                 template = config.get("filename_template")
@@ -642,7 +894,7 @@ def run_once(config):
 
                     shutil.rmtree(temp, ignore_errors=True)
 
-                    if success and remove and entry_id:
+                    if success and remove and entry_id and yt_service:
                         try:
                             yt_service.playlistItems().delete(id=entry_id).execute()
                         except Exception:
@@ -684,6 +936,10 @@ def run_once(config):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/config.json")
+    parser.add_argument("--single-url", help="Download a single URL and exit (no playlist scan).")
+    parser.add_argument("--destination", help="Destination directory for --single-url downloads.")
+    parser.add_argument("--format", dest="final_format_override", help="Override final format/container (e.g., mp3, mp4, webm, mkv).")
+    parser.add_argument("--js-runtime", help="Force JS runtime (e.g., node:/usr/bin/node or deno:/usr/bin/deno).")
     args = parser.parse_args()
 
     if not os.path.exists(args.config):
@@ -691,6 +947,14 @@ def main():
         return
 
     config = load_config(args.config)
+    if args.js_runtime:
+        config["js_runtime"] = args.js_runtime
+    if args.single_url:
+        ok = run_single_download(config, args.single_url, args.destination, args.final_format_override)
+        if not ok:
+            sys.exit(1)
+        return
+
     run_once(config)
 
 

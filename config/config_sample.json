@@ -11,16 +11,18 @@
       "playlist_id": "PLXXXXXXXXXXXXXXXXXXXXXXX",
       "folder": "/path/to/output/folder",
       "account": "example_account",
-      "remove_after_download": false
+      "remove_after_download": false,
+      "final_format": "webm"
     }
   ],
   "yt_dlp_opts": {},
   "filename_template": "%(title)s - %(uploader)s - %(upload_date)s.%(ext)s",
   "upload_date_format": "MM-YYYY",
   "final_format": "webm",
-  "js_runtime": "",
+  "js_runtime": "node:/usr/bin/node",
   "telegram": {
     "bot_token": "",
     "chat_id": ""
-  }
+  },
+  "single_download_folder": "downloads"
 }

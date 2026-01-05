@@ -8,6 +8,8 @@ import sys
 import threading
 from pathlib import Path
 
+ICON_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), "app_icon.icns")
+
 DEFAULT_CONFIG_PATH = "~/config.json"
 
 APP_SETTINGS_FILE = os.path.expanduser("~/.yt_archiver_gui_settings.json")
@@ -29,6 +31,23 @@ def save_app_settings(settings):
         pass
 
 
+def set_app_icon(root):
+    """Set window icon (Tk) and Dock icon (macOS via PyObjC if available)."""
+    if ICON_PATH and os.path.exists(ICON_PATH):
+        try:
+            img = tk.PhotoImage(file=ICON_PATH)
+            root.iconphoto(False, img)
+        except Exception:
+            pass
+        try:
+            from AppKit import NSApplication, NSImage
+            nsimg = NSImage.alloc().initByReferencingFile_(ICON_PATH)
+            if nsimg:
+                NSApplication.sharedApplication().setApplicationIconImage_(nsimg)
+        except Exception:
+            pass
+
+
 class ConfigGUI:
     def __init__(self, root):
         self.root = root
@@ -42,6 +61,7 @@ class ConfigGUI:
         self.app_settings = load_app_settings()
         self.dark_mode = self.app_settings.get("dark_mode", False)
         self.last_config_path = self.app_settings.get("last_config_path", "")
+        self.last_direct_folder = self.app_settings.get("last_direct_folder", "")
 
         # =========================
         # TOP BAR: CONFIG PATH + BUTTONS
@@ -64,6 +84,53 @@ class ConfigGUI:
         ttk.Button(top, text="Open in Finder", command=self.open_in_finder).pack(side="left", padx=4)
 
         # =========================
+        # DIRECT URL DOWNLOAD (no OAuth required)
+        # =========================
+        direct_frame = ttk.LabelFrame(root, text="Direct Download (single URL)", padding=8)
+        direct_frame.pack(side="top", fill="x", padx=10, pady=(0, 8))
+
+        self.direct_url_var = tk.StringVar()
+        ttk.Label(direct_frame, text="Video URL:").grid(row=0, column=0, sticky="e")
+        ttk.Entry(direct_frame, textvariable=self.direct_url_var, width=60).grid(row=0, column=1, padx=5, pady=2, sticky="w")
+
+        self.direct_dest_var = tk.StringVar(value=self.last_direct_folder)
+        ttk.Label(direct_frame, text="Save to folder:").grid(row=1, column=0, sticky="e")
+        ttk.Entry(direct_frame, textvariable=self.direct_dest_var, width=50).grid(row=1, column=1, padx=5, pady=2, sticky="w")
+        ttk.Button(direct_frame, text="Browse", command=self.browse_direct_folder).grid(row=1, column=2, padx=4, pady=2)
+
+        ttk.Label(direct_frame, text="Format:").grid(row=2, column=0, sticky="e")
+        self.direct_format_var = tk.StringVar(value="Config default")
+        ttk.Combobox(
+            direct_frame,
+            textvariable=self.direct_format_var,
+            values=["Config default", "webm", "mp4", "mkv", "mp3"],
+            width=14,
+            state="readonly"
+        ).grid(row=2, column=1, sticky="w", padx=5, pady=2)
+
+        self.direct_status_var = tk.StringVar(value="")
+        self.direct_download_btn = ttk.Button(direct_frame, text="Download", command=self.run_direct_download)
+        self.direct_download_btn.grid(row=3, column=1, sticky="w", pady=4, padx=5)
+        ttk.Label(direct_frame, textvariable=self.direct_status_var, foreground="green").grid(row=3, column=2, sticky="w")
+        self.direct_progress = ttk.Progressbar(direct_frame, mode="indeterminate", length=200)
+        self.direct_progress.grid(row=4, column=1, sticky="w", padx=5, pady=2)
+
+        # =========================
+        # RUN FULL ARCHIVER
+        # =========================
+        run_frame = ttk.LabelFrame(root, text="Run Archiver (playlists)", padding=8)
+        run_frame.pack(side="top", fill="x", padx=10, pady=(0, 8))
+
+        self.run_status_var = tk.StringVar(value="")
+        self.run_archiver_btn = ttk.Button(run_frame, text="Run Now", command=self.run_full_archiver)
+        self.run_archiver_btn.grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        self.save_button = ttk.Button(run_frame, text="Save Configuration", command=self.save_config)
+        self.save_button.grid(row=0, column=1, padx=5, pady=2, sticky="w")
+        ttk.Label(run_frame, textvariable=self.run_status_var, foreground="green").grid(row=0, column=2, sticky="w", padx=6)
+        self.run_progress = ttk.Progressbar(run_frame, mode="indeterminate", length=180)
+        self.run_progress.grid(row=1, column=0, columnspan=3, sticky="w", padx=5, pady=2)
+
+        # =========================
         # SCROLLABLE MAIN AREA
         # =========================
         container = ttk.Frame(root)
@@ -83,6 +150,10 @@ class ConfigGUI:
 
         self.canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        # Mouse wheel scrolling (bind on hover to avoid stealing events globally)
+        self.canvas.bind("<Enter>", lambda e: self._bind_mousewheel())
+        self.canvas.bind("<Leave>", lambda e: self._unbind_mousewheel())
 
         # =========================
         # ACCOUNTS SECTION (READ-ONLY DISPLAY)
@@ -163,15 +234,24 @@ class ConfigGUI:
         ttk.Label(self.main_frame, text="Final Output Format", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
 
         self.final_format_var = tk.StringVar()
-        self.format_box = ttk.Combobox(self.main_frame, textvariable=self.final_format_var, values=["mp4", "mkv", "webm"], state="readonly", width=10)
+        self.format_box = ttk.Combobox(
+            self.main_frame,
+            textvariable=self.final_format_var,
+            values=["", "webm", "mp4", "mkv", "mp3"],
+            state="readonly",
+            width=12
+        )
         self.format_box.pack(anchor="w", pady=5)
-        self.final_format_var.set("mp4")
+        self.final_format_var.set("webm")
 
         # =========================
-        # SAVE BUTTON
+        # JS RUNTIME
         # =========================
-        ttk.Button(self.main_frame, text="Save Configuration", command=self.save_config).pack(anchor="w", pady=15)
+        ttk.Label(self.main_frame, text="JS Runtime (node:/path or deno:/path)", font=("Arial", 12, "bold")).pack(anchor="w", pady=(10, 0))
+        self.js_runtime_entry = ttk.Entry(self.main_frame, width=70)
+        self.js_runtime_entry.pack(anchor="w", pady=5)
 
+        # =========================
         # Startup: ask for config, then load, then apply theme + center window
         self.root.after(50, self.startup_select_config)
 
@@ -195,6 +275,29 @@ class ConfigGUI:
         x = (sw // 2) - (w // 2)
         y = 0  # start at top
         self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _bind_mousewheel(self):
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)   # Windows/mac
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)     # Linux scroll up
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)     # Linux scroll down
+
+    def _unbind_mousewheel(self):
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+
+    def _on_mousewheel(self, event):
+        # Normalize for different platforms
+        delta = 0
+        if getattr(event, "num", None) == 4:   # Linux scroll up
+            delta = -1
+        elif getattr(event, "num", None) == 5:  # Linux scroll down
+            delta = 1
+        elif hasattr(event, "delta") and event.delta != 0:
+            delta = -1 if event.delta > 0 else 1  # macOS/Windows sign only
+
+        if delta != 0:
+            self.canvas.yview_scroll(delta, "units")
 
     def browse_config(self):
         path = filedialog.askopenfilename(title="Select config.json", filetypes=[("JSON Files", "*.json")])
@@ -273,6 +376,7 @@ class ConfigGUI:
                     directory=pl.get("folder") or pl.get("directory", ""),
                     account=pl.get("account", ""),
                     remove_after=pl.get("remove_after_download", False),
+                    final_format=pl.get("final_format", ""),
                 )
         else:
             self.add_playlist_card()
@@ -298,10 +402,16 @@ class ConfigGUI:
         self.filename_template_entry.insert(0, tmpl)
 
         # ----- Final format -----
-        final_format = self.config.get("final_format", "mp4")
-        if final_format not in ["mp4", "mkv", "webm"]:
-            final_format = "mp4"
+        final_format = self.config.get("final_format", "")
+        if final_format not in ["", "webm", "mp4", "mkv", "mp3"]:
+            final_format = ""
         self.final_format_var.set(final_format)
+
+        # ----- JS runtime -----
+        js_runtime = self.config.get("js_runtime", "")
+        self.js_runtime_entry.delete(0, tk.END)
+        if js_runtime:
+            self.js_runtime_entry.insert(0, js_runtime)
 
     # ============================================================
     # DARK / LIGHT THEME
@@ -384,6 +494,10 @@ class ConfigGUI:
         base_dir = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
         return os.path.join(base_dir, "setup_oauth.py")
 
+    def get_archiver_path(self):
+        base_dir = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
+        return os.path.join(base_dir, "archiver.py")
+
     def run_oauth_flow(self):
         account = self.oauth_account_entry.get().strip()
         client_secret = os.path.expanduser(self.oauth_client_secret_entry.get().strip())
@@ -439,9 +553,129 @@ class ConfigGUI:
         threading.Thread(target=worker, daemon=True).start()
 
     # ============================================================
+    # DIRECT DOWNLOAD HANDLERS
+    # ============================================================
+    def browse_direct_folder(self):
+        folder = filedialog.askdirectory(title="Select download folder")
+        if folder:
+            self.direct_dest_var.set(folder)
+            self.app_settings["last_direct_folder"] = folder
+            save_app_settings(self.app_settings)
+
+    def run_direct_download(self):
+        url = self.direct_url_var.get().strip()
+        dest = os.path.expanduser(self.direct_dest_var.get().strip())
+        config_path = os.path.expanduser(self.config_path_entry.get().strip())
+
+        if not url:
+            messagebox.showerror("Missing URL", "Paste a YouTube video URL first.")
+            return
+        if not dest:
+            messagebox.showerror("Missing Folder", "Choose where to save the download.")
+            return
+        if not config_path or not os.path.exists(config_path):
+            messagebox.showerror("Missing Config", "Select a valid config.json path first.")
+            return
+
+        archiver_path = self.get_archiver_path()
+        if not os.path.exists(archiver_path):
+            messagebox.showerror("Missing Script", f"archiver.py not found at:\n{archiver_path}")
+            return
+
+        fmt = self.direct_format_var.get().strip()
+        if fmt.lower() == "config default":
+            fmt = ""
+
+        cmd = [sys.executable, archiver_path, "--config", config_path, "--single-url", url, "--destination", dest]
+        if fmt:
+            cmd.extend(["--format", fmt])
+
+        self.app_settings["last_direct_folder"] = dest
+        save_app_settings(self.app_settings)
+
+        self.direct_download_btn.config(state="disabled")
+        self.direct_status_var.set("Downloading...")
+        try:
+            self.direct_progress.start(10)
+        except Exception:
+            pass
+
+        def worker():
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                out, _ = proc.communicate()
+                code = proc.returncode
+            except Exception as e:
+                code = -1
+                out = f"Error: {e}"
+
+            def done():
+                self.direct_download_btn.config(state="normal")
+                try:
+                    self.direct_progress.stop()
+                except Exception:
+                    pass
+                if code == 0:
+                    self.direct_status_var.set("Download complete")
+                    messagebox.showinfo("Download complete", "Download successful!")
+                else:
+                    self.direct_status_var.set("Download failed")
+                    messagebox.showerror("Download failed", out or "Check console output for details.")
+
+            self.root.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_full_archiver(self):
+        config_path = os.path.expanduser(self.config_path_entry.get().strip())
+        if not config_path or not os.path.exists(config_path):
+            messagebox.showerror("Missing Config", "Select a valid config.json path first.")
+            return
+
+        archiver_path = self.get_archiver_path()
+        if not os.path.exists(archiver_path):
+            messagebox.showerror("Missing Script", f"archiver.py not found at:\n{archiver_path}")
+            return
+
+        cmd = [sys.executable, archiver_path, "--config", config_path]
+
+        self.run_archiver_btn.config(state="disabled")
+        self.run_status_var.set("Running...")
+        try:
+            self.run_progress.start(10)
+        except Exception:
+            pass
+
+        def worker():
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                out, _ = proc.communicate()
+                code = proc.returncode
+            except Exception as e:
+                code = -1
+                out = f"Error: {e}"
+
+            def done():
+                self.run_archiver_btn.config(state="normal")
+                try:
+                    self.run_progress.stop()
+                except Exception:
+                    pass
+                if code == 0:
+                    self.run_status_var.set("Run complete")
+                    messagebox.showinfo("Archiver finished", "Run finished successfully.")
+                else:
+                    self.run_status_var.set("Run failed")
+                    messagebox.showerror("Archiver failed", out or "Check console output for details.")
+
+            self.root.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ============================================================
     # PLAYLIST CARD MANAGEMENT
     # ============================================================
-    def add_playlist_card(self, playlist_id="", directory="", account="", remove_after=False):
+    def add_playlist_card(self, playlist_id="", directory="", account="", remove_after=False, final_format=""):
         card = ttk.Frame(self.playlist_frame, padding=8, style="Card.TFrame")
 
         # Playlist ID
@@ -479,15 +713,28 @@ class ConfigGUI:
         ttk.Checkbutton(row3, text="Remove after download", variable=remove_var).pack(side="left", padx=10)
         row3.pack(anchor="w", pady=2)
 
+        # Final format override
+        row4 = ttk.Frame(card)
+        ttk.Label(row4, text="Final format:").pack(side="left")
+        format_var = tk.StringVar(value=final_format if final_format else "inherit(default)")
+        ttk.Combobox(
+            row4,
+            textvariable=format_var,
+            values=["inherit(default)", "webm", "mp4", "mkv", "mp3"],
+            state="readonly",
+            width=14
+        ).pack(side="left", padx=5)
+        row4.pack(anchor="w", pady=2)
+
         # Remove card button
         def remove_card():
             card.destroy()
-            self.playlist_rows.remove((id_entry, dir_entry, account_entry, remove_var))
+            self.playlist_rows.remove((id_entry, dir_entry, account_entry, remove_var, format_var))
 
         ttk.Button(card, text="Remove", command=remove_card).pack(anchor="e", pady=3)
 
         card.pack(fill="x", pady=5)
-        self.playlist_rows.append((id_entry, dir_entry, account_entry, remove_var))
+        self.playlist_rows.append((id_entry, dir_entry, account_entry, remove_var, format_var))
 
     # ============================================================
     # SAVE CONFIG
@@ -504,20 +751,24 @@ class ConfigGUI:
 
         # Playlists
         playlists = []
-        for id_entry, dir_entry, account_entry, remove_var in self.playlist_rows:
+        for id_entry, dir_entry, account_entry, remove_var, format_var in self.playlist_rows:
             pid = id_entry.get().strip()
             pdir = dir_entry.get().strip()
             acc = account_entry.get().strip()
             rm = bool(remove_var.get())
+            fmt = format_var.get().strip()
+            if fmt == "inherit(default)":
+                fmt = ""
             if pid and pdir:
-                playlists.append(
-                    {
-                        "playlist_id": pid,
-                        "folder": pdir,
-                        "account": acc,
-                        "remove_after_download": rm,
-                    }
-                )
+                entry = {
+                    "playlist_id": pid,
+                    "folder": pdir,
+                    "account": acc,
+                    "remove_after_download": rm,
+                }
+                if fmt:
+                    entry["final_format"] = fmt
+                playlists.append(entry)
         if not playlists:
             messagebox.showerror("No Playlists", "Please add at least one playlist.")
             return
@@ -531,7 +782,12 @@ class ConfigGUI:
 
         # Filename template & final format
         new_cfg["filename_template"] = self.filename_template_entry.get().strip() or "%(title)s - %(uploader)s - %(upload_date)s.%(ext)s"
-        new_cfg["final_format"] = self.final_format_var.get() or "mp4"
+        new_cfg["final_format"] = self.final_format_var.get() or ""
+        js_rt = self.js_runtime_entry.get().strip()
+        if js_rt:
+            new_cfg["js_runtime"] = js_rt
+        elif "js_runtime" in new_cfg:
+            new_cfg.pop("js_runtime", None)
 
         # Write file
         try:
@@ -558,5 +814,6 @@ class ConfigGUI:
 # ============================================================
 if __name__ == "__main__":
     root = tk.Tk()
+    set_app_icon(root)
     app = ConfigGUI(root)
     root.mainloop()
