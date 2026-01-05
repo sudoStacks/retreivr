@@ -80,7 +80,6 @@ class ConfigGUI:
 
         ttk.Button(top, text="Browse", command=self.browse_config).pack(side="left", padx=4)
         ttk.Button(top, text="Reload", command=self.reload_config).pack(side="left", padx=4)
-        ttk.Button(top, text="Dark Mode", command=self.toggle_dark_mode).pack(side="left", padx=4)
         ttk.Button(top, text="Open in Finder", command=self.open_in_finder).pack(side="left", padx=4)
 
         # =========================
@@ -193,6 +192,7 @@ class ConfigGUI:
         self.oauth_run_btn = ttk.Button(oauth_frame, text="Run OAuth Flow", command=self.run_oauth_flow)
         self.oauth_run_btn.grid(row=4, column=1, sticky="w", pady=6)
         ttk.Label(oauth_frame, textvariable=self.oauth_status_var, foreground="green").grid(row=4, column=2, sticky="w", padx=6)
+        ttk.Button(oauth_frame, text="Open Google Console", command=self.open_google_console).grid(row=4, column=0, padx=4, pady=6, sticky="e")
 
         # =========================
         # PLAYLISTS SECTION
@@ -489,6 +489,13 @@ class ConfigGUI:
         if path:
             self.oauth_token_entry.delete(0, tk.END)
             self.oauth_token_entry.insert(0, path)
+
+    def open_google_console(self):
+        try:
+            import webbrowser
+            webbrowser.open("https://console.cloud.google.com/", new=2)
+        except Exception:
+            messagebox.showerror("Error", "Could not open Google Cloud Console.")
 
     def get_setup_oauth_path(self):
         base_dir = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
