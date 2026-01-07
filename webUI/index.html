@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube Archiver</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="backdrop"></div>
+  <header class="topbar">
+    <div class="brand">
+      <img class="app-icon" src="app_icon.png" alt="YouTube Archiver">
+      <div class="brand-text">
+        <div class="title">YouTube Archiver</div>
+        <div class="subtitle">Self-hosted playlist archiving</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="refresh-all" class="button">Refresh</button>
+      <button id="toggle-theme" class="button ghost">Light mode</button>
+      <a class="button ghost" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel" id="run-panel">
+      <div class="panel-title">Run Controls</div>
+      <div class="stack">
+        <div class="group">
+          <div class="group-title">Playlists</div>
+          <div class="row">
+            <button id="run-playlists" class="button">Run Playlists</button>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Single URL</div>
+          <label class="field">
+            <span>Video URL</span>
+            <input id="run-single-url" type="text" placeholder="https://www.youtube.com/watch?v=...">
+          </label>
+        <label class="field">
+          <span>Destination</span>
+          <div class="row">
+            <input id="run-destination" type="text" placeholder="downloads">
+            <button id="browse-run-destination" class="button ghost small" type="button">Browse</button>
+          </div>
+        </label>
+        <div class="row">
+          <label class="field">
+            <span>Format override</span>
+            <select id="run-format">
+              <option value="">(config default)</option>
+              <option value="webm">webm</option>
+              <option value="mp4">mp4</option>
+              <option value="mkv">mkv</option>
+              <option value="mp3">mp3</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>JS runtime override</span>
+            <input id="run-js-runtime" type="text" placeholder="node:/usr/bin/node">
+          </label>
+          </div>
+        <div class="row">
+          <button id="run-single" class="button">Run Single URL</button>
+          <a id="run-single-download" class="button ghost small" href="#" aria-disabled="true">Download last</a>
+        </div>
+      </div>
+
+        <div id="run-message" class="notice" role="status"></div>
+      </div>
+    </section>
+
+    <section class="panel" id="status-panel">
+      <div class="panel-title">Status</div>
+      <div class="stack">
+        <div class="row">
+          <span class="chip" id="status-running">idle</span>
+          <span class="meta" id="status-run-id">run: -</span>
+        </div>
+        <div class="row">
+          <div class="stat">
+            <span class="label">Started</span>
+            <span id="status-started">-</span>
+          </div>
+          <div class="stat">
+            <span class="label">Finished</span>
+            <span id="status-finished">-</span>
+          </div>
+        </div>
+        <div class="row">
+          <div class="stat">
+            <span class="label">Success</span>
+            <span id="status-success">0</span>
+          </div>
+          <div class="stat">
+            <span class="label">Failed</span>
+            <span id="status-failed">0</span>
+          </div>
+        </div>
+        <div class="row">
+          <div class="stat">
+            <span class="label">Active playlist</span>
+            <span id="status-playlist">-</span>
+          </div>
+          <div class="stat">
+            <span class="label">Active video</span>
+            <span id="status-video">-</span>
+          </div>
+        </div>
+        <div class="row">
+          <div class="stat">
+            <span class="label">Last completed</span>
+            <span id="status-last-completed">-</span>
+          </div>
+          <div class="stat">
+            <span class="label">Playlist progress</span>
+            <span id="status-playlist-progress-text">-</span>
+          </div>
+        </div>
+        <div class="progress">
+          <div id="status-playlist-progress-bar" class="progress-bar"></div>
+        </div>
+        <div id="status-video-progress" class="stack hidden">
+          <div class="row">
+            <div class="stat">
+              <span class="label">Video progress</span>
+              <span id="status-video-progress-text">-</span>
+            </div>
+            <span id="status-video-progress-meta" class="meta">-</span>
+          </div>
+          <div class="progress">
+            <div id="status-video-progress-bar" class="progress-bar"></div>
+          </div>
+        </div>
+        <div class="row">
+          <span class="label">Last error</span>
+          <span id="status-error" class="meta">-</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="schedule-panel">
+      <div class="panel-title">Schedule</div>
+      <div class="stack">
+        <div class="row">
+          <label class="field inline">
+            <span>Enabled</span>
+            <input id="schedule-enabled" type="checkbox">
+          </label>
+          <label class="field inline">
+            <span>Interval (hours)</span>
+            <input id="schedule-interval" type="number" min="1" step="1" value="6">
+          </label>
+          <label class="field inline">
+            <span>Run on startup</span>
+            <input id="schedule-startup" type="checkbox">
+          </label>
+        </div>
+        <div class="row">
+          <button id="schedule-save" class="button">Save Schedule</button>
+          <button id="schedule-run-now" class="button ghost">Run now</button>
+          <div id="schedule-message" class="notice" role="status"></div>
+        </div>
+        <div class="row">
+          <div class="stat">
+            <span class="label">Last run</span>
+            <span id="schedule-last-run">-</span>
+          </div>
+          <div class="stat">
+            <span class="label">Next run</span>
+            <span id="schedule-next-run">-</span>
+          </div>
+        </div>
+        <div class="notice">Scheduled runs will not interrupt or overlap manual runs.</div>
+      </div>
+    </section>
+
+    <section class="panel" id="metrics-panel">
+      <div class="panel-title">Metrics</div>
+      <div class="row">
+        <div class="stat">
+          <span class="label">Downloads files</span>
+          <span id="metrics-downloads-count">-</span>
+        </div>
+        <div class="stat">
+          <span class="label">Downloads size</span>
+          <span id="metrics-downloads-size">-</span>
+        </div>
+        <div class="stat">
+          <span class="label">Disk free</span>
+          <span id="metrics-disk-free">-</span>
+        </div>
+        <div class="stat">
+          <span class="label">Disk total</span>
+          <span id="metrics-disk-total">-</span>
+        </div>
+      </div>
+      <div class="row">
+        <span id="metrics-message" class="notice"></span>
+      </div>
+    </section>
+
+    <section class="panel full" id="config-panel">
+      <div class="panel-title">Config Editor</div>
+      <div class="stack">
+        <div class="group">
+          <div class="group-title">Config File</div>
+          <div class="row">
+            <label class="field">
+              <span>Config path (server)</span>
+              <input id="config-path" type="text" placeholder="config/config.json">
+            </label>
+            <button id="browse-config-path" class="button ghost">Browse</button>
+            <button id="load-config-path" class="button">Load</button>
+          </div>
+          <div class="notice">Path changes apply globally on the server.</div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">General</div>
+          <div class="grid two">
+            <label class="field">
+              <span>Playlist check interval (minutes)</span>
+              <input id="cfg-poll-interval" type="number" min="1" step="1">
+              <div class="notice">Checks YouTube playlists for new items (not UI refresh timing).</div>
+            </label>
+            <label class="field">
+              <span>Upload date format</span>
+              <input id="cfg-upload-date-format" type="text" placeholder="MM-YYYY">
+            </label>
+            <label class="field">
+              <span>Filename template</span>
+              <input id="cfg-filename-template" type="text" placeholder="%(title)s - %(uploader)s - %(upload_date)s.%(ext)s">
+            </label>
+            <label class="field">
+              <span>Final format</span>
+              <select id="cfg-final-format">
+                <option value="">(not set)</option>
+                <option value="webm">webm (default)</option>
+                <option value="mp4">mp4</option>
+                <option value="mkv">mkv</option>
+                <option value="mp3">mp3</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>JS runtime</span>
+              <input id="cfg-js-runtime" type="text" placeholder="node:/usr/bin/node">
+            </label>
+            <label class="field">
+              <span>Single download folder</span>
+              <div class="row">
+                <input id="cfg-single-download-folder" type="text" placeholder="downloads">
+                <button id="browse-single-download" class="button ghost small">Browse</button>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Telegram</div>
+          <div class="grid two">
+            <label class="field">
+              <span>Bot token</span>
+              <div class="row">
+                <input id="cfg-telegram-token" type="password">
+                <button id="toggle-telegram-token" class="button ghost small" type="button">Show</button>
+              </div>
+            </label>
+            <label class="field">
+              <span>Chat ID</span>
+              <input id="cfg-telegram-chat" type="text">
+            </label>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Accounts</div>
+          <div id="accounts-list" class="stack"></div>
+          <button id="add-account" class="button ghost">Add account</button>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Playlists</div>
+          <div id="playlists-list" class="stack"></div>
+          <button id="add-playlist" class="button ghost">Add playlist</button>
+        </div>
+
+        <div class="group">
+          <div class="group-title">yt-dlp Options (JSON)</div>
+          <label class="field">
+            <span>Options</span>
+            <textarea id="cfg-yt-dlp-opts" rows="6" placeholder='{"format_sort": ["res", "codec"]}'></textarea>
+          </label>
+        </div>
+
+        <div class="row">
+          <button id="save-config" class="button">Save Config</button>
+          <button id="reset-config" class="button ghost">Reset</button>
+          <div id="config-message" class="notice" role="status"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="logs-panel">
+      <div class="panel-title">Logs</div>
+      <div class="row">
+        <label class="field inline">
+          <span>Lines</span>
+          <input id="logs-lines" type="number" min="1" max="5000" value="200">
+        </label>
+        <button id="logs-refresh" class="button ghost">Refresh</button>
+        <label class="field inline">
+          <span>Auto</span>
+          <input id="logs-auto" type="checkbox" checked>
+        </label>
+      </div>
+      <pre id="logs-output" class="log-output" aria-live="polite"></pre>
+    </section>
+
+    <section class="panel full" id="downloads-panel">
+      <div class="panel-title">Downloads</div>
+      <div class="row">
+        <button id="downloads-refresh" class="button ghost">Refresh</button>
+        <button id="cleanup-temp" class="button ghost">Clear temporary files</button>
+        <div id="downloads-message" class="notice" role="status"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Modified</th>
+              <th>Size</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="downloads-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel full" id="history-panel">
+      <div class="panel-title">History</div>
+      <div class="row">
+        <label class="field inline">
+          <span>Search</span>
+          <input id="history-search" type="text" placeholder="title or filename">
+        </label>
+        <label class="field inline">
+          <span>Playlist</span>
+          <input id="history-playlist" type="text" placeholder="playlist id">
+        </label>
+        <label class="field inline">
+          <span>From</span>
+          <input id="history-from" type="date">
+        </label>
+        <label class="field inline">
+          <span>To</span>
+          <input id="history-to" type="date">
+        </label>
+      </div>
+      <div class="row">
+        <label class="field inline">
+          <span>Limit</span>
+          <input id="history-limit" type="number" min="1" max="5000" value="200">
+        </label>
+        <label class="field inline">
+          <span>Sort</span>
+          <select id="history-sort">
+            <option value="date">date</option>
+            <option value="title">title</option>
+            <option value="size">size</option>
+          </select>
+        </label>
+        <label class="field inline">
+          <span>Dir</span>
+          <select id="history-dir">
+            <option value="desc">desc</option>
+            <option value="asc">asc</option>
+          </select>
+        </label>
+        <label class="field inline">
+          <span>Internal paths</span>
+          <input id="history-show-paths" type="checkbox">
+        </label>
+        <button id="history-apply" class="button ghost">Apply</button>
+        <button id="history-clear" class="button ghost">Clear</button>
+        <button id="history-refresh" class="button ghost">Refresh</button>
+      </div>
+      <div id="history-message" class="notice" role="status"></div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Video ID</th>
+              <th>Playlist ID</th>
+              <th>Downloaded At</th>
+              <th>Filepath</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="history-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div id="browser-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="browser-title">
+    <div class="modal-card">
+      <div class="row space-between">
+        <div id="browser-title" class="panel-title">Server Browser</div>
+        <button id="browser-close" class="button ghost small">Close</button>
+      </div>
+      <div class="row space-between">
+        <div class="meta" id="browser-path">/</div>
+        <button id="browser-up" class="button ghost small">Up</button>
+      </div>
+      <div id="browser-list" class="browser-list"></div>
+      <div class="row space-between">
+        <div class="meta" id="browser-selected">No selection</div>
+        <button id="browser-select" class="button small">Use this path</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

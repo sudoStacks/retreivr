@@ -5,8 +5,23 @@ Usage:
 
 This will run the OAuth flow and save the token to tokens/token_main.json
 """
-from google_auth_oauthlib.flow import InstalledAppFlow
+import sys
 import argparse, json
+
+from engine.paths import TOKENS_DIR, ensure_dir, resolve_dir
+
+def _require_python_311():
+    if sys.version_info[:2] != (3, 11):
+        found = sys.version.split()[0]
+        raise SystemExit(
+            f"ERROR: youtube-archiver requires Python 3.11.x; found Python {found} "
+            f"(executable: {sys.executable})"
+        )
+
+if __name__ == "__main__":
+    _require_python_311()
+
+from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 
@@ -24,8 +39,13 @@ def main():
     )
     args = parser.parse_args()
 
-    client_secret_file = args.client_secret
-    token_file = args.token_out
+    try:
+        client_secret_file = resolve_dir(args.client_secret, TOKENS_DIR)
+        token_file = resolve_dir(args.token_out, TOKENS_DIR)
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
+
+    ensure_dir(TOKENS_DIR)
 
     flow = InstalledAppFlow.from_client_secrets_file(client_secret_file, SCOPES)
 

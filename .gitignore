@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 
 # Local config and secrets
+config/
 config/config.json
 config/config_mac.json
 config/partial_config.json
@@ -13,14 +14,21 @@ tokens/
 tgbot_token.txt
 rename.sh
 update_yt_dlp.sh
+.env
 
 # State / outputs
+data/
+logs/
+downloads/
+*.sqlite
 database/
 logs/
 temp_downloads/
 downloads/
 backups/
 tmp/
+dist/
+build/
 
 # Editor / OS
 .DS_Store

@@ -1,5 +1,11 @@
 {
   "poll_interval_minutes": 30,
+  "schedule": {
+    "enabled": false,
+    "mode": "interval",
+    "interval_hours": 6,
+    "run_on_startup": false
+  },
   "accounts": {
     "example_account": {
       "client_secret": "tokens/client_secret_example.json",

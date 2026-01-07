@@ -8,4 +8,6 @@ yt-dlp>=2025.10.01
 python-dotenv>=1.0.0
 ffmpeg-python 
 pytz>=2024.1
-
+fastapi>=0.110.0
+uvicorn>=0.27.0
+APScheduler>=3.10.4
