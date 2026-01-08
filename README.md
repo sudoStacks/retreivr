@@ -18,7 +18,7 @@ Highlights
 	•	Mobile-friendly Web UI served by the API
 	•	Built-in scheduler (no cron, no systemd)
 	•	Docker-safe path handling and volume layout
-	•	Background runs with live status and progress
+	•	Background runs with live playlist + video progress
 	•	SQLite history with search, filter, and sort
 	•	Optional Telegram run summaries
 	•	Optional Basic auth and reverse-proxy support
@@ -61,7 +61,7 @@ python setup_oauth.py --account family_tv tokens/client_secret_family.json token
 - `final_format` default (webm/mp4/mkv/mp3)
 - `js_runtime` to avoid extractor issues (node:/path or deno:/path)
 - `single_download_folder` default for single-URL downloads
-- `telegram` optional bot_token/chat_id for summaries
+- `telegram` optional bot_token/chat_id for summaries (see Telegram setup below)
 - `schedule` optional interval scheduler
 
 ## Path strategy (Docker)
@@ -78,11 +78,12 @@ Do not put absolute host paths in `config.json` when using Docker.
 
 ## Web UI
 The Web UI is served by the API and talks only to REST endpoints. It provides:
-	•	Config editor (including schedule controls)
-	•	Manual run controls (playlists or single URL)
-	•	Live status and progress
-	•	Logs viewer
-	•	History with search, filter, and sort
+	•	Home page with run controls, status, schedule, and metrics
+	•	Config page (including schedule controls and optional playlist names)
+	•	Downloads page with search and limit controls
+	•	History page with search, filter, sort, and limit controls
+	•	Logs page with manual refresh
+	•	Live playlist progress + per-video download progress
 	•	Download buttons for completed files
 	•	Manual cleanup for temporary files
 
@@ -97,6 +98,27 @@ Common endpoints:
 
 
 OpenAPI docs are available at `/docs`.
+
+## Telegram notifications (optional)
+You must create your own bot and provide both the bot token and chat ID.
+
+Quick setup:
+1) Talk to @BotFather in Telegram and create a bot to get the token.
+2) Start a chat with the new bot and send a message.
+3) Get your chat ID by visiting:
+   `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
+   Look for `"chat":{"id":...}` in the response.
+4) Set these in `config.json`:
+```
+"telegram": {
+  "bot_token": "YOUR_BOT_TOKEN",
+  "chat_id": "YOUR_CHAT_ID"
+}
+```
+
+Notes:
+	•	For group chats, add the bot to the group and send a message first.
+	•	Group chat IDs are usually negative numbers.
 
 ## Updating
 Containers are disposable; your real data lives in mounted volumes. A safe update flow is:
@@ -125,6 +147,7 @@ This project does not attempt to:
 ## Notes
 	•	Keep config/config.json, tokens/, and the SQLite database out of version control
 	•	Downloads are staged in a temp directory and atomically copied to their final location
+	•	“Clear temporary files” only removes working directories (temp downloads + yt-dlp temp)
 	•	YT_ARCHIVER_* environment variables can override paths (see .env.example)
 
 ## Release

@@ -4,7 +4,7 @@ __pycache__/
 .venv/
 
 # Local config and secrets
-config/
+scripts/
 config/config.json
 config/config_mac.json
 config/partial_config.json

@@ -10,6 +10,8 @@ const state = {
   lastFilesKey: null,
   configNoticeTimer: null,
   configNoticeClearable: false,
+  currentPage: "home",
+  actionButtons: null,
 };
 const browserState = {
   open: false,
@@ -63,6 +65,66 @@ function setConfigNotice(message, isError = false, autoClear = false) {
   state.configNoticeClearable = !!autoClear;
   if (autoClear) {
     state.configNoticeTimer = setTimeout(clearConfigNotice, 20000);
+  }
+}
+
+function setPage(page) {
+  const allowed = new Set(["home", "config", "downloads", "history", "logs"]);
+  const target = allowed.has(page) ? page : "home";
+  state.currentPage = target;
+  document.body.classList.remove("nav-open");
+  const navToggle = $("#nav-toggle");
+  if (navToggle) {
+    navToggle.setAttribute("aria-expanded", "false");
+  }
+  const sections = $$("section[data-page]");
+  sections.forEach((section) => {
+    const show = section.dataset.page === target;
+    section.classList.toggle("page-hidden", !show);
+  });
+  $$(".nav-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.page === target);
+  });
+  if (target === "home") {
+    refreshStatus();
+    refreshSchedule();
+    refreshMetrics();
+  } else if (target === "config") {
+    if (!state.config || !state.configDirty) {
+      loadConfig();
+    }
+  } else if (target === "downloads") {
+    refreshDownloads();
+  } else if (target === "history") {
+    refreshHistory();
+  } else if (target === "logs") {
+    refreshLogs();
+  }
+}
+
+function setupNavActions() {
+  const topActions = $("#top-actions");
+  const navActions = $("#nav-actions");
+  if (!topActions || !navActions) {
+    return;
+  }
+  if (!state.actionButtons) {
+    state.actionButtons = Array.from(topActions.children);
+  }
+  const mql = window.matchMedia("(max-width: 900px)");
+  const sync = () => {
+    const target = mql.matches ? navActions : topActions;
+    state.actionButtons.forEach((button) => {
+      if (button.parentElement !== target) {
+        target.appendChild(button);
+      }
+    });
+  };
+  sync();
+  if (mql.addEventListener) {
+    mql.addEventListener("change", sync);
+  } else if (mql.addListener) {
+    mql.addListener(sync);
   }
 }
 
@@ -535,7 +597,7 @@ async function refreshLogs() {
 }
 
 async function refreshHistory() {
-  const limit = parseInt($("#history-limit").value, 10) || 200;
+  const limit = parseInt($("#history-limit").value, 10) || 50;
   try {
     const params = new URLSearchParams();
     params.set("limit", String(limit));
@@ -698,21 +760,32 @@ async function runScheduleNow() {
 
 async function refreshDownloads() {
   try {
+    const search = ($("#downloads-search")?.value || "").trim().toLowerCase();
+    const limitRaw = parseInt($("#downloads-limit")?.value, 10);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 50;
     const rows = await fetchJson("/api/files");
-    const key = JSON.stringify(rows);
+    const key = JSON.stringify({ rows, search, limit });
     if (key === state.lastFilesKey) {
       return;
     }
     state.lastFilesKey = key;
     const body = $("#downloads-body");
     body.textContent = "";
-    if (!rows.length) {
+    const filtered = search
+      ? rows.filter((row) => {
+        const hay = `${row.relative_path || ""} ${row.name || ""}`.toLowerCase();
+        return hay.includes(search);
+      })
+      : rows;
+    const sliced = filtered.slice(0, limit);
+    if (!sliced.length) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td colspan="4">No downloads found.</td>`;
+      const label = search ? "No downloads match this filter." : "No downloads found.";
+      tr.innerHTML = `<td colspan="4">${label}</td>`;
       body.appendChild(tr);
       return;
     }
-    rows.forEach((row) => {
+    sliced.forEach((row) => {
       const tr = document.createElement("tr");
       const downloadHref = downloadUrl(row.id);
       const copyUrl = encodeURIComponent(downloadHref);
@@ -1076,6 +1149,31 @@ function setupTimers() {
 }
 
 function bindEvents() {
+  const navToggle = $("#nav-toggle");
+  if (navToggle) {
+    navToggle.addEventListener("click", () => {
+      const isOpen = document.body.classList.toggle("nav-open");
+      navToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    });
+  }
+  $$(".filters-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      const targetId = button.dataset.target;
+      if (!targetId) return;
+      const block = document.getElementById(targetId);
+      if (!block) return;
+      const open = block.classList.toggle("open");
+      button.textContent = open ? "Hide filters" : "Filters";
+    });
+  });
+  $$(".nav-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const page = button.dataset.page || "home";
+      setPage(page);
+      window.location.hash = page;
+    });
+  });
+
   $("#refresh-all").addEventListener("click", async () => {
     await refreshStatus();
     await refreshSchedule();
@@ -1087,6 +1185,12 @@ function bindEvents() {
 
   $("#logs-refresh").addEventListener("click", refreshLogs);
   $("#downloads-refresh").addEventListener("click", refreshDownloads);
+  $("#downloads-apply").addEventListener("click", refreshDownloads);
+  $("#downloads-clear").addEventListener("click", async () => {
+    $("#downloads-search").value = "";
+    $("#downloads-limit").value = 50;
+    await refreshDownloads();
+  });
   $("#cleanup-temp").addEventListener("click", cleanupTemp);
   $("#history-refresh").addEventListener("click", refreshHistory);
   $("#history-apply").addEventListener("click", refreshHistory);
@@ -1095,7 +1199,7 @@ function bindEvents() {
     $("#history-playlist").value = "";
     $("#history-from").value = "";
     $("#history-to").value = "";
-    $("#history-limit").value = 200;
+    $("#history-limit").value = 50;
     $("#history-sort").value = "date";
     $("#history-dir").value = "desc";
     await refreshHistory();
@@ -1222,14 +1326,14 @@ function bindEvents() {
 async function init() {
   applyTheme(resolveTheme());
   bindEvents();
+  setupNavActions();
   await loadPaths();
-  await loadConfig();
-  await refreshStatus();
-  await refreshSchedule();
-  await refreshMetrics();
-  await refreshLogs();
-  await refreshHistory();
-  await refreshDownloads();
+  const initialPage = (window.location.hash || "#home").replace("#", "");
+  setPage(initialPage || "home");
+  window.addEventListener("hashchange", () => {
+    const next = (window.location.hash || "#home").replace("#", "");
+    setPage(next || "home");
+  });
   setupTimers();
   const logsAuto = $("#logs-auto");
   if (logsAuto) {

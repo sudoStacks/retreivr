@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>YouTube Archiver</title>
+  <link rel="icon" href="app_icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="app_icon.png">
   <link rel="stylesheet" href="styles.css">
   <script defer src="app.js"></script>
 </head>
@@ -17,7 +19,18 @@
         <div class="subtitle">Self-hosted playlist archiving</div>
       </div>
     </div>
-    <div class="top-actions">
+    <button id="nav-toggle" class="button ghost small nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav">
+      Menu
+    </button>
+    <nav class="top-nav" id="primary-nav" aria-label="Primary">
+      <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
+      <button class="button ghost small nav-button" data-page="config" type="button">Config</button>
+      <button class="button ghost small nav-button" data-page="downloads" type="button">Downloads</button>
+      <button class="button ghost small nav-button" data-page="history" type="button">History</button>
+      <button class="button ghost small nav-button" data-page="logs" type="button">Logs</button>
+      <div id="nav-actions" class="nav-actions"></div>
+    </nav>
+    <div class="top-actions" id="top-actions">
       <button id="refresh-all" class="button">Refresh</button>
       <button id="toggle-theme" class="button ghost">Light mode</button>
       <a class="button ghost" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
@@ -25,7 +38,7 @@
   </header>
 
   <main class="layout">
-    <section class="panel" id="run-panel">
+    <section class="panel" id="run-panel" data-page="home">
       <div class="panel-title">Run Controls</div>
       <div class="stack">
         <div class="group">
@@ -74,7 +87,7 @@
       </div>
     </section>
 
-    <section class="panel" id="status-panel">
+    <section class="panel" id="status-panel" data-page="home">
       <div class="panel-title">Status</div>
       <div class="stack">
         <div class="row">
@@ -143,7 +156,7 @@
       </div>
     </section>
 
-    <section class="panel" id="schedule-panel">
+    <section class="panel" id="schedule-panel" data-page="home">
       <div class="panel-title">Schedule</div>
       <div class="stack">
         <div class="row">
@@ -179,7 +192,7 @@
       </div>
     </section>
 
-    <section class="panel" id="metrics-panel">
+    <section class="panel" id="metrics-panel" data-page="home">
       <div class="panel-title">Metrics</div>
       <div class="row">
         <div class="stat">
@@ -204,7 +217,7 @@
       </div>
     </section>
 
-    <section class="panel full" id="config-panel">
+    <section class="panel full" id="config-panel" data-page="config">
       <div class="panel-title">Config Editor</div>
       <div class="stack">
         <div class="group">
@@ -305,7 +318,7 @@
       </div>
     </section>
 
-    <section class="panel" id="logs-panel">
+    <section class="panel full page-full" id="logs-panel" data-page="logs">
       <div class="panel-title">Logs</div>
       <div class="row">
         <label class="field inline">
@@ -321,12 +334,29 @@
       <pre id="logs-output" class="log-output" aria-live="polite"></pre>
     </section>
 
-    <section class="panel full" id="downloads-panel">
+    <section class="panel full page-full" id="downloads-panel" data-page="downloads">
       <div class="panel-title">Downloads</div>
       <div class="row">
         <button id="downloads-refresh" class="button ghost">Refresh</button>
         <button id="cleanup-temp" class="button ghost">Clear temporary files</button>
         <div id="downloads-message" class="notice" role="status"></div>
+      </div>
+      <div class="row">
+        <button class="button ghost small filters-toggle" data-target="downloads-filters" type="button">Filters</button>
+      </div>
+      <div class="filters-block" id="downloads-filters">
+        <div class="row filters">
+          <label class="field inline">
+            <span>Search</span>
+            <input id="downloads-search" type="text" placeholder="name or path">
+          </label>
+          <label class="field inline">
+            <span>Limit</span>
+            <input id="downloads-limit" type="number" min="1" max="5000" value="50">
+          </label>
+          <button id="downloads-apply" class="button ghost">Apply</button>
+          <button id="downloads-clear" class="button ghost">Clear</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table class="table">
@@ -343,53 +373,58 @@
       </div>
     </section>
 
-    <section class="panel full" id="history-panel">
+    <section class="panel full page-full" id="history-panel" data-page="history">
       <div class="panel-title">History</div>
       <div class="row">
-        <label class="field inline">
-          <span>Search</span>
-          <input id="history-search" type="text" placeholder="title or filename">
-        </label>
-        <label class="field inline">
-          <span>Playlist</span>
-          <input id="history-playlist" type="text" placeholder="playlist id">
-        </label>
-        <label class="field inline">
-          <span>From</span>
-          <input id="history-from" type="date">
-        </label>
-        <label class="field inline">
-          <span>To</span>
-          <input id="history-to" type="date">
-        </label>
-      </div>
-      <div class="row">
-        <label class="field inline">
-          <span>Limit</span>
-          <input id="history-limit" type="number" min="1" max="5000" value="200">
-        </label>
-        <label class="field inline">
-          <span>Sort</span>
-          <select id="history-sort">
-            <option value="date">date</option>
-            <option value="title">title</option>
-            <option value="size">size</option>
-          </select>
-        </label>
-        <label class="field inline">
-          <span>Dir</span>
-          <select id="history-dir">
-            <option value="desc">desc</option>
-            <option value="asc">asc</option>
-          </select>
-        </label>
-        <label class="field inline">
-          <span>Internal paths</span>
-          <input id="history-show-paths" type="checkbox">
-        </label>
-        <button id="history-apply" class="button ghost">Apply</button>
-        <button id="history-clear" class="button ghost">Clear</button>
+        <button class="button ghost small filters-toggle" data-target="history-filters" type="button">Filters</button>
         <button id="history-refresh" class="button ghost">Refresh</button>
+      </div>
+      <div class="filters-block" id="history-filters">
+        <div class="row filters">
+          <label class="field inline">
+            <span>Search</span>
+            <input id="history-search" type="text" placeholder="title or filename">
+          </label>
+          <label class="field inline">
+            <span>Playlist</span>
+            <input id="history-playlist" type="text" placeholder="playlist id">
+          </label>
+          <label class="field inline">
+            <span>From</span>
+            <input id="history-from" type="date">
+          </label>
+          <label class="field inline">
+            <span>To</span>
+            <input id="history-to" type="date">
+          </label>
+        </div>
+        <div class="row filters">
+          <label class="field inline">
+            <span>Limit</span>
+            <input id="history-limit" type="number" min="1" max="5000" value="50">
+          </label>
+          <label class="field inline">
+            <span>Sort</span>
+            <select id="history-sort">
+              <option value="date">date</option>
+              <option value="title">title</option>
+              <option value="size">size</option>
+            </select>
+          </label>
+          <label class="field inline">
+            <span>Dir</span>
+            <select id="history-dir">
+              <option value="desc">desc</option>
+              <option value="asc">asc</option>
+            </select>
+          </label>
+          <label class="field inline">
+            <span>Internal paths</span>
+            <input id="history-show-paths" type="checkbox">
+          </label>
+          <button id="history-apply" class="button ghost">Apply</button>
+          <button id="history-clear" class="button ghost">Clear</button>
+        </div>
       </div>
       <div id="history-message" class="notice" role="status"></div>
       <div class="table-wrap">

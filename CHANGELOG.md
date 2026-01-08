@@ -16,3 +16,20 @@ Added:
 - Optional Telegram summaries and optional Basic auth.
 - Home Assistant-friendly status and metrics endpoints via API.
 - desktop GUI deprecated
+
+## 1.0.1
+Added:
+- Multi-page Web UI (Home, Config, Downloads, History, Logs) with top navigation.
+- Separate playlist progress vs per-video download progress indicators.
+- Downloads + History filters with limits, and internal scrolling tables.
+- Mobile navigation menu + collapsible filters for small screens.
+- Telegram summary truncation to avoid oversized messages.
+- Playlist name field in config editor (non-functional label).
+
+Changed:
+- Default Downloads/History limit to 50.
+- Light-mode header styling and mobile spacing tweaks.
+
+Fixed:
+- History “Copy URL” now copies the YouTube URL, not API download URL.
+- Config/playlist download paths normalized to remain relative to /downloads.

@@ -68,12 +68,18 @@ body {
   top: 0;
   z-index: 2;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   padding: 14px 22px;
   background: rgba(15, 20, 28, 0.92);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(8px);
+  gap: 12px;
+}
+
+:root[data-theme="light"] .topbar {
+  background: rgba(248, 250, 252, 0.96);
 }
 
 .brand .title {
@@ -109,9 +115,64 @@ body {
   object-fit: cover;
 }
 
+:root[data-theme="light"] .app-icon {
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+}
+
 .top-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+#top-actions:empty {
+  display: none;
+}
+
+.filters {
+  gap: 10px;
+}
+
+.filters-block {
+  display: block;
+}
+
+.filters-toggle {
+  display: none;
+}
+
+.nav-toggle {
+  display: none;
+}
+
+.top-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.nav-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.nav-button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.page-hidden {
+  display: none !important;
+}
+
+.page-full {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 150px);
+  min-height: 420px;
 }
 
 .layout {
@@ -121,6 +182,7 @@ body {
   gap: 20px;
   padding: 24px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: calc(100vh - 90px);
 }
 
 .panel {
@@ -364,7 +426,6 @@ a[aria-disabled="true"] {
   border-radius: 10px;
   padding: 12px;
   min-height: 200px;
-  max-height: 360px;
   overflow: auto;
   font-family: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", "Liberation Mono", monospace;
   font-size: 12px;
@@ -380,6 +441,18 @@ a[aria-disabled="true"] {
   border-radius: 12px;
   border: 1px solid var(--border);
   max-width: 100%;
+}
+
+#downloads-panel .table-wrap,
+#history-panel .table-wrap {
+  flex: 1;
+  min-height: 0;
+}
+
+#logs-panel .log-output {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
 }
 
 .table {
@@ -502,6 +575,43 @@ a[aria-disabled="true"] {
     align-items: flex-start;
     gap: 8px;
   }
+
+  .top-nav,
+  .top-actions {
+    width: 100%;
+  }
+}
+
+@media (max-width: 900px) {
+  .nav-toggle {
+    display: inline-flex;
+    align-self: flex-start;
+  }
+
+  .top-nav {
+    display: none;
+    width: 100%;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+  }
+
+  body.nav-open .top-nav {
+    display: flex;
+  }
+
+  .nav-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .nav-actions .button,
+  .nav-actions a.button {
+    width: 100%;
+  }
 }
 
 @media (max-width: 600px) {
@@ -510,10 +620,112 @@ a[aria-disabled="true"] {
   }
 
   .layout {
-    padding: 16px;
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .topbar {
+    padding: 10px 14px;
+  }
+
+  .brand .title {
+    font-size: 18px;
+  }
+
+  .brand .subtitle {
+    font-size: 11px;
+    letter-spacing: 1px;
+  }
+
+  .panel {
+    padding: 14px;
+  }
+
+  .panel-title {
+    margin-bottom: 8px;
+  }
+
+  .stack {
+    gap: 8px;
+  }
+
+  .row {
+    gap: 8px;
+  }
+
+  .row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .row > input,
+  .row > select,
+  .row > textarea {
+    width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .field.inline {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .top-actions {
+    width: 100%;
   }
 
   .button {
     width: 100%;
+  }
+
+  input,
+  textarea,
+  select {
+    padding: 8px;
+    font-size: 13px;
+  }
+
+  .button {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  .button.small {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .table th,
+  .table td {
+    word-break: break-word;
+    padding: 8px;
+    font-size: 11px;
+  }
+
+  .page-full {
+    height: calc(100vh - 140px);
+    min-height: 280px;
+  }
+
+  .filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .filters .field.inline {
+    width: 100%;
+  }
+
+  .filters-toggle {
+    display: inline-flex;
+  }
+
+  .filters-block {
+    display: none;
+  }
+
+  .filters-block.open {
+    display: block;
   }
 }
