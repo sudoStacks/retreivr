@@ -26,6 +26,13 @@ Highlights
 	•	Home Assistant–friendly status and metrics endpoints
 
 ## Quick start (Docker - recommended)
+Pull the prebuilt image from GHCR:
+```bash
+docker pull ghcr.io/z3ro-2/youtube-archiver:latest
+```
+The image is published under GitHub Packages for this repo.
+
+Copy the Docker and env templates, then start:
 ```bash
 cp docker/docker-compose.yml.example docker/docker-compose.yml
 cp .env.example .env
