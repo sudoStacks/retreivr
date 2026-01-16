@@ -1,13 +1,13 @@
 import unittest
 
-from engine.core import build_ytdlp_opts
+from engine.job_queue import build_ytdlp_opts
 
 
 class YtdlpDownloadOptsTests(unittest.TestCase):
     def test_download_opts_no_suppressors(self):
         context = {
             "operation": "download",
-            "music_mode": False,
+            "audio_mode": False,
             "final_format": None,
             "audio_only": False,
             "config": {},
@@ -20,7 +20,7 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
     def test_download_opts_dropped_keys_warning(self):
         context = {
             "operation": "download",
-            "music_mode": False,
+            "audio_mode": False,
             "final_format": None,
             "audio_only": False,
             "config": {},

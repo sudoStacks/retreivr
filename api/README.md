@@ -1,4 +1,4 @@
-YouTube Archiver API
+Retreivr API
 
 This API is designed to be consumed by internal tools (CLI/Web UI) and external
 monitoring systems such as Home Assistant. JSON responses aim to be stable and
@@ -74,7 +74,7 @@ Home Assistant examples
 REST sensors:
 sensor:
   - platform: rest
-    name: YouTube Archiver Status
+    name: Retreivr Status
     resource: http://YOUR_SERVER:8000/api/status
     value_template: "{{ value_json.state }}"
     json_attributes:
@@ -85,7 +85,7 @@ sensor:
       - error
       - status
   - platform: rest
-    name: YouTube Archiver Schedule
+    name: Retreivr Schedule
     resource: http://YOUR_SERVER:8000/api/schedule
     value_template: "{{ value_json.enabled }}"
     json_attributes:
@@ -93,7 +93,7 @@ sensor:
       - last_run
       - next_run
   - platform: rest
-    name: YouTube Archiver Metrics
+    name: Retreivr Metrics
     resource: http://YOUR_SERVER:8000/api/metrics
     value_template: "{{ value_json.downloads_files }}"
     json_attributes:
@@ -104,7 +104,7 @@ sensor:
 
 REST command to start a run:
 rest_command:
-  youtube_archiver_run:
+  retreivr_run:
     url: http://YOUR_SERVER:8000/api/run
     method: POST
     headers:
@@ -113,7 +113,7 @@ rest_command:
 
 REST command to run a single URL:
 rest_command:
-  youtube_archiver_run_single:
+  retreivr_run_single:
     url: http://YOUR_SERVER:8000/api/run
     method: POST
     headers:
@@ -122,7 +122,7 @@ rest_command:
 
 REST command to update schedule:
 rest_command:
-  youtube_archiver_schedule:
+  retreivr_schedule:
     url: http://YOUR_SERVER:8000/api/schedule
     method: POST
     headers:

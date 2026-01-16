@@ -1,6 +1,10 @@
-# YouTube Archiver
+# Retreivr
 
-YouTube Archiver is a self-hosted tool for archiving YouTube playlists or individual videos with a clean Web UI, a simple API, and a Docker-first deployment model. For most users, the recommended install and best experience is the Docker container.
+Retreivr is a self-hosted tool for archiving YouTube playlists or individual videos with a clean Web UI, a simple API, and a Docker-first deployment model. For most users, the recommended install and best experience is the Docker container.
+
+Retreivr is the evolution of the former YouTube-Archiver project.
+The project has been renamed and repositioned to reflect its broader role as a controlled media discovery and library seeding system.
+Version v0.9.0 is the first release under the Retreivr name.
 
 It’s designed to run unattended, keep history in a local SQLite database, and let you inspect status, logs, and completed downloads from a browser. Files are downloaded to disk once and can be streamed or downloaded directly to your device via the Web UI.
 
@@ -28,7 +32,7 @@ Highlights
 ## Quick start (Docker - recommended)
 Pull the prebuilt image from GHCR:
 ```bash
-docker pull ghcr.io/z3ro-2/youtube-archiver:latest
+docker pull ghcr.io/retreivr/retreivr:latest
 ```
 The image is published under GitHub Packages for this repo.
 
@@ -215,7 +219,7 @@ This preserves your config, database, logs, tokens, and downloads.
 ## Versioning (Docker builds)
 The app reads its version from `YT_ARCHIVER_VERSION`. The Dockerfile exposes a build arg:
 ```bash
-docker build -f docker/Dockerfile --build-arg YT_ARCHIVER_VERSION=1.1.0 -t youtube-archiver:latest .
+docker build -f docker/Dockerfile --build-arg YT_ARCHIVER_VERSION=0.9.0 -t retreivr:latest .
 ```
 This avoids keeping the version in Compose or runtime envs.
 

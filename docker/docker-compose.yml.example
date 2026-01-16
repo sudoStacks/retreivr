@@ -1,8 +1,8 @@
 version: "3.9"
 
 services:
-  youtube-archiver:
-    image: ghcr.io/z3ro-2/youtube-archiver:latest
+  retreivr:
+    image: ghcr.io/retreivr/retreivr:latest
     ports:
       - "8090:8000"
     environment:

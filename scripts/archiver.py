@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-YouTube playlist archiver with robust retries, metadata embedding, and clean filenames.
+Retreivr playlist archiver with robust retries, metadata embedding, and clean filenames.
 - Sequential downloads to avoid throttling; retries across multiple extractor profiles.
 - Embedded metadata (title/channel/date/description/tags/URL) and thumbnail as cover art.
 - Optional final format copy (webm/mp4/mkv) and filename templating.
@@ -16,7 +16,7 @@ def _require_python_311():
     if sys.version_info[:2] != (3, 11):
         found = sys.version.split()[0]
         raise SystemExit(
-            f"ERROR: youtube-archiver requires Python 3.11.x; found Python {found} "
+            f"ERROR: Retreivr requires Python 3.11.x; found Python {found} "
             f"(executable: {sys.executable})"
         )
 

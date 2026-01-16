@@ -6,7 +6,7 @@ def _require_python_311():
     if sys.version_info[:2] != (3, 11):
         found = sys.version.split()[0]
         raise SystemExit(
-            f"ERROR: youtube-archiver requires Python 3.11.x; found Python {found} "
+            f"ERROR: Retreivr requires Python 3.11.x; found Python {found} "
             f"(executable: {sys.executable})"
         )
 
@@ -44,6 +44,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from google.auth.exceptions import RefreshError
 
+from engine.job_queue import DownloadWorkerEngine
+
+from engine.search_engine import SearchResolutionService, resolve_search_db_path
+
 from engine.core import (
     EngineStatus,
     build_youtube_clients,
@@ -78,7 +82,7 @@ from engine.paths import (
 )
 from engine.runtime import get_runtime_info
 
-APP_NAME = "YouTube Archiver API"
+APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 1
 METRICS_SCHEMA_VERSION = 1
 SCHEDULE_SCHEMA_VERSION = 1
@@ -227,6 +231,25 @@ class OAuthCompleteRequest(BaseModel):
     code: str
 
 
+class SearchRequestPayload(BaseModel):
+    created_by: str | None = None
+    intent: str
+    media_type: str | None = "music"
+    artist: str
+    album: str | None = None
+    track: str | None = None
+    destination_dir: str | None = None
+    include_albums: bool = True
+    include_singles: bool = True
+    min_match_score: float = 0.92
+    duration_hint_sec: int | None = None
+    quality_min_bitrate_kbps: int | None = None
+    lossless_only: bool = False
+    auto_enqueue: bool = True
+    source_priority: list[str] | str | None = None
+    max_candidates_per_source: int = 5
+
+
 def _purge_oauth_sessions():
     now = datetime.now(timezone.utc)
     with _OAUTH_LOCK:
@@ -235,7 +258,15 @@ def _purge_oauth_sessions():
             _OAUTH_SESSIONS.pop(key, None)
 
 
-app = FastAPI(title=APP_NAME)
+class EnqueueCandidatePayload(BaseModel):
+    candidate_id: str
+
+
+
+app = FastAPI(
+    title=APP_NAME,
+    description="Retreivr API for self-hosted playlist archiving, scheduling, and metrics.",
+)
 
 if _TRUST_PROXY:
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
@@ -311,6 +342,36 @@ async def startup():
         logging.info("Scheduler active — fixed interval bulk runs")
 
     init_db(app.state.paths.db_path)
+    _ensure_watch_tables(app.state.paths.db_path)
+    app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, config)
+    app.state.search_service = SearchResolutionService(
+        search_db_path=app.state.search_db_path,
+        queue_db_path=app.state.paths.db_path,
+        adapters=None,
+        config=config or {},
+        paths=app.state.paths,
+    )
+
+    app.state.worker_stop_event = threading.Event()
+    app.state.worker_engine = DownloadWorkerEngine(
+        app.state.paths.db_path,
+        config or {},
+        app.state.paths,
+    )
+
+    def _worker_runner():
+        logging.info("Download worker started")
+        logging.info("Polling unified download queue")
+        app.state.worker_engine.run_loop(stop_event=app.state.worker_stop_event)
+
+    app.state.worker_thread = threading.Thread(
+        target=_worker_runner,
+        name="download-worker",
+        daemon=True,
+    )
+    app.state.worker_thread.start()
+
+
     watch_policy = normalize_watch_policy(config or {})
     app.state.watch_policy = watch_policy
     app.state.watch_config_cache = config
@@ -363,6 +424,14 @@ async def shutdown():
                 await asyncio.wait_for(task, timeout=30)
             except asyncio.TimeoutError:
                 logging.warning("Shutdown timeout while waiting for archive run to stop")
+
+    worker_stop = getattr(app.state, "worker_stop_event", None)
+    if worker_stop:
+        worker_stop.set()
+    worker_thread = getattr(app.state, "worker_thread", None)
+    if worker_thread and worker_thread.is_alive():
+        worker_thread.join(timeout=10)
+
     scheduler = app.state.scheduler
     if scheduler:
         scheduler.shutdown(wait=False)
@@ -1245,6 +1314,53 @@ def _schedule_deferred_run(payload, next_allowed):
     )
 
 
+def _ensure_watch_tables(db_path):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS playlist_watch (
+            playlist_id TEXT PRIMARY KEY,
+            last_check TIMESTAMP,
+            next_check TIMESTAMP,
+            idle_count INTEGER DEFAULT 0
+        )
+        """
+    )
+    cur.execute("PRAGMA table_info(playlist_watch)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    if "last_checked_at" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_checked_at TIMESTAMP")
+    if "next_poll_at" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN next_poll_at TIMESTAMP")
+    if "current_interval_min" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN current_interval_min INTEGER")
+    if "consecutive_no_change" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN consecutive_no_change INTEGER")
+    if "last_change_at" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_change_at TIMESTAMP")
+    if "skip_reason" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN skip_reason TEXT")
+    if "last_error" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_error TEXT")
+    if "last_error_at" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_error_at TIMESTAMP")
+    if "last_check" in existing_cols and "last_checked_at" in existing_cols:
+        cur.execute(
+            "UPDATE playlist_watch SET last_checked_at=COALESCE(last_checked_at, last_check) "
+            "WHERE last_checked_at IS NULL"
+        )
+    if "next_check" in existing_cols and "next_poll_at" in existing_cols:
+        cur.execute(
+            "UPDATE playlist_watch SET next_poll_at=COALESCE(next_poll_at, next_check) "
+            "WHERE next_poll_at IS NULL"
+        )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_watch_next ON playlist_watch (next_check)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_watch_next_poll ON playlist_watch (next_poll_at)")
+    conn.commit()
+    conn.close()
+
+
 def _read_watch_state(db_path):
     rows = {}
     conn = sqlite3.connect(db_path)
@@ -1744,7 +1860,7 @@ async def _watcher_supervisor():
                     seconds = duration_seconds % 60
                     duration_label = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
                     msg = (
-                        "YouTube Archiver Watcher Batch\n"
+                        "Retreivr Watcher Batch\n"
                         f"Playlists: {len(batch_playlists)}\n"
                         f"Videos downloaded: {total_downloaded}\n"
                         f"Duration: {duration_label}"
@@ -2262,6 +2378,103 @@ async def api_cancel():
 @app.get("/api/logs", response_class=PlainTextResponse)
 async def api_logs(lines: int = Query(200, ge=1, le=5000)):
     return _tail_lines(app.state.log_path, lines)
+
+
+@app.post("/api/search/requests")
+async def create_search_request(request: SearchRequestPayload):
+    service = app.state.search_service
+    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    try:
+        request_id = service.create_search_request(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"request_id": request_id}
+
+
+@app.get("/api/search/requests")
+async def list_search_requests(status: str | None = None, limit: int | None = None):
+    service = app.state.search_service
+    return {"requests": service.list_search_requests(status=status, limit=limit)}
+
+
+@app.get("/api/search/requests/{request_id}")
+async def get_search_request(request_id: str):
+    service = app.state.search_service
+    result = service.get_search_request(request_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Search request not found")
+    return result
+
+
+@app.post("/api/search/requests/{request_id}/cancel")
+async def cancel_search_request(request_id: str):
+    service = app.state.search_service
+    ok = service.cancel_search_request(request_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Search request not found")
+    return {"status": "canceled"}
+
+
+@app.post("/api/search/resolve/once")
+async def run_search_resolution_once():
+    service = app.state.search_service
+    request_id = service.run_search_resolution_once()
+    return {"request_id": request_id}
+
+
+@app.get("/api/search/items/{item_id}/candidates")
+async def get_search_candidates(item_id: str):
+    service = app.state.search_service
+    candidates = service.list_item_candidates(item_id)
+    return {"candidates": candidates}
+
+
+@app.post("/api/search/items/{item_id}/enqueue")
+async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayload):
+    service = app.state.search_service
+    try:
+        result = service.enqueue_item_candidate(item_id, payload.candidate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result:
+        raise HTTPException(status_code=404, detail="Search item or candidate not found")
+    return result
+
+
+@app.get("/api/download_jobs")
+async def list_download_jobs(limit: int = 100, status: str | None = None):
+    conn = sqlite3.connect(app.state.paths.db_path)
+    try:
+        cur = conn.cursor()
+        query = "SELECT id, origin, source, media_intent, status, attempts, created_at, last_error FROM download_jobs"
+        params = []
+        if status:
+            query += " WHERE status=?"
+            params.append(status)
+        query += " ORDER BY created_at DESC"
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        cur.execute(query, params)
+        rows = [
+            {
+                "id": row[0],
+                "origin": row[1],
+                "source": row[2],
+                "media_intent": row[3],
+                "status": row[4],
+                "attempts": row[5],
+                "created_at": row[6],
+                "last_error": row[7],
+            }
+            for row in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+    return {"jobs": rows}
+
+
+
 
 
 @app.get("/api/config")

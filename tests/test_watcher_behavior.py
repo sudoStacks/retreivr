@@ -14,6 +14,7 @@ class WatcherBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmpdir.name, "db.sqlite")
         engine_core.init_db(self.db_path)
+        api_main._ensure_watch_tables(self.db_path)
         api_main.app.state.paths = types.SimpleNamespace(db_path=self.db_path)
 
     async def asyncTearDown(self):

@@ -12,9 +12,9 @@ def _ensure_user_agent():
         return
     logging.getLogger("musicbrainzngs").setLevel(logging.WARNING)
     musicbrainzngs.set_useragent(
-        "youtube-archiver",
-        "1.0",
-        "https://github.com/z3ro-2/youtube-archiver",
+        "retreivr",
+        "0.9.0",
+        "https://github.com/Retreivr/retreivr",
     )
     _USER_AGENT_SET = True
 

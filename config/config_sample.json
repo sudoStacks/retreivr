@@ -31,7 +31,7 @@
       "account": "example_account",
       "remove_after_download": false,
       "mode": "full",
-      "final_format": "webm",
+      "final_format": "mp3",
       "music_mode": false
     }
   ],
@@ -53,11 +53,12 @@
   "music_metadata_debug": false,
   "dry_run": false,
   "upload_date_format": "MM-YYYY",
-  "final_format": "webm",
+  "final_format": "mp3",
   "js_runtime": "node:/usr/bin/node",
   "telegram": {
     "bot_token": "",
     "chat_id": ""
   },
+  "music_download_folder": "Music",
   "single_download_folder": "Singles"
 }

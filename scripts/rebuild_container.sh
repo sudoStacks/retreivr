@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/mnt/Homes/mikesell/Scripts/youtube-archiver"
+PROJECT_DIR="/mnt/Homes/mikesell/Scripts/retreivr"
 cd "$PROJECT_DIR"
 
-IMAGE_NAME="${IMAGE_NAME:-youtube-archiver:latest}"
+IMAGE_NAME="${IMAGE_NAME:-retreivr:latest}"
 DOCKERFILE="${DOCKERFILE:-docker/Dockerfile}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker/docker-compose.yml}"
 DO_UP="${DO_UP:-0}"

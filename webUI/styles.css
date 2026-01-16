@@ -553,6 +553,32 @@ a[aria-disabled="true"] {
   max-width: 100%;
 }
 
+
+#search-requests-panel .table-wrap {
+  height: 260px;
+  overflow-y: auto;
+}
+
+.source-priority-list {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(15, 23, 36, 0.4);
+}
+
+:root[data-theme="light"] .source-priority-list {
+  background: #f8fafc;
+}
+
+.source-priority-row {
+  justify-content: space-between;
+  flex-wrap: nowrap;
+}
+
+.source-priority-row .field.inline {
+  margin: 0;
+}
+
 #downloads-panel .table-wrap,
 #history-panel .table-wrap {
   flex: 1;
@@ -584,6 +610,25 @@ a[aria-disabled="true"] {
 
 .table tbody tr:nth-child(even) {
   background: #111927;
+}
+
+.table tbody tr.selected {
+  background: rgba(89, 176, 255, 0.18);
+}
+
+
+.cell-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.candidate-artwork {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  display: block;
 }
 
 :root[data-theme="light"] .table thead {

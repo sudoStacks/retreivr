@@ -14,6 +14,13 @@ const state = {
   actionButtons: null,
   runtimeInfo: null,
   watcherStatus: null,
+  searchSelectedRequestId: null,
+  searchSelectedItemId: null,
+  lastSearchRequestsKey: null,
+  lastSearchItemsKey: null,
+  lastSearchCandidatesKey: null,
+  lastSearchQueueKey: null,
+  searchRequestsSort: "desc",
 };
 const browserState = {
   open: false,
@@ -38,9 +45,9 @@ const BROWSE_DEFAULTS = {
   mediaRoot: "",
   tokensDir: "",
 };
-const GITHUB_REPO = "z3ro-2/youtube-archiver";
+const GITHUB_REPO = "Retreivr/retreivr";
 const GITHUB_RELEASE_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const GITHUB_RELEASE_PAGE = "https://github.com/z3ro-2/youtube-archiver/releases";
+const GITHUB_RELEASE_PAGE = "https://github.com/Retreivr/retreivr/releases";
 const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at";
 const RELEASE_CACHE_KEY = "yt_archiver_release_cache";
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version";
@@ -83,7 +90,7 @@ function setConfigNotice(message, isError = false, autoClear = false) {
 }
 
 function setPage(page) {
-  const allowed = new Set(["home", "config", "downloads", "history", "logs"]);
+  const allowed = new Set(["home", "config", "downloads", "history", "logs", "search"]);
   const target = allowed.has(page) ? page : "home";
   state.currentPage = target;
   document.body.classList.remove("nav-open");
@@ -112,6 +119,17 @@ function setPage(page) {
     refreshDownloads();
   } else if (target === "history") {
     refreshHistory();
+  } else if (target === "search") {
+    if (!state.config) {
+      fetchJson("/api/config").then((cfg) => {
+        state.config = cfg;
+        updateSearchDestinationDisplay();
+      }).catch(() => {});
+    } else {
+      updateSearchDestinationDisplay();
+    }
+    refreshSearchRequests();
+    refreshSearchQueue();
   } else if (target === "logs") {
     refreshLogs();
   }
@@ -1115,6 +1133,437 @@ async function refreshDownloads() {
   }
 }
 
+
+
+function getSearchSourcePriority() {
+  const list = $("#search-source-list");
+  if (!list) return [];
+  return Array.from(list.querySelectorAll(".source-priority-row"))
+    .map((row) => {
+      const enabled = row.querySelector(".source-enabled");
+      return enabled && enabled.checked ? row.dataset.source : null;
+    })
+    .filter(Boolean);
+}
+
+function updateSearchSortLabel() {
+  const button = $("#search-requests-sort");
+  if (!button) return;
+  const label = state.searchRequestsSort === "asc" ? "Sort: Oldest" : "Sort: Newest";
+  button.textContent = label;
+}
+
+function moveSourcePriorityRow(row, direction) {
+  if (!row) return;
+  const parent = row.parentElement;
+  if (!parent) return;
+  if (direction === "up") {
+    const prev = row.previousElementSibling;
+    if (prev) {
+      parent.insertBefore(row, prev);
+    }
+  } else if (direction === "down") {
+    const next = row.nextElementSibling;
+    if (next) {
+      parent.insertBefore(next, row);
+    }
+  }
+}
+
+function buildSearchRequestPayload(sources, { autoEnqueue = true } = {}) {
+  const artist = $("#search-artist").value.trim();
+  const album = $("#search-album").value.trim();
+  const track = $("#search-track").value.trim();
+  const intent = $("#search-intent").value || "track";
+  const minScoreRaw = parseFloat($("#search-min-score").value);
+  const maxCandidatesRaw = parseInt($("#search-max-candidates").value, 10);
+  const destination = $("#search-destination").value.trim();
+
+  return {
+    intent,
+    media_type: "music",
+    artist,
+    album: album || null,
+    track: track || null,
+    destination_dir: destination || null,
+    include_albums: $("#search-include-albums").checked,
+    include_singles: $("#search-include-singles").checked,
+    lossless_only: $("#search-lossless-only").checked,
+    auto_enqueue: autoEnqueue,
+    min_match_score: Number.isFinite(minScoreRaw) ? minScoreRaw : 0.92,
+    max_candidates_per_source: Number.isFinite(maxCandidatesRaw) ? maxCandidatesRaw : 5,
+    source_priority: sources && sources.length ? sources : null,
+  };
+}
+
+
+
+function getSearchDefaultDestination() {
+  if (state.config && state.config.music_download_folder) {
+    return state.config.music_download_folder;
+  }
+  if (state.config && state.config.single_download_folder) {
+    return state.config.single_download_folder;
+  }
+  return "";
+}
+
+function updateSearchDestinationDisplay() {
+  const el = $("#search-default-destination");
+  if (!el) return;
+  const value = getSearchDefaultDestination();
+  el.textContent = value || "-";
+}
+function setSearchSelectedRequest(requestId) {
+  state.searchSelectedRequestId = requestId || null;
+  const label = $("#search-selected-request");
+  if (label) {
+    label.textContent = requestId || "-";
+  }
+}
+
+function setSearchSelectedItem(itemId) {
+  state.searchSelectedItemId = itemId || null;
+  const label = $("#search-selected-item");
+  if (label) {
+    label.textContent = itemId || "-";
+  }
+}
+
+function renderSearchEmptyRow(body, colspan, message) {
+  if (!body) return;
+  body.textContent = "";
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td colspan="${colspan}">${message}</td>`;
+  body.appendChild(tr);
+}
+
+async function createSearchRequest(autoEnqueue = true) {
+  const messageEl = $("#search-create-message");
+  try {
+    const sources = getSearchSourcePriority();
+    if (!sources.length) {
+      setNotice(messageEl, "Select at least one source", true);
+      return;
+    }
+    const payload = buildSearchRequestPayload(sources, { autoEnqueue });
+    const modeLabel = autoEnqueue ? "Search & Download" : "Search Only";
+    setNotice(messageEl, `${modeLabel}: creating request...`, false);
+    const data = await fetchJson("/api/search/requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    setNotice(messageEl, `${modeLabel}: created ${data.request_id}`, false);
+    await runSearchResolutionOnce({ preferRequestId: data.request_id, showMessage: false });
+  } catch (err) {
+    setNotice(messageEl, `Create failed: ${err.message}`, true);
+  }
+}
+
+
+async function runSearchResolutionOnce({ preferRequestId = null, showMessage = true } = {}) {
+  const messageEl = $("#search-requests-message");
+  try {
+    if (showMessage) {
+      setNotice(messageEl, "Running resolution...", false);
+    }
+    const data = await fetchJson("/api/search/resolve/once", { method: "POST" });
+    const resolvedId = data.request_id || preferRequestId || null;
+    if (showMessage) {
+      if (data.request_id) {
+        setNotice(messageEl, `Resolved request ${data.request_id}`, false);
+      } else {
+        setNotice(messageEl, "No queued requests", false);
+      }
+    } else if (messageEl) {
+      messageEl.textContent = "";
+    }
+    await refreshSearchRequests(resolvedId);
+    if (resolvedId) {
+      await refreshSearchRequestDetails(resolvedId);
+    }
+    await refreshSearchQueue();
+  } catch (err) {
+    if (showMessage) {
+      setNotice(messageEl, `Resolution failed: ${err.message}`, true);
+    }
+  }
+}
+
+
+async function enqueueSearchCandidate(itemId, candidateId) {
+  if (!itemId || !candidateId) return;
+  const messageEl = $("#search-requests-message");
+  try {
+    setNotice(messageEl, `Enqueuing candidate ${candidateId}...`, false);
+    const data = await fetchJson(`/api/search/items/${encodeURIComponent(itemId)}/enqueue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidate_id: candidateId }),
+    });
+    if (data.created) {
+      setNotice(messageEl, `Enqueued job ${data.job_id}`, false);
+    } else {
+      setNotice(messageEl, "Job already queued", false);
+    }
+    await refreshSearchRequestDetails(state.searchSelectedRequestId);
+    await refreshSearchQueue();
+  } catch (err) {
+    setNotice(messageEl, `Enqueue failed: ${err.message}`, true);
+  }
+}
+async function cancelSearchRequest(requestId) {
+  if (!requestId) return;
+  const messageEl = $("#search-requests-message");
+  try {
+    setNotice(messageEl, `Canceling request ${requestId}...`, false);
+    await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}/cancel`, { method: "POST" });
+    setNotice(messageEl, `Canceled request ${requestId}`, false);
+    await refreshSearchRequests(requestId);
+    if (state.searchSelectedRequestId === requestId) {
+      await refreshSearchRequestDetails(requestId);
+    }
+  } catch (err) {
+    setNotice(messageEl, `Cancel failed: ${err.message}`, true);
+  }
+}
+
+async function refreshSearchRequests(preferRequestId = null) {
+  const body = $("#search-requests-body");
+  const messageEl = $("#search-requests-message");
+  try {
+    updateSearchSortLabel();
+    const data = await fetchJson("/api/search/requests");
+    const requests = (data.requests || []).slice();
+    const sortDir = state.searchRequestsSort === "asc" ? "asc" : "desc";
+    requests.sort((a, b) => {
+      const aTime = Date.parse(a.created_at || "");
+      const bTime = Date.parse(b.created_at || "");
+      if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
+        const aKey = String(a.created_at || "");
+        const bKey = String(b.created_at || "");
+        return sortDir === "desc" ? bKey.localeCompare(aKey) : aKey.localeCompare(bKey);
+      }
+      return sortDir === "desc" ? bTime - aTime : aTime - bTime;
+    });
+
+    body.textContent = "";
+    if (!requests.length) {
+      renderSearchEmptyRow(body, 7, "No search requests found.");
+      setSearchSelectedRequest(null);
+      setSearchSelectedItem(null);
+      renderSearchEmptyRow($("#search-items-body"), 6, "Select a request to view items.");
+      renderSearchEmptyRow($("#search-candidates-body"), 8, "Select an item to view candidates.");
+      if (messageEl) messageEl.textContent = "";
+      return;
+    }
+
+    let selectedRequestId = preferRequestId || state.searchSelectedRequestId;
+    if (selectedRequestId && !requests.some((req) => req.id === selectedRequestId)) {
+      selectedRequestId = null;
+    }
+    setSearchSelectedRequest(selectedRequestId);
+
+    requests.forEach((req) => {
+      const tr = document.createElement("tr");
+      tr.dataset.requestId = req.id || "";
+      if (req.id && req.id === selectedRequestId) {
+        tr.classList.add("selected");
+      }
+      const summary = [req.artist, req.album, req.track].filter(Boolean).join(" / ") || "-";
+      const status = req.status || "";
+      const cancelDisabled = ["completed", "failed", "canceled"].includes(status);
+      tr.innerHTML = `
+        <td>${req.id || ""}</td>
+        <td>${summary}</td>
+        <td>${req.intent || ""}</td>
+        <td>${status}</td>
+        <td>${formatTimestamp(req.created_at) || ""}</td>
+        <td>${req.error || ""}</td>
+        <td>
+          <div class="action-group">
+            <button class="button ghost small" data-action="cancel" data-request-id="${req.id}" ${cancelDisabled ? "disabled" : ""}>Cancel</button>
+          </div>
+        </td>
+      `;
+      body.appendChild(tr);
+    });
+
+    if (!selectedRequestId) {
+      setSearchSelectedItem(null);
+      renderSearchEmptyRow($("#search-items-body"), 6, "Select a request to view items.");
+      renderSearchEmptyRow($("#search-candidates-body"), 8, "Select an item to view candidates.");
+    }
+    if (messageEl) messageEl.textContent = "";
+  } catch (err) {
+    renderSearchEmptyRow(body, 7, `Failed to load requests: ${err.message}`);
+    setNotice(messageEl, `Failed to load requests: ${err.message}`, true);
+  }
+}
+
+async function refreshSearchRequestDetails(requestId) {
+  const itemsBody = $("#search-items-body");
+  const candidatesBody = $("#search-candidates-body");
+  if (!requestId) {
+    renderSearchEmptyRow(itemsBody, 6, "Select a request to view items.");
+    renderSearchEmptyRow(candidatesBody, 8, "Select an item to view candidates.");
+    setSearchSelectedItem(null);
+    return;
+  }
+  try {
+    const data = await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}`);
+    const items = data.items || [];
+    const requestStatus = data.request ? data.request.status : null;
+    itemsBody.textContent = "";
+
+    if (!items.length) {
+      renderSearchEmptyRow(itemsBody, 6, "No items found for this request.");
+      renderSearchEmptyRow(candidatesBody, 8, "Select an item to view candidates.");
+      setSearchSelectedItem(null);
+      return;
+    }
+
+    let selectedItemId = state.searchSelectedItemId;
+    if (selectedItemId && !items.some((item) => item.id === selectedItemId)) {
+      selectedItemId = null;
+    }
+    if (!selectedItemId && items.length && ["completed", "failed"].includes(requestStatus)) {
+      selectedItemId = items[0].id;
+    }
+    setSearchSelectedItem(selectedItemId);
+
+    items.forEach((item) => {
+      const tr = document.createElement("tr");
+      tr.dataset.itemId = item.id || "";
+      if (item.id && item.id === selectedItemId) {
+        tr.classList.add("selected");
+      }
+      const summary = [item.artist, item.album, item.track].filter(Boolean).join(" / ") || "-";
+      const score = Number.isFinite(item.chosen_score) ? item.chosen_score.toFixed(3) : "";
+      tr.innerHTML = `
+        <td>${item.id || ""}</td>
+        <td>${item.position ?? ""}</td>
+        <td>${summary}</td>
+        <td>${item.status || ""}</td>
+        <td>${item.chosen_source || ""}</td>
+        <td>${score}</td>
+      `;
+      itemsBody.appendChild(tr);
+    });
+
+    if (selectedItemId) {
+      await refreshSearchCandidates(selectedItemId);
+    } else {
+      renderSearchEmptyRow(candidatesBody, 8, "Select an item to view candidates.");
+    }
+  } catch (err) {
+    renderSearchEmptyRow(itemsBody, 6, `Failed to load items: ${err.message}`);
+    renderSearchEmptyRow(candidatesBody, 8, "Select an item to view candidates.");
+    setSearchSelectedItem(null);
+  }
+}
+
+async function refreshSearchCandidates(itemId) {
+  const body = $("#search-candidates-body");
+  if (!itemId) {
+    renderSearchEmptyRow(body, 8, "Select an item to view candidates.");
+    return;
+  }
+  try {
+    const data = await fetchJson(`/api/search/items/${encodeURIComponent(itemId)}/candidates`);
+    const candidates = data.candidates || [];
+    body.textContent = "";
+
+    if (!candidates.length) {
+      renderSearchEmptyRow(body, 8, "No candidates found for this item.");
+      return;
+    }
+
+    candidates.forEach((candidate) => {
+      const tr = document.createElement("tr");
+      const canonical = candidate.canonical_metadata || {};
+      const canonicalTitle = canonical.track || canonical.album || "";
+      const canonicalDetailParts = [canonical.artist, canonical.album].filter(Boolean);
+      const canonicalDetail = canonicalDetailParts.join(" / ");
+      const canonicalType = canonical.album_type ? (canonicalDetail ? ` · ${canonical.album_type}` : canonical.album_type) : "";
+      const canonicalYear = canonical.release_year ? ` (${canonical.release_year})` : "";
+      const canonicalHtml = canonicalTitle
+        ? `<div class="cell-title">${canonicalTitle}</div><div class="meta">${canonicalDetail}${canonicalType}${canonicalYear}</div>`
+        : `<span class="meta">-</span>`;
+      const artworkUrl = Array.isArray(canonical.artwork) && canonical.artwork.length
+        ? canonical.artwork[0].url
+        : "";
+      const artworkHtml = artworkUrl
+        ? `<img class="candidate-artwork" src="${artworkUrl}" alt="">`
+        : `<span class="meta">-</span>`;
+      const detected = [candidate.artist_detected, candidate.album_detected, candidate.track_detected]
+        .filter(Boolean)
+        .join(" / ");
+      const sourceTitle = candidate.title || "";
+      const sourceHtml = sourceTitle
+        ? `<div class="cell-title">${sourceTitle}</div>${detected ? `<div class=\"meta\">${detected}</div>` : ""}`
+        : `<span class="meta">-</span>`;
+      const duration = Number.isFinite(candidate.duration_sec)
+        ? formatDuration(candidate.duration_sec)
+        : "";
+      const score = Number.isFinite(candidate.final_score) ? candidate.final_score.toFixed(3) : "";
+      const downloadDisabled = !candidate.id || !candidate.url;
+      const actionHtml = `<button class="button ghost small" data-action="download" data-item-id="${itemId}" data-candidate-id="${candidate.id || ""}" ${downloadDisabled ? "disabled" : ""}>Download</button>`;
+      tr.innerHTML = `
+        <td>${candidate.source || ""}</td>
+        <td>${canonicalHtml}</td>
+        <td>${artworkHtml}</td>
+        <td>${sourceHtml}</td>
+        <td>${duration}</td>
+        <td>${score}</td>
+        <td>${candidate.rank ?? ""}</td>
+        <td>${actionHtml}</td>
+      `;
+      body.appendChild(tr);
+    });
+  } catch (err) {
+    renderSearchEmptyRow(body, 8, `Failed to load candidates: ${err.message}`);
+  }
+}
+
+async function refreshSearchQueue() {
+  const body = $("#search-queue-body");
+  const messageEl = $("#search-queue-message");
+  try {
+    const limitRaw = parseInt($("#search-queue-limit").value, 10);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100;
+    const data = await fetchJson(`/api/download_jobs?limit=${limit}`);
+    const jobs = data.jobs || [];
+
+    body.textContent = "";
+    if (!jobs.length) {
+      renderSearchEmptyRow(body, 8, "No queued jobs found.");
+      if (messageEl) messageEl.textContent = "";
+      return;
+    }
+
+    jobs.forEach((job) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${job.id || ""}</td>
+        <td>${job.origin || ""}</td>
+        <td>${job.source || ""}</td>
+        <td>${job.media_intent || ""}</td>
+        <td>${job.status || ""}</td>
+        <td>${job.attempts ?? ""}</td>
+        <td>${formatTimestamp(job.created_at) || ""}</td>
+        <td>${job.last_error || ""}</td>
+      `;
+      body.appendChild(tr);
+    });
+    if (messageEl) messageEl.textContent = "";
+  } catch (err) {
+    renderSearchEmptyRow(body, 8, `Failed to load queue: ${err.message}`);
+    setNotice(messageEl, `Failed to load queue: ${err.message}`, true);
+  }
+}
+
 async function cleanupTemp() {
   const ok = window.confirm("Clear temporary files? This does not affect completed downloads.");
   if (!ok) {
@@ -1333,6 +1782,7 @@ async function loadConfig() {
     const cfg = await fetchJson("/api/config");
     state.config = cfg;
     renderConfig(cfg);
+    updateSearchDestinationDisplay();
     state.configDirty = false;
     updatePollingState();
     setConfigNotice("Config loaded", false);
@@ -1807,6 +2257,64 @@ function bindEvents() {
   $("#downloads-body").addEventListener("click", async (event) => {
     await handleCopy(event, $("#downloads-message"));
   });
+  $("#search-create-download").addEventListener("click", () => createSearchRequest(true));
+  $("#search-create-only").addEventListener("click", () => createSearchRequest(false));
+  $("#search-requests-refresh").addEventListener("click", refreshSearchRequests);
+  $("#search-requests-sort").addEventListener("click", () => {
+    state.searchRequestsSort = state.searchRequestsSort === "asc" ? "desc" : "asc";
+    updateSearchSortLabel();
+    refreshSearchRequests();
+  });
+  $("#search-queue-refresh").addEventListener("click", refreshSearchQueue);
+  const sourceList = $("#search-source-list");
+  if (sourceList) {
+    sourceList.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-action]");
+      if (!button) return;
+      const row = button.closest(".source-priority-row");
+      if (!row) return;
+      moveSourcePriorityRow(row, button.dataset.action);
+    });
+  }
+  $("#search-requests-body").addEventListener("click", async (event) => {
+    const actionButton = event.target.closest("button[data-action]");
+    if (actionButton) {
+      const requestId = actionButton.dataset.requestId;
+      const action = actionButton.dataset.action;
+      if (action === "cancel") {
+        await cancelSearchRequest(requestId);
+      }
+      return;
+    }
+    const row = event.target.closest("tr[data-request-id]");
+    if (!row) return;
+    const requestId = row.dataset.requestId;
+    if (!requestId) return;
+    setSearchSelectedRequest(requestId);
+    setSearchSelectedItem(null);
+    $$("#search-requests-body tr.selected").forEach((el) => el.classList.remove("selected"));
+    row.classList.add("selected");
+    await refreshSearchRequestDetails(requestId);
+  });
+  $("#search-items-body").addEventListener("click", async (event) => {
+    const row = event.target.closest("tr[data-item-id]");
+    if (!row) return;
+    const itemId = row.dataset.itemId;
+    if (!itemId) return;
+    setSearchSelectedItem(itemId);
+    $$("#search-items-body tr.selected").forEach((el) => el.classList.remove("selected"));
+    row.classList.add("selected");
+    await refreshSearchCandidates(itemId);
+  });
+
+  $("#search-candidates-body").addEventListener("click", async (event) => {
+    const button = event.target.closest('button[data-action="download"]');
+    if (!button) return;
+    const itemId = button.dataset.itemId || state.searchSelectedItemId;
+    const candidateId = button.dataset.candidateId;
+    await enqueueSearchCandidate(itemId, candidateId);
+  });
+
   $("#schedule-save").addEventListener("click", saveSchedule);
   $("#schedule-run-now").addEventListener("click", runScheduleNow);
   $("#save-config").addEventListener("click", saveConfig);

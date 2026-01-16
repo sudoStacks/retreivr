@@ -19,7 +19,7 @@ def _require_python_311():
     if sys.version_info[:2] != (3, 11):
         found = sys.version.split()[0]
         raise SystemExit(
-            f"ERROR: youtube-archiver requires Python 3.11.x; found Python {found} "
+            f"ERROR: Retreivr requires Python 3.11.x; found Python {found} "
             f"(executable: {sys.executable})"
         )
 

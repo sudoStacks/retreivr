@@ -1,7 +1,34 @@
 # Changelog
 All notable changes to this project will be documented here.
 
-## 1.3.0 - Music Mode and Metadata
+## [v0.9.0] – Retreivr Rebrand Release
+
+### Summary
+This release marks the official rebrand of the project from **YouTube-Archiver** to **Retreivr**.
+The version number has been reset to reflect a new product identity and roadmap.
+
+### Important Notes
+- v1.2.0 was the **final release** under the YouTube-Archiver name.
+- Versioning resumes at v0.9.0 under the Retreivr name.
+- Functionality is unchanged in this release.
+- Future releases may introduce breaking changes as APIs, environment variables, and UI contracts are stabilized.
+
+### Changes
+- Project renamed to Retreivr
+- Repository migrated to new namespace
+- Branding updated across documentation, UI, and Docker artifacts
+- Environment variables remain `YT_ARCHIVER_*` in this release
+- No functional behavior changes
+
+---
+
+## [v1.2.0] – Final YouTube-Archiver Release
+
+### Summary
+Final release published under the YouTube-Archiver name before rebranding.
+
+### Changes
+1.3.0 - Music Mode and Metadata
 Added:
 - Music mode (opt-in per playlist and per single-URL run) with audio-focused metadata and music-safe naming.
 - yt-dlp cookies support (Netscape cookies.txt) for improved YouTube Music metadata.
@@ -28,26 +55,26 @@ Changed:
 - Watcher batches detections with a quiet-window strategy and sends one Telegram summary per batch.
 - Status now reports current phase and last error for active runs.
 
-## 1.2.0 - OAuth Web UI Helper
+1.2.0 - OAuth Web UI Helper
 Added:
 - Web UI OAuth helper per account (launches Google auth URL + paste code to save token).
 - API endpoints to support OAuth in the Web UI flow.
 
 Notes:
 - Docker pulls remain available via GHCR:
-  - `docker pull ghcr.io/z3ro-2/youtube-archiver:latest`
-  - `image: ghcr.io/z3ro-2/youtube-archiver:latest`
+- `docker pull ghcr.io/retreivr/retreivr:latest`
+- `image: ghcr.io/retreivr/retreivr:latest`
 
-## 1.1.2 - Publish Docker to GHCR Latest
+1.1.2 - Publish Docker to GHCR Latest
 No changes from v1.1.1 - just creating new tag to automatically publish to GHCR repo to make docker pulls directly from there.
 
 Docker Pull Command:
-docker pull ghcr.io/z3ro-2/youtube-archiver:latest
+docker pull ghcr.io/retreivr/retreivr:latest
 
 Docker Compose Line:
-image: ghcr.io/z3ro-2/youtube-archiver:latest
+image: ghcr.io/retreivr/retreivr:latest
 
-## 1.1.1 - Minor Patch
+1.1.1 - Minor Patch
 Added:
 - prompts to verify you wish to remove items on 'Remove' button press
 
@@ -56,7 +83,7 @@ Changed:
 - better date/time format in Status block.
 - clearer log entries when Google Oauth runs to verify playlists.
 
-## 1.1.0 - Version Control and YT-DLP Update Maintenance
+1.1.0 - Version Control and YT-DLP Update Maintenance
 Added:
 - App version display and GitHub release check in Status.
 - Manual yt-dlp update button (requires restart).
@@ -64,7 +91,7 @@ Added:
 Changed:
 - Dockerfile build arg for `YT_ARCHIVER_VERSION`.
 
-## 1.0.1 - Frontend UI Updates 
+1.0.1 - Frontend UI Updates
 Added:
 - Multi-page Web UI (Home, Config, Downloads, History, Logs) with top navigation.
 - Separate playlist progress vs per-video download progress indicators.
@@ -81,7 +108,7 @@ Fixed:
 - History “Copy URL” now copies the YouTube URL, not API download URL.
 - Config/playlist download paths normalized to remain relative to /downloads.
 
-## 1.0.0 - First public release
+1.0.0 - First public release
 Added:
 - Docker-first deployment with explicit volume paths.
 - FastAPI backend serving API + static Web UI.
@@ -92,7 +119,7 @@ Added:
 - Home Assistant-friendly status and metrics endpoints via API.
 - desktop GUI deprecated
 
-## Prior to 1.0.0
+Prior to 1.0.0
 - no official release
 - only python scripts released, no official package
 - archiver.py ran independently

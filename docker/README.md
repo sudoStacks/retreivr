@@ -1,7 +1,7 @@
-Docker assets for youtube-archiver.
+Docker assets for Retreivr.
 
 Quick start
-- Build: `docker build -f docker/Dockerfile -t youtube-archiver:latest .`
+- Build: `docker build -f docker/Dockerfile -t retreivr:latest .`
 - Compose: use `docker/docker-compose.yml.example` as your base.
 
 Ports
@@ -19,7 +19,7 @@ Use relative paths inside `config.json` (e.g. `folder: "YouTube/Channel"`).
 
 Version build arg
 ```bash
-docker build -f docker/Dockerfile --build-arg YT_ARCHIVER_VERSION=1.1.0 -t youtube-archiver:latest .
+docker build -f docker/Dockerfile --build-arg YT_ARCHIVER_VERSION=0.9.0 -t retreivr:latest .
 ```
 
 Notes
