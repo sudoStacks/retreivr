@@ -5,12 +5,12 @@
 </p>
 
 <p align="center">
-  Self-hosted media search, scoring, and archival engine
+  Powerful, self-hosted media search, archival, and metadata imbedding engine
 </p>
 
 ## Overview
-Retreivr is a self-hosted media search and download engine focused on discovering, scoring, and archiving publicly available media.  
-It provides an advanced search pipeline, a unified FIFO download queue, and post-download metadata enrichment, with an initial focus on music.
+Retreivr is a self-hosted media search and archival engine focused on discovering, scoring, and archiving publicly available media.  
+It provides an advanced search pipeline, a unified FIFO download queue, and post-download metadata enrichment, with an initial focus on music. 
 
 ## History
 Retreivr is the successor to the YouTube-Archiver project.  
