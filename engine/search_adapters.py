@@ -99,6 +99,15 @@ class YouTubeMusicAdapter(_YtDlpSearchMixin):
         return 0.90
 
 
+class YouTubeAdapter(_YtDlpSearchMixin):
+    source = "youtube"
+    search_prefix = "ytsearch"
+
+    def source_modifier(self, candidate):
+        # Neutral weight for general video content
+        return 0.85
+
+
 class SoundCloudAdapter(_YtDlpSearchMixin):
     source = "soundcloud"
     search_prefix = "scsearch"
@@ -116,5 +125,5 @@ class BandcampAdapter(_YtDlpSearchMixin):
 
 
 def default_adapters():
-    adapters = [BandcampAdapter(), YouTubeMusicAdapter(), SoundCloudAdapter()]
+    adapters = [BandcampAdapter(), YouTubeMusicAdapter(), YouTubeAdapter(), SoundCloudAdapter()]
     return {adapter.source: adapter for adapter in adapters}

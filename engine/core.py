@@ -386,6 +386,8 @@ def read_history(
     playlist_id=None,
     start_date=None,
     end_date=None,
+    date_from=None,
+    date_to=None,
     search=None,
     sort_by="date",
     sort_dir="desc",
@@ -396,6 +398,12 @@ def read_history(
     query = "SELECT video_id, playlist_id, downloaded_at, filepath FROM downloads"
     clauses = []
     params = []
+
+    # Normalize API parameter aliases
+    if date_from and not start_date:
+        start_date = date_from
+    if date_to and not end_date:
+        end_date = date_to
 
     if playlist_id:
         clauses.append("playlist_id=?")
