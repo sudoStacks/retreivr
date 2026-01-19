@@ -14,7 +14,7 @@ from engine.search_adapters import default_adapters
 from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
 from metadata.canonical import CanonicalMetadataResolver
 
-REQUEST_STATUSES = {"queued", "resolving", "ready", "running", "completed", "failed", "canceled"}
+REQUEST_STATUSES = {"pending", "resolving", "completed", "completed_with_skips", "failed"}
 ITEM_STATUSES = {
     "queued",
     "searching",
@@ -76,6 +76,17 @@ def _normalize_media_type(value, *, default="music"):
         return "music"
     if value == "video":
         return "video"
+    return None
+
+
+def _extract_canonical_id(metadata):
+    if not isinstance(metadata, dict):
+        return None
+    external_ids = metadata.get("external_ids") or {}
+    for key in ("spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id"):
+        value = external_ids.get(key)
+        if value:
+            return str(value)
     return None
 
 
@@ -257,7 +268,7 @@ class SearchJobStore:
                     1 if auto_enqueue else 0,
                     json.dumps(source_priority),
                     max_candidates,
-                    "queued",
+                    "pending",
                     None,
                 ),
             )
@@ -335,9 +346,10 @@ class SearchJobStore:
             cur.execute(query, params)
             rows = []
             for row in cur.fetchall():
-                entry = dict(row)
-                entry["source_priority"] = _parse_source_priority(row["source_priority_json"])
-                rows.append(entry)
+            entry = dict(row)
+            entry["source_priority"] = _parse_source_priority(row["source_priority_json"])
+            entry["resolved_destination"] = self._resolve_request_destination(entry.get("destination_dir"))
+            rows.append(entry)
             return rows
         finally:
             conn.close()
@@ -351,9 +363,9 @@ class SearchJobStore:
                 """
                 UPDATE search_requests
                 SET status=?, updated_at=?, error=?
-                WHERE id=? AND status NOT IN ('completed', 'failed', 'canceled')
+                WHERE id=? AND status NOT IN ('completed', 'completed_with_skips', 'failed')
                 """,
-                ("canceled", now, "request_canceled", request_id),
+                ("failed", now, "request_canceled", request_id),
             )
             cur.execute(
                 """
@@ -375,7 +387,7 @@ class SearchJobStore:
             cur.execute("BEGIN IMMEDIATE")
             cur.execute(
                 "SELECT * FROM search_requests WHERE status=? ORDER BY created_at ASC LIMIT 1",
-                ("queued",),
+                ("pending",),
             )
             row = cur.fetchone()
             if not row:
@@ -384,7 +396,35 @@ class SearchJobStore:
             now = _utc_now()
             cur.execute(
                 "UPDATE search_requests SET status=?, updated_at=? WHERE id=? AND status=?",
-                ("resolving", now, row["id"], "queued"),
+                ("resolving", now, row["id"], "pending"),
+            )
+            if cur.rowcount != 1:
+                conn.commit()
+                return None
+            conn.commit()
+            return dict(row)
+        finally:
+            conn.close()
+
+    def claim_request(self, request_id):
+        if not request_id:
+            return self.claim_next_request()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                "SELECT * FROM search_requests WHERE id=? AND status=?",
+                (request_id, "pending"),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.commit()
+                return None
+            now = _utc_now()
+            cur.execute(
+                "UPDATE search_requests SET status=?, updated_at=? WHERE id=? AND status=?",
+                ("resolving", now, request_id, "pending"),
             )
             if cur.rowcount != 1:
                 conn.commit()
@@ -560,6 +600,19 @@ class SearchResolutionService:
         self._ensure_queue_schema()
         self.canonical_resolver = canonical_resolver or CanonicalMetadataResolver(config=self.config)
 
+    def _resolve_request_destination(self, destination):
+        if not self.paths:
+            return destination
+        try:
+            template = build_output_template(
+                self.config,
+                destination=destination,
+                base_dir=self.paths.single_downloads_dir,
+            )
+            return template.get("output_dir")
+        except ValueError:
+            return destination
+
 
     def _ensure_queue_schema(self):
         conn = sqlite3.connect(self.queue_db_path)
@@ -572,7 +625,12 @@ class SearchResolutionService:
         return self.store.create_request(payload)
 
     def get_search_request(self, request_id):
-        return self.store.get_request(request_id)
+        result = self.store.get_request(request_id)
+        if not result:
+            return None
+        request = result.get("request") or {}
+        request["resolved_destination"] = self._resolve_request_destination(request.get("destination_dir"))
+        return result
 
     def list_item_candidates(self, item_id):
         return self.store.list_candidates(item_id)
@@ -583,8 +641,8 @@ class SearchResolutionService:
     def cancel_search_request(self, request_id):
         return self.store.cancel_request(request_id)
 
-    def run_search_resolution_once(self, *, stop_event=None):
-        request_row = self.store.claim_next_request()
+    def run_search_resolution_once(self, *, stop_event=None, request_id=None):
+        request_row = self.store.claim_request(request_id)
         if not request_row:
             return None
 
@@ -594,6 +652,11 @@ class SearchResolutionService:
         auto_enqueue_value = request_row.get("auto_enqueue")
         auto_enqueue = True if auto_enqueue_value is None else bool(auto_enqueue_value)
         destination_dir = request_row.get("destination_dir") or None
+        created_by = (request_row.get("created_by") or "").strip()
+        playlist_id = None
+        if created_by.startswith("spotify_playlist:"):
+            playlist_id = created_by.split(":", 1)[1]
+        job_origin = "spotify_playlist" if playlist_id else "search"
         if intent in {"artist", "artist_collection"}:
             self.store.update_request_status(request_id, "failed", error="not_implemented")
             _log_event(logging.WARNING, "request_failed", request_id=request_id, error="not_implemented")
@@ -689,6 +752,7 @@ class SearchResolutionService:
                 continue
 
             output_template = None
+            resolved_destination = None
             if self.paths is not None:
                 try:
                     output_template = build_output_template(
@@ -696,6 +760,7 @@ class SearchResolutionService:
                         destination=destination_dir,
                         base_dir=self.paths.single_downloads_dir,
                     )
+                    resolved_destination = output_template.get("output_dir")
                 except ValueError as exc:
                     self.store.update_item_status(item["id"], "failed", error="invalid_destination")
                     _log_event(
@@ -708,7 +773,7 @@ class SearchResolutionService:
                     continue
 
             canonical_for_job = chosen.get("canonical_metadata") if isinstance(chosen, dict) else None
-            if not canonical_for_job and chosen and chosen.get("canonical_json"):
+            if not canonical_for_job and isinstance(chosen, dict) and chosen.get("canonical_json"):
                 try:
                     canonical_for_job = json.loads(chosen.get("canonical_json"))
                 except json.JSONDecodeError:
@@ -718,21 +783,11 @@ class SearchResolutionService:
                     output_template = {}
                 output_template["canonical_metadata"] = canonical_for_job
 
-            if self.queue_store.job_exists("search", request_id, chosen["url"]):
-                self.store.update_item_status(item["id"], "enqueued", chosen=chosen)
-                _log_event(
-                    logging.INFO,
-                    "job_exists",
-                    request_id=request_id,
-                    item_id=item["id"],
-                    source=chosen.get("source"),
-                )
-                continue
-
+            canonical_id = _extract_canonical_id(canonical_for_job or chosen)
             trace_id = uuid4().hex
             media_intent = "album" if item["item_type"] == "album" else "track"
-            job_id, created = self.queue_store.enqueue_job(
-                origin="search",
+            job_id, created, dedupe_reason = self.queue_store.enqueue_job(
+                origin=job_origin,
                 origin_id=request_id,
                 media_type=item["media_type"],
                 media_intent=media_intent,
@@ -740,7 +795,30 @@ class SearchResolutionService:
                 url=chosen["url"],
                 output_template=output_template,
                 trace_id=trace_id,
+                resolved_destination=resolved_destination,
+                canonical_id=canonical_id,
             )
+
+            if not created and dedupe_reason == "duplicate":
+                self.store.update_item_status(
+                    item["id"],
+                    "skipped",
+                    chosen=chosen,
+                    error="duplicate",
+                )
+                _log_event(
+                    logging.INFO,
+                    "job_skipped_duplicate",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    job_id=job_id,
+                    source=chosen.get("source"),
+                    origin=job_origin,
+                    destination=resolved_destination,
+                    media_type=item["media_type"],
+                    dedupe_result=dedupe_reason,
+                )
+                continue
 
             if created:
                 self.store.update_item_status(item["id"], "enqueued", chosen=chosen)
@@ -752,21 +830,41 @@ class SearchResolutionService:
                     job_id=job_id,
                     trace_id=trace_id,
                     source=chosen.get("source"),
+                    origin=job_origin,
+                    destination=resolved_destination,
+                    media_type=item["media_type"],
                 )
+                if job_origin == "spotify_playlist" and playlist_id:
+                    _log_event(
+                        logging.INFO,
+                        "search_enqueued",
+                        playlist_id=playlist_id,
+                        request_id=request_id,
+                        job_id=job_id,
+                        source=chosen.get("source"),
+                        destination=resolved_destination,
+                    )
             else:
                 self.store.update_item_status(item["id"], "enqueued", chosen=chosen)
-                _log_event(
-                    logging.INFO,
-                    "job_exists",
-                    request_id=request_id,
-                    item_id=item["id"],
-                    job_id=job_id,
-                    source=chosen.get("source"),
-                )
+            _log_event(
+                logging.INFO,
+                "job_exists",
+                request_id=request_id,
+                item_id=item["id"],
+                job_id=job_id,
+                source=chosen.get("source"),
+                destination=resolved_destination,
+                media_type=item["media_type"],
+            )
 
         items = self.store.list_items(request_id)
-        if any(item.get("status") in {"enqueued", "selected"} for item in items):
-            self.store.update_request_status(request_id, "completed")
+        has_enqueued = any(item.get("status") in {"enqueued", "selected"} for item in items)
+        has_skipped = any(item.get("status") == "skipped" for item in items)
+        if has_enqueued:
+            status_value = "completed_with_skips" if has_skipped else "completed"
+            self.store.update_request_status(request_id, status_value)
+        elif has_skipped:
+            self.store.update_request_status(request_id, "completed_with_skips")
         else:
             self.store.update_request_status(request_id, "failed", error="no_items_enqueued")
         return request_id
@@ -808,20 +906,11 @@ class SearchResolutionService:
                 output_template = {}
             output_template["canonical_metadata"] = canonical_payload
 
-        if self.queue_store.job_exists("search", request["id"], candidate["url"]):
-            self.store.update_item_status(item_id, "enqueued", chosen=candidate)
-            _log_event(
-                logging.INFO,
-                "job_exists",
-                request_id=request["id"],
-                item_id=item_id,
-                source=candidate.get("source"),
-            )
-            return {"job_id": None, "created": False}
-
+        resolved_destination = output_template.get("output_dir") if output_template else None
+        canonical_id = _extract_canonical_id(canonical_payload or candidate)
         trace_id = uuid4().hex
         media_intent = "album" if item.get("item_type") == "album" else "track"
-        job_id, created = self.queue_store.enqueue_job(
+        job_id, created, dedupe_reason = self.queue_store.enqueue_job(
             origin="search",
             origin_id=request["id"],
             media_type=item.get("media_type") or "music",
@@ -830,7 +919,30 @@ class SearchResolutionService:
             url=candidate.get("url"),
             output_template=output_template,
             trace_id=trace_id,
+            resolved_destination=resolved_destination,
+            canonical_id=canonical_id,
         )
+
+        if not created and dedupe_reason == "duplicate":
+            self.store.update_item_status(
+                item_id,
+                "skipped",
+                chosen=candidate,
+                error="duplicate",
+            )
+            _log_event(
+                logging.INFO,
+                "job_skipped_duplicate",
+                request_id=request["id"],
+                item_id=item_id,
+                job_id=job_id,
+                source=candidate.get("source"),
+                origin="search",
+                destination=resolved_destination,
+                media_type=item.get("media_type"),
+                dedupe_result=dedupe_reason,
+            )
+            return {"job_id": job_id, "created": False}
 
         self.store.update_item_status(item_id, "enqueued", chosen=candidate)
         if created:
@@ -842,6 +954,9 @@ class SearchResolutionService:
                 job_id=job_id,
                 trace_id=trace_id,
                 source=candidate.get("source"),
+                origin="search",
+                destination=resolved_destination,
+                media_type=item.get("media_type"),
             )
         else:
             _log_event(
@@ -851,9 +966,11 @@ class SearchResolutionService:
                 item_id=item_id,
                 job_id=job_id,
                 source=candidate.get("source"),
+                destination=resolved_destination,
+                media_type=item.get("media_type"),
             )
 
-        if request.get("status") not in {"completed", "failed"}:
+        if request.get("status") not in {"completed", "completed_with_skips", "failed"}:
             self.store.update_request_status(request["id"], "completed")
 
         return {"job_id": job_id, "created": created}

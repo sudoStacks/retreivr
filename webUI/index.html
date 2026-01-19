@@ -24,11 +24,9 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
-      <button class="button ghost small nav-button" data-page="search" type="button">Search</button>
+      <button class="button ghost small nav-button" data-page="advanced" type="button">Advanced Search</button>
+      <button class="button ghost small nav-button" data-page="status" type="button">Status</button>
       <button class="button ghost small nav-button" data-page="config" type="button">Config</button>
-      <button class="button ghost small nav-button" data-page="downloads" type="button">Downloads</button>
-      <button class="button ghost small nav-button" data-page="history" type="button">History</button>
-      <button class="button ghost small nav-button" data-page="logs" type="button">Logs</button>
       <div id="nav-actions" class="nav-actions"></div>
     </nav>
     <div class="top-actions" id="top-actions">
@@ -39,7 +37,62 @@
   </header>
 
   <main class="layout">
-    <section class="panel" id="run-panel" data-page="home">
+    <section class="panel full page-full" id="home-panel" data-page="home">
+      <div class="panel-title">Home</div>
+      <div class="home-search-card">
+        <div class="home-search-bar">
+          <input id="home-search-input" type="text" placeholder="Artist, track, album, or playlist URL">
+          <select id="home-search-source">
+            <option value="auto">Auto (Recommended)</option>
+            <option value="youtube">YouTube / YouTube Music</option>
+            <option value="soundcloud">SoundCloud</option>
+            <option value="archive">Internet Archive</option>
+          </select>
+        </div>
+        <div class="home-search-actions">
+          <button id="home-search-download" class="button">Search &amp; Download</button>
+          <button id="home-search-only" class="button ghost">Search Only</button>
+        </div>
+        <div class="home-advanced-toggle">
+          <button id="home-advanced-toggle" class="button ghost small" type="button">Advanced options</button>
+        </div>
+        <div class="home-advanced-options" id="home-advanced-options">
+          <div class="grid two">
+            <label class="field short">
+              <span>Min match score</span>
+              <input id="home-min-score" type="number" min="0" max="1" step="0.01" value="0.65">
+            </label>
+            <label class="field full">
+              <span>Destination override</span>
+              <input id="home-destination" type="text" placeholder="Leave blank for default">
+            </label>
+          </div>
+          <div class="grid two">
+            <label class="field inline">
+              <span>Treat as music</span>
+              <input id="home-treat-music" type="checkbox" checked>
+            </label>
+            <label class="field inline">
+              <span>Prefer albums over singles</span>
+              <input id="home-prefer-albums" type="checkbox">
+            </label>
+          </div>
+        </div>
+        <div id="home-search-message" class="notice" role="status"></div>
+      </div>
+      <div class="home-results hidden" id="home-results">
+        <div class="home-results-header">
+          <span>Results</span>
+          <div class="home-results-header-actions">
+            <span id="home-results-status-text" class="meta">Waiting for search</span>
+            <button id="home-view-advanced" class="button ghost small" type="button">View in Advanced Search</button>
+          </div>
+        </div>
+        <div id="home-results-detail" class="meta home-results-detail hidden"></div>
+        <div id="home-results-list"></div>
+      </div>
+    </section>
+    <section class="panel" id="run-panel" data-page="legacy-run">
       <div class="panel-title">Run Controls</div>
       <div class="stack">
         <div class="group">
@@ -122,7 +175,7 @@
       </div>
     </section>
 
-    <section class="panel" id="status-panel" data-page="home">
+    <section class="panel" id="status-panel" data-page="status">
       <div class="panel-title">Status</div>
       <div class="stack">
         <div class="row">
@@ -243,45 +296,7 @@
       </div>
     </section>
 
-    <section class="panel subtle" id="schedule-panel" data-page="home">
-      <div class="panel-title">Optional bulk run scheduler</div>
-      <div class="stack">
-        <div class="row">
-          <label class="field inline">
-            <span>Enabled</span>
-            <input id="schedule-enabled" type="checkbox">
-          </label>
-          <label class="field inline short">
-            <span>Interval (hours)</span>
-            <input id="schedule-interval" type="number" min="1" step="1" value="6">
-          </label>
-          <label class="field inline">
-            <span>Run on startup</span>
-            <input id="schedule-startup" type="checkbox">
-          </label>
-        </div>
-        <div class="row">
-          <button id="schedule-save" class="button">Save Schedule</button>
-          <button id="schedule-run-now" class="button ghost">Run now</button>
-          <div id="schedule-message" class="notice" role="status"></div>
-        </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Last run</span>
-            <span id="schedule-last-run">-</span>
-          </div>
-          <div class="stat">
-            <span class="label">Next run</span>
-            <span id="schedule-next-run">-</span>
-          </div>
-        </div>
-        <div class="notice">Runs full playlist jobs on a fixed interval. Not required when watcher is enabled.</div>
-        <div id="schedule-watcher-note" class="notice" style="display: none;">Watcher is active. Scheduler is optional and usually unnecessary.</div>
-        <div class="notice">Scheduled runs will not interrupt or overlap manual runs.</div>
-      </div>
-    </section>
-
-    <section class="panel" id="metrics-panel" data-page="home">
+    <section class="panel" id="metrics-panel" data-page="status">
       <div class="panel-title">Metrics</div>
       <div class="panel-body">
         <div class="row">
@@ -415,8 +430,46 @@
               <input id="cfg-watcher-downtime-timezone" type="text" placeholder="local">
             </label>
           </div>
-          <div class="notice">Automatically monitors playlists and downloads new videos as they appear.</div>
+        <div class="notice">Automatically monitors playlists and downloads new videos as they appear.</div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">Scheduler</div>
+        <div class="row">
+          <label class="field inline">
+            <span>Enabled</span>
+            <input id="schedule-enabled" type="checkbox">
+          </label>
+          <label class="field inline short">
+            <span>Interval (hours)</span>
+            <input id="schedule-interval" type="number" min="1" step="1" value="6">
+          </label>
+          <label class="field inline">
+            <span>Run on startup</span>
+            <input id="schedule-startup" type="checkbox">
+          </label>
         </div>
+        <div class="row">
+          <button id="schedule-save" class="button">Save Schedule</button>
+          <button id="schedule-run-now" class="button ghost">Run now</button>
+        </div>
+        <div class="row">
+          <div id="schedule-message" class="notice" role="status"></div>
+        </div>
+        <div class="row">
+          <div class="stat">
+            <span class="label">Last run</span>
+            <span id="schedule-last-run">-</span>
+          </div>
+          <div class="stat">
+            <span class="label">Next run</span>
+            <span id="schedule-next-run">-</span>
+          </div>
+        </div>
+        <div class="notice">Runs full playlist jobs on a fixed interval. Not required when watcher is enabled.</div>
+        <div id="schedule-watcher-note" class="notice" style="display: none;">Watcher is active. Scheduler is optional and usually unnecessary.</div>
+        <div class="notice">Scheduled runs will not interrupt or overlap manual runs.</div>
+      </div>
 
         <div class="group">
           <div class="group-title">Telegram</div>
@@ -509,6 +562,11 @@
         </div>
 
         <div class="group">
+          <div class="group-title">Spotify Playlists</div>
+          <div id="spotify-playlists-list" class="stack"></div>
+        </div>
+
+        <div class="group">
           <div class="group-title">yt-dlp Options (JSON)</div>
           <label class="field full">
             <span>Options</span>
@@ -533,7 +591,7 @@
     </section>
 
     
-    <section class="panel" id="search-create-panel" data-page="search">
+    <section class="panel" id="search-create-panel" data-page="advanced">
       <div class="panel-title">Media Search Console</div>
       <div class="stack">
         <div class="group">
@@ -637,7 +695,7 @@
 
 
 
-    <section class="panel" id="search-items-panel" data-page="search">
+    <section class="panel" id="search-items-panel" data-page="advanced">
       <div class="panel-title">Search Items & Candidates</div>
       <div class="notice">Selected request: <span id="search-selected-request">-</span></div>
       <div class="group">
@@ -682,7 +740,7 @@
     </section>
 
 
-    <section class="panel" id="search-requests-panel" data-page="search">
+    <section class="panel" id="search-requests-panel" data-page="advanced">
       <div class="panel-title">Search Requests</div>
       <div class="row">
         <button id="search-requests-refresh" class="button ghost">Refresh</button>
@@ -711,7 +769,7 @@
 
     
 
-    <section class="panel" id="search-queue-panel" data-page="search">
+    <section class="panel" id="search-queue-panel" data-page="advanced">
       <div class="panel-title">Unified Download Queue</div>
       <div class="row">
         <label class="field inline short">
@@ -740,7 +798,7 @@
       </div>
     </section>
 
-    <section class="panel full page-full" id="logs-panel" data-page="logs">
+    <section class="panel full page-full" id="logs-panel" data-page="status">
       <div class="panel-title">Logs</div>
       <div class="row">
         <label class="field inline short">
@@ -756,7 +814,7 @@
       <pre id="logs-output" class="log-output" aria-live="polite"></pre>
     </section>
 
-    <section class="panel full page-full" id="downloads-panel" data-page="downloads">
+    <section class="panel full page-full" id="downloads-panel" data-page="status">
       <div class="panel-title">Downloads</div>
       <div class="row">
         <button id="downloads-refresh" class="button ghost">Refresh</button>
@@ -795,7 +853,7 @@
       </div>
     </section>
 
-    <section class="panel full page-full" id="history-panel" data-page="history">
+    <section class="panel full page-full" id="history-panel" data-page="status">
       <div class="panel-title">History</div>
       <div class="row">
         <button class="button ghost small filters-toggle" data-target="history-filters" type="button">Filters</button>

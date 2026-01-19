@@ -1,0 +1,26 @@
+# Git
+.git
+.git/*
+.git/**
+
+# macOS metadata
+._*
+.DS_Store
+
+# Rust / Tauri build artifacts
+target
+**/target
+**/target/**
+
+# Node / frontend artifacts (if any)
+node_modules
+**/node_modules/**
+
+# Python cache
+__pycache__
+**/__pycache__/**
+*.pyc
+
+# Launcher - not included with docker anyway
+launcher/
+launcher/**

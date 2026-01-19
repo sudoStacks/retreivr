@@ -21,6 +21,14 @@ const state = {
   lastSearchCandidatesKey: null,
   lastSearchQueueKey: null,
   searchRequestsSort: "desc",
+  homeSearchRequestId: null,
+  homeResultsTimer: null,
+  homeSearchMode: "download",
+  homeRequestContext: {},
+  homeBestScores: {},
+  homeSearchControlsEnabled: true,
+  pendingAdvancedRequestId: null,
+  spotifyPlaylistStatus: {},
 };
 const browserState = {
   open: false,
@@ -51,9 +59,47 @@ const GITHUB_RELEASE_PAGE = "https://github.com/Retreivr/retreivr/releases";
 const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at";
 const RELEASE_CACHE_KEY = "yt_archiver_release_cache";
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version";
+const HOME_SOURCE_PRIORITY_MAP = {
+  auto: null,
+  youtube: ["youtube", "youtube_music"],
+  soundcloud: ["soundcloud"],
+  archive: null,
+};
+const HOME_STATUS_LABELS = {
+  queued: "Searching",
+  searching: "Searching",
+  candidate_found: "Matched",
+  selected: "Matched",
+  enqueued: "Queued",
+  failed: "Failed",
+  skipped: "Failed",
+};
+const HOME_STATUS_CLASS_MAP = {
+  queued: "searching",
+  searching: "searching",
+  candidate_found: "matched",
+  selected: "matched",
+  enqueued: "queued",
+  failed: "failed",
+  skipped: "failed",
+};
+const HOME_FINAL_STATUSES = new Set(["completed", "completed_with_skips", "failed"]);
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+function normalizePageName(page) {
+  if (!page) {
+    return "home";
+  }
+  if (page === "search") {
+    return "advanced";
+  }
+  if (["downloads", "history", "logs"].includes(page)) {
+    return "status";
+  }
+  return page;
+}
 
 function setNotice(el, message, isError = false) {
   if (!el) return;
@@ -90,9 +136,19 @@ function setConfigNotice(message, isError = false, autoClear = false) {
 }
 
 function setPage(page) {
-  const allowed = new Set(["home", "config", "downloads", "history", "logs", "search"]);
-  const target = allowed.has(page) ? page : "home";
+  const normalized = normalizePageName(page);
+  const allowed = new Set(["home", "config", "status", "advanced"]);
+  const target = allowed.has(normalized) ? normalized : "home";
   state.currentPage = target;
+  if (target === "home") {
+    if (state.homeSearchRequestId) {
+      startHomeResultPolling(state.homeSearchRequestId);
+    }
+    updateHomeViewAdvancedLink();
+  } else {
+    stopHomeResultPolling();
+    updateHomeViewAdvancedLink();
+  }
   document.body.classList.remove("nav-open");
   const navToggle = $("#nav-toggle");
   if (navToggle) {
@@ -106,32 +162,40 @@ function setPage(page) {
   $$(".nav-button").forEach((button) => {
     button.classList.toggle("active", button.dataset.page === target);
   });
-  if (target === "home") {
+  if (target === "status") {
     refreshStatus();
-    refreshSchedule();
     refreshMetrics();
     refreshVersion();
+    refreshDownloads();
+    refreshHistory();
+    refreshLogs();
   } else if (target === "config") {
     if (!state.config || !state.configDirty) {
       loadConfig();
     }
-  } else if (target === "downloads") {
-    refreshDownloads();
-  } else if (target === "history") {
-    refreshHistory();
-  } else if (target === "search") {
+    refreshSchedule();
+  } else if (target === "advanced") {
     if (!state.config) {
-      fetchJson("/api/config").then((cfg) => {
-        state.config = cfg;
-        updateSearchDestinationDisplay();
-      }).catch(() => {});
+      fetchJson("/api/config")
+        .then((cfg) => {
+          state.config = cfg;
+          updateSearchDestinationDisplay();
+        })
+        .catch(() => {});
     } else {
       updateSearchDestinationDisplay();
     }
-    refreshSearchRequests();
+    const handoffRequestId = state.pendingAdvancedRequestId;
+    state.pendingAdvancedRequestId = null;
+    refreshSearchRequests(handoffRequestId)
+      .then(() => {
+        const requestIdToLoad = handoffRequestId || state.searchSelectedRequestId;
+        if (requestIdToLoad) {
+          return refreshSearchRequestDetails(requestIdToLoad);
+        }
+      })
+      .catch(() => {});
     refreshSearchQueue();
-  } else if (target === "logs") {
-    refreshLogs();
   }
 }
 
@@ -1238,6 +1302,494 @@ function renderSearchEmptyRow(body, colspan, message) {
   body.appendChild(tr);
 }
 
+function getHomeSourcePriority() {
+  const select = $("#home-search-source");
+  if (!select) return null;
+  const value = select.value;
+  return HOME_SOURCE_PRIORITY_MAP[value] || null;
+}
+
+function parseHomeSearchQuery(value, preferAlbum) {
+  const trimmed = (value || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+  const isUrl = /^https?:\/\//i.test(trimmed);
+  let artist = trimmed;
+  let album = null;
+  let track = trimmed;
+  let intent = preferAlbum ? "album" : "track";
+  const separators = [" - ", " / ", ":"];
+  const separator = separators.find((sep) => trimmed.includes(sep));
+  if (separator && !isUrl) {
+    const [first, second] = trimmed.split(separator);
+    artist = first.trim() || trimmed;
+    const remainder = second.trim();
+    if (preferAlbum) {
+      intent = "album";
+      album = remainder || trimmed;
+      track = "";
+    } else {
+      intent = "track";
+      track = remainder || trimmed;
+    }
+  } else if (isUrl) {
+    intent = "track";
+    artist = trimmed;
+    track = trimmed;
+  } else {
+    if (preferAlbum) {
+      intent = "album";
+      album = trimmed;
+      track = "";
+    } else {
+      intent = "track";
+      track = trimmed;
+    }
+  }
+  if (intent === "track" && !track) {
+    track = artist || trimmed;
+  }
+  return {
+    intent,
+    artist: artist || trimmed,
+    album: album || null,
+    track: track || null,
+  };
+}
+
+function buildHomeSearchPayload(autoEnqueue) {
+  const preferAlbum = $("#home-prefer-albums")?.checked;
+  const parsed = parseHomeSearchQuery($("#home-search-input")?.value, preferAlbum);
+  if (!parsed) {
+    throw new Error("Enter an artist, track, album, or playlist URL");
+  }
+  const minScoreRaw = parseFloat($("#home-min-score")?.value);
+  const destination = $("#home-destination")?.value.trim();
+  const treatAsMusic = $("#home-treat-music")?.checked ?? true;
+  return {
+    intent: parsed.intent,
+    media_type: "music",
+    artist: parsed.artist,
+    album: parsed.album,
+    track: parsed.track,
+    destination_dir: destination || null,
+    include_albums: 1,
+    include_singles: preferAlbum ? 0 : 1,
+    min_match_score: Number.isFinite(minScoreRaw) ? minScoreRaw : 0.92,
+    lossless_only: treatAsMusic ? 1 : 0,
+    auto_enqueue: autoEnqueue,
+    source_priority: getHomeSourcePriority(),
+    max_candidates_per_source: 5,
+  };
+}
+
+function showHomeResults(visible) {
+  const section = $("#home-results");
+  if (!section) return;
+  section.classList.toggle("hidden", !visible);
+}
+
+function updateHomeViewAdvancedLink() {
+  const button = $("#home-view-advanced");
+  if (!button) return;
+  const enabled = !!state.homeSearchRequestId;
+  button.disabled = !enabled;
+  button.setAttribute("aria-disabled", (!enabled).toString());
+}
+
+function handleHomeViewAdvanced() {
+  const requestId = state.homeSearchRequestId;
+  if (!requestId) {
+    return;
+  }
+  state.pendingAdvancedRequestId = requestId;
+  window.location.hash = "#advanced";
+}
+
+function setHomeSearchControlsEnabled(enabled) {
+  state.homeSearchControlsEnabled = enabled;
+  ["#home-search-download", "#home-search-only"].forEach((selector) => {
+    const el = $(selector);
+    if (!el) return;
+    el.disabled = !enabled;
+    el.setAttribute("aria-disabled", (!enabled).toString());
+  });
+}
+
+function maybeReleaseHomeSearchControls(requestId, requestStatus) {
+  if (!requestId) return;
+  if (state.homeSearchRequestId !== requestId) {
+    return;
+  }
+  if (HOME_FINAL_STATUSES.has(requestStatus)) {
+    setHomeSearchControlsEnabled(true);
+  }
+}
+
+function stopHomeResultPolling() {
+  if (state.homeResultsTimer) {
+    clearInterval(state.homeResultsTimer);
+    state.homeResultsTimer = null;
+  }
+}
+
+function setHomeResultsStatus(text) {
+  const statusEl = $("#home-results-status-text");
+  if (statusEl) {
+    statusEl.textContent = text;
+  }
+}
+
+function setHomeResultsDetail(text, isError = false) {
+  const detailEl = $("#home-results-detail");
+  if (!detailEl) {
+    return;
+  }
+  if (!text) {
+    detailEl.textContent = "";
+    detailEl.classList.remove("home-results-error");
+    detailEl.classList.add("hidden");
+    return;
+  }
+  detailEl.textContent = text;
+  detailEl.classList.toggle("home-results-error", isError);
+  detailEl.classList.remove("hidden");
+}
+
+function buildHomeResultsStatusInfo(requestId) {
+  const context = state.homeRequestContext[requestId];
+  if (!context) {
+    return { text: "Waiting for search", detail: "", isError: false };
+  }
+  const request = context.request || {};
+  const items = context.items || [];
+  const requestStatus = request.status || "pending";
+  const error = request.error || "";
+  const minScore = Number.isFinite(request.min_match_score) ? request.min_match_score : null;
+  const thresholdText = Number.isFinite(minScore) ? minScore.toFixed(2) : "0.00";
+  const bestScore = state.homeBestScores[requestId];
+  const bestText = Number.isFinite(bestScore) ? bestScore.toFixed(2) : "calculating…";
+  const hasCandidates = items.some((item) => item.candidate_count > 0);
+  const hasQueued = items.some((item) => ["selected", "enqueued"].includes(item.status));
+
+  if (requestStatus === "failed" && error && error !== "no_items_enqueued") {
+    return { text: "FAILED", detail: error, isError: true, status: requestStatus };
+  }
+
+  if (requestStatus === "failed" && error === "no_items_enqueued") {
+    if (hasCandidates) {
+      const detail = `Best score ${bestText} · Threshold ${thresholdText}. Lower threshold or click Download next to a result.`;
+      return { text: "Results found (below auto-download threshold)", detail, isError: false, status: requestStatus };
+    }
+    return {
+      text: "No results",
+      detail: "No candidates were returned for this search.",
+      isError: false,
+      status: requestStatus,
+    };
+  }
+
+  if (!items.length) {
+    const fallback = requestStatus === "pending" ? "Waiting for search" : formatHomeRequestStatus(requestStatus);
+    const detail = requestStatus === "pending" ? "Waiting for the search worker to start." : "";
+    return { text: fallback, detail, isError: false, status: requestStatus };
+  }
+
+  if (hasQueued || requestStatus === "completed_with_skips") {
+    const detail =
+      hasQueued && requestStatus === "completed_with_skips"
+        ? "Some matches were skipped because they already exist."
+        : requestStatus === "completed_with_skips"
+        ? "Matches were skipped, but the request resolved successfully."
+        : "Items have been scheduled for download.";
+    return {
+      text: "Results queued",
+      detail,
+      isError: false,
+      status: requestStatus,
+    };
+  }
+
+  const detail =
+    requestStatus === "resolving"
+      ? "Searching for matches…"
+      : requestStatus === "completed_with_skips"
+      ? "Some entries already existed in the queue."
+      : "";
+  return { text: formatHomeRequestStatus(requestStatus), detail, isError: false, status: requestStatus };
+}
+
+function updateHomeResultsStatusForRequest(requestId) {
+  if (!requestId) {
+    setHomeResultsStatus("Waiting for search");
+    setHomeResultsDetail("", false);
+    return;
+  }
+  const info = buildHomeResultsStatusInfo(requestId);
+  setHomeResultsStatus(info.text);
+  setHomeResultsDetail(info.detail, info.isError);
+  maybeReleaseHomeSearchControls(requestId, info.status);
+}
+
+function recordHomeCandidateScore(requestId, score) {
+  if (!requestId || !Number.isFinite(score)) {
+    return;
+  }
+  const current = state.homeBestScores[requestId];
+  if (!Number.isFinite(current) || score > current) {
+    state.homeBestScores[requestId] = score;
+    updateHomeResultsStatusForRequest(requestId);
+  }
+}
+
+function formatHomeRequestStatus(status) {
+  if (!status) return "Waiting";
+  if (status === "resolving") return "Searching";
+  if (status === "pending") return "Pending";
+  if (status === "completed_with_skips") return "Completed with skips";
+  return status[0]?.toUpperCase() + status.slice(1);
+}
+
+function renderHomeStatusBadge(status) {
+  const normalized = status || "queued";
+  const label = HOME_STATUS_LABELS[normalized] || normalized;
+  const className = HOME_STATUS_CLASS_MAP[normalized] || "searching";
+  const badge = document.createElement("span");
+  badge.className = `home-result-badge ${className} long`;
+  badge.textContent = label;
+  return badge;
+}
+
+const HOME_CANDIDATE_STATE_LABELS = {
+  queued: "Queued",
+  searching: "Searching",
+  candidate_found: "Matched",
+  selected: "Selected",
+  enqueued: "Queued",
+  failed: "Failed",
+  skipped: "Already queued",
+};
+function getHomeCandidateStateInfo(status) {
+  const key = status || "queued";
+  const label = HOME_CANDIDATE_STATE_LABELS[key] || key;
+  const className = {
+    queued: "queued",
+    searching: "searching",
+    candidate_found: "matched",
+    selected: "matched",
+    enqueued: "queued",
+    failed: "failed",
+    skipped: "skipped",
+  }[key] || "queued";
+  return { label, className };
+}
+
+function renderHomeResultItem(item) {
+  const card = document.createElement("article");
+  card.className = "home-result-card";
+  const header = document.createElement("div");
+  header.className = "home-result-header";
+  const title = document.createElement("div");
+  const summary = [item.artist, item.album, item.track].filter(Boolean).join(" / ") || "-";
+  title.innerHTML = `<strong>${summary}</strong>`;
+  header.appendChild(title);
+  header.appendChild(renderHomeStatusBadge(item.status));
+  card.appendChild(header);
+  const detail = document.createElement("div");
+  detail.className = "home-candidate-title";
+  detail.textContent = `Source: ${item.media_type || "music"} · ${item.position ? `Item ${item.position}` : ""}`.trim();
+  card.appendChild(detail);
+  const requestContext = state.homeRequestContext[item.request_id];
+  const resolvedDestination = requestContext?.request?.resolved_destination;
+  if (resolvedDestination) {
+    const destinationEl = document.createElement("div");
+    destinationEl.className = "home-result-destination";
+    destinationEl.textContent = `Destination: ${resolvedDestination}`;
+    card.appendChild(destinationEl);
+  }
+  const candidateList = document.createElement("div");
+  candidateList.className = "home-candidate-list";
+  card.appendChild(candidateList);
+  loadHomeCandidates(item, candidateList);
+  return card;
+}
+
+async function loadHomeCandidates(item, container) {
+  container.textContent = "";
+  const placeholder = document.createElement("div");
+  placeholder.className = "home-results-empty";
+  placeholder.textContent = "Fetching candidates…";
+  container.appendChild(placeholder);
+  try {
+    const data = await fetchJson(`/api/search/items/${encodeURIComponent(item.id)}/candidates`);
+    const candidates = data.candidates || [];
+    container.textContent = "";
+    if (!candidates.length) {
+      placeholder.textContent = "Waiting for candidates…";
+      container.appendChild(placeholder);
+      return;
+    }
+    const requestId = item.request_id || state.homeSearchRequestId;
+    const bestScore = candidates.reduce((max, candidate) => {
+      const value = Number(candidate.final_score);
+      return Number.isFinite(value) && value > max ? value : max;
+    }, Number.NEGATIVE_INFINITY);
+    if (Number.isFinite(bestScore)) {
+      recordHomeCandidateScore(requestId, bestScore);
+    }
+    candidates.forEach((candidate) => {
+      container.appendChild(renderHomeCandidateRow(candidate, item));
+    });
+  } catch (err) {
+    container.textContent = "";
+    const errorEl = document.createElement("div");
+    errorEl.className = "home-results-empty";
+    errorEl.textContent = `Failed to load candidates: ${err.message}`;
+    container.appendChild(errorEl);
+  }
+}
+
+function renderHomeCandidateRow(candidate, item) {
+  const row = document.createElement("div");
+  row.className = "home-candidate-row";
+  const artworkUrl = Array.isArray(candidate.canonical_metadata?.artwork)
+    ? candidate.canonical_metadata.artwork[0].url
+    : candidate.canonical_metadata?.thumbnail;
+  const artwork = document.createElement("div");
+  artwork.className = "home-candidate-artwork";
+  if (artworkUrl) {
+    const img = document.createElement("img");
+    img.src = artworkUrl;
+    img.alt = candidate.source || "";
+    artwork.appendChild(img);
+  } else {
+    artwork.innerHTML = "<span class=\"meta\">No artwork</span>";
+  }
+  row.appendChild(artwork);
+
+  const info = document.createElement("div");
+  info.className = "home-candidate-info";
+  const title = candidate.title || candidate.source || "-";
+  const detail = [candidate.artist_detected, candidate.album_detected, candidate.track_detected]
+    .filter(Boolean)
+    .join(" / ");
+  info.innerHTML = `<span class="home-candidate-source">${title}</span>${detail ? `<span class="home-candidate-meta">${detail}</span>` : ""}`;
+  row.appendChild(info);
+
+  const score = document.createElement("div");
+  score.textContent = Number.isFinite(candidate.final_score) ? candidate.final_score.toFixed(3) : "-";
+  score.className = "home-candidate-meta";
+  row.appendChild(score);
+
+  const action = document.createElement("div");
+  action.className = "home-candidate-action";
+  const stateInfo = getHomeCandidateStateInfo(item.status);
+  const stateBadge = document.createElement("span");
+  stateBadge.className = `home-candidate-state ${stateInfo.className}`;
+  stateBadge.textContent = stateInfo.label;
+  action.appendChild(stateBadge);
+  if (state.homeSearchMode === "searchOnly") {
+    const itemQueued = ["enqueued", "selected", "skipped"].includes(item.status);
+    const button = document.createElement("button");
+    button.className = "button ghost small";
+    button.dataset.action = "home-download";
+    button.dataset.itemId = item.id || "";
+    button.dataset.candidateId = candidate.id || "";
+    button.textContent = itemQueued ? "Queued" : "Download";
+    button.disabled = itemQueued || !candidate.id || !candidate.url;
+    action.appendChild(button);
+  } else {
+    const label = document.createElement("span");
+    label.textContent = "Auto";
+    label.className = "meta";
+    action.appendChild(label);
+  }
+  row.appendChild(action);
+
+  return row;
+}
+
+async function refreshHomeResults(requestId) {
+  const container = $("#home-results-list");
+  if (!container) return null;
+  try {
+    const data = await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}`);
+    const requestStatus = data.request?.status || "queued";
+    const items = data.items || [];
+    state.homeRequestContext[requestId] = {
+      request: data.request || {},
+      items,
+    };
+    updateHomeResultsStatusForRequest(requestId);
+    container.textContent = "";
+    if (!items.length) {
+      const placeholder = document.createElement("div");
+      placeholder.className = "home-results-empty";
+      placeholder.textContent = "Waiting for items…";
+      container.appendChild(placeholder);
+      return requestStatus;
+    }
+    items.forEach((item) => {
+      container.appendChild(renderHomeResultItem(item));
+    });
+    return requestStatus;
+  } catch (err) {
+    container.textContent = "";
+    const errorEl = document.createElement("div");
+    errorEl.className = "home-results-empty";
+    errorEl.textContent = `Failed to refresh results: ${err.message}`;
+    container.appendChild(errorEl);
+    setHomeResultsStatus("FAILED");
+    setHomeResultsDetail(`Failed to refresh results: ${err.message}`, true);
+    setHomeSearchControlsEnabled(true);
+    return null;
+  }
+}
+
+function startHomeResultPolling(requestId) {
+  stopHomeResultPolling();
+  showHomeResults(true);
+  const tick = async () => {
+    const status = await refreshHomeResults(requestId);
+    if (status && ["completed", "completed_with_skips", "failed"].includes(status)) {
+      stopHomeResultPolling();
+    }
+  };
+  state.homeResultsTimer = setInterval(tick, 4000);
+  tick();
+}
+
+async function submitHomeSearch(autoEnqueue) {
+  const messageEl = $("#home-search-message");
+  if (!state.homeSearchControlsEnabled) {
+    return;
+  }
+  setHomeSearchControlsEnabled(false);
+  try {
+    const payload = buildHomeSearchPayload(autoEnqueue);
+    const modeLabel = autoEnqueue ? "Search & Download" : "Search Only";
+    setNotice(messageEl, `${modeLabel}: creating request...`, false);
+    const data = await fetchJson("/api/search/requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    state.homeRequestContext = {};
+    state.homeBestScores = {};
+    state.homeSearchRequestId = data.request_id;
+    state.homeSearchMode = autoEnqueue ? "download" : "searchOnly";
+    updateHomeViewAdvancedLink();
+    setNotice(messageEl, `${modeLabel}: created ${data.request_id}`, false);
+    showHomeResults(true);
+    startHomeResultPolling(data.request_id);
+    await runSearchResolutionOnce({ preferRequestId: data.request_id, showMessage: false });
+  } catch (err) {
+    setHomeSearchControlsEnabled(true);
+    setNotice(messageEl, `Search failed: ${err.message}`, true);
+  }
+}
+
 async function createSearchRequest(autoEnqueue = true) {
   const messageEl = $("#search-create-message");
   try {
@@ -1292,9 +1844,9 @@ async function runSearchResolutionOnce({ preferRequestId = null, showMessage = t
 }
 
 
-async function enqueueSearchCandidate(itemId, candidateId) {
+async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
   if (!itemId || !candidateId) return;
-  const messageEl = $("#search-requests-message");
+  const messageEl = options.messageEl || $("#search-requests-message");
   try {
     setNotice(messageEl, `Enqueuing candidate ${candidateId}...`, false);
     const data = await fetchJson(`/api/search/items/${encodeURIComponent(itemId)}/enqueue`, {
@@ -1373,7 +1925,7 @@ async function refreshSearchRequests(preferRequestId = null) {
       }
       const summary = [req.artist, req.album, req.track].filter(Boolean).join(" / ") || "-";
       const status = req.status || "";
-      const cancelDisabled = ["completed", "failed", "canceled"].includes(status);
+      const cancelDisabled = ["completed", "completed_with_skips", "failed"].includes(status);
       tr.innerHTML = `
         <td>${req.id || ""}</td>
         <td>${summary}</td>
@@ -1409,10 +1961,16 @@ async function refreshSearchRequestDetails(requestId) {
     renderSearchEmptyRow(itemsBody, 6, "Select a request to view items.");
     renderSearchEmptyRow(candidatesBody, 8, "Select an item to view candidates.");
     setSearchSelectedItem(null);
+    updateSearchDestinationDisplay();
     return;
   }
   try {
     const data = await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}`);
+    const destEl = $("#search-default-destination");
+    if (destEl) {
+      destEl.textContent =
+        data.request?.resolved_destination || getSearchDefaultDestination() || "-";
+    }
     const items = data.items || [];
     const requestStatus = data.request ? data.request.status : null;
     itemsBody.textContent = "";
@@ -1770,10 +2328,173 @@ function renderConfig(cfg) {
   $("#playlists-list").textContent = "";
   const playlists = cfg.playlists || [];
   playlists.forEach((entry) => addPlaylistRow(entry));
+  renderSpotifyPlaylists(cfg);
+  refreshSpotifyPlaylistStatus();
 
   const opts = cfg.yt_dlp_opts || {};
   $("#cfg-yt-dlp-opts").value = Object.keys(opts).length ? JSON.stringify(opts, null, 2) : "";
   state.suppressDirty = false;
+}
+
+function renderSpotifyPlaylists(cfg) {
+  const container = $("#spotify-playlists-list");
+  if (!container) return;
+  container.textContent = "";
+  const entries = cfg.spotify_playlists || [];
+  if (!entries.length) {
+    const note = document.createElement("div");
+    note.className = "notice";
+    note.textContent = "No Spotify playlists configured.";
+    container.appendChild(note);
+    return;
+  }
+  entries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "row spotify-playlist-row";
+    row.dataset.playlistUrl = entry.playlist_url || "";
+
+    const info = document.createElement("div");
+    info.className = "spotify-playlist-info";
+    const title = document.createElement("div");
+    title.className = "spotify-playlist-title";
+    title.textContent = entry.name || "Spotify Playlist";
+    const summary = document.createElement("div");
+    summary.className = "meta spotify-playlist-summary";
+    const summaryParts = [];
+    if (entry.destination) {
+      summaryParts.push(`Destination: ${entry.destination}`);
+    } else {
+      summaryParts.push("Destination: default");
+    }
+    summaryParts.push(`Auto-download: ${entry.auto_download === false ? "off" : "on"}`);
+    const minScore = Number.isFinite(entry.min_match_score) ? entry.min_match_score.toFixed(2) : "0.65";
+    summaryParts.push(`Min score: ${minScore}`);
+    summary.textContent = summaryParts.join(" · ");
+    const status = document.createElement("div");
+    status.className = "spotify-playlist-status";
+    const url = document.createElement("div");
+    url.className = "meta";
+    url.textContent = entry.playlist_url || "";
+    info.append(title, summary, status, url);
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button ghost small spotify-import-button";
+    button.textContent = "Import Playlist";
+    button.addEventListener("click", () => importSpotifyPlaylist(entry, row, button));
+
+    container.append(row);
+    row.append(info, button);
+    updateSpotifyPlaylistRowStatus(row, entry.playlist_url);
+  });
+}
+
+async function refreshSpotifyPlaylistStatus() {
+  try {
+    const data = await fetchJson("/api/spotify/playlists/status");
+    state.spotifyPlaylistStatus = data.statuses || {};
+    updateSpotifyPlaylistStatusDisplay();
+  } catch (err) {
+    // ignore
+  }
+}
+
+function updateSpotifyPlaylistStatusDisplay() {
+  $$(".spotify-playlist-row").forEach((row) => {
+    const url = row.dataset.playlistUrl;
+    updateSpotifyPlaylistRowStatus(row, url);
+  });
+}
+
+function updateSpotifyPlaylistRowStatus(row, playlistUrl) {
+  const statusEl = row.querySelector(".spotify-playlist-status");
+  if (!statusEl) return;
+  const status = state.spotifyPlaylistStatus[playlistUrl] || null;
+  if (!status) {
+    statusEl.textContent = "Status: Idle";
+    return;
+  }
+
+  let statusLabel = "Status: Idle";
+  if (status.state === "importing") {
+    statusLabel = "Status: Importing...";
+  } else if (status.state === "completed") {
+    if (status.tracks_queued > 0) {
+      statusLabel = "✅ Imported successfully";
+    } else if (status.tracks_skipped > 0) {
+      statusLabel = "🔁 Imported, tracks already queued";
+    } else if (status.tracks_discovered > 0) {
+      statusLabel = "⚠ Imported, no matches met threshold";
+    } else {
+      statusLabel = "⚠ Imported, no tracks found";
+    }
+  } else if (status.state === "error") {
+    statusLabel = "❌ Import error";
+  } else {
+    statusLabel = `Status: ${status.state || "idle"}`;
+  }
+
+  const parts = [statusLabel];
+  if (status.destination) {
+    parts.push(`Destination: ${status.destination}`);
+  }
+  if (status.tracks_discovered != null) {
+    parts.push(`Tracks discovered: ${status.tracks_discovered}`);
+  }
+  if (status.tracks_queued != null && status.tracks_queued > 0) {
+    parts.push(`Queued: ${status.tracks_queued}`);
+  }
+  if (status.tracks_skipped != null && status.tracks_skipped > 0) {
+    parts.push(`Duplicates skipped: ${status.tracks_skipped}`);
+  }
+  if (status.tracks_failed != null && status.tracks_failed > 0) {
+    parts.push(`No matches: ${status.tracks_failed}`);
+  }
+  if (status.error) {
+    parts.push(`Error: ${status.error}`);
+  } else if (status.message && status.state === "importing") {
+    parts.push(status.message);
+  }
+  statusEl.textContent = parts.join(" · ");
+}
+
+async function importSpotifyPlaylist(entry, row, button) {
+  const playlistUrl = (entry.playlist_url || "").trim();
+  if (!playlistUrl) {
+    return;
+  }
+  button.disabled = true;
+  state.spotifyPlaylistStatus[playlistUrl] = {
+    state: "importing",
+    message: "Importing playlist metadata...",
+    tracks_discovered: 0,
+    tracks_queued: 0,
+    error: null,
+    updated_at: new Date().toISOString(),
+  };
+  updateSpotifyPlaylistRowStatus(row, playlistUrl);
+  try {
+    const result = await fetchJson("/api/spotify/playlists/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playlist_url: playlistUrl }),
+    });
+    state.spotifyPlaylistStatus[playlistUrl] = result.status || state.spotifyPlaylistStatus[playlistUrl];
+    updateSpotifyPlaylistRowStatus(row, playlistUrl);
+  } catch (err) {
+    state.spotifyPlaylistStatus[playlistUrl] = {
+      state: "error",
+      message: "Import failed",
+      error: err.message,
+      tracks_discovered: 0,
+      tracks_queued: 0,
+      updated_at: new Date().toISOString(),
+    };
+    updateSpotifyPlaylistRowStatus(row, playlistUrl);
+  } finally {
+    button.disabled = false;
+    await refreshSpotifyPlaylistStatus();
+  }
 }
 
 async function loadConfig() {
@@ -2274,6 +2995,46 @@ function bindEvents() {
       const row = button.closest(".source-priority-row");
       if (!row) return;
       moveSourcePriorityRow(row, button.dataset.action);
+    });
+  }
+  const homeSearchDownload = $("#home-search-download");
+  if (homeSearchDownload) {
+    homeSearchDownload.addEventListener("click", () => submitHomeSearch(true));
+  }
+  const homeSearchOnly = $("#home-search-only");
+  if (homeSearchOnly) {
+    homeSearchOnly.addEventListener("click", () => submitHomeSearch(false));
+  }
+  const homeAdvancedToggle = $("#home-advanced-toggle");
+  const homeAdvancedPanel = $("#home-advanced-options");
+  if (homeAdvancedToggle && homeAdvancedPanel) {
+    homeAdvancedToggle.addEventListener("click", () => {
+      const open = homeAdvancedPanel.classList.toggle("open");
+      homeAdvancedToggle.textContent = open ? "Hide advanced options" : "Advanced options";
+      homeAdvancedToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+  }
+  const homeViewAdvanced = $("#home-view-advanced");
+  if (homeViewAdvanced) {
+    homeViewAdvanced.addEventListener("click", handleHomeViewAdvanced);
+    updateHomeViewAdvancedLink();
+  }
+  const homeResultsList = $("#home-results-list");
+  if (homeResultsList) {
+    homeResultsList.addEventListener("click", async (event) => {
+      const button = event.target.closest('button[data-action="home-download"]');
+      if (!button) return;
+      const itemId = button.dataset.itemId;
+      const candidateId = button.dataset.candidateId;
+      if (!itemId || !candidateId) return;
+      if (button.disabled) return;
+      button.disabled = true;
+      const originalText = button.textContent;
+      button.textContent = "Queued";
+      await enqueueSearchCandidate(itemId, candidateId, { messageEl: $("#home-search-message") });
+      await refreshHomeResults(state.homeSearchRequestId);
+      button.disabled = false;
+      button.textContent = originalText;
     });
   }
   $("#search-requests-body").addEventListener("click", async (event) => {

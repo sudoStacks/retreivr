@@ -35,6 +35,15 @@
       "music_mode": false
     }
   ],
+  "spotify_playlists": [
+    {
+      "name": "Country Bangers",
+      "playlist_url": "https://open.spotify.com/playlist/37i9dQZF1DX1dvfUVJ0P0Y",
+      "destination": "Music/Playlists/Country Bangers",
+      "auto_download": true,
+      "min_match_score": 0.65
+    }
+  ],
   "yt_dlp_cookies": "",
   "yt_dlp_opts": {},
   "filename_template": "%(title)s - %(uploader)s - %(upload_date)s.%(ext)s",

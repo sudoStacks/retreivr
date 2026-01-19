@@ -45,8 +45,11 @@ from apscheduler.triggers.date import DateTrigger
 from google.auth.exceptions import RefreshError
 
 from engine.job_queue import DownloadWorkerEngine
-
 from engine.search_engine import SearchResolutionService, resolve_search_db_path
+from engine.spotify_playlist_importer import (
+    SpotifyPlaylistImportError,
+    SpotifyPlaylistImporter,
+)
 
 from engine.core import (
     EngineStatus,
@@ -262,6 +265,10 @@ class EnqueueCandidatePayload(BaseModel):
     candidate_id: str
 
 
+class SpotifyPlaylistImportPayload(BaseModel):
+    playlist_url: str
+
+
 
 app = FastAPI(
     title=APP_NAME,
@@ -351,6 +358,8 @@ async def startup():
         config=config or {},
         paths=app.state.paths,
     )
+    app.state.spotify_playlist_importer = SpotifyPlaylistImporter()
+    app.state.spotify_import_status = {}
 
     app.state.worker_stop_event = threading.Event()
     app.state.worker_engine = DownloadWorkerEngine(
@@ -2420,6 +2429,73 @@ async def run_search_resolution_once():
     service = app.state.search_service
     request_id = service.run_search_resolution_once()
     return {"request_id": request_id}
+
+
+@app.post("/api/spotify/playlists/import")
+async def import_spotify_playlist(payload: SpotifyPlaylistImportPayload):
+    playlist_url = (payload.playlist_url or "").strip()
+    if not playlist_url:
+        raise HTTPException(status_code=400, detail="playlist_url is required")
+    config = _read_config_or_404()
+    playlist_entries = config.get("spotify_playlists") or []
+    entry = next((pl for pl in playlist_entries if pl.get("playlist_url") == playlist_url), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Spotify playlist not configured")
+    status_entry = {
+        "state": "importing",
+        "message": "Importing playlist metadata...",
+        "destination": None,
+        "tracks_discovered": 0,
+        "tracks_queued": 0,
+        "tracks_skipped": 0,
+        "tracks_failed": 0,
+        "error": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    app.state.spotify_import_status[playlist_url] = status_entry
+    try:
+        result = await anyio.to_thread.run_sync(
+            app.state.spotify_playlist_importer.import_playlist,
+            entry,
+            app.state.search_service,
+            config,
+        )
+        status_entry.update(
+            state="completed",
+            message="Import completed",
+            destination=result.get("destination"),
+            tracks_discovered=result.get("tracks_discovered", 0),
+            tracks_queued=result.get("tracks_queued", 0),
+            tracks_skipped=result.get("tracks_skipped", 0),
+            tracks_failed=result.get("tracks_failed", 0),
+            error=None,
+        )
+        status_entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return {"status": status_entry}
+    except SpotifyPlaylistImportError as exc:
+        status_entry.update(
+            state="error",
+            message="Import failed",
+            error=str(exc),
+        )
+        status_entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logging.exception("Spotify playlist import failed: %s", exc)
+        status_entry.update(
+            state="error",
+            message="Import failed",
+            error=str(exc),
+        )
+        status_entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        app.state.spotify_import_status[playlist_url] = status_entry
+
+
+@app.get("/api/spotify/playlists/status")
+async def spotify_playlist_status():
+    return {"statuses": app.state.spotify_import_status}
 
 
 @app.get("/api/search/items/{item_id}/candidates")

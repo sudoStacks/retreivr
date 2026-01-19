@@ -33,6 +33,10 @@ CLIENT_DELIVERY_TIMEOUT_SECONDS = 600
 
 _GOOGLE_AUTH_RETRY = re.compile(r"Refreshing credentials due to a 401 response\. Attempt (\d+)/(\d+)\.")
 
+_SPOTIFY_PLAYLIST_RE = re.compile(
+    r"^(?:https?://open\.spotify\.com/playlist/|spotify:playlist:)([A-Za-z0-9]+)"
+)
+
 
 def _install_google_auth_filter():
     def _rewrite(record):
@@ -214,6 +218,40 @@ def validate_config(config):
             media_type = pl.get("media_type")
             if media_type is not None and media_type not in {"music", "audio", "video"}:
                 errors.append(f"playlists[{idx}].media_type must be 'music', 'audio', or 'video'")
+
+    spotify_playlists = config.get("spotify_playlists")
+    if spotify_playlists is not None and not isinstance(spotify_playlists, list):
+        errors.append("spotify_playlists must be a list")
+    if isinstance(spotify_playlists, list):
+        for idx, entry in enumerate(spotify_playlists):
+            if not isinstance(entry, dict):
+                errors.append(f"spotify_playlists[{idx}] must be an object")
+                continue
+            url = entry.get("playlist_url")
+            if not url:
+                errors.append(f"spotify_playlists[{idx}].playlist_url is required")
+            elif not isinstance(url, str) or not _SPOTIFY_PLAYLIST_RE.match(url):
+                errors.append(f"spotify_playlists[{idx}].playlist_url must be a Spotify playlist URL")
+            name = entry.get("name")
+            if name is not None and not isinstance(name, str):
+                errors.append(f"spotify_playlists[{idx}].name must be a string")
+            destination = entry.get("destination")
+            if destination is not None and not isinstance(destination, str):
+                errors.append(f"spotify_playlists[{idx}].destination must be a string")
+            auto_download = entry.get("auto_download")
+            if auto_download is not None and not isinstance(auto_download, bool):
+                errors.append(f"spotify_playlists[{idx}].auto_download must be true/false")
+            min_score = entry.get("min_match_score")
+            if min_score is not None:
+                try:
+                    value = float(min_score)
+                except (TypeError, ValueError):
+                    errors.append(f"spotify_playlists[{idx}].min_match_score must be a number")
+                else:
+                    if not (0 <= value <= 1):
+                        errors.append(
+                            f"spotify_playlists[{idx}].min_match_score must be between 0 and 1"
+                        )
 
     schedule = config.get("schedule")
     if schedule is not None:
@@ -757,7 +795,8 @@ def run_single_download(
         if final_format_override:
             output_template["final_format"] = final_format_override
 
-        job_id, created = store.enqueue_job(
+        resolved_destination = output_template.get("output_dir")
+        job_id, created, _dedupe_reason = store.enqueue_job(
             origin=origin,
             origin_id=origin_id,
             media_type=media_type,
@@ -765,6 +804,7 @@ def run_single_download(
             source=source,
             url=video_url,
             output_template=output_template,
+            resolved_destination=resolved_destination,
         )
         if created:
             _status_append(status, "run_successes", job_id)
@@ -927,7 +967,9 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                     logging.error("Invalid playlist folder path: %s", exc)
                     continue
 
-                job_id, created = store.enqueue_job(
+                resolved_destination = output_template.get("output_dir")
+
+                job_id, created, _dedupe_reason = store.enqueue_job(
                     origin="playlist",
                     origin_id=playlist_id,
                     media_type=media_type,
@@ -935,6 +977,7 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                     source=source,
                     url=video_url,
                     output_template=output_template,
+                    resolved_destination=resolved_destination,
                 )
                 if created:
                     _status_append(status, "run_successes", job_id)

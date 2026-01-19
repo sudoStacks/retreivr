@@ -11,6 +11,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from uuid import uuid4
 
 import requests
@@ -21,12 +22,14 @@ from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from metadata.queue import enqueue_metadata
 
 JOB_STATUS_QUEUED = "queued"
-JOB_STATUS_RUNNING = "running"
+JOB_STATUS_CLAIMED = "claimed"
+JOB_STATUS_DOWNLOADING = "downloading"
+JOB_STATUS_POSTPROCESSING = "postprocessing"
 JOB_STATUS_COMPLETED = "completed"
+JOB_STATUS_SKIPPED_DUPLICATE = "skipped_duplicate"
 JOB_STATUS_FAILED = "failed"
-JOB_STATUS_CANCELED = "canceled"
 
-TERMINAL_STATUSES = {JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_CANCELED}
+TERMINAL_STATUSES = (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_SKIPPED_DUPLICATE)
 
 _FORMAT_VIDEO = (
     "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
@@ -85,7 +88,9 @@ class DownloadJob:
     url: str
     status: str
     queued: str | None
-    running: str | None
+    claimed: str | None
+    downloading: str | None
+    postprocessing: str | None
     completed: str | None
     failed: str | None
     canceled: str | None
@@ -96,6 +101,8 @@ class DownloadJob:
     last_error: str | None
     trace_id: str
     output_template: dict | None
+    resolved_destination: str | None
+    canonical_id: str | None
 
 
 def utc_now():
@@ -121,7 +128,9 @@ def ensure_download_jobs_table(conn):
             url TEXT NOT NULL,
             status TEXT NOT NULL,
             queued TEXT,
-            running TEXT,
+            claimed TEXT,
+            downloading TEXT,
+            postprocessing TEXT,
             completed TEXT,
             failed TEXT,
             canceled TEXT,
@@ -131,10 +140,23 @@ def ensure_download_jobs_table(conn):
             updated_at TEXT NOT NULL,
             last_error TEXT,
             trace_id TEXT NOT NULL UNIQUE,
-            output_template TEXT
+            output_template TEXT,
+            resolved_destination TEXT,
+            canonical_id TEXT
         )
         """
     )
+    cur.execute("PRAGMA table_info(download_jobs)")
+    existing_columns = {row[1] for row in cur.fetchall()}
+    for column in (
+        "claimed",
+        "downloading",
+        "postprocessing",
+        "resolved_destination",
+        "canonical_id",
+    ):
+        if column not in existing_columns:
+            cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs (status)")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_download_jobs_source_status ON download_jobs (source, status)"
@@ -192,7 +214,9 @@ class DownloadJobStore:
             url=row["url"],
             status=row["status"],
             queued=row["queued"],
-            running=row["running"],
+            claimed=row["claimed"],
+            downloading=row["downloading"],
+            postprocessing=row["postprocessing"],
             completed=row["completed"],
             failed=row["failed"],
             canceled=row["canceled"],
@@ -203,6 +227,8 @@ class DownloadJobStore:
             last_error=row["last_error"],
             trace_id=row["trace_id"],
             output_template=parsed_output,
+            resolved_destination=row["resolved_destination"],
+            canonical_id=row["canonical_id"],
         )
 
     def list_sources_with_queued_jobs(self, *, now=None):
@@ -235,17 +261,51 @@ class DownloadJobStore:
         try:
             cur = conn.cursor()
             cur.execute(
-                """
+                f"""
                 SELECT * FROM download_jobs
-                WHERE origin=? AND origin_id=? AND url=? AND status NOT IN (?, ?, ?)
+                WHERE origin=? AND origin_id=? AND url=? AND status NOT IN ({', '.join('?' for _ in TERMINAL_STATUSES)})
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                (origin, origin_id, url, JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_CANCELED),
+                (origin, origin_id, url, *TERMINAL_STATUSES),
             )
             row = cur.fetchone()
             if not row:
                 return None
+            return self._row_to_job(row)
+        finally:
+            conn.close()
+
+    def find_duplicate_job(self, *, canonical_id=None, url=None, destination=None):
+        if not canonical_id and not url:
+            return None
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            clauses = []
+            params = []
+            dest_clause = "resolved_destination=?" if destination is not None else "resolved_destination IS NULL"
+            if canonical_id:
+                clauses.append(f"(canonical_id=? AND {dest_clause})")
+                params.append(canonical_id)
+                if destination is not None:
+                    params.append(destination)
+            if url:
+                clauses.append(f"(url=? AND {dest_clause})")
+                params.append(url)
+                if destination is not None:
+                    params.append(destination)
+            if not clauses:
+                return None
+            query = f"""
+                SELECT * FROM download_jobs
+                WHERE ({' OR '.join(clauses)}) AND status!=?
+                ORDER BY created_at DESC
+                LIMIT 1
+            """
+            params.append(JOB_STATUS_FAILED)
+            cur.execute(query, tuple(params))
+            row = cur.fetchone()
             return self._row_to_job(row)
         finally:
             conn.close()
@@ -262,11 +322,34 @@ class DownloadJobStore:
         output_template=None,
         max_attempts=3,
         trace_id=None,
+        resolved_destination=None,
+        canonical_id=None,
     ):
         origin_id = origin_id or ""
-        existing = self.find_active_job(origin, origin_id, url)
-        if existing:
-            return existing.id, False
+        destination = resolved_destination
+        if destination is None and output_template:
+            destination = (output_template or {}).get("output_dir")
+
+        duplicate = self.find_duplicate_job(
+            canonical_id=canonical_id,
+            url=url,
+            destination=destination,
+        )
+        if duplicate:
+            _log_event(
+                logging.INFO,
+                "job_skipped_duplicate",
+                job_id=duplicate.id,
+                trace_id=duplicate.trace_id,
+                origin=origin,
+                origin_id=origin_id,
+                source=source,
+                url=url,
+                destination=destination,
+                canonical_id=canonical_id,
+                status=duplicate.status,
+            )
+            return duplicate.id, False, "duplicate"
 
         job_id = uuid4().hex
         now = utc_now()
@@ -280,9 +363,10 @@ class DownloadJobStore:
                 """
                 INSERT INTO download_jobs (
                     id, origin, origin_id, media_type, media_intent, source, url,
-                    status, queued, running, completed, failed, canceled, attempts,
-                    max_attempts, created_at, updated_at, last_error, trace_id, output_template
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, queued, claimed, downloading, postprocessing, completed,
+                    failed, canceled, attempts, max_attempts, created_at, updated_at,
+                    last_error, trace_id, output_template, resolved_destination, canonical_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -298,6 +382,8 @@ class DownloadJobStore:
                     None,
                     None,
                     None,
+                    None,
+                    None,
                     0,
                     max_attempts,
                     now,
@@ -305,10 +391,12 @@ class DownloadJobStore:
                     None,
                     trace_id,
                     output_template_json,
+                    destination,
+                    canonical_id,
                 ),
             )
             conn.commit()
-            return job_id, True
+            return job_id, True, None
         finally:
             conn.close()
 
@@ -320,7 +408,7 @@ class DownloadJobStore:
             cur.execute("BEGIN IMMEDIATE")
             cur.execute(
                 "SELECT 1 FROM download_jobs WHERE status=? AND source=? LIMIT 1",
-                (JOB_STATUS_RUNNING, source),
+                (JOB_STATUS_DOWNLOADING, source),
             )
             if cur.fetchone():
                 conn.commit()
@@ -342,18 +430,18 @@ class DownloadJobStore:
             cur.execute(
                 """
                 UPDATE download_jobs
-                SET status=?, running=?, updated_at=?
+                SET status=?, claimed=?, updated_at=?
                 WHERE id=? AND status=?
                 """,
-                (JOB_STATUS_RUNNING, now, now, job_id, JOB_STATUS_QUEUED),
+                (JOB_STATUS_CLAIMED, now, now, job_id, JOB_STATUS_QUEUED),
             )
             if cur.rowcount != 1:
                 conn.commit()
                 return None
             conn.commit()
             updated_row = dict(row)
-            updated_row["status"] = JOB_STATUS_RUNNING
-            updated_row["running"] = now
+            updated_row["status"] = JOB_STATUS_CLAIMED
+            updated_row["claimed"] = now
             updated_row["updated_at"] = now
             return self._row_to_job(updated_row)
         finally:
@@ -383,10 +471,10 @@ class DownloadJobStore:
             cur.execute(
                 """
                 UPDATE download_jobs
-                SET status=?, canceled=?, updated_at=?, last_error=?
+                SET status=?, canceled=?, failed=?, updated_at=?, last_error=?
                 WHERE id=?
                 """,
-                (JOB_STATUS_CANCELED, now, now, reason, job_id),
+                (JOB_STATUS_FAILED, now, now, now, reason, job_id),
             )
             conn.commit()
         finally:
@@ -422,6 +510,40 @@ class DownloadJobStore:
             )
             conn.commit()
             return JOB_STATUS_FAILED
+        finally:
+            conn.close()
+
+    def mark_downloading(self, job_id):
+        now = utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE download_jobs
+                SET status=?, downloading=?, updated_at=?
+                WHERE id=?
+                """,
+                (JOB_STATUS_DOWNLOADING, now, now, job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def mark_postprocessing(self, job_id):
+        now = utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE download_jobs
+                SET status=?, postprocessing=?, updated_at=?
+                WHERE id=?
+                """,
+                (JOB_STATUS_POSTPROCESSING, now, now, job_id),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -502,7 +624,7 @@ class DownloadWorkerEngine:
             lock.release()
 
     def _execute_job(self, job, *, stop_event=None):
-        if job.status != JOB_STATUS_RUNNING:
+        if job.status != JOB_STATUS_CLAIMED:
             _log_event(
                 logging.ERROR,
                 "job_not_running",
@@ -529,6 +651,7 @@ class DownloadWorkerEngine:
                 retry_delay_seconds=self.retry_delay_seconds,
             )
             return
+        self.store.mark_downloading(job.id)
         _log_event(
             logging.INFO,
             "job_started",
@@ -543,6 +666,7 @@ class DownloadWorkerEngine:
             if not result:
                 raise RuntimeError("adapter_execute_failed")
             final_path, meta = result
+            self.store.mark_postprocessing(job.id)
             record_download_history(
                 self.db_path,
                 job,

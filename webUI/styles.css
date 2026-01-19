@@ -164,6 +164,246 @@ body {
   border-color: var(--accent);
 }
 
+.home-search-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.home-search-bar {
+  display: flex;
+  gap: 12px;
+}
+
+.home-search-bar input {
+  flex: 1;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 16px;
+}
+
+.home-search-bar select {
+  width: 200px;
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.home-search-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.home-advanced-toggle {
+  text-align: right;
+}
+
+.home-advanced-options {
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+  transition: max-height 0.2s ease;
+}
+
+.home-advanced-options.open {
+  display: flex;
+}
+
+.home-results {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.home-results-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.home-results-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.home-result-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--surface);
+}
+
+.home-result-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.home-result-destination {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: -4px;
+}
+
+.home-result-badge {
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.home-results-detail {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.home-results-detail.home-results-error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.home-result-badge.long {
+  min-width: 80px;
+  text-align: center;
+}
+
+.home-result-badge.searching {
+  background: rgba(90, 90, 255, 0.15);
+  color: #5a5aff;
+}
+
+.home-result-badge.matched {
+  background: rgba(27, 201, 176, 0.15);
+  color: #1bc9b0;
+}
+
+.home-result-badge.queued {
+  background: rgba(255, 193, 7, 0.15);
+  color: #ffc107;
+}
+
+.home-result-badge.downloading {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+
+.home-result-badge.complete {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.home-result-badge.failed {
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+}
+
+.home-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.home-candidate-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.home-candidate-row:last-child {
+  border-bottom: none;
+}
+
+.home-candidate-artwork img {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.home-candidate-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.home-candidate-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.home-candidate-source {
+  font-weight: 600;
+}
+
+.home-candidate-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.home-candidate-state {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+}
+
+.home-candidate-state.searching {
+  background: rgba(59, 130, 246, 0.15);
+  color: #5f9bff;
+}
+
+.home-candidate-state.matched {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.home-candidate-state.queued {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.home-candidate-state.skipped {
+  background: rgba(14, 165, 233, 0.1);
+  color: #38bdf8;
+}
+
+.home-candidate-state.failed {
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+}
+
+.home-results-empty {
+  text-align: center;
+  color: var(--muted);
+}
 .page-hidden {
   display: none !important;
 }
@@ -690,6 +930,43 @@ a[aria-disabled="true"] {
 .playlist-row .field.inline {
   flex: 0 1 220px;
   max-width: 260px;
+}
+
+.spotify-playlist-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.spotify-playlist-row:last-child {
+  border-bottom: none;
+}
+
+.spotify-playlist-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.spotify-playlist-title {
+  font-weight: 700;
+}
+
+.spotify-playlist-summary {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.spotify-playlist-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.spotify-import-button {
+  white-space: nowrap;
 }
 
 .filters .field.inline {
