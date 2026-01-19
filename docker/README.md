@@ -19,9 +19,9 @@ Use relative paths inside `config.json` (e.g. `folder: "YouTube/Channel"`).
 
 Version build arg
 ```bash
-docker build -f docker/Dockerfile --build-arg YT_ARCHIVER_VERSION=0.9.0 -t retreivr:latest .
+docker build -f docker/Dockerfile --build-arg RETREIVR_VERSION=0.9.0 -t retreivr:latest .
 ```
 
 Notes
-- Bind to all interfaces in containers with `YT_ARCHIVER_HOST=0.0.0.0` if needed.
+- Bind to all interfaces in containers with `RETREIVR_HOST=0.0.0.0` if needed.
 - Consider running as a non-root user with a fixed UID/GID to match volume permissions.

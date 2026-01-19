@@ -157,6 +157,12 @@ def _normalize_audio_format(value: str | None) -> str | None:
         return "m4a"
     return v
 
+
+def _normalize_format(value: str | None) -> str | None:
+    if not value:
+        return None
+    return str(value).strip().lower()
+
 class DownloadJobStore:
     def __init__(self, db_path):
         self.db_path = db_path
@@ -581,13 +587,16 @@ class YouTubeAdapter:
     def execute(self, job, config, paths, *, stop_event=None):
         output_template = job.output_template or {}
         output_dir = output_template.get("output_dir") or paths.single_downloads_dir
-        audio_mode = is_music_media_type(job.media_type)
-        final_format = _normalize_audio_format(output_template.get("final_format"))
-        if audio_mode:
-            if not final_format or final_format not in _AUDIO_FORMATS:
-                if final_format:
-                    logging.warning("Unsupported audio format %s; defaulting to mp3", final_format)
-                final_format = "mp3"
+        raw_final_format = output_template.get("final_format")
+        normalized_format = _normalize_format(raw_final_format)
+        normalized_audio_format = _normalize_audio_format(raw_final_format)
+        audio_format = normalized_audio_format if normalized_audio_format in _AUDIO_FORMATS else None
+        audio_mode = is_music_media_type(job.media_type) and (
+            not raw_final_format or audio_format
+        )
+        final_format = audio_format if audio_mode else normalized_format
+        if audio_mode and not final_format:
+            final_format = "mp3"
         filename_template = output_template.get("filename_template")
         audio_template = output_template.get("audio_filename_template")
 

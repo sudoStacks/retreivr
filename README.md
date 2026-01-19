@@ -72,6 +72,8 @@ docker compose up -d
 
 Docker deployment is the recommended path for most users.
 
+For Portainer deployment, see portainer.md and /docker/docker-compose.portainer.yml.example
+
 ## Requirements
 Docker deployment:
 - Docker Engine or Docker Desktop  

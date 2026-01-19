@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  retreivr:
+    # Docker Hub:
+    image: retreivr/retreivr:0.9.0
+    # Or GHCR:
+    # image: ghcr.io/retreivr/retreivr:0.9.0
+
+    container_name: retreivr
+    ports:
+      - "8090:8000"
+
+    environment:
+      - RETREIVR_DOWNLOADS_DIR=/downloads
+      - RETREIVR_DATA_DIR=/data
+      - RETREIVR_LOG_DIR=/logs
+      - RETREIVR_TOKENS_DIR=/tokens
+      - RETREIVR_HOST=0.0.0.0
+      - RETREIVR_PORT=8000
+
+    volumes:
+      # IMPORTANT: Use absolute host paths in Portainer.
+      - /srv/retreivr/downloads:/downloads
+      - /srv/retreivr/data:/data
+      - /srv/retreivr/config:/config
+      - /srv/retreivr/logs:/logs
+      - /srv/retreivr/tokens:/tokens
+
+    restart: unless-stopped
