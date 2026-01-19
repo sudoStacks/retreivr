@@ -76,6 +76,8 @@ def _normalize_media_type(value, *, default="music"):
         return "music"
     if value == "video":
         return "video"
+    if value in {"generic", "general"}:
+        return "generic"
     return None
 
 
@@ -216,8 +218,8 @@ class SearchJobStore:
         if intent not in {"track", "album", "artist", "artist_collection"}:
             raise ValueError("intent must be track, album, artist, or artist_collection")
         media_type = _normalize_media_type(payload.get("media_type") or "music")
-        if media_type != "music":
-            raise ValueError("media_type must be music")
+        if media_type not in {"music", "video", "generic"}:
+            raise ValueError("media_type must be music, video, or generic")
         artist = payload.get("artist")
         if not artist:
             raise ValueError("artist is required")
@@ -726,7 +728,10 @@ class SearchResolutionService:
             _log_event(logging.INFO, "item_candidate_found", request_id=request_id, item_id=item["id"])
 
             min_score = float(request_row.get("min_match_score") or 0.92)
-            chosen = select_best_candidate(ranked, min_score)
+            request_media_type = request_row.get("media_type") or "music"
+            is_music_request = request_media_type == "music"
+            selection_threshold = min_score if is_music_request else 0.0
+            chosen = select_best_candidate(ranked, selection_threshold)
             if not chosen:
                 self.store.update_item_status(item["id"], "failed", error="no_candidate_above_threshold")
                 _log_event(

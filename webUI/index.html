@@ -50,11 +50,11 @@
           </select>
         </div>
         <div class="home-search-actions">
-          <button id="home-search-download" class="button">Search &amp; Download</button>
-          <button id="home-search-only" class="button ghost">Search Only</button>
+          <button id="home-search-only" class="button">Search Only (Discover)</button>
+          <button id="home-search-download" class="button ghost">Search &amp; Download (Auto)</button>
         </div>
         <div class="home-advanced-toggle">
-          <button id="home-advanced-toggle" class="button ghost small" type="button">Advanced options</button>
+          <button id="home-advanced-toggle" class="button ghost small" type="button">Advanced options (optional)</button>
         </div>
         <div class="home-advanced-options" id="home-advanced-options">
           <div class="grid two">
@@ -62,15 +62,31 @@
               <span>Min match score</span>
               <input id="home-min-score" type="number" min="0" max="1" step="0.01" value="0.65">
             </label>
-            <label class="field full">
+            <label class="field long">
               <span>Destination override</span>
-              <input id="home-destination" type="text" placeholder="Leave blank for default">
+              <div class="row">
+                <input id="home-destination" type="text" placeholder="Leave blank for default">
+                <button id="home-destination-browse" class="button ghost small" type="button">Browse</button>
+              </div>
+              <div class="meta home-destination-resolved" id="home-destination-resolved">Resolved: /downloads</div>
             </label>
           </div>
           <div class="grid two">
+            <label class="field short">
+              <span>Format override</span>
+              <select id="home-format">
+                <option value="">(config default)</option>
+                <option value="webm">webm</option>
+                <option value="mp4">mp4</option>
+                <option value="mkv">mkv</option>
+                <option value="mp3">mp3</option>
+                <option value="m4a">m4a</option>
+              </select>
+            </label>
+          <div class="grid two">
             <label class="field inline">
               <span>Treat as music</span>
-              <input id="home-treat-music" type="checkbox" checked>
+              <input id="home-treat-music" type="checkbox">
             </label>
             <label class="field inline">
               <span>Prefer albums over singles</span>
@@ -78,13 +94,13 @@
             </label>
           </div>
         </div>
-        <div id="home-search-message" class="notice" role="status"></div>
+        <div id="home-search-message" class="notice" role="status">Search Only is the default action; run it to inspect results before downloading.</div>
       </div>
       <div class="home-results hidden" id="home-results">
         <div class="home-results-header">
           <span>Results</span>
           <div class="home-results-header-actions">
-            <span id="home-results-status-text" class="meta">Waiting for search</span>
+            <span id="home-results-status-text" class="meta">Ready to discover media</span>
             <button id="home-view-advanced" class="button ghost small" type="button">View in Advanced Search</button>
           </div>
         </div>
@@ -675,7 +691,11 @@
           <div class="row">
             <label class="field">
               <span>Destination override</span>
-              <input id="search-destination" type="text" placeholder="Leave blank for default">
+              <div class="row">
+                <input id="search-destination" type="text" placeholder="Leave blank for default">
+                <button id="search-destination-browse" class="button ghost small" type="button">Browse</button>
+              </div>
+              <div class="meta" id="search-destination-resolved">Resolved: /downloads</div>
             </label>
             <div class="field">
               <span>Default destination</span>
