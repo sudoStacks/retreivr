@@ -632,6 +632,14 @@ class SearchResolutionService:
         self._ensure_queue_schema()
         self.canonical_resolver = canonical_resolver or CanonicalMetadataResolver(config=self.config)
 
+    def ensure_schema(self):
+        """
+        Ensure the search database schema exists.
+        This is called during app startup to guarantee tables are present
+        before any reads or writes occur.
+        """
+        self.store.ensure_schema()
+
     def _resolve_request_destination(self, destination):
         if not self.paths:
             return destination

@@ -375,6 +375,12 @@ async def startup():
         config=config or {},
         paths=app.state.paths,
     )
+    # Ensure search DB schema exists before any read operations
+    try:
+        app.state.search_service.ensure_schema()
+    except Exception:
+        logging.exception("Failed to initialize search DB schema")
+        raise
     json_sanity_check()
     if os.environ.get("RETREIVR_DIAG", "").strip().lower() in {"1", "true", "yes"}:
         diag_url = os.environ.get("RETREIVR_DIAG_URL", "https://youtu.be/PmtGDk0c-JM")
@@ -2897,13 +2903,32 @@ async def get_search_candidates(item_id: str):
 @app.post("/api/search/items/{item_id}/enqueue")
 async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayload):
     service = app.state.search_service
-    try:
-        result = service.enqueue_item_candidate(item_id, payload.candidate_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not result:
-        raise HTTPException(status_code=404, detail="Search item or candidate not found")
-    return result
+
+    item = service.store.get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Search item not found")
+
+    candidate = service.store.get_candidate(payload.candidate_id)
+    if not candidate or candidate.get("item_id") != item_id:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    url = candidate.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="Candidate has no URL")
+
+    # Build a synthetic /api/run payload
+    run_payload = {
+        "single_url": True,
+        "url": url,
+        "media_type": item.get("media_type"),
+        "final_format": payload.final_format,
+        "destination": service._resolve_request_destination(
+            service.store.get_request_row(item["request_id"]).get("destination_dir")
+        ),
+    }
+
+    # Delegate to the SAME code path as Search + Download
+    return await run_direct_url(run_payload)
 
 
 @app.get("/api/download_jobs")
