@@ -11,12 +11,10 @@ services:
       # Change to your local TZ
 
     volumes:
-      # Map downloads to your media storage location.
-      - ./downloads:/app/downloads
+      # Map /app/data to your media storage location.
+
       - ./data:/app/data
-      - ./config:/app/config
-      - ./logs:/app/logs
-      - ./tokens:/app/tokens
+
     restart: unless-stopped
 
 # Notes:

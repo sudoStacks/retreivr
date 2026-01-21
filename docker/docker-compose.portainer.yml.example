@@ -17,10 +17,6 @@ services:
 
     volumes:
       # IMPORTANT: Use absolute host paths in Portainer.
-      - /srv/retreivr/downloads:/app/downloads
       - /srv/retreivr/data:/app/data
-      - /srv/retreivr/config:/app/config
-      - /srv/retreivr/logs:/app/logs
-      - /srv/retreivr/tokens:/app/tokens
 
     restart: unless-stopped
