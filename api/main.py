@@ -386,6 +386,7 @@ async def startup():
     init_db(app.state.paths.db_path)
     _ensure_watch_tables(app.state.paths.db_path)
     app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, config)
+    logging.info("Search DB path: %s", app.state.search_db_path)
     app.state.search_service = SearchResolutionService(
         search_db_path=app.state.search_db_path,
         queue_db_path=app.state.paths.db_path,

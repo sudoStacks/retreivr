@@ -76,15 +76,7 @@ def _log_event(level, message, **fields):
 
 
 def resolve_search_db_path(queue_db_path, config=None):
-    env_path = os.environ.get("RETREIVR_SEARCH_DB_PATH")
-    if env_path:
-        return os.path.abspath(env_path)
-    if isinstance(config, dict):
-        override = config.get("search_db_path")
-        if override:
-            return os.path.abspath(override)
-    base_dir = os.path.dirname(queue_db_path) or DATA_DIR
-    return os.path.join(base_dir, "search_jobs.sqlite")
+    return str(DATA_DIR / "database" / "search_jobs.sqlite")
 
 
 def _normalize_media_type(value, *, default="generic"):
@@ -380,7 +372,6 @@ class SearchJobStore:
             for row in cur.fetchall():
                 entry = dict(row)
                 entry["source_priority"] = _parse_source_priority(row["source_priority_json"])
-                entry["resolved_destination"] = self._resolve_request_destination(entry.get("destination_dir"))
                 rows.append(entry)
             return rows
         finally:
