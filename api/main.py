@@ -2832,8 +2832,13 @@ async def create_search_request(request: SearchRequestPayload):
 
 @app.get("/api/search/requests")
 async def list_search_requests(status: str | None = None, limit: int | None = None):
-    service = app.state.search_service
-    return {"requests": service.list_search_requests(status=status, limit=limit)}
+    try:
+        store = SearchJobStore(app.state.search_db_path)
+        requests = store.list_requests(status=status, limit=limit)
+    except Exception:
+        logging.exception("Failed to list search requests")
+        raise HTTPException(status_code=500, detail="Failed to load search requests")
+    return {"requests": requests}
 
 
 @app.get("/api/search/requests/{request_id}")
