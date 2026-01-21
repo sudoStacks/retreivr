@@ -1906,8 +1906,20 @@ function renderHomeCandidateRow(candidate, item) {
   stateBadge.className = `home-candidate-state ${stateInfo.className}`;
   stateBadge.textContent = stateInfo.label;
   action.appendChild(stateBadge);
-  const allowDownload = Boolean(candidate.allow_download || item.allow_download);
-  if (state.homeSearchMode === "searchOnly" && allowDownload) {
+  const allowDownload = (candidate.allow_download ?? item.allow_download);
+  const canDownload = allowDownload !== false;
+  const isSearchOnly = state.homeSearchMode === "searchOnly";
+  const isSearchResult = Boolean(item.request_id);
+  if (isSearchOnly && isSearchResult) {
+    const button = document.createElement("button");
+    button.className = "button ghost small";
+    button.dataset.action = "home-download";
+    button.dataset.itemId = item.id || "";
+    button.dataset.candidateId = candidate.id || "";
+    button.textContent = "Download";
+    button.disabled = !canDownload || !candidate.url || !item.id || !candidate.id;
+    action.appendChild(button);
+  } else if (isSearchOnly && canDownload) {
     const jobStatus = candidate.job_status || "";
     const queued = ["queued", "claimed", "downloading", "postprocessing", "completed"].includes(jobStatus);
     const button = document.createElement("button");
@@ -1917,7 +1929,7 @@ function renderHomeCandidateRow(candidate, item) {
     button.textContent = queued ? "Queued" : "Download";
     button.disabled = queued || !candidate.url;
     action.appendChild(button);
-  } else if (state.homeSearchMode === "searchOnly") {
+  } else if (isSearchOnly) {
     const button = document.createElement("button");
     button.className = "button ghost small";
     button.textContent = "Search only";
@@ -2041,6 +2053,38 @@ async function refreshHomeDirectJobStatus() {
         stopHomeDirectJobPolling();
         setHomeSearchControlsEnabled(true);
       }
+      return;
+    }
+    if (!state.homeDirectJob.runId) {
+      return;
+    }
+    const runData = await fetchJson("/api/status");
+    if (runData.run_id !== state.homeDirectJob.runId) {
+      return;
+    }
+    let runStatus = "queued";
+    let runError = "";
+    if (runData.state === "error" || runData.error) {
+      runStatus = "failed";
+      runError = runData.error || "";
+    } else if (runData.running) {
+      runStatus = "downloading";
+    } else {
+      runStatus = "completed";
+    }
+    state.homeDirectJob.status = runStatus;
+    state.homeDirectPreview = {
+      ...state.homeDirectPreview,
+      job_status: runStatus,
+    };
+    container.textContent = "";
+    const card = renderHomeDirectUrlCard(state.homeDirectPreview, runStatus);
+    container.appendChild(card);
+    setHomeResultsStatus(formatDirectJobStatus(runStatus));
+    setHomeResultsDetail(runError || "", Boolean(runError));
+    if (["completed", "failed"].includes(runStatus)) {
+      stopHomeDirectJobPolling();
+      setHomeSearchControlsEnabled(true);
     }
   } catch (err) {
     setHomeResultsStatus("Direct URL status error");
@@ -2263,12 +2307,13 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   payload.music_mode = treatAsMusic;
   setNotice(messageEl, "Direct URL download requested...", false);
   try {
-    await startRun(payload);
+    const runInfo = await startRun(payload);
     state.homeSearchMode = "download";
     state.homeDirectJob = {
       url,
       playlistId: playlistId || null,
       startedAt: new Date().toISOString(),
+      runId: runInfo?.run_id || null,
       status: "queued",
     };
     state.homeDirectPreview = {
@@ -3297,15 +3342,17 @@ async function updateYtdlp() {
 async function startRun(payload) {
   try {
     setNotice($("#run-message"), "Starting run...", false);
-    await fetchJson("/api/run", {
+    const data = await fetchJson("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     setNotice($("#run-message"), "Run started", false);
     await refreshStatus();
+    return data;
   } catch (err) {
     setNotice($("#run-message"), `Run failed: ${err.message}`, true);
+    return null;
   }
 }
 
