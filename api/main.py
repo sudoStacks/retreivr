@@ -629,14 +629,36 @@ def _yt_dlp_script_path():
 def _record_direct_url_history(db_path, files, source_url):
     if not files:
         return
+
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
+
+    # Ensure the history table exists (direct URL runs can occur before other
+    # flows have created the full schema).
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS download_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id TEXT,
+            title TEXT,
+            filename TEXT,
+            destination TEXT,
+            source TEXT,
+            status TEXT,
+            created_at TEXT,
+            completed_at TEXT,
+            file_size_bytes INTEGER
+        )
+        """
+    )
+
     now = datetime.now(timezone.utc).isoformat()
     for path in files:
         try:
             stat = os.stat(path)
         except OSError:
             continue
+
         cur.execute(
             """
             INSERT INTO download_history
@@ -653,9 +675,10 @@ def _record_direct_url_history(db_path, files, source_url):
                 "completed",
                 now,
                 now,
-                stat.st_size,
+                int(stat.st_size),
             ),
         )
+
     conn.commit()
     conn.close()
 
@@ -875,11 +898,9 @@ def _run_direct_url_with_cli(
 
         # Call the helper to record direct URL downloads into history
         try:
-            _record_direct_url_history(
-                paths.db_path,
-                moved,
-                url,
-            )
+            _record_direct_url_history(paths.db_path, moved, url)
+        except sqlite3.Error:
+            logging.exception("Failed to record direct URL history (sqlite)")
         except Exception:
             logging.exception("Failed to record direct URL history")
 
