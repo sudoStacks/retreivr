@@ -2058,7 +2058,7 @@ async function refreshHomeDirectJobStatus() {
     if (!state.homeDirectJob.runId) {
       return;
     }
-    const runData = await fetchJson("/api/status");
+    const runData = await fetchJson(`/api/status?run_id=${encodeURIComponent(state.homeDirectJob.runId)}`);
     if (runData.run_id !== state.homeDirectJob.runId) {
       return;
     }
@@ -2067,7 +2067,9 @@ async function refreshHomeDirectJobStatus() {
     if (runData.state === "error" || runData.error) {
       runStatus = "failed";
       runError = runData.error || "";
-    } else if (runData.running) {
+    } else if (runData.state === "completed") {
+      runStatus = "completed";
+    } else if (runData.running || runData.state === "running") {
       runStatus = "downloading";
     } else {
       runStatus = "completed";
