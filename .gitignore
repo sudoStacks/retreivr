@@ -2,7 +2,6 @@
 .env
 *.sqlite
 *.pyc
-backups/
 ._*
 .vscode/
 _project_management/

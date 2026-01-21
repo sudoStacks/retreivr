@@ -2,22 +2,21 @@ version: "3.9"
 
 services:
   retreivr:
-    image: ghcr.io/retreivr/retreivr:latest
+    image: ghcr.io/retreivr/retreivr:0.9.1
+    container_name: retreivr
     ports:
       - "8090:8000"
     environment:
-      # Defaults match the container's internal layout; override if needed.
-      - RETREIVR_DOWNLOADS_DIR=/downloads
-      - RETREIVR_DATA_DIR=/data
-      - RETREIVR_LOG_DIR=/logs
-      - RETREIVR_TOKENS_DIR=/tokens
+      - TZ=America/Chicago 
+      # Change to your local TZ
+
     volumes:
       # Map downloads to your media storage location.
-      - ./downloads:/downloads
-      - ./data:/data
-      - ./config:/config
-      - ./logs:/logs
-      - ./tokens:/tokens
+      - ./downloads:/app/downloads
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./tokens:/app/tokens
     restart: unless-stopped
 
 # Notes:

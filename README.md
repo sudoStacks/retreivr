@@ -208,6 +208,11 @@ Notes:
 - For group chats, add the bot to the group and send a message first.  
 - Group chat IDs are usually negative numbers.
 
+## Documentation
+
+- [Path & Volume Layout](docs/paths.md)
+- [Portainer Setup](docs/portainer.md)
+
 ## Updating
 Containers are disposable; your real data lives in mounted volumes. A safe update flow is:
 ```bash

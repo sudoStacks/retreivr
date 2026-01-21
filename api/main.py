@@ -624,6 +624,41 @@ def _yt_dlp_script_path():
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts", "update_yt_dlp.sh"))
 
 
+
+# Helper to record direct URL downloads into history
+def _record_direct_url_history(db_path, files, source_url):
+    if not files:
+        return
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    for path in files:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        cur.execute(
+            """
+            INSERT INTO download_history
+                (video_id, title, filename, destination, source, status, created_at, completed_at, file_size_bytes)
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                None,
+                os.path.basename(path),
+                os.path.basename(path),
+                os.path.dirname(path),
+                source_url,
+                "completed",
+                now,
+                now,
+                stat.st_size,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
 # Fast-lane direct URL download via yt-dlp CLI
 def _run_direct_url_with_cli(
     *,
@@ -837,6 +872,16 @@ def _run_direct_url_with_cli(
                 sort_keys=True,
             )
         )
+
+        # Call the helper to record direct URL downloads into history
+        try:
+            _record_direct_url_history(
+                paths.db_path,
+                moved,
+                url,
+            )
+        except Exception:
+            logging.exception("Failed to record direct URL history")
 
         # Ensure in-memory engine status reflects completion for UI polling.
         try:
