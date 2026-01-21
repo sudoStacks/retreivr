@@ -14,7 +14,7 @@ It provides an advanced search pipeline, a unified FIFO download queue, and post
 
 ## History
 Retreivr is the successor to the YouTube-Archiver project.  
-Version v0.9.0 is the first stable pre-1.0 release under the Retreivr name.
+Version v0.9.x represents the first stable pre-1.0 release series under the Retreivr name.
 
 ## Functionality
 Retreivr runs as a local service backed by SQLite, exposing a Web UI and API for search, queue inspection, logs, and completed downloads.  
@@ -38,7 +38,6 @@ All downloads are processed exactly once through a unified worker queue and writ
 - Single-URL delivery mode (server library or one-time client download)  
 - Manual cleanup for temporary files  
 - Single-playlist runs on demand (without editing config)  
-- Kill downloads in progress (cancel active run)  
 - Current phase and last error in Status  
 - App version + update availability (GitHub release check)  
 
@@ -158,6 +157,15 @@ Single-URL runs support an explicit delivery mode:
 
 Delivery mode applies to single-URL runs only; playlists and watcher runs always save to the server library. Validation and conversion still occur before any delivery.
 
+## Direct URL limitations
+Direct URL mode is intentionally limited to **single media items only**.
+
+- Playlist URLs are **not supported** in Direct URL mode.
+- If a playlist URL is entered, the run will fail immediately with a clear error message.
+- To archive playlists, use the **Scheduler** or **Playlist** configuration instead.
+
+This design keeps Direct URL runs fast, predictable, and isolated from long-running playlist jobs.
+
 ## Web UI
 The Web UI is served by the API and talks only to REST endpoints. It provides:  
 - Home page with run controls, status, schedule, and metrics  
@@ -174,7 +182,6 @@ The Web UI is served by the API and talks only to REST endpoints. It provides:
 - Manual cleanup for temporary files  
 - Manual yt-dlp update button (restart container after update)  
 - Single-playlist runs on demand (without editing config)  
-- Kill downloads in progress (cancel active run)  
 
 ## API overview
 Common endpoints:  
@@ -232,11 +239,12 @@ This avoids keeping the version in Compose or runtime envs.
 ## Security
 Retreivr is designed as a local-first application with no hosted or cloud mode. It supports optional Basic auth and is reverse-proxy friendly. OAuth tokens and sensitive data are stored locally and not exposed to frontend JavaScript.
 
-## Project Scope (v0.9.0)
+## Project Scope (v0.9.x)
 - Music-focused search and downloads  
 - Public, non-DRM sources only  
 - Single-worker, deterministic execution  
 - UI and APIs are stable but evolving  
+- Direct URL mode is restricted to single-item downloads; playlists must use scheduled or playlist runs.
 
 ## What this tool does not attempt to do
 This project does not attempt to:  

@@ -47,7 +47,7 @@ from google.auth.exceptions import RefreshError
 
 from engine.job_queue import DownloadJobStore, DownloadWorkerEngine, preview_direct_url
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
-from engine.search_engine import SearchResolutionService, resolve_search_db_path
+from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
 from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
@@ -394,19 +394,7 @@ async def startup():
         paths=app.state.paths,
     )
     # Ensure search DB schema exists before any read operations.
-    # Older/newer versions of SearchResolutionService expose this differently.
-    try:
-        if hasattr(app.state.search_service, "ensure_schema"):
-            app.state.search_service.ensure_schema()
-        elif hasattr(app.state.search_service, "store") and hasattr(app.state.search_service.store, "ensure_schema"):
-            app.state.search_service.store.ensure_schema()
-        elif hasattr(app.state.search_service, "job_store") and hasattr(app.state.search_service.job_store, "ensure_schema"):
-            app.state.search_service.job_store.ensure_schema()
-        else:
-            logging.warning("Search DB schema initializer not found on SearchResolutionService; continuing")
-    except Exception:
-        logging.exception("Failed to initialize search DB schema")
-        raise
+    SearchJobStore(app.state.search_db_path).ensure_schema()
     json_sanity_check()
     if os.environ.get("RETREIVR_DIAG", "").strip().lower() in {"1", "true", "yes"}:
         diag_url = os.environ.get("RETREIVR_DIAG_URL", "https://youtu.be/PmtGDk0c-JM")

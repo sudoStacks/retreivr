@@ -1,5 +1,33 @@
 # Changelog
+
 All notable changes to this project will be documented here.
+
+## [v0.9.1] – Runtime Stability & Direct URL Fixes
+
+This release focuses on restoring and hardening runtime stability after refactors since yt-archiver v1.2.0.
+Primary goals were correctness, predictability, and eliminating regressions in downloads, scheduling, and search flows.
+
+Fixed:
+- Restored reliable Direct URL downloads for video and audio (mp3/m4a/etc).
+- Corrected yt-dlp invocation for audio formats (uses extract-audio instead of merge-output-format).
+- Fixed Direct URL runs appearing permanently queued in the Home UI.
+- Prevented empty or zero-byte output files from being recorded as completed.
+- Fixed scheduler playlist downloads producing incorrect formats or audio-only output.
+- Ensured scheduler and direct downloads can run concurrently without interference.
+- Fixed missing database schema initialization for search-related tables.
+- Normalized all filesystem paths via paths.py and environment variables (Docker-safe).
+
+Changed:
+- Direct URL playlist links are now explicitly rejected with a clear user-facing error message.
+- Direct URL runs bypass the job queue but still report progress and completion via run status.
+- Search-only results can now be downloaded individually via the Home results UI.
+- Default video downloads respect configured format preferences (e.g., webm/mp4).
+- Metadata enrichment failures no longer block or corrupt completed downloads.
+
+Notes:
+- Playlist URLs must be added via Scheduler / Playlist configuration, not Direct URL mode.
+- Kill-download button is not guaranteed during active runs and remains experimental.
+- Watcher functionality is present but considered beta and may change in later releases.
 
 ## [v0.9.0] – Retreivr Rebrand Release // Music Mode and Metadata
 - Project renamed to Retreivr
