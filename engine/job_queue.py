@@ -30,8 +30,14 @@ JOB_STATUS_POSTPROCESSING = "postprocessing"
 JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_SKIPPED_DUPLICATE = "skipped_duplicate"
 JOB_STATUS_FAILED = "failed"
+JOB_STATUS_CANCELLED = "cancelled"
 
-TERMINAL_STATUSES = (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_SKIPPED_DUPLICATE)
+TERMINAL_STATUSES = (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_SKIPPED_DUPLICATE,
+    JOB_STATUS_CANCELLED,
+)
 
 _FORMAT_VIDEO = (
     "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
@@ -571,10 +577,10 @@ class DownloadJobStore:
             cur.execute(
                 """
                 UPDATE download_jobs
-                SET status=?, canceled=?, failed=?, updated_at=?, last_error=?
+                SET status=?, canceled=?, updated_at=?, last_error=?
                 WHERE id=?
                 """,
-                (JOB_STATUS_FAILED, now, now, now, reason, job_id),
+                (JOB_STATUS_CANCELLED, now, now, reason, job_id),
             )
             conn.commit()
         finally:
@@ -588,12 +594,11 @@ class DownloadJobStore:
             cur.execute(
                 """
                 UPDATE download_jobs
-                SET status=?, canceled=?, failed=?, updated_at=?, last_error=?
+                SET status=?, canceled=?, updated_at=?, last_error=?
                 WHERE status IN (?, ?, ?, ?)
                 """,
                 (
-                    JOB_STATUS_FAILED,
-                    now,
+                    JOB_STATUS_CANCELLED,
                     now,
                     now,
                     reason,
@@ -1244,6 +1249,27 @@ def build_ytdlp_opts(context):
     return opts
 
 
+# Canonical yt-dlp invocation wrapper.
+# This function does NOT change behavior.
+# It centralizes intent + opts generation for reuse by
+# both Python API and CLI execution paths.
+def build_ytdlp_invocation(job, context):
+    """
+    Canonical yt-dlp invocation wrapper.
+    This function does NOT change behavior.
+    It centralizes intent + opts generation for reuse by
+    both Python API and CLI execution paths.
+    """
+    opts = build_ytdlp_opts(context)
+    return {
+        "media_type": job.media_type if job else context.get("media_type"),
+        "media_intent": job.media_intent if job else context.get("media_intent"),
+        "audio_mode": context.get("audio_mode"),
+        "final_format": context.get("final_format"),
+        "opts": opts,
+    }
+
+
 def _build_audio_postprocessors(target_format):
     preferred = _normalize_audio_format(target_format) or "mp3"
     if preferred not in _AUDIO_FORMATS:
@@ -1333,7 +1359,11 @@ def download_with_ytdlp(
         "media_intent": media_intent,
         "origin": origin,
     }
-    opts = build_ytdlp_opts(context)
+    invocation = build_ytdlp_invocation(
+        job=None,
+        context=context,
+    )
+    opts = invocation["opts"]
 
     _log_event(
         logging.INFO,
