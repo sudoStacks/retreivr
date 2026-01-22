@@ -1941,7 +1941,17 @@ function renderHomeCandidateRow(candidate, item) {
     button.dataset.itemId = item.id || "";
     button.dataset.candidateId = candidate.id || "";
     button.textContent = "Download";
-    button.disabled = !canDownload || !candidate.url || !item.id || !candidate.id;
+
+    const disabled =
+      !canDownload || !candidate.url || !item.id || !candidate.id;
+
+    button.disabled = disabled;
+
+    if (disabled) {
+      button.title = "Not downloadable";
+      button.setAttribute("aria-disabled", "true");
+    }
+
     action.appendChild(button);
   } else if (isSearchOnly && canDownload) {
     const jobStatus = candidate.job_status || "";
