@@ -532,6 +532,7 @@ function resolveBrowseStart(rootKey, value) {
   return "";
 }
 
+
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   if (!response.ok) {
@@ -539,6 +540,16 @@ async function fetchJson(url, options = {}) {
     throw new Error(`${response.status} ${text}`);
   }
   return response.json();
+}
+
+// Helper to cancel a job by ID
+async function cancelJob(jobId) {
+  if (!jobId) return;
+  return fetchJson(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: "User cancelled" }),
+  });
 }
 
 function updateVersionDisplay(info) {
@@ -1071,6 +1082,17 @@ async function refreshStatus() {
     const cancelBtn = $("#status-cancel");
     if (cancelBtn) {
       cancelBtn.disabled = !data.running;
+      cancelBtn.onclick = async () => {
+        const jobId = data.current_job_id || data.run_id;
+        if (!jobId) return;
+        cancelBtn.disabled = true;
+        try {
+          await cancelJob(jobId);
+          await refreshStatus();
+        } catch (err) {
+          setNotice($("#run-message"), `Cancel failed: ${err.message}`, true);
+        }
+      };
     }
   } catch (err) {
     setNotice($("#run-message"), `Status error: ${err.message}`, true);
@@ -1975,6 +1997,7 @@ function renderHomeDirectUrlCard(preview, status) {
   card.appendChild(detail);
   const candidateList = document.createElement("div");
   candidateList.className = "home-candidate-list";
+  // Compose candidate and item
   const candidate = {
     id: "direct-url-candidate",
     title: preview.title,
@@ -1993,7 +2016,36 @@ function renderHomeDirectUrlCard(preview, status) {
     status,
     allow_download: preview.allow_download !== false,
   };
-  candidateList.appendChild(renderHomeCandidateRow(candidate, item));
+  // Insert candidate row, with Cancel button if needed
+  const row = renderHomeCandidateRow(candidate, item);
+  // Add Cancel button for active direct jobs
+  if (
+    ["queued", "claimed", "downloading", "postprocessing"].includes(status)
+  ) {
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "button ghost small";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.onclick = async () => {
+      try {
+        cancelBtn.disabled = true;
+        await cancelJob(state.homeDirectJob?.runId || state.homeDirectJob?.jobId);
+        stopHomeDirectJobPolling();
+        state.homeDirectPreview.job_status = "cancelled";
+        const container = $("#home-results-list");
+        if (container) {
+          container.textContent = "";
+          container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "cancelled"));
+        }
+        setHomeResultsStatus("Cancelled");
+        setHomeResultsDetail("Download cancelled by user", false);
+        setHomeSearchControlsEnabled(true);
+      } catch (err) {
+        setHomeResultsDetail(`Cancel failed: ${err.message}`, true);
+      }
+    };
+    row.querySelector(".home-candidate-action")?.appendChild(cancelBtn);
+  }
+  candidateList.appendChild(row);
   card.appendChild(candidateList);
   return card;
 }
@@ -2141,6 +2193,7 @@ function startHomeDirectJobPolling() {
 }
 
 function formatDirectJobStatus(status) {
+  if (status === "cancelled") return "Cancelled";
   if (!status) return "Queued";
   if (status === "claimed" || status === "downloading" || status === "postprocessing") {
     return "Downloading";
