@@ -1614,6 +1614,12 @@ function buildHomeResultsStatusInfo(requestId) {
   const request = context.request || {};
   const items = context.items || [];
   const requestStatus = request.status || "pending";
+  const adaptersTotal = Number.isFinite(request.adapters_total)
+    ? request.adapters_total
+    : null;
+  const adaptersCompleted = Number.isFinite(request.adapters_completed)
+    ? request.adapters_completed
+    : null;
   const error = request.error || "";
   const minScore = Number.isFinite(request.min_match_score) ? request.min_match_score : null;
   const thresholdText = Number.isFinite(minScore) ? minScore.toFixed(2) : "0.00";
@@ -1642,6 +1648,14 @@ function buildHomeResultsStatusInfo(requestId) {
 
   if (!items.length) {
     const searchingStates = new Set(["pending", "resolving"]);
+    if (searchingStates.has(requestStatus) && adaptersTotal !== null && adaptersCompleted !== null) {
+      return {
+        text: `Searching sources (${adaptersCompleted}/${adaptersTotal})`,
+        detail: "Results appear as soon as sources return matches.",
+        isError: false,
+        status: requestStatus,
+      };
+    }
     const fallback = searchingStates.has(requestStatus)
       ? "Searching for media…"
       : formatHomeRequestStatus(requestStatus);
@@ -1666,10 +1680,17 @@ function buildHomeResultsStatusInfo(requestId) {
     };
   }
 
+  if (requestStatus === "resolving" && adaptersTotal !== null && adaptersCompleted !== null) {
+    return {
+      text: `Searching sources (${adaptersCompleted}/${adaptersTotal})`,
+      detail: "More results may still appear.",
+      isError: false,
+      status: requestStatus,
+    };
+  }
+
   const detail =
-    requestStatus === "resolving"
-      ? "Searching for matches…"
-      : requestStatus === "completed_with_skips"
+    requestStatus === "completed_with_skips"
       ? "Some entries already existed in the queue."
       : "";
   return { text: formatHomeRequestStatus(requestStatus), detail, isError: false, status: requestStatus };
