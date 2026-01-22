@@ -4139,3 +4139,20 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 });
+
+
+(function ensureHomeClass() {
+  const homeSection = document.querySelector('section[data-page="home"]');
+  if (!homeSection) return;
+
+  const observer = new MutationObserver(() => {
+    const visible = !homeSection.classList.contains("page-hidden");
+    document.body.classList.toggle("home-page", visible);
+  });
+
+  observer.observe(homeSection, { attributes: true, attributeFilter: ["class"] });
+
+  // initial state
+  const visible = !homeSection.classList.contains("page-hidden");
+  document.body.classList.toggle("home-page", visible);
+})();
