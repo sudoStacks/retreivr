@@ -5,22 +5,49 @@ MAX_PARALLEL_ADAPTERS = 4
 def _run_adapter_search(adapter, item, max_candidates, canonical_payload):
     """
     Execute a single adapter search safely.
-    Returns a list of candidate dicts (may be empty).
+    - Adapter exceptions are contained
+    - Invalid URLs are dropped here
+    - Never raises
     """
-    if item["item_type"] == "album":
-        candidates = adapter.search_album(item["artist"], item.get("album"), max_candidates)
-    else:
-        candidates = adapter.search_track(
-            item["artist"],
-            item.get("track"),
-            item.get("album"),
-            max_candidates,
+    try:
+        if item["item_type"] == "album":
+            candidates = adapter.search_album(
+                item["artist"],
+                item.get("album"),
+                max_candidates,
+            )
+        else:
+            candidates = adapter.search_track(
+                item["artist"],
+                item.get("track"),
+                item.get("album"),
+                max_candidates,
+            )
+    except Exception as exc:
+        logging.exception(
+            "adapter_search_exception",
+            extra={
+                "adapter": getattr(adapter, "name", repr(adapter)),
+                "artist": item.get("artist"),
+                "album": item.get("album"),
+                "track": item.get("track"),
+                "error": str(exc),
+            },
         )
+        return []
+
     out = []
     for cand in candidates or []:
-        cand = dict(cand)
-        cand["canonical_metadata"] = canonical_payload
-        out.append(cand)
+        try:
+            url = cand.get("url")
+            if not _is_http_url(url):
+                continue
+            cand = dict(cand)
+            cand["canonical_metadata"] = canonical_payload
+            out.append(cand)
+        except Exception:
+            continue
+
     return out
 import json
 import logging

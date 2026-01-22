@@ -1,8 +1,17 @@
 import logging
+from urllib.parse import urlparse
 
 from yt_dlp import YoutubeDL
 
 from engine.json_utils import safe_json_dumps
+
+def _is_http_url(value):
+    if not value or not isinstance(value, str):
+        return False
+    try:
+        return urlparse(value).scheme in ("http", "https")
+    except Exception:
+        return False
 
 class SearchAdapter:
     source = ""
@@ -34,6 +43,7 @@ class _YtDlpSearchMixin(SearchAdapter):
             "ignoreerrors": True,
             "noplaylist": True,
             "cachedir": False,
+            "socket_timeout": 10,
         }
         try:
             with YoutubeDL(opts) as ydl:
@@ -50,9 +60,19 @@ class _YtDlpSearchMixin(SearchAdapter):
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            url = entry.get("webpage_url") or entry.get("url")
+            url = entry.get("webpage_url")
+            if not _is_http_url(url):
+                # yt-dlp search extractors often expose internal extractor URLs (e.g. bandcampsearch5)
+                # which must never be treated as real URLs.
+                logging.debug(
+                    "Skipping non-http search result from %s: %r",
+                    self.source,
+                    entry.get("url"),
+                )
+                continue
+
             title = entry.get("title")
-            if not url or not title:
+            if not title:
                 continue
             isrc = entry.get("isrc")
             if not isrc:
