@@ -31,6 +31,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
+from urllib.parse import urlparse
 
 import anyio
 from fastapi import Body, FastAPI, HTTPException, Query, Request
@@ -114,6 +115,27 @@ DIRECT_URL_PLAYLIST_ERROR = (
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
 
+def _is_http_url(value: str | None) -> bool:
+    if not value or not isinstance(value, str):
+        return False
+    try:
+        return urlparse(value).scheme in ("http", "https")
+    except Exception:
+        return False
+
+
+def _sanitize_non_http_urls(obj):
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k == "url" and isinstance(v, str) and v and not _is_http_url(v):
+                out[k] = None
+            else:
+                out[k] = _sanitize_non_http_urls(v)
+        return out
+    if isinstance(obj, list):
+        return [_sanitize_non_http_urls(v) for v in obj]
+    return obj
 
 def _env_or_default(name, default):
     value = os.environ.get(name)
@@ -2872,6 +2894,11 @@ async def api_direct_url_preview(request: DirectUrlPreviewRequest):
         raise HTTPException(status_code=400, detail="URL is required")
     if _looks_like_playlist_url(url):
         raise HTTPException(status_code=400, detail=DIRECT_URL_PLAYLIST_ERROR)
+    if not _is_http_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="This search result is not directly downloadable."
+        )
     config = _read_config_or_404()
     try:
         preview = preview_direct_url(url, config)
@@ -2925,7 +2952,7 @@ async def list_search_requests(status: str | None = None, limit: int | None = No
     except Exception:
         logging.exception("Failed to list search requests")
         raise HTTPException(status_code=500, detail="Failed to load search requests")
-    return {"requests": requests}
+    return _sanitize_non_http_urls({"requests": requests})
 
 
 @app.get("/api/search/requests/{request_id}")
@@ -2934,16 +2961,14 @@ async def get_search_request(request_id: str):
     result = service.get_search_request(request_id)
     if not result:
         raise HTTPException(status_code=404, detail="Search request not found")
-    return result
+    return _sanitize_non_http_urls(result)
 
 
 @app.post("/api/search/requests/{request_id}/cancel")
 async def cancel_search_request(request_id: str):
-    service = app.state.search_service
-    ok = service.cancel_search_request(request_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Search request not found")
-    return {"status": "canceled"}
+    store = SearchJobStore(app.state.search_db_path)
+    store.mark_request_cancelled(request_id)
+    return {"ok": True, "request_id": request_id, "status": "cancelled"}
 
 
 @app.post("/api/search/resolve/once")
@@ -3042,6 +3067,11 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
     url = candidate.get("url")
     if not url:
         raise HTTPException(status_code=400, detail="Candidate has no URL")
+    if not _is_http_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="This search result is not directly downloadable."
+        )
 
     # Build a synthetic /api/run payload
     run_payload = {
