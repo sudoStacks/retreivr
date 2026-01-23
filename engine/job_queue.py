@@ -53,7 +53,8 @@ _FORMAT_VIDEO = (
     "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
     "bestvideo*+bestaudio/best"
 )
-_FORMAT_AUDIO = "bestaudio/best"
+# Audio-only selector: explicitly require an audio codec to avoid video-only DASH streams
+_FORMAT_AUDIO = "bestaudio[acodec!=none]/bestaudio"
 
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
 
@@ -1735,23 +1736,41 @@ def download_with_ytdlp(
                 local_path = req.get("filepath") or req.get("filename")
                 if local_path:
                     break
-    if local_path and os.path.exists(local_path):
+
+    # If yt-dlp reported a concrete output file, use it
+    if local_path and os.path.exists(local_path) and os.path.getsize(local_path) > 0:
         return info, local_path
 
+    # Otherwise, scan temp_dir for completed artifacts
     candidates = []
+    audio_candidates = []
     for entry in os.listdir(temp_dir):
         # Ignore yt-dlp temporary/partial artifacts
         if entry.endswith((".part", ".ytdl", ".temp")):
             continue
         candidate = os.path.join(temp_dir, entry)
-        if os.path.isfile(candidate):
-            try:
-                size = os.path.getsize(candidate)
-            except OSError:
-                size = 0
-            if size > 0:
-                candidates.append((size, candidate))
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            size = os.path.getsize(candidate)
+        except OSError:
+            size = 0
+        if size <= 0:
+            continue
+        candidates.append((size, candidate))
+        if os.path.splitext(candidate)[1].lower() in {".m4a", ".webm", ".opus", ".aac", ".mp3", ".flac"}:
+            audio_candidates.append((size, candidate))
 
+    # In audio_mode, we MUST have an audio-capable artifact
+    if audio_mode:
+        if not audio_candidates:
+            raise PostprocessingError(
+                "No audio stream resolved (video-only format selected)"
+            )
+        audio_candidates.sort(reverse=True)
+        return info, audio_candidates[0][1]
+
+    # Video mode fallback: pick the largest completed artifact
     if candidates:
         candidates.sort(reverse=True)
         return info, candidates[0][1]
