@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import tempfile
@@ -53,10 +54,9 @@ _FORMAT_VIDEO = (
     "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
     "bestvideo*+bestaudio/best"
 )
-# Audio format selector:
-# Prefer audio-only when available, but ALWAYS allow muxed fallback for reliability.
-# Audio extraction is guaranteed later by FFmpegExtractAudio.
-_FORMAT_AUDIO = "bestaudio/bestvideo+bestaudio/best"
+# Prefer audio-only formats first; fall back to any best format only if needed.
+# Keep this quoted/argument-safe in CLI execution (we do NOT use shell=True).
+_FORMAT_AUDIO = "bestaudio[acodec!=none]/bestaudio/best"
 
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
 
@@ -1478,31 +1478,61 @@ def _redact_ytdlp_opts(opts):
         redacted[key] = value
     return redacted
 
-# Render a sanitized equivalent yt-dlp CLI command for logging.
-def _render_ytdlp_cli(opts, url):
-    parts = ["yt-dlp"]
+
+# Render yt-dlp CLI argv for subprocess.run(shell=False), supporting cookies and safe quoting.
+def _render_ytdlp_cli_argv(opts, url):
+    """Return a yt-dlp argv list suitable for subprocess.run(shell=False)."""
+    argv = ["yt-dlp"]
+
+    # Core selection/output
     if opts.get("format"):
-        parts.extend(["--format", opts["format"]])
+        argv.extend(["--format", str(opts["format"])])
     if opts.get("merge_output_format"):
-        parts.extend(["--merge-output-format", opts["merge_output_format"]])
+        argv.extend(["--merge-output-format", str(opts["merge_output_format"])])
     if opts.get("outtmpl"):
-        parts.extend(["--output", str(opts["outtmpl"])])
+        argv.extend(["--output", str(opts["outtmpl"])])
+
+    # Playlist behavior
     if opts.get("noplaylist") is True:
-        parts.append("--no-playlist")
+        argv.append("--no-playlist")
     elif opts.get("noplaylist") is False:
-        parts.append("--yes-playlist")
+        argv.append("--yes-playlist")
+
+    # Retries
     if opts.get("retries") is not None:
-        parts.extend(["--retries", str(opts.get("retries"))])
+        argv.extend(["--retries", str(opts.get("retries"))])
     if opts.get("fragment_retries") is not None:
-        parts.extend(["--fragment-retries", str(opts.get("fragment_retries"))])
+        argv.extend(["--fragment-retries", str(opts.get("fragment_retries"))])
+
+    # Cookies (python opts uses cookiefile, CLI uses --cookies)
+    if opts.get("cookiefile"):
+        argv.extend(["--cookies", str(opts.get("cookiefile"))])
+
+    # Audio extraction (CLI parity for FFmpegExtractAudio)
     if opts.get("postprocessors"):
         for pp in opts.get("postprocessors") or []:
             if pp.get("key") == "FFmpegExtractAudio":
-                parts.append("--extract-audio")
+                argv.append("--extract-audio")
                 if pp.get("preferredcodec"):
-                    parts.extend(["--audio-format", pp.get("preferredcodec")])
-    parts.append(url)
-    return " ".join(parts)
+                    argv.extend(["--audio-format", str(pp.get("preferredcodec"))])
+
+    argv.append(str(url))
+    return argv
+
+
+def _argv_to_redacted_cli(argv):
+    """Render argv as a single command string with shell-escaping, redacting sensitive paths."""
+    redacted = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in {"--cookies"} and i + 1 < len(argv):
+            redacted.extend([tok, "<redacted>"])
+            i += 2
+            continue
+        redacted.append(tok)
+        i += 1
+    return shlex.join(redacted)
 
 
 def _format_summary(info):
@@ -1609,7 +1639,6 @@ def download_with_ytdlp(
             or "forbidden" in msg_l
         )
 
-    import sys
     from subprocess import DEVNULL, CalledProcessError
     info = None
     # Always get metadata via API (for output file info, etc.)
@@ -1650,22 +1679,23 @@ def download_with_ytdlp(
     # Remove progress_hooks if present
     if "progress_hooks" in opts_for_run:
         opts_for_run.pop("progress_hooks")
-    # Build CLI command
-    cmd = _render_ytdlp_cli(_redact_ytdlp_opts(opts_for_run), url)
+    # Build CLI argv and run without a shell (prevents globbing of format strings like [acodec!=none])
+    cmd_argv = _render_ytdlp_cli_argv(opts_for_run, url)
+    cmd_log = _argv_to_redacted_cli(cmd_argv)
+
     try:
-        subprocess.run(cmd, shell=True, check=True, stdout=DEVNULL, stderr=DEVNULL)
+        subprocess.run(cmd_argv, check=True, stdout=DEVNULL, stderr=DEVNULL)
+        # Log AFTER the command has been executed, per requirement.
         _log_event(
             logging.INFO,
             "YTDLP_CLI_EQUIVALENT",
             job_id=job_id,
             url=url,
-            cli=cmd,
+            cli=cmd_log,
         )
     except CalledProcessError as exc:
-        # If a cookiefile is present and yt-dlp reports an empty download, retry once WITHOUT cookies.
+        # If a cookiefile is present and yt-dlp produced no completed file in temp_dir, retry once WITHOUT cookies.
         if opts.get("cookiefile"):
-            # Try again without cookies if empty/403
-            # Check if file exists in temp_dir, if not, treat as empty/403
             found = False
             for entry in os.listdir(temp_dir):
                 if entry.endswith((".part", ".ytdl", ".temp")):
@@ -1674,6 +1704,7 @@ def download_with_ytdlp(
                 if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
                     found = True
                     break
+
             if not found:
                 _log_event(
                     logging.WARNING,
@@ -1690,17 +1721,19 @@ def download_with_ytdlp(
                     outtmpl=opts.get("outtmpl"),
                     noplaylist=opts.get("noplaylist"),
                 )
+
                 retry_opts = dict(opts_for_run)
                 retry_opts.pop("cookiefile", None)
-                cmd_retry = _render_ytdlp_cli(_redact_ytdlp_opts(retry_opts), url)
+                cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
+                cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
                 try:
-                    subprocess.run(cmd_retry, shell=True, check=True, stdout=DEVNULL, stderr=DEVNULL)
+                    subprocess.run(cmd_retry_argv, check=True, stdout=DEVNULL, stderr=DEVNULL)
                     _log_event(
                         logging.INFO,
                         "YTDLP_CLI_EQUIVALENT",
                         job_id=job_id,
                         url=url,
-                        cli=cmd_retry,
+                        cli=cmd_retry_log,
                     )
                 except CalledProcessError as retry_exc:
                     _log_event(
