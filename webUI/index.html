@@ -47,15 +47,35 @@
           autocomplete="off"
         />
 
-        <button
-          id="home-advanced-toggle"
-          class="button ghost small home-advanced-toggle"
-          type="button"
-          aria-expanded="false"
-          aria-controls="home-advanced-panel"
-        >
-          Advanced options
-        </button>
+        <div class="home-search-toggles">
+          <div id="home-source-filters" class="home-source-filters">
+            <button
+              id="home-source-toggle"
+              class="home-source-toggle"
+              type="button"
+              aria-expanded="false"
+              aria-controls="home-source-panel"
+            >
+              Sources: All
+            </button>
+            <div id="home-source-panel" class="home-source-panel" role="menu">
+              <label class="home-source-pill"><input type="checkbox" data-source="youtube" checked> <span>YouTube</span></label>
+              <label class="home-source-pill"><input type="checkbox" data-source="youtube_music" checked> <span>YouTube Music</span></label>
+              <label class="home-source-pill"><input type="checkbox" data-source="soundcloud" checked> <span>SoundCloud</span></label>
+              <label class="home-source-pill"><input type="checkbox" data-source="bandcamp" checked> <span>Bandcamp</span></label>
+            </div>
+          </div>
+
+          <button
+            id="home-advanced-toggle"
+            class="button ghost small home-advanced-toggle"
+            type="button"
+            aria-expanded="false"
+            aria-controls="home-advanced-panel"
+          >
+            Advanced options
+          </button>
+        </div>
 
         <div id="home-advanced-panel" class="home-advanced-panel hidden">
           <div class="home-advanced-row">
@@ -77,41 +97,17 @@
 
             <label class="home-advanced-field">
               <span>Destination</span>
-              <input id="home-destination" type="text" placeholder="downloads">
+              <div class="row">
+                <input id="home-destination" type="text" placeholder="downloads">
+                <button id="home-destination-browse" class="button ghost small" type="button">Browse</button>
+              </div>
             </label>
-
-            <label class="home-advanced-field inline">
-              <span>Delivery</span>
-              <select id="home-delivery-mode">
-                <option value="server">Server</option>
-                <option value="client">This device</option>
-              </select>
-            </label>
-          </div>
-        </div>
-
-        <div id="home-source-filters" class="home-source-filters">
-          <button
-            id="home-source-toggle"
-            class="home-source-toggle"
-            type="button"
-            aria-expanded="false"
-            aria-controls="home-source-panel"
-          >
-            Sources: All
-          </button>
-          <div id="home-source-panel" class="home-source-panel" role="menu">
-            <label class="home-source-pill"><input type="checkbox" data-source="youtube" checked> <span>YouTube</span></label>
-            <label class="home-source-pill"><input type="checkbox" data-source="youtube_music" checked> <span>YouTube Music</span></label>
-            <label class="home-source-pill"><input type="checkbox" data-source="soundcloud" checked> <span>SoundCloud</span></label>
-            <label class="home-source-pill"><input type="checkbox" data-source="bandcamp" checked> <span>Bandcamp</span></label>
           </div>
         </div>
 
         <div class="home-search-actions">
           <button id="home-search-only" class="button primary">Search</button>
           <button id="home-search-download" class="button ghost">Search &amp; Download</button>
-          <button id="home-view-advanced" class="button ghost small" type="button">Advanced Search</button>
         </div>
 
         <div id="home-search-message" class="notice" role="status">

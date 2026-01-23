@@ -3578,6 +3578,17 @@ async function loadConfig() {
     state.config = cfg;
     renderConfig(cfg);
     updateSearchDestinationDisplay();
+    const homeDestInput = $("#home-destination");
+    if (homeDestInput) {
+      const defaultHomeDest =
+        (state.config && state.config.single_download_folder) ||
+        (state.config && state.config.music_download_folder) ||
+        "";
+      if (!homeDestInput.value && defaultHomeDest) {
+        homeDestInput.value = defaultHomeDest;
+      }
+      updateHomeDestinationResolved();
+    }
     state.configDirty = false;
     updatePollingState();
     setConfigNotice("Config loaded", false);
@@ -4232,7 +4243,9 @@ function bindEvents() {
     homeBrowse.addEventListener("click", () => {
       const target = $("#home-destination");
       if (!target) return;
-      openBrowser(target, "downloads", "dir", "", resolveBrowseStart("downloads", target.value));
+      const defaultStart = (state.config && state.config.single_download_folder) || "";
+      const startValue = target.value.trim() || defaultStart;
+      openBrowser(target, "downloads", "dir", "", resolveBrowseStart("downloads", startValue));
     });
   }
   const searchBrowse = $("#search-destination-browse");
