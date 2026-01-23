@@ -145,6 +145,122 @@ def _sanitize_non_http_urls(obj):
         return [_sanitize_non_http_urls(v) for v in obj]
     return obj
 
+
+def normalize_search_payload(payload: dict | None, *, default_sources: list[str]) -> dict:
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+
+    def _clean_str(value, field):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            trimmed = value.strip()
+            return trimmed if trimmed else None
+        raise ValueError(f"{field} must be a string")
+
+    def _coerce_bool(value, field):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            if value in (0, 1):
+                return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y"}:
+                return True
+            if lowered in {"false", "0", "no", "n"}:
+                return False
+        raise ValueError(f"{field} must be a boolean")
+
+    def _parse_sources(raw):
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("sources must be a list or comma-separated string") from exc
+                if not isinstance(parsed, list):
+                    raise ValueError("sources must be a list")
+                items = parsed
+            else:
+                items = [part.strip() for part in text.split(",")]
+        else:
+            raise ValueError("sources must be a list or comma-separated string")
+        return [str(item).strip() for item in items if str(item).strip()]
+
+    raw_query = payload.get("query")
+    if raw_query is None:
+        artist = _clean_str(payload.get("artist"), "artist")
+        track = _clean_str(payload.get("track"), "track")
+        album = _clean_str(payload.get("album"), "album")
+        parts = [part for part in [artist, track or album] if part]
+        query = " ".join(parts).strip()
+    elif isinstance(raw_query, str):
+        query = raw_query.strip()
+    else:
+        raise ValueError("query must be a string")
+
+    raw_sources = payload.get("sources")
+    if raw_sources is None:
+        raw_sources = payload.get("source_priority", payload.get("source_priority_json"))
+    sources = _parse_sources(raw_sources)
+    allowed = list(default_sources or [])
+    allowed_set = set(allowed)
+    filtered = [source for source in sources if source in allowed_set]
+    sources = filtered or allowed
+
+    raw_search_only = payload.get("search_only")
+    search_only = _coerce_bool(raw_search_only, "search_only")
+    if search_only is None:
+        auto_enqueue = _coerce_bool(payload.get("auto_enqueue"), "auto_enqueue")
+        search_only = not auto_enqueue if auto_enqueue is not None else True
+
+    music_mode = _coerce_bool(payload.get("music_mode"), "music_mode")
+    if music_mode is None:
+        media_type = _clean_str(payload.get("media_type"), "media_type")
+        lossless_only = _coerce_bool(payload.get("lossless_only"), "lossless_only")
+        music_mode = bool(lossless_only) or (media_type in {"music", "audio"})
+
+    final_format = _clean_str(payload.get("final_format"), "final_format")
+    if final_format is None:
+        final_format = _clean_str(payload.get("final_format_override"), "final_format")
+
+    destination = _clean_str(payload.get("destination"), "destination")
+    if destination is None:
+        destination = _clean_str(payload.get("destination_dir"), "destination")
+    if destination is None:
+        destination = _clean_str(payload.get("destination_path"), "destination_path")
+
+    delivery_mode = _clean_str(payload.get("delivery_mode"), "delivery_mode")
+    if delivery_mode is None:
+        delivery_mode = _clean_str(payload.get("destination_type"), "destination_type")
+    delivery_mode = delivery_mode or "server"
+    if delivery_mode not in {"server", "client"}:
+        raise ValueError("delivery_mode must be 'server' or 'client'")
+
+    return {
+        "query": query or "",
+        "sources": sources,
+        "search_only": bool(search_only),
+        "music_mode": bool(music_mode),
+        "final_format": final_format,
+        "destination": destination,
+        "destination_type": delivery_mode,
+        "destination_path": destination,
+        "delivery_mode": delivery_mode,
+    }
+
 def _env_or_default(name, default):
     value = os.environ.get(name)
     return value if value else default
@@ -457,6 +573,8 @@ async def startup():
         config=config or {},
         paths=app.state.paths,
     )
+    app.state.search_request_overrides = {}
+    app.state.search_service.request_overrides = app.state.search_request_overrides
     # Ensure search DB schema exists before any read operations.
     SearchJobStore(app.state.search_db_path).ensure_schema()
     json_sanity_check()
@@ -2937,6 +3055,13 @@ async def api_direct_url_preview(request: DirectUrlPreviewRequest):
             status_code=400,
             detail="This search result is not directly downloadable."
         )
+    try:
+        normalize_search_payload(
+            {"query": url, "search_only": True},
+            default_sources=list(getattr(app.state.search_service, "adapters", {}).keys()),
+        )
+    except ValueError:
+        pass
     config = _read_config_or_404()
     try:
         preview = preview_direct_url(url, config)
@@ -2972,13 +3097,65 @@ async def api_logs(lines: int = Query(200, ge=1, le=5000)):
 
 
 @app.post("/api/search/requests")
-async def create_search_request(request: SearchRequestPayload):
+async def create_search_request(request: dict = Body(...)):
     service = app.state.search_service
-    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    raw_payload = request if isinstance(request, dict) else {}
+    enabled_sources = list(getattr(service, "adapters", {}).keys())
+    try:
+        normalized = normalize_search_payload(raw_payload, default_sources=enabled_sources)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if normalized["delivery_mode"] == "client" and normalized["destination_path"]:
+        raise HTTPException(status_code=400, detail="Client delivery does not use a server destination")
+    if normalized["delivery_mode"] == "client" and not normalized["search_only"]:
+        raise HTTPException(status_code=400, detail="Search & Download is not available for client delivery")
+
+    if "source_priority" not in raw_payload or not raw_payload.get("source_priority"):
+        raw_payload["source_priority"] = normalized["sources"]
+    if "auto_enqueue" not in raw_payload:
+        raw_payload["auto_enqueue"] = not normalized["search_only"]
+    if "media_type" not in raw_payload:
+        raw_payload["media_type"] = "music" if normalized["music_mode"] else "generic"
+    if "destination_dir" not in raw_payload and normalized["destination"] is not None:
+        raw_payload["destination_dir"] = normalized["destination"]
+
+    allowed_keys = {
+        "created_by",
+        "intent",
+        "media_type",
+        "artist",
+        "album",
+        "track",
+        "destination_dir",
+        "include_albums",
+        "include_singles",
+        "min_match_score",
+        "duration_hint_sec",
+        "quality_min_bitrate_kbps",
+        "lossless_only",
+        "auto_enqueue",
+        "source_priority",
+        "max_candidates_per_source",
+    }
+    request_payload = {key: raw_payload.get(key) for key in allowed_keys if key in raw_payload}
+
+    try:
+        parsed = SearchRequestPayload(**request_payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload = parsed.model_dump() if hasattr(parsed, "model_dump") else parsed.dict()
     try:
         request_id = service.create_search_request(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if hasattr(app.state, "search_request_overrides"):
+        app.state.search_request_overrides[request_id] = {
+            "final_format": normalized["final_format"],
+            "delivery_mode": normalized["delivery_mode"],
+            "destination_type": normalized["destination_type"],
+            "destination_path": normalized["destination_path"],
+        }
+    logging.debug("Normalized search payload", extra={"payload": normalized, "request_id": request_id})
     return {"request_id": request_id}
 
 
@@ -3161,6 +3338,45 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
             content={"error": "Search request not found", "code": "REQUEST_NOT_FOUND"},
         )
 
+    enabled_sources = list(getattr(service, "adapters", {}).keys())
+    try:
+        normalized_request = normalize_search_payload(
+            {
+                "source_priority": request_row.get("source_priority_json"),
+                "auto_enqueue": request_row.get("auto_enqueue"),
+                "media_type": request_row.get("media_type"),
+                "destination_dir": request_row.get("destination_dir"),
+            },
+            default_sources=enabled_sources,
+        )
+    except ValueError as exc:
+        logging.warning(
+            "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+            str(exc),
+            request_id,
+            item_id,
+            candidate_id,
+            candidate.get("source"),
+        )
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid search request payload", "code": "INVALID_REQUEST"},
+        )
+    request_overrides = None
+    if hasattr(app.state, "search_request_overrides"):
+        request_overrides = app.state.search_request_overrides.get(request_id)
+    delivery_mode = normalized_request.get("delivery_mode")
+    if request_overrides and request_overrides.get("delivery_mode"):
+        delivery_mode = request_overrides.get("delivery_mode")
+    if delivery_mode == "client":
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Client delivery is not available for queued downloads.",
+                "code": "CLIENT_DELIVERY_UNSUPPORTED",
+            },
+        )
+
     url = candidate.get("url")
     source = candidate.get("source")
     logging.debug(
@@ -3191,7 +3407,7 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
         safe_json(
             {
                 "destination": service._resolve_request_destination(
-                    request_row.get("destination_dir")
+                    normalized_request.get("destination_path")
                 ),
                 "final_format": getattr(payload, "final_format", None),
             }
@@ -3232,8 +3448,15 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
             content={"error": "Candidate already enqueued.", "code": "ALREADY_ENQUEUED"},
         )
 
+    final_format_override = getattr(payload, "final_format", None)
+    if not final_format_override and request_overrides:
+        final_format_override = request_overrides.get("final_format")
     try:
-        result = service.enqueue_item_candidate(item_id, candidate_id)
+        result = service.enqueue_item_candidate(
+            item_id,
+            candidate_id,
+            final_format_override=final_format_override,
+        )
     except ValueError as exc:
         logging.warning(
             "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",

@@ -28,6 +28,7 @@
 .home-search-actions {
   display: flex;
   justify-content: flex-start;
+  gap: 12px;
 }
 
 .home-search-actions .button {
@@ -253,42 +254,6 @@ body.home-page .home-results {
   border-color: var(--accent);
 }
 
-.home-search-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 24px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-
-.home-search-bar {
-  display: flex;
-  gap: 12px;
-}
-
-.home-search-bar input {
-  flex: 1;
-  padding: 12px 16px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  font-size: 16px;
-}
-
-.home-search-bar select {
-  width: 200px;
-  padding: 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-}
-
-.home-search-actions {
-  display: flex;
-  gap: 12px;
-}
 body.home-page .home-search-actions {
   justify-content: center;
 }
@@ -353,11 +318,6 @@ body.home-page .home-source-panel .home-source-pill input {
 body.home-page .home-source-panel .home-source-pill span {
   font-size: 13px;
 }
-body.home-page .home-source-panel .home-source-pill:has(input:checked) {
-  border-color: var(--accent);
-  background: rgba(239, 68, 68, 0.12);
-  color: #fff;
-}
 body.home-page .home-source-panel .home-source-pill.selected {
   border-color: var(--accent);
   background: rgba(239, 68, 68, 0.12);
@@ -366,17 +326,6 @@ body.home-page .home-source-panel .home-source-pill.selected {
 
 .home-advanced-toggle {
   text-align: right;
-}
-
-.home-advanced-options {
-  display: none;
-  flex-direction: column;
-  gap: 12px;
-  transition: max-height 0.2s ease;
-}
-
-.home-advanced-options.open {
-  display: flex;
 }
 
 .home-results {
@@ -388,7 +337,6 @@ body.home-page .home-source-panel .home-source-pill.selected {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  max-width: 1100px;
   margin-left: auto;
   margin-right: auto;
 }
@@ -1519,4 +1467,35 @@ body.home-page .button:hover {
 }
 body.home-page .home-candidate-row:hover {
   background: rgba(255,255,255,0.04);
+}
+
+/* ===== HOME SOURCES FINAL OVERRIDES ===== */
+body.home-page .home-source-toggle {
+  color: #e5e7eb !important;
+  background: #121821 !important;
+}
+
+body.home-page .home-source-panel {
+  background: #0f141b !important;
+}
+
+body.home-page .home-source-panel label,
+body.home-page .home-source-panel span {
+  color: #e5e7eb !important;
+}
+
+/* ===== HOME SEARCH WIDTH AUTHORITY ===== */
+body.home-page .home-search-shell {
+  max-width: 1200px !important;
+}
+
+body.home-page .home-search-input {
+  font-size: 20px !important;
+  padding: 22px 26px !important;
+}
+
+/* ===== HOME SEARCH PROGRESS HARD STOP ===== */
+body.home-page .home-results.has-results .home-results-progress,
+body.home-page .home-results.search-complete .home-results-progress {
+  display: none !important;
 }

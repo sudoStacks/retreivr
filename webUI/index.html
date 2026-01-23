@@ -47,6 +47,49 @@
           autocomplete="off"
         />
 
+        <button
+          id="home-advanced-toggle"
+          class="button ghost small home-advanced-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="home-advanced-panel"
+        >
+          Advanced options
+        </button>
+
+        <div id="home-advanced-panel" class="home-advanced-panel hidden">
+          <div class="home-advanced-row">
+            <label class="home-advanced-field">
+              <span>Music mode</span>
+              <input id="home-music-mode" type="checkbox">
+            </label>
+
+            <label class="home-advanced-field">
+              <span>Format</span>
+              <select id="home-format">
+                <option value="">Default</option>
+                <option value="mp3">mp3</option>
+                <option value="mp4">mp4</option>
+                <option value="webm">webm</option>
+                <option value="mkv">mkv</option>
+              </select>
+            </label>
+
+            <label class="home-advanced-field">
+              <span>Destination</span>
+              <input id="home-destination" type="text" placeholder="downloads">
+            </label>
+
+            <label class="home-advanced-field inline">
+              <span>Delivery</span>
+              <select id="home-delivery-mode">
+                <option value="server">Server</option>
+                <option value="client">This device</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
         <div id="home-source-filters" class="home-source-filters">
           <button
             id="home-source-toggle"

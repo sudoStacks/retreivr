@@ -737,6 +737,12 @@ class SearchResolutionService:
         except ValueError:
             return destination
 
+    def _get_request_override(self, request_id):
+        overrides = getattr(self, "request_overrides", None)
+        if isinstance(overrides, dict):
+            return overrides.get(request_id)
+        return None
+
 
     def _ensure_queue_schema(self):
         conn = sqlite3.connect(self.queue_db_path)
@@ -1031,6 +1037,12 @@ class SearchResolutionService:
                         error=f"invalid_destination: {exc}",
                     )
                     continue
+            request_override = self._get_request_override(request_id)
+            final_format_override = request_override.get("final_format") if request_override else None
+            if final_format_override:
+                if output_template is None:
+                    output_template = {}
+                output_template["final_format"] = final_format_override
 
             canonical_for_job = chosen.get("canonical_metadata") if isinstance(chosen, dict) else None
             if not canonical_for_job and isinstance(chosen, dict) and chosen.get("canonical_json"):
@@ -1150,7 +1162,7 @@ class SearchResolutionService:
             )
         return request_id
 
-    def enqueue_item_candidate(self, item_id, candidate_id):
+    def enqueue_item_candidate(self, item_id, candidate_id, *, final_format_override=None):
         item = self.store.get_item(item_id)
         if not item:
             return None
@@ -1163,6 +1175,10 @@ class SearchResolutionService:
         request = self.store.get_request_row(item.get("request_id"))
         if not request:
             return None
+        if final_format_override is None:
+            request_override = self._get_request_override(request.get("id"))
+            if request_override:
+                final_format_override = request_override.get("final_format")
 
         destination_dir = request.get("destination_dir") or None
         output_template = None
@@ -1175,6 +1191,10 @@ class SearchResolutionService:
                 )
             except ValueError as exc:
                 raise ValueError(f"invalid_destination: {exc}")
+        if final_format_override:
+            if output_template is None:
+                output_template = {}
+            output_template["final_format"] = final_format_override
 
         canonical_payload = None
         canonical_raw = candidate.get("canonical_json")

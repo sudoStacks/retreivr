@@ -28,6 +28,7 @@ const state = {
   homeBestScores: {},
   homeCandidateCache: {},
   homeCandidatesLoading: {},
+  homeCandidateData: {},
   homeSearchPollStart: null,
   homeSearchControlsEnabled: true,
   pendingAdvancedRequestId: null,
@@ -37,6 +38,8 @@ const state = {
   homeDirectPreview: null,
   homeDirectJob: null,
   homeDirectJobTimer: null,
+  homeJobTimer: null,
+  homeJobSnapshot: null,
 };
 const browserState = {
   open: false,
@@ -179,6 +182,11 @@ function setPage(page) {
   if (target !== "home") {
     setHomeSearchActive(false);
     setHomeResultsState({ hasResults: false, terminal: false });
+    stopHomeJobPolling();
+    const panel = document.querySelector("#home-advanced-panel");
+    if (panel) {
+      panel.classList.add("hidden");
+    }
   }
   document.body.dataset.page = target;
   const navToggle = $("#nav-toggle");
@@ -1567,7 +1575,9 @@ function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
   }
   const minScoreRaw = parseFloat($("#home-min-score")?.value);
   const destination = $("#home-destination")?.value.trim();
-  const treatAsMusic = $("#home-treat-music")?.checked ?? false;
+  const treatAsMusic = $("#home-music-mode")?.checked ?? $("#home-treat-music")?.checked ?? false;
+  const formatOverride = $("#home-format")?.value.trim();
+  const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const rawText = rawQuery || $("#home-search-input")?.value || "";
   const selectedSource = $("#home-search-source")?.value;
   let sources = getHomeSourcePriority();
@@ -1576,17 +1586,24 @@ function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
     sources = preferVideo ? HOME_VIDEO_SOURCE_PRIORITY : HOME_GENERIC_SOURCE_PRIORITY;
   }
   return {
+    query: rawText,
     intent: parsed.intent,
     media_type: treatAsMusic ? "music" : "generic",
     artist: parsed.artist,
     album: parsed.album,
     track: parsed.track,
     destination_dir: destination || null,
+    destination_type: deliveryMode,
+    destination_path: destination || null,
+    delivery_mode: deliveryMode,
     include_albums: 1,
     include_singles: preferAlbum ? 0 : 1,
     min_match_score: Number.isFinite(minScoreRaw) ? minScoreRaw : 0.92,
     lossless_only: treatAsMusic ? 1 : 0,
     auto_enqueue: autoEnqueue,
+    search_only: !autoEnqueue,
+    music_mode: treatAsMusic,
+    final_format: formatOverride || null,
     source_priority: sources && sources.length ? sources : null,
     max_candidates_per_source: 5,
   };
@@ -1849,6 +1866,12 @@ const HOME_CANDIDATE_STATE_LABELS = {
   enqueued: "Queued",
   failed: "Failed",
   skipped: "Already queued",
+  claimed: "Queued",
+  downloading: "Downloading",
+  postprocessing: "Downloading",
+  completed: "Completed",
+  cancelled: "Cancelled",
+  canceled: "Cancelled",
 };
 function getHomeCandidateStateInfo(status, { searchOnly = false } = {}) {
   const key = status || "queued";
@@ -1861,11 +1884,135 @@ function getHomeCandidateStateInfo(status, { searchOnly = false } = {}) {
     enqueued: "queued",
     failed: "failed",
     skipped: "skipped",
+    claimed: "queued",
+    downloading: "queued",
+    postprocessing: "queued",
+    completed: "matched",
+    cancelled: "failed",
+    canceled: "failed",
   }[key] || "queued";
   if (searchOnly && key === "enqueued") {
     return { label: "Matched", className: "matched" };
   }
   return { label, className };
+}
+
+async function fetchHomeJobSnapshot(requestId) {
+  const now = Date.now();
+  const cached = state.homeJobSnapshot;
+  if (cached && cached.requestId === requestId && now - cached.at < 3000) {
+    return cached;
+  }
+  const data = await fetchJson("/api/download_jobs?limit=200");
+  const jobs = data.jobs || [];
+  const jobsByUrl = new Map();
+  jobs.forEach((job) => {
+    if (job.origin !== "search") {
+      return;
+    }
+    if (requestId && job.origin_id && job.origin_id !== requestId) {
+      return;
+    }
+    if (job.url) {
+      jobsByUrl.set(job.url, job);
+    }
+  });
+  const snapshot = { at: now, requestId, jobsByUrl };
+  state.homeJobSnapshot = snapshot;
+  return snapshot;
+}
+
+function updateHomeCandidateRowState(row, candidate, item, job) {
+  if (!row) return;
+  const action = row.querySelector(".home-candidate-action");
+  if (!action) return;
+  const button = action.querySelector(
+    'button[data-action="home-download"], button[data-action="home-direct-download"]'
+  );
+  const stateEl = action.querySelector(".home-candidate-state");
+  const allowDownload = candidate.allow_download ?? item.allow_download;
+  const canDownload = allowDownload !== false && !!candidate.url;
+  const jobStatus = job?.status || candidate.job_status || "";
+  const jobError = job?.last_error || "";
+  if (stateEl) {
+    if (jobStatus) {
+      const info = getHomeCandidateStateInfo(jobStatus, { searchOnly: state.homeSearchMode === "searchOnly" });
+      stateEl.textContent = info.label;
+      stateEl.className = `home-candidate-state ${info.className}`;
+      stateEl.classList.remove("hidden");
+    } else {
+      stateEl.textContent = "";
+      stateEl.className = "home-candidate-state";
+      stateEl.classList.add("hidden");
+    }
+  }
+  if (jobStatus === "failed") {
+    showHomeEnqueueError(action, jobError || "Download failed.");
+  } else {
+    clearHomeEnqueueError(action);
+  }
+  if (button) {
+    const active = ["queued", "claimed", "downloading", "postprocessing"].includes(jobStatus);
+    const disabled = active || !canDownload || !item.id || !candidate.id;
+    button.disabled = disabled;
+    button.setAttribute("aria-disabled", disabled ? "true" : "false");
+    if (button.dataset.action === "home-direct-download") {
+      button.textContent = active ? "Queued" : "Download";
+    } else {
+      button.textContent = "Download";
+    }
+  }
+}
+
+function stopHomeJobPolling() {
+  if (state.homeJobTimer) {
+    clearInterval(state.homeJobTimer);
+    state.homeJobTimer = null;
+  }
+}
+
+async function refreshHomeJobStatuses(requestId) {
+  if (!requestId) {
+    stopHomeJobPolling();
+    return;
+  }
+  let snapshot = null;
+  try {
+    snapshot = await fetchHomeJobSnapshot(requestId);
+  } catch (err) {
+    return;
+  }
+  let hasActive = false;
+  Object.values(state.homeCandidateData).forEach((entry) => {
+    if (!entry) return;
+    const candidate = entry.candidate;
+    const item = entry.item;
+    if (!candidate || !item) return;
+    if (item.request_id && item.request_id !== requestId) {
+      return;
+    }
+    if (!candidate.id) return;
+    const row = document.querySelector(
+      `.home-candidate-row[data-candidate-id="${CSS.escape(candidate.id)}"]`
+    );
+    if (!row) return;
+    const job = candidate.url ? snapshot.jobsByUrl.get(candidate.url) : null;
+    updateHomeCandidateRowState(row, candidate, item, job);
+    if (job && ["queued", "claimed", "downloading", "postprocessing"].includes(job.status)) {
+      hasActive = true;
+    }
+  });
+  if (!hasActive) {
+    stopHomeJobPolling();
+  }
+}
+
+function startHomeJobPolling(requestId) {
+  stopHomeJobPolling();
+  state.homeJobTimer = setInterval(() => {
+    refreshHomeJobStatuses(requestId);
+  }, 4000);
+  refreshHomeJobStatuses(requestId);
 }
 
 function renderHomeResultItem(item) {
@@ -1970,27 +2117,52 @@ async function loadHomeCandidates(item, container) {
     if (placeholder.parentElement) {
       placeholder.remove();
     }
+    const requestId = item.request_id || state.homeSearchRequestId;
+    let jobSnapshot = null;
+    try {
+      jobSnapshot = await fetchHomeJobSnapshot(requestId);
+    } catch (err) {
+      jobSnapshot = null;
+    }
     setHomeResultsState({ hasResults: true, terminal: false });
     let rendered = state.homeCandidateCache[item.id];
     if (!rendered) {
       rendered = new Set();
     }
-    const requestId = item.request_id || state.homeSearchRequestId;
     let bestScore = Number.NEGATIVE_INFINITY;
     candidates.forEach((candidate) => {
-      if (rendered.has(candidate.id)) {
-        return;
+      if (candidate.id && !rendered.has(candidate.id)) {
+        rendered.add(candidate.id);
       }
-      rendered.add(candidate.id);
       if (candidate.final_score !== undefined) {
         const score = Number(candidate.final_score);
         if (Number.isFinite(score) && score > bestScore) {
           bestScore = score;
         }
       }
-      const row = renderHomeCandidateRow(candidate, item);
-      container.appendChild(row);
+      let row = null;
+      if (candidate.id) {
+        const selector = `[data-candidate-id="${CSS.escape(candidate.id)}"]`;
+        row = container.querySelector(selector);
+      }
+      if (!row) {
+        row = renderHomeCandidateRow(candidate, item);
+        container.appendChild(row);
+      }
+      const job = candidate.url ? jobSnapshot?.jobsByUrl?.get(candidate.url) : null;
+      updateHomeCandidateRowState(row, candidate, item, job);
+      if (candidate.id) {
+        state.homeCandidateData[candidate.id] = { candidate, item };
+      }
     });
+    if (jobSnapshot && !state.homeJobTimer) {
+      const hasActive = Array.from(jobSnapshot.jobsByUrl.values()).some((job) =>
+        ["queued", "claimed", "downloading", "postprocessing"].includes(job.status)
+      );
+      if (hasActive) {
+        startHomeJobPolling(requestId);
+      }
+    }
     state.homeCandidateCache[item.id] = rendered;
     if (Number.isFinite(bestScore)) {
       recordHomeCandidateScore(requestId, bestScore);
@@ -2009,6 +2181,15 @@ async function loadHomeCandidates(item, container) {
 function renderHomeCandidateRow(candidate, item) {
   const row = document.createElement("div");
   row.className = "home-candidate-row";
+  if (candidate.id) {
+    row.dataset.candidateId = candidate.id;
+  }
+  if (item.id) {
+    row.dataset.itemId = item.id;
+  }
+  if (candidate.url) {
+    row.dataset.url = candidate.url;
+  }
 
   const artworkUrl =
     candidate.thumbnail_url ||
@@ -2060,7 +2241,11 @@ function renderHomeCandidateRow(candidate, item) {
   const canDownload = allowDownload !== false;
   const isSearchOnly = state.homeSearchMode === "searchOnly";
   const isSearchResult = Boolean(item.request_id);
-  if (isSearchOnly && isSearchResult) {
+  const stateEl = document.createElement("span");
+  stateEl.className = "home-candidate-state hidden";
+  action.appendChild(stateEl);
+
+  if (isSearchResult) {
     const button = document.createElement("button");
     button.className = "button ghost small";
     button.dataset.action = "home-download";
@@ -2068,9 +2253,7 @@ function renderHomeCandidateRow(candidate, item) {
     button.dataset.candidateId = candidate.id || "";
     button.textContent = "Download";
 
-    const disabled =
-      !canDownload || !candidate.url || !item.id || !candidate.id;
-
+    const disabled = !canDownload || !candidate.url || !item.id || !candidate.id;
     button.disabled = disabled;
 
     if (disabled) {
@@ -2209,6 +2392,8 @@ function showHomeDirectUrlError(url, message, messageEl) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateData = {};
+  stopHomeJobPolling();
   showHomeResults(true);
   setHomeResultsStatus("Failed");
   setHomeResultsDetail(text, true);
@@ -2231,6 +2416,8 @@ function showHomeDirectUrlPreview(preview) {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  state.homeCandidateData = {};
+  stopHomeJobPolling();
   showHomeResults(true);
   setHomeResultsStatus("Direct URL preview");
   setHomeResultsDetail("Review the metadata and click Download to enqueue.", false);
@@ -2373,10 +2560,19 @@ async function refreshHomeResults(requestId) {
       container.textContent = "";
       const placeholder = document.createElement("div");
       placeholder.className = "home-results-empty";
-      placeholder.textContent = "Searching sources…";
+      if (["completed", "completed_with_skips", "failed"].includes(requestStatus)) {
+        placeholder.textContent = requestStatus === "failed" ? "Search failed." : "No results found.";
+      } else {
+        placeholder.textContent = "Searching sources…";
+      }
       container.appendChild(placeholder);
       const terminal = ["completed", "completed_with_skips", "failed"].includes(requestStatus);
-      setHomeResultsState({ hasResults: terminal, terminal });
+      setHomeResultsState({ hasResults: true, terminal });
+      if (terminal) {
+        setHomeSearchActive(false);
+        stopHomeResultPolling();
+        startHomeJobPolling(requestId);
+      }
       return requestStatus;
     }
     const currentIds = new Set();
@@ -2401,9 +2597,14 @@ async function refreshHomeResults(requestId) {
     existingCards.forEach((card) => {
       card.remove();
     });
-    const hasResults = items.some((entry) => entry.candidate_count > 0);
+    const hasResults = items.length > 0;
     const terminal = ["completed", "completed_with_skips", "failed"].includes(requestStatus);
     setHomeResultsState({ hasResults: hasResults || terminal, terminal });
+    if (terminal) {
+      setHomeSearchActive(false);
+      stopHomeResultPolling();
+      startHomeJobPolling(requestId);
+    }
     Object.keys(state.homeCandidateCache).forEach((key) => {
       if (!currentIds.has(key)) {
         delete state.homeCandidateCache[key];
@@ -2443,6 +2644,7 @@ function guardHomeSearchNoCandidates(requestId, requestStatus, items) {
         true
       );
       setHomeResultsState({ hasResults: false, terminal: true });
+      setHomeSearchActive(false);
       setHomeSearchControlsEnabled(true);
     }
     return;
@@ -2455,6 +2657,7 @@ function abortHomeResultPolling(message) {
   setHomeResultsStatus("Search timed out");
   setHomeResultsDetail(message || "Adapters took too long; try again or use Advanced Search.", true);
   setHomeResultsState({ hasResults: false, terminal: true });
+  setHomeSearchActive(false);
   setHomeSearchControlsEnabled(true);
 }
 
@@ -2485,6 +2688,7 @@ async function submitHomeSearch(autoEnqueue) {
   const messageEl = $("#home-search-message");
   const inputValue = $("#home-search-input")?.value.trim() || "";
   const destinationValue = $("#home-destination")?.value.trim() || "";
+  const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   if (!state.homeSearchControlsEnabled) {
     return;
   }
@@ -2501,7 +2705,21 @@ async function submitHomeSearch(autoEnqueue) {
   stopHomeDirectJobPolling();
   state.homeDirectJob = null;
   state.homeDirectPreview = null;
-  if (hasInvalidDestinationValue(destinationValue)) {
+  stopHomeJobPolling();
+  state.homeCandidateData = {};
+  if (deliveryMode === "client" && destinationValue) {
+    setNotice(messageEl, "Client delivery does not use a server destination.", true);
+    setHomeSearchControlsEnabled(true);
+    setHomeSearchActive(false);
+    return;
+  }
+  if (deliveryMode === "client" && autoEnqueue) {
+    setNotice(messageEl, "Search & Download is not available for client delivery. Use Search only or select Server delivery.", true);
+    setHomeSearchControlsEnabled(true);
+    setHomeSearchActive(false);
+    return;
+  }
+  if (deliveryMode !== "client" && hasInvalidDestinationValue(destinationValue)) {
     setNotice(messageEl, "Destination path is invalid; please select a folder within downloads.", true);
     setHomeSearchControlsEnabled(true);
     return;
@@ -2546,21 +2764,29 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   if (!messageEl) return;
   setHomeSearchActive(true);
   const formatOverride = $("#home-format")?.value.trim();
-  const treatAsMusic = $("#home-treat-music")?.checked ?? false;
+  const treatAsMusic = $("#home-music-mode")?.checked ?? $("#home-treat-music")?.checked ?? false;
+  const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const playlistId = extractPlaylistIdFromUrl(url);
   if (playlistId) {
     showHomeDirectUrlError(url, DIRECT_URL_PLAYLIST_ERROR, messageEl);
     return;
   }
+  if (deliveryMode === "client" && destination) {
+    setNotice(messageEl, "Client delivery does not use a server destination.", true);
+    setHomeSearchControlsEnabled(true);
+    setHomeSearchActive(false);
+    return;
+  }
   const payload = {};
   payload.single_url = url;
-  if (destination) {
+  if (destination && deliveryMode !== "client") {
     payload.destination = destination;
   }
   if (formatOverride) {
     payload.final_format_override = formatOverride;
   }
   payload.music_mode = treatAsMusic;
+  payload.delivery_mode = deliveryMode;
   setNotice(messageEl, "Direct URL download requested...", false);
   try {
     const runInfo = await startRun(payload);
@@ -2686,12 +2912,17 @@ async function runSearchResolutionOnce({ preferRequestId = null, showMessage = t
 async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
   if (!itemId || !candidateId) return;
   const messageEl = options.messageEl || $("#search-requests-message");
+  const finalFormat = $("#home-format")?.value.trim();
+  const payload = { candidate_id: candidateId };
+  if (finalFormat) {
+    payload.final_format = finalFormat;
+  }
   try {
     setNotice(messageEl, `Enqueuing candidate ${candidateId}...`, false);
     const data = await fetchJson(`/api/search/items/${encodeURIComponent(itemId)}/enqueue`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ candidate_id: candidateId }),
+      body: JSON.stringify(payload),
     });
     if (data.created) {
       setNotice(messageEl, `Enqueued job ${data.job_id}`, false);
@@ -3883,19 +4114,17 @@ function bindEvents() {
       });
     updateHomeSourceToggleLabel();
   }
-const homeAdvancedToggle = $("#home-advanced-toggle");
-const homeAdvancedPanel = $("#home-advanced-options");
-if (homeAdvancedToggle && homeAdvancedPanel) {
-  const advancedLabel = "Advanced options (optional)";
-  homeAdvancedPanel.classList.remove("open");
-  homeAdvancedToggle.textContent = advancedLabel;
-  homeAdvancedToggle.setAttribute("aria-expanded", "false");
-  homeAdvancedToggle.addEventListener("click", () => {
-    const open = homeAdvancedPanel.classList.toggle("open");
-    homeAdvancedToggle.textContent = open ? "Hide advanced options" : advancedLabel;
-    homeAdvancedToggle.setAttribute("aria-expanded", open ? "true" : "false");
-  });
-}
+  const homeAdvancedToggle = document.querySelector("#home-advanced-toggle");
+  const homeAdvancedPanel = document.querySelector("#home-advanced-panel");
+  if (homeAdvancedToggle && homeAdvancedPanel) {
+    homeAdvancedPanel.classList.add("hidden");
+    homeAdvancedToggle.setAttribute("aria-expanded", "false");
+    homeAdvancedToggle.addEventListener("click", () => {
+      const isOpen = !homeAdvancedPanel.classList.contains("hidden");
+      homeAdvancedPanel.classList.toggle("hidden", isOpen);
+      homeAdvancedToggle.setAttribute("aria-expanded", String(!isOpen));
+    });
+  }
   const homeViewAdvanced = $("#home-view-advanced");
   if (homeViewAdvanced) {
     homeViewAdvanced.addEventListener("click", handleHomeViewAdvanced);
