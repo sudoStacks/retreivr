@@ -53,8 +53,10 @@ _FORMAT_VIDEO = (
     "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
     "bestvideo*+bestaudio/best"
 )
-# Audio selector chain: prefer audio-only, then muxed with audio, then best as last resort.
-_FORMAT_AUDIO = "bestaudio[acodec!=none]/bestaudio/best[acodec!=none]/best"
+# Audio format selector:
+# Prefer audio-only when available, but ALWAYS allow muxed fallback for reliability.
+# Audio extraction is guaranteed later by FFmpegExtractAudio.
+_FORMAT_AUDIO = "bestaudio/bestvideo+bestaudio/best"
 
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
 
