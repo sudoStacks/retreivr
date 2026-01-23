@@ -3093,37 +3093,197 @@ async def get_search_candidates(item_id: str):
 @app.post("/api/search/items/{item_id}/enqueue")
 async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayload):
     service = app.state.search_service
+    candidate_id = (payload.candidate_id or "").strip()
+    logging.debug(
+        "Search enqueue payload: %s",
+        safe_json(
+            {
+                "item_id": item_id,
+                "candidate_id": candidate_id,
+                "final_format": getattr(payload, "final_format", None),
+            }
+        ),
+    )
+
+    if not candidate_id:
+        logging.warning(
+            "Search enqueue failed: missing candidate_id request_id=%s item_id=%s candidate_id=%s source=%s",
+            None,
+            item_id,
+            candidate_id,
+            None,
+        )
+        return JSONResponse(
+            status_code=400,
+            content={"error": "candidate_id is required", "code": "INVALID_REQUEST"},
+        )
 
     item = service.store.get_item(item_id)
     if not item:
-        raise HTTPException(status_code=404, detail="Search item not found")
-
-    candidate = service.store.get_candidate(payload.candidate_id)
-    if not candidate or candidate.get("item_id") != item_id:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
-    url = candidate.get("url")
-    if not url:
-        raise HTTPException(status_code=400, detail="Candidate has no URL")
-    if not _is_http_url(url):
-        raise HTTPException(
-            status_code=400,
-            detail="This search result is not directly downloadable."
+        logging.warning(
+            "Search enqueue failed: item not found request_id=%s item_id=%s candidate_id=%s source=%s",
+            None,
+            item_id,
+            candidate_id,
+            None,
+        )
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Search item not found", "code": "ITEM_NOT_FOUND"},
         )
 
-    # Build a synthetic /api/run payload
-    run_payload = {
-        "single_url": True,
-        "url": url,
-        "media_type": item.get("media_type"),
-        "final_format": getattr(payload, "final_format", None),
-        "destination": service._resolve_request_destination(
-            service.store.get_request_row(item["request_id"]).get("destination_dir")
-        ),
-    }
+    candidate = service.store.get_candidate(candidate_id)
+    if not candidate or candidate.get("item_id") != item_id:
+        logging.warning(
+            "Search enqueue failed: candidate not found request_id=%s item_id=%s candidate_id=%s source=%s",
+            item.get("request_id"),
+            item_id,
+            candidate_id,
+            None,
+        )
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Candidate not found", "code": "CANDIDATE_NOT_FOUND"},
+        )
 
-    # Delegate to the SAME code path as Search + Download
-    return await run_direct_url(run_payload)
+    request_id = item.get("request_id")
+    request_row = service.store.get_request_row(request_id) if request_id else None
+    if not request_row:
+        logging.warning(
+            "Search enqueue failed: request not found request_id=%s item_id=%s candidate_id=%s source=%s",
+            request_id,
+            item_id,
+            candidate_id,
+            candidate.get("source"),
+        )
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Search request not found", "code": "REQUEST_NOT_FOUND"},
+        )
+
+    url = candidate.get("url")
+    source = candidate.get("source")
+    logging.debug(
+        "Search enqueue resolved item: %s",
+        safe_json(
+            {
+                "id": item.get("id"),
+                "status": item.get("status"),
+                "request_id": request_id,
+                "media_type": item.get("media_type"),
+                "item_type": item.get("item_type"),
+            }
+        ),
+    )
+    logging.debug(
+        "Search enqueue resolved candidate: %s",
+        safe_json(
+            {
+                "id": candidate.get("id"),
+                "source": source,
+                "url": url,
+                "external_id": candidate.get("external_id"),
+            }
+        ),
+    )
+    logging.debug(
+        "Search enqueue derived destination: %s",
+        safe_json(
+            {
+                "destination": service._resolve_request_destination(
+                    request_row.get("destination_dir")
+                ),
+                "final_format": getattr(payload, "final_format", None),
+            }
+        ),
+    )
+
+    if not url or not _is_http_url(url):
+        logging.warning(
+            "Search enqueue failed: non-downloadable URL request_id=%s item_id=%s candidate_id=%s source=%s",
+            request_id,
+            item_id,
+            candidate_id,
+            source,
+        )
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "This search result is not directly downloadable.",
+                "code": "CANDIDATE_NOT_DOWNLOADABLE",
+            },
+        )
+
+    if item.get("status") == "enqueued":
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Candidate already enqueued.", "code": "ALREADY_ENQUEUED"},
+        )
+    if item.get("status") == "skipped" and item.get("error") == "duplicate":
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Already downloaded.", "code": "ALREADY_DOWNLOADED"},
+        )
+
+    active_job = service.queue_store.find_active_job("search", request_id, url)
+    if active_job:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Candidate already enqueued.", "code": "ALREADY_ENQUEUED"},
+        )
+
+    try:
+        result = service.enqueue_item_candidate(item_id, candidate_id)
+    except ValueError as exc:
+        logging.warning(
+            "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+            str(exc),
+            request_id,
+            item_id,
+            candidate_id,
+            source,
+        )
+        error_msg = "Invalid destination"
+        code = "INVALID_DESTINATION"
+        if "invalid_destination" not in str(exc).lower():
+            error_msg = "Invalid request"
+            code = "INVALID_REQUEST"
+        return JSONResponse(status_code=422, content={"error": error_msg, "code": code})
+    except Exception as exc:
+        logging.warning(
+            "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+            exc,
+            request_id,
+            item_id,
+            candidate_id,
+            source,
+            exc_info=True,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Enqueue failed.", "code": "ENQUEUE_FAILED"},
+        )
+
+    if not result:
+        logging.warning(
+            "Search enqueue failed: unresolved request_id=%s item_id=%s candidate_id=%s source=%s",
+            request_id,
+            item_id,
+            candidate_id,
+            source,
+        )
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Search item not found", "code": "ITEM_NOT_FOUND"},
+        )
+
+    if not result.get("created") and result.get("job_id"):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Already downloaded.", "code": "ALREADY_DOWNLOADED"},
+        )
+
+    return result
 
 
 @app.get("/api/download_jobs")
