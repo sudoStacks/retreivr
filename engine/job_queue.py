@@ -1463,6 +1463,7 @@ def _merge_overrides(opts, overrides, *, operation, lock_format=False):
     return opts
 
 
+
 def _redact_ytdlp_opts(opts):
     redacted = {}
     for key, value in (opts or {}).items():
@@ -1474,6 +1475,32 @@ def _redact_ytdlp_opts(opts):
             continue
         redacted[key] = value
     return redacted
+
+# Render a sanitized equivalent yt-dlp CLI command for logging.
+def _render_ytdlp_cli(opts, url):
+    parts = ["yt-dlp"]
+    if opts.get("format"):
+        parts.extend(["--format", opts["format"]])
+    if opts.get("merge_output_format"):
+        parts.extend(["--merge-output-format", opts["merge_output_format"]])
+    if opts.get("outtmpl"):
+        parts.extend(["--output", str(opts["outtmpl"])])
+    if opts.get("noplaylist") is True:
+        parts.append("--no-playlist")
+    elif opts.get("noplaylist") is False:
+        parts.append("--yes-playlist")
+    if opts.get("retries") is not None:
+        parts.extend(["--retries", str(opts.get("retries"))])
+    if opts.get("fragment_retries") is not None:
+        parts.extend(["--fragment-retries", str(opts.get("fragment_retries"))])
+    if opts.get("postprocessors"):
+        for pp in opts.get("postprocessors") or []:
+            if pp.get("key") == "FFmpegExtractAudio":
+                parts.append("--extract-audio")
+                if pp.get("preferredcodec"):
+                    parts.extend(["--audio-format", pp.get("preferredcodec")])
+    parts.append(url)
+    return " ".join(parts)
 
 
 def _format_summary(info):
@@ -1601,6 +1628,14 @@ def download_with_ytdlp(
         opts_for_run["progress_hooks"] = hooks
         with YoutubeDL(opts_for_run) as ydl:
             info = ydl.extract_info(url, download=True)
+            # Log sanitized yt-dlp CLI equivalent after execution is invoked
+            _log_event(
+                logging.INFO,
+                "YTDLP_CLI_EQUIVALENT",
+                job_id=job_id,
+                url=url,
+                cli=_render_ytdlp_cli(_redact_ytdlp_opts(opts_for_run), url),
+            )
             if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
                 raise CancelledError(cancel_reason or "Cancelled by user")
     except Exception as exc:
