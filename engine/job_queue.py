@@ -43,6 +43,9 @@ TERMINAL_STATUSES = (
 class CancelledError(Exception):
     """Raised to abort an in-flight download due to user cancellation."""
 
+class PostprocessingError(Exception):
+    pass
+
 _FORMAT_VIDEO = (
     "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
     "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
@@ -1372,7 +1375,7 @@ def build_ytdlp_opts(context):
                 opts["format"] = "bestvideo+bestaudio/best"
                 opts["merge_output_format"] = video_container_target
             else:
-                opts["format"] = _FORMAT_VIDEO
+                opts["format"] = "best"
 
     # Only lock down format-related overrides when the target_format was actually applied
     # (audio codec in audio_mode, or video container preference in video mode).
@@ -1600,6 +1603,15 @@ def download_with_ytdlp(
             if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
                 raise CancelledError(cancel_reason or "Cancelled by user")
     except Exception as exc:
+        message = str(exc) or ""
+        lowered = message.lower()
+        if (
+            "postprocessing" in lowered
+            or "postprocessor" in lowered
+            or "ffmpeg" in lowered
+            or "conversion failed" in lowered
+        ):
+            raise PostprocessingError(message)
         # If a cookiefile is present and yt-dlp reports an empty download, retry once WITHOUT cookies.
         # This matches the observed CLI behavior (no cookies) and avoids poisoning downloads with bad/expired cookies.
         if _is_empty_download_error(exc) and opts.get("cookiefile"):
@@ -2127,10 +2139,14 @@ def extract_video_id(url):
 def is_retryable_error(error):
     if isinstance(error, TypeError):
         return False
+    if isinstance(error, PostprocessingError):
+        return False
     if isinstance(error, (DownloadError, ExtractorError)):
         message = str(error).lower()
     else:
         message = str(error).lower()
+    if "postprocessing" in message or "postprocessor" in message or "ffmpeg" in message:
+        return False
     if "json serializable" in message or "not json" in message:
         return False
     if "drm" in message:
