@@ -156,6 +156,19 @@ def _normalize_media_type(value, *, default="generic"):
     return None
 
 
+# Audio formats that require the audio-mode download pipeline
+_AUDIO_FINAL_FORMATS = {"mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"}
+
+def _is_audio_final_format(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        v = str(value).strip().lower()
+    except Exception:
+        return False
+    return v in _AUDIO_FINAL_FORMATS
+
+
 def _extract_canonical_id(metadata):
     if not isinstance(metadata, dict):
         return None
@@ -1044,6 +1057,11 @@ class SearchResolutionService:
                     output_template = {}
                 output_template["final_format"] = final_format_override
 
+                # Invariant: if an audio codec is requested (e.g. mp3), force the audio-mode pipeline
+                # even when the search request/item media_type is generic.
+                if _is_audio_final_format(final_format_override):
+                    output_template["audio_mode"] = True
+
             canonical_for_job = chosen.get("canonical_metadata") if isinstance(chosen, dict) else None
             if not canonical_for_job and isinstance(chosen, dict) and chosen.get("canonical_json"):
                 try:
@@ -1063,7 +1081,7 @@ class SearchResolutionService:
             job_id, created, dedupe_reason = self.queue_store.enqueue_job(
                 origin=job_origin,
                 origin_id=request_id,
-                media_type=item["media_type"],
+                media_type=("music" if _is_audio_final_format(final_format_override) else item["media_type"]),
                 media_intent=media_intent,
                 source=chosen["source"],
                 url=chosen["url"],
@@ -1196,6 +1214,11 @@ class SearchResolutionService:
                 output_template = {}
             output_template["final_format"] = final_format_override
 
+            # Invariant: if an audio codec is requested (e.g. mp3), force the audio-mode pipeline
+            # even when the item media_type is generic.
+            if _is_audio_final_format(final_format_override):
+                output_template["audio_mode"] = True
+
         canonical_payload = None
         canonical_raw = candidate.get("canonical_json")
         if canonical_raw:
@@ -1217,7 +1240,7 @@ class SearchResolutionService:
         job_id, created, dedupe_reason = self.queue_store.enqueue_job(
             origin="search",
             origin_id=request["id"],
-            media_type=item.get("media_type") or "generic",
+            media_type=("music" if _is_audio_final_format(final_format_override) else (item.get("media_type") or "generic")),
             media_intent=media_intent,
             source=candidate.get("source"),
             url=candidate_url,
