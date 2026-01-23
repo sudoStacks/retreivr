@@ -31,6 +31,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
+from urllib.parse import urlparse
+from typing import Optional
 
 import anyio
 from fastapi import Body, FastAPI, HTTPException, Query, Request
@@ -45,7 +47,24 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from google.auth.exceptions import RefreshError
 
-from engine.job_queue import DownloadJobStore, DownloadWorkerEngine, preview_direct_url
+from engine.job_queue import (
+    DownloadJobStore,
+    DownloadWorkerEngine,
+    atomic_move,
+    build_output_filename,
+    preview_direct_url,
+    canonicalize_url,
+    download_with_ytdlp,
+    embed_metadata,
+    extract_meta,
+    resolve_source,
+    resolve_media_intent,
+    resolve_media_type,
+    resolve_cookie_file,
+    extract_video_id,
+    _normalize_audio_format,
+    _normalize_format,
+)
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
 from engine.spotify_playlist_importer import (
@@ -65,6 +84,7 @@ from engine.core import (
     _acquire_client_delivery,
     _finalize_client_delivery,
     _mark_client_delivery,
+    _register_client_delivery,
     load_config,
     mark_video_seen,
     playlist_has_seen,
@@ -114,6 +134,143 @@ DIRECT_URL_PLAYLIST_ERROR = (
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
 
+def _is_http_url(value: str | None) -> bool:
+    if not value or not isinstance(value, str):
+        return False
+    try:
+        return urlparse(value).scheme in ("http", "https")
+    except Exception:
+        return False
+
+
+def _sanitize_non_http_urls(obj):
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k == "url" and isinstance(v, str) and v and not _is_http_url(v):
+                out[k] = None
+            else:
+                out[k] = _sanitize_non_http_urls(v)
+        return out
+    if isinstance(obj, list):
+        return [_sanitize_non_http_urls(v) for v in obj]
+    return obj
+
+
+def normalize_search_payload(payload: dict | None, *, default_sources: list[str]) -> dict:
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+
+    def _clean_str(value, field):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            trimmed = value.strip()
+            return trimmed if trimmed else None
+        raise ValueError(f"{field} must be a string")
+
+    def _coerce_bool(value, field):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            if value in (0, 1):
+                return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y"}:
+                return True
+            if lowered in {"false", "0", "no", "n"}:
+                return False
+        raise ValueError(f"{field} must be a boolean")
+
+    def _parse_sources(raw):
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("sources must be a list or comma-separated string") from exc
+                if not isinstance(parsed, list):
+                    raise ValueError("sources must be a list")
+                items = parsed
+            else:
+                items = [part.strip() for part in text.split(",")]
+        else:
+            raise ValueError("sources must be a list or comma-separated string")
+        return [str(item).strip() for item in items if str(item).strip()]
+
+    raw_query = payload.get("query")
+    if raw_query is None:
+        artist = _clean_str(payload.get("artist"), "artist")
+        track = _clean_str(payload.get("track"), "track")
+        album = _clean_str(payload.get("album"), "album")
+        parts = [part for part in [artist, track or album] if part]
+        query = " ".join(parts).strip()
+    elif isinstance(raw_query, str):
+        query = raw_query.strip()
+    else:
+        raise ValueError("query must be a string")
+
+    raw_sources = payload.get("sources")
+    if raw_sources is None:
+        raw_sources = payload.get("source_priority", payload.get("source_priority_json"))
+    sources = _parse_sources(raw_sources)
+    allowed = list(default_sources or [])
+    allowed_set = set(allowed)
+    filtered = [source for source in sources if source in allowed_set]
+    sources = filtered or allowed
+
+    raw_search_only = payload.get("search_only")
+    search_only = _coerce_bool(raw_search_only, "search_only")
+    if search_only is None:
+        auto_enqueue = _coerce_bool(payload.get("auto_enqueue"), "auto_enqueue")
+        search_only = not auto_enqueue if auto_enqueue is not None else True
+
+    music_mode = _coerce_bool(payload.get("music_mode"), "music_mode")
+    if music_mode is None:
+        media_type = _clean_str(payload.get("media_type"), "media_type")
+        lossless_only = _coerce_bool(payload.get("lossless_only"), "lossless_only")
+        music_mode = bool(lossless_only) or (media_type in {"music", "audio"})
+
+    final_format = _clean_str(payload.get("final_format"), "final_format")
+    if final_format is None:
+        final_format = _clean_str(payload.get("final_format_override"), "final_format")
+
+    destination = _clean_str(payload.get("destination"), "destination")
+    if destination is None:
+        destination = _clean_str(payload.get("destination_dir"), "destination")
+    if destination is None:
+        destination = _clean_str(payload.get("destination_path"), "destination_path")
+
+    delivery_mode = _clean_str(payload.get("delivery_mode"), "delivery_mode")
+    if delivery_mode is None:
+        delivery_mode = _clean_str(payload.get("destination_type"), "destination_type")
+    delivery_mode = delivery_mode or "server"
+    if delivery_mode not in {"server", "client"}:
+        raise ValueError("delivery_mode must be 'server' or 'client'")
+
+    return {
+        "query": query or "",
+        "sources": sources,
+        "search_only": bool(search_only),
+        "music_mode": bool(music_mode),
+        "final_format": final_format,
+        "destination": destination,
+        "destination_type": delivery_mode,
+        "destination_path": destination,
+        "delivery_mode": delivery_mode,
+    }
 
 def _env_or_default(name, default):
     value = os.environ.get(name)
@@ -237,6 +394,38 @@ class DirectUrlPreviewRequest(BaseModel):
     url: str
 
 
+# Cancel job API request model
+class CancelJobRequest(BaseModel):
+    reason: str | None = None
+
+# Helper to best-effort terminate a subprocess
+def _terminate_subprocess(proc: subprocess.Popen, *, grace_sec: float = 3.0) -> None:
+    """Best-effort terminate a subprocess quickly and safely."""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    deadline = time.monotonic() + grace_sec
+    while time.monotonic() < deadline:
+        try:
+            if proc.poll() is not None:
+                return
+        except Exception:
+            return
+        time.sleep(0.05)
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
 class ConfigPathRequest(BaseModel):
     path: str
 
@@ -288,6 +477,7 @@ def _purge_oauth_sessions():
 
 class EnqueueCandidatePayload(BaseModel):
     candidate_id: str
+    final_format: Optional[str] = None
 
 
 class SpotifyPlaylistImportPayload(BaseModel):
@@ -394,6 +584,8 @@ async def startup():
         config=config or {},
         paths=app.state.paths,
     )
+    app.state.search_request_overrides = {}
+    app.state.search_service.request_overrides = app.state.search_request_overrides
     # Ensure search DB schema exists before any read operations.
     SearchJobStore(app.state.search_db_path).ensure_schema()
     json_sanity_check()
@@ -668,12 +860,34 @@ def _record_direct_url_history(db_path, files, source_url):
             status TEXT,
             created_at TEXT,
             completed_at TEXT,
-            file_size_bytes INTEGER
+            file_size_bytes INTEGER,
+            input_url TEXT,
+            canonical_url TEXT,
+            external_id TEXT
         )
         """
     )
+    cur.execute("PRAGMA table_info(download_history)")
+    existing_columns = {row[1] for row in cur.fetchall()}
+    for column in ("input_url", "canonical_url", "external_id", "source"):
+        if column not in existing_columns:
+            cur.execute(f"ALTER TABLE download_history ADD COLUMN {column} TEXT")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_history_source_extid "
+        "ON download_history (source, external_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_history_canonical_url "
+        "ON download_history (canonical_url)"
+    )
 
     now = datetime.now(timezone.utc).isoformat()
+    input_url = source_url
+    source = resolve_source(source_url) if source_url else None
+    if source == "unknown":
+        source = None
+    external_id = extract_video_id(source_url) if source in {"youtube", "youtube_music"} else None
+    canonical_url = canonicalize_url(source, input_url, external_id)
     for path in files:
         try:
             stat = os.stat(path)
@@ -683,27 +897,185 @@ def _record_direct_url_history(db_path, files, source_url):
         cur.execute(
             """
             INSERT INTO download_history
-                (video_id, title, filename, destination, source, status, created_at, completed_at, file_size_bytes)
+                (
+                    video_id, title, filename, destination, source, status,
+                    created_at, completed_at, file_size_bytes,
+                    input_url, canonical_url, external_id
+                )
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 None,
                 os.path.basename(path),
                 os.path.basename(path),
                 os.path.dirname(path),
-                source_url,
+                source,
                 "completed",
                 now,
                 now,
                 int(stat.st_size),
+                input_url,
+                canonical_url,
+                external_id,
             ),
         )
 
     conn.commit()
     conn.close()
 
+# Execution router: client delivery runs immediately, server delivery enqueues.
+def execute_download(*, delivery_mode: str | None, run_immediate, enqueue):
+    mode = (delivery_mode or "server").strip().lower()
+    if mode == "client":
+        return run_immediate()
+    return enqueue()
+
+def _run_immediate_download_to_client(
+    *,
+    url: str,
+    config: dict,
+    paths,
+    media_type: str | None,
+    media_intent: str | None,
+    final_format_override: str | None,
+    stop_event: threading.Event | None = None,
+    status: EngineStatus | None = None,
+    origin: str | None = None,
+):
+    job_id = uuid4().hex
+    temp_dir = os.path.join(paths.temp_downloads_dir, job_id)
+    ensure_dir(temp_dir)
+
+    config = config or {}
+    filename_template = config.get("filename_template")
+    audio_template = config.get("audio_filename_template") or config.get("music_filename_template")
+
+    raw_final_format = final_format_override
+    normalized_format = _normalize_format(raw_final_format)
+    normalized_audio_format = _normalize_audio_format(raw_final_format)
+    audio_mode = bool(normalized_audio_format)
+    final_format = normalized_audio_format if audio_mode else normalized_format
+
+    cookie_file = resolve_cookie_file(config or {})
+
+    try:
+        info, local_file = download_with_ytdlp(
+            url,
+            temp_dir,
+            config,
+            audio_mode=audio_mode,
+            final_format=final_format,
+            cookie_file=cookie_file,
+            stop_event=stop_event,
+            media_type=media_type,
+            media_intent=media_intent,
+            job_id=job_id,
+            origin=origin,
+            resolved_destination=None,
+        )
+        if not info or not local_file:
+            raise RuntimeError("yt_dlp_no_output")
+
+        meta = extract_meta(info, fallback_url=url)
+        video_id = meta.get("video_id") or job_id
+        ext = os.path.splitext(local_file)[1].lstrip(".")
+        if audio_mode:
+            ext = final_format or "mp3"
+        elif not ext:
+            ext = final_format or "webm"
+        template = audio_template if audio_mode else filename_template
+        cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
+        final_path = os.path.join(temp_dir, cleaned_name)
+
+        if not audio_mode:
+            embed_metadata(local_file, meta, video_id, paths.thumbs_dir)
+        if final_path != local_file:
+            atomic_move(local_file, final_path)
+
+        size = 0
+        try:
+            size = os.path.getsize(final_path)
+        except OSError:
+            size = 0
+        if size <= 0:
+            raise RuntimeError("empty_output_file")
+
+        delivery_id, expires_at, _event = _register_client_delivery(
+            final_path,
+            os.path.basename(final_path),
+        )
+
+        if status is not None:
+            lock = getattr(status, "lock", None)
+            if lock:
+                with lock:
+                    status.client_delivery_id = delivery_id
+                    status.client_delivery_filename = os.path.basename(final_path)
+                    status.client_delivery_expires_at = expires_at.isoformat()
+                    status.single_download_ok = True
+                    status.last_completed_path = final_path
+                    status.last_completed_at = datetime.now(timezone.utc).isoformat()
+            else:
+                status.client_delivery_id = delivery_id
+                status.client_delivery_filename = os.path.basename(final_path)
+                status.client_delivery_expires_at = expires_at.isoformat()
+                status.single_download_ok = True
+                status.last_completed_path = final_path
+                status.last_completed_at = datetime.now(timezone.utc).isoformat()
+
+        return {
+            "delivery_id": delivery_id,
+            "filename": os.path.basename(final_path),
+            "expires_at": expires_at.isoformat(),
+        }
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
 # Fast-lane direct URL download via yt-dlp CLI
+def _build_direct_url_cli_args(*, url: str, outtmpl: str, final_format_override: str | None) -> list[str]:
+    """
+    Build yt-dlp CLI argv for the direct URL fast-lane.
+    IMPORTANT: This function is a mechanical refactor of the previous inline args logic.
+    It must not change behavior.
+    """
+    def _looks_like_playlist(u: str) -> bool:
+        u = (u or "").lower()
+        # Conservative heuristic: only allow playlist downloads when the user actually pasted a playlist URL.
+        # This keeps single-video URLs behaving like the CLI test (`--no-playlist`).
+        return (
+            "list=" in u
+            or "/playlist" in u
+            or "playlist?" in u
+            or "?playlist" in u
+        )
+
+    args: list[str] = ["yt-dlp"]
+
+    # Match the proven CLI behavior for single-video URLs.
+    # If the URL looks like a playlist URL, do NOT add --no-playlist.
+    if not _looks_like_playlist(url):
+        args.append("--no-playlist")
+
+    # Output template
+    args += ["-o", outtmpl]
+
+    # Optional final container override
+    if final_format_override:
+        fmt = final_format_override.strip().lower()
+        audio_formats = {"mp3", "m4a", "flac", "wav", "opus", "ogg"}
+        video_formats = {"webm", "mp4", "mkv"}
+        if fmt in audio_formats:
+            args += ["-f", "bestaudio", "--extract-audio", "--audio-format", fmt]
+        elif fmt in video_formats:
+            args += ["--merge-output-format", fmt]
+        else:
+            args += ["--merge-output-format", final_format_override]
+
+    args.append(url)
+    return args
+
 def _run_direct_url_with_cli(
     *,
     url: str,
@@ -738,52 +1110,16 @@ def _run_direct_url_with_cli(
     temp_dir = os.path.join(paths.temp_downloads_dir, job_id)
     ensure_dir(temp_dir)
 
-
     # Output template: keep simple and CLI-equivalent
     # Note: if the template is absolute, yt-dlp ignores --paths; so keep it absolute here.
     outtmpl = os.path.join(temp_dir, "%(title).200s-%(id)s.%(ext)s")
 
-    def _looks_like_playlist(u: str) -> bool:
-        u = (u or "").lower()
-        # Conservative heuristic: only allow playlist downloads when the user actually pasted a playlist URL.
-        # This keeps single-video URLs behaving like the CLI test (`--no-playlist`).
-        return (
-            "list=" in u
-            or "/playlist" in u
-            or "playlist?" in u
-            or "?playlist" in u
-        )
-
-    args = [
-        "yt-dlp",
-    ]
-
-    # Match the proven CLI behavior for single-video URLs.
-    # If the URL looks like a playlist URL, do NOT add --no-playlist.
-    if not _looks_like_playlist(url):
-        args.append("--no-playlist")
-
-    # Output template
-    args += ["-o", outtmpl]
-
-    # Optional final container override
-    if final_format_override:
-        fmt = final_format_override.strip().lower()
-        audio_formats = {"mp3", "m4a", "flac", "wav", "opus", "ogg"}
-        video_formats = {"webm", "mp4", "mkv"}
-        if fmt in audio_formats:
-            args += ["-f", "bestaudio", "--extract-audio", "--audio-format", fmt]
-        elif fmt in video_formats:
-            args += ["--merge-output-format", fmt]
-        else:
-            args += ["--merge-output-format", final_format_override]
-
-    # Cookies are NOT passed by default for the fast lane.
-    # Rationale: user verified the minimal CLI works reliably without cookies; cookies can change
-    # selected formats/auth flows and can trigger fragment 403s depending on the session.
-    # If you want cookies for a specific site, add a config flag later (e.g. direct_url_use_cookies).
-
-    args.append(url)
+    # Build the CLI args using the new helper
+    args = _build_direct_url_cli_args(
+        url=url,
+        outtmpl=outtmpl,
+        final_format_override=final_format_override,
+    )
 
     def _redact_cli_args(argv: list[str]) -> list[str]:
         redacted: list[str] = []
@@ -845,7 +1181,7 @@ def _run_direct_url_with_cli(
                     proc.terminate()
                 except Exception:
                     pass
-                raise RuntimeError("cancelled")
+                raise RuntimeError("direct_url_cancelled")
 
             rc = proc.poll()
             if rc is not None:
@@ -1436,15 +1772,32 @@ async def _start_run_with_config(
                     )
                 else:
                     if single_url:
-                        run_callable = functools.partial(
-                            _run_direct_url_with_cli,
-                            url=single_url,
-                            paths=app.state.paths,
-                            config=config,
-                            destination=destination,
-                            final_format_override=effective_final_format_override,
-                            stop_event=app.state.stop_event,
-                            status=status,
+                        resolved_media_type = resolve_media_type(config, url=single_url)
+                        resolved_media_intent = resolve_media_intent("manual", resolved_media_type)
+                        run_callable = execute_download(
+                            delivery_mode=delivery_mode or "server",
+                            run_immediate=lambda: functools.partial(
+                                _run_immediate_download_to_client,
+                                url=single_url,
+                                config=config,
+                                paths=app.state.paths,
+                                media_type=resolved_media_type,
+                                media_intent=resolved_media_intent,
+                                final_format_override=effective_final_format_override,
+                                stop_event=app.state.stop_event,
+                                status=status,
+                                origin=run_source,
+                            ),
+                            enqueue=lambda: functools.partial(
+                                _run_direct_url_with_cli,
+                                url=single_url,
+                                paths=app.state.paths,
+                                config=config,
+                                destination=destination,
+                                final_format_override=effective_final_format_override,
+                                stop_event=app.state.stop_event,
+                                status=status,
+                            ),
                         )
                     else:
                         run_callable = functools.partial(
@@ -1479,9 +1832,15 @@ async def _start_run_with_config(
                         app.state.last_error = "Run stopped"
                     app.state.state = "error"
             except Exception as exc:
-                logging.exception("Archive run failed: %s", exc)
-                app.state.last_error = str(exc)
-                app.state.state = "error"
+                # Direct URL cancel should not surface as a generic error state.
+                if str(exc) == "direct_url_cancelled" or getattr(app.state, "cancel_requested", False):
+                    app.state.cancel_requested = False
+                    app.state.last_error = "Downloads cancelled by user"
+                    app.state.state = "idle"
+                else:
+                    logging.exception("Archive run failed: %s", exc)
+                    app.state.last_error = str(exc)
+                    app.state.state = "error"
             finally:
                 # Ensure CLI process isn't left running
                 try:
@@ -1507,6 +1866,48 @@ async def _start_run_with_config(
         app.state.run_task = asyncio.create_task(_runner())
 
     return "started", None
+
+
+# Cancel endpoint for jobs (API-level)
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, payload: CancelJobRequest = Body(default=CancelJobRequest())):
+    """
+    Cancel a queued/active download job.
+
+    Behavior:
+    - If the job corresponds to the direct-URL fast-lane, terminate the active yt-dlp CLI subprocess.
+    - If the job is a queued worker job, mark it CANCELLED in the download_jobs table and request
+      cancellation from the worker engine.
+    """
+    reason = (payload.reason or "Cancelled by user").strip() if payload else "Cancelled by user"
+
+    # 1) Direct URL fast-lane: terminate current CLI process (if this matches)
+    try:
+        current_job_id = getattr(app.state, "current_download_job_id", None)
+        current_proc = getattr(app.state, "current_download_proc", None)
+        if current_job_id and current_job_id == job_id and current_proc:
+            app.state.cancel_requested = True
+            await anyio.to_thread.run_sync(_terminate_subprocess, current_proc)
+            return {"ok": True, "job_id": job_id, "status": "cancelled", "scope": "direct_url"}
+    except Exception:
+        logging.exception("Direct URL cancel path failed")
+
+    # 2) Unified queue jobs: mark cancelled and ask worker to stop
+    try:
+        engine = getattr(app.state, "worker_engine", None)
+        if engine is not None and hasattr(engine, "cancel_job") and callable(getattr(engine, "cancel_job")):
+            try:
+                engine.cancel_job(job_id, reason=reason)
+            except TypeError:
+                engine.cancel_job(job_id)
+            return {"ok": True, "job_id": job_id, "status": "cancelled", "scope": "queue"}
+        # Fallback if engine isn't available for some reason: mark cancelled in DB.
+        store = DownloadJobStore(app.state.paths.db_path)
+        store.mark_canceled(job_id, reason=reason)
+        return {"ok": True, "job_id": job_id, "status": "cancelled", "scope": "queue"}
+    except Exception as exc:
+        logging.exception("Cancel job failed")
+        raise HTTPException(status_code=500, detail=f"Cancel failed: {exc}")
 
 
 def _get_next_run_iso():
@@ -2786,6 +3187,18 @@ async def api_direct_url_preview(request: DirectUrlPreviewRequest):
         raise HTTPException(status_code=400, detail="URL is required")
     if _looks_like_playlist_url(url):
         raise HTTPException(status_code=400, detail=DIRECT_URL_PLAYLIST_ERROR)
+    if not _is_http_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="This search result is not directly downloadable."
+        )
+    try:
+        normalize_search_payload(
+            {"query": url, "search_only": True},
+            default_sources=list(getattr(app.state.search_service, "adapters", {}).keys()),
+        )
+    except ValueError:
+        pass
     config = _read_config_or_404()
     try:
         preview = preview_direct_url(url, config)
@@ -2821,13 +3234,65 @@ async def api_logs(lines: int = Query(200, ge=1, le=5000)):
 
 
 @app.post("/api/search/requests")
-async def create_search_request(request: SearchRequestPayload):
+async def create_search_request(request: dict = Body(...)):
     service = app.state.search_service
-    payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    raw_payload = request if isinstance(request, dict) else {}
+    enabled_sources = list(getattr(service, "adapters", {}).keys())
+    try:
+        normalized = normalize_search_payload(raw_payload, default_sources=enabled_sources)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if normalized["delivery_mode"] == "client" and normalized["destination_path"]:
+        raise HTTPException(status_code=400, detail="Client delivery does not use a server destination")
+    if normalized["delivery_mode"] == "client" and not normalized["search_only"]:
+        raise HTTPException(status_code=400, detail="Search & Download is not available for client delivery")
+
+    if "source_priority" not in raw_payload or not raw_payload.get("source_priority"):
+        raw_payload["source_priority"] = normalized["sources"]
+    if "auto_enqueue" not in raw_payload:
+        raw_payload["auto_enqueue"] = not normalized["search_only"]
+    if "media_type" not in raw_payload:
+        raw_payload["media_type"] = "music" if normalized["music_mode"] else "generic"
+    if "destination_dir" not in raw_payload and normalized["destination"] is not None:
+        raw_payload["destination_dir"] = normalized["destination"]
+
+    allowed_keys = {
+        "created_by",
+        "intent",
+        "media_type",
+        "artist",
+        "album",
+        "track",
+        "destination_dir",
+        "include_albums",
+        "include_singles",
+        "min_match_score",
+        "duration_hint_sec",
+        "quality_min_bitrate_kbps",
+        "lossless_only",
+        "auto_enqueue",
+        "source_priority",
+        "max_candidates_per_source",
+    }
+    request_payload = {key: raw_payload.get(key) for key in allowed_keys if key in raw_payload}
+
+    try:
+        parsed = SearchRequestPayload(**request_payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload = parsed.model_dump() if hasattr(parsed, "model_dump") else parsed.dict()
     try:
         request_id = service.create_search_request(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if hasattr(app.state, "search_request_overrides"):
+        app.state.search_request_overrides[request_id] = {
+            "final_format": normalized["final_format"],
+            "delivery_mode": normalized["delivery_mode"],
+            "destination_type": normalized["destination_type"],
+            "destination_path": normalized["destination_path"],
+        }
+    logging.debug("Normalized search payload", extra={"payload": normalized, "request_id": request_id})
     return {"request_id": request_id}
 
 
@@ -2839,7 +3304,7 @@ async def list_search_requests(status: str | None = None, limit: int | None = No
     except Exception:
         logging.exception("Failed to list search requests")
         raise HTTPException(status_code=500, detail="Failed to load search requests")
-    return {"requests": requests}
+    return _sanitize_non_http_urls({"requests": requests})
 
 
 @app.get("/api/search/requests/{request_id}")
@@ -2848,16 +3313,14 @@ async def get_search_request(request_id: str):
     result = service.get_search_request(request_id)
     if not result:
         raise HTTPException(status_code=404, detail="Search request not found")
-    return result
+    return _sanitize_non_http_urls(result)
 
 
 @app.post("/api/search/requests/{request_id}/cancel")
 async def cancel_search_request(request_id: str):
-    service = app.state.search_service
-    ok = service.cancel_search_request(request_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Search request not found")
-    return {"status": "canceled"}
+    store = SearchJobStore(app.state.search_db_path)
+    store.mark_request_cancelled(request_id)
+    return {"ok": True, "request_id": request_id, "status": "cancelled"}
 
 
 @app.post("/api/search/resolve/once")
@@ -2944,32 +3407,303 @@ async def get_search_candidates(item_id: str):
 @app.post("/api/search/items/{item_id}/enqueue")
 async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayload):
     service = app.state.search_service
+    candidate_id = (payload.candidate_id or "").strip()
+    logging.debug(
+        "Search enqueue payload: %s",
+        safe_json(
+            {
+                "item_id": item_id,
+                "candidate_id": candidate_id,
+                "final_format": getattr(payload, "final_format", None),
+            }
+        ),
+    )
+
+    if not candidate_id:
+        logging.warning(
+            "Search enqueue failed: missing candidate_id request_id=%s item_id=%s candidate_id=%s source=%s",
+            None,
+            item_id,
+            candidate_id,
+            None,
+        )
+        return JSONResponse(
+            status_code=400,
+            content={"error": "candidate_id is required", "code": "INVALID_REQUEST"},
+        )
 
     item = service.store.get_item(item_id)
     if not item:
-        raise HTTPException(status_code=404, detail="Search item not found")
+        logging.warning(
+            "Search enqueue failed: item not found request_id=%s item_id=%s candidate_id=%s source=%s",
+            None,
+            item_id,
+            candidate_id,
+            None,
+        )
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Search item not found", "code": "ITEM_NOT_FOUND"},
+        )
 
-    candidate = service.store.get_candidate(payload.candidate_id)
+    candidate = service.store.get_candidate(candidate_id)
     if not candidate or candidate.get("item_id") != item_id:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+        logging.warning(
+            "Search enqueue failed: candidate not found request_id=%s item_id=%s candidate_id=%s source=%s",
+            item.get("request_id"),
+            item_id,
+            candidate_id,
+            None,
+        )
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Candidate not found", "code": "CANDIDATE_NOT_FOUND"},
+        )
+
+    request_id = item.get("request_id")
+    request_row = service.store.get_request_row(request_id) if request_id else None
+    if not request_row:
+        logging.warning(
+            "Search enqueue failed: request not found request_id=%s item_id=%s candidate_id=%s source=%s",
+            request_id,
+            item_id,
+            candidate_id,
+            candidate.get("source"),
+        )
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Search request not found", "code": "REQUEST_NOT_FOUND"},
+        )
+
+    enabled_sources = list(getattr(service, "adapters", {}).keys())
+    try:
+        normalized_request = normalize_search_payload(
+            {
+                "source_priority": request_row.get("source_priority_json"),
+                "auto_enqueue": request_row.get("auto_enqueue"),
+                "media_type": request_row.get("media_type"),
+                "destination_dir": request_row.get("destination_dir"),
+            },
+            default_sources=enabled_sources,
+        )
+    except ValueError as exc:
+        logging.warning(
+            "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+            str(exc),
+            request_id,
+            item_id,
+            candidate_id,
+            candidate.get("source"),
+        )
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid search request payload", "code": "INVALID_REQUEST"},
+        )
+    request_overrides = None
+    if hasattr(app.state, "search_request_overrides"):
+        request_overrides = app.state.search_request_overrides.get(request_id)
+    delivery_mode = normalized_request.get("delivery_mode")
+    if request_overrides and request_overrides.get("delivery_mode"):
+        delivery_mode = request_overrides.get("delivery_mode")
 
     url = candidate.get("url")
-    if not url:
-        raise HTTPException(status_code=400, detail="Candidate has no URL")
-
-    # Build a synthetic /api/run payload
-    run_payload = {
-        "single_url": True,
-        "url": url,
-        "media_type": item.get("media_type"),
-        "final_format": payload.final_format,
-        "destination": service._resolve_request_destination(
-            service.store.get_request_row(item["request_id"]).get("destination_dir")
+    source = candidate.get("source")
+    logging.debug(
+        "Search enqueue resolved item: %s",
+        safe_json(
+            {
+                "id": item.get("id"),
+                "status": item.get("status"),
+                "request_id": request_id,
+                "media_type": item.get("media_type"),
+                "item_type": item.get("item_type"),
+            }
         ),
-    }
+    )
+    logging.debug(
+        "Search enqueue resolved candidate: %s",
+        safe_json(
+            {
+                "id": candidate.get("id"),
+                "source": source,
+                "url": url,
+                "external_id": candidate.get("external_id"),
+            }
+        ),
+    )
+    logging.debug(
+        "Search enqueue derived destination: %s",
+        safe_json(
+            {
+                "destination": service._resolve_request_destination(
+                    normalized_request.get("destination_path")
+                ),
+                "final_format": getattr(payload, "final_format", None),
+            }
+        ),
+    )
 
-    # Delegate to the SAME code path as Search + Download
-    return await run_direct_url(run_payload)
+    if not url or not _is_http_url(url):
+        logging.warning(
+            "Search enqueue failed: non-downloadable URL request_id=%s item_id=%s candidate_id=%s source=%s",
+            request_id,
+            item_id,
+            candidate_id,
+            source,
+        )
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "This search result is not directly downloadable.",
+                "code": "CANDIDATE_NOT_DOWNLOADABLE",
+            },
+        )
+
+    if item.get("status") == "enqueued":
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Candidate already enqueued.", "code": "ALREADY_ENQUEUED"},
+        )
+    if item.get("status") == "skipped" and item.get("error") == "duplicate":
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Already downloaded.", "code": "ALREADY_DOWNLOADED"},
+        )
+
+    active_job = service.queue_store.find_active_job("search", request_id, url)
+    if active_job:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Candidate already enqueued.", "code": "ALREADY_ENQUEUED"},
+        )
+
+    final_format_override = getattr(payload, "final_format", None)
+    if not final_format_override and request_overrides:
+        final_format_override = request_overrides.get("final_format")
+
+    async def _run_immediate():
+        config = _read_config_or_404()
+        effective_final_format = final_format_override or config.get("final_format")
+        media_type = item.get("media_type") or "generic"
+        if _normalize_audio_format(effective_final_format):
+            media_type = "music"
+        media_intent = "album" if item.get("item_type") == "album" else "track"
+        try:
+            result = await anyio.to_thread.run_sync(
+                _run_immediate_download_to_client,
+                url=url,
+                config=config,
+                paths=app.state.paths,
+                media_type=media_type,
+                media_intent=media_intent,
+                final_format_override=effective_final_format,
+                origin="search",
+            )
+        except Exception as exc:
+            logging.warning(
+                "Search client delivery failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+                exc,
+                request_id,
+                item_id,
+                candidate_id,
+                source,
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Client delivery failed.", "code": "CLIENT_DELIVERY_FAILED"},
+            )
+
+        service.store.update_item_status(item_id, "enqueued", chosen=candidate)
+        if request_row.get("status") not in {"completed", "completed_with_skips", "failed"}:
+            service.store.update_request_status(request_id, "completed")
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "created": True,
+                "job_id": result.get("delivery_id"),
+                "delivery_id": result.get("delivery_id"),
+                "delivery_url": f"/api/deliveries/{result.get('delivery_id')}/download",
+                "filename": result.get("filename"),
+                "expires_at": result.get("expires_at"),
+            },
+        )
+
+    def _enqueue():
+        if delivery_mode == "client":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "Client delivery is not available for queued downloads.",
+                    "code": "CLIENT_DELIVERY_UNSUPPORTED",
+                },
+            )
+        try:
+            result = service.enqueue_item_candidate(
+                item_id,
+                candidate_id,
+                final_format_override=final_format_override,
+            )
+        except ValueError as exc:
+            logging.warning(
+                "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+                str(exc),
+                request_id,
+                item_id,
+                candidate_id,
+                source,
+            )
+            error_msg = "Invalid destination"
+            code = "INVALID_DESTINATION"
+            if "invalid_destination" not in str(exc).lower():
+                error_msg = "Invalid request"
+                code = "INVALID_REQUEST"
+            return JSONResponse(status_code=422, content={"error": error_msg, "code": code})
+        except Exception as exc:
+            logging.warning(
+                "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+                exc,
+                request_id,
+                item_id,
+                candidate_id,
+                source,
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Enqueue failed.", "code": "ENQUEUE_FAILED"},
+            )
+
+        if not result:
+            logging.warning(
+                "Search enqueue failed: unresolved request_id=%s item_id=%s candidate_id=%s source=%s",
+                request_id,
+                item_id,
+                candidate_id,
+                source,
+            )
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Search item not found", "code": "ITEM_NOT_FOUND"},
+            )
+
+        if not result.get("created") and result.get("job_id"):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Already downloaded.", "code": "ALREADY_DOWNLOADED"},
+            )
+
+        return result
+
+    result = execute_download(
+        delivery_mode=delivery_mode,
+        run_immediate=_run_immediate,
+        enqueue=_enqueue,
+    )
+    if asyncio.iscoroutine(result):
+        return await result
+    return result
 
 
 @app.get("/api/download_jobs")
@@ -3250,3 +3984,53 @@ if __name__ == "__main__":
     host = _env_or_default("YT_ARCHIVER_HOST", "127.0.0.1")
     port = int(_env_or_default("YT_ARCHIVER_PORT", "8000"))
     uvicorn.run("api.main:app", host=host, port=port, reload=False)
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, payload: CancelJobRequest = Body(default=CancelJobRequest())):
+    """
+    Cancel a queued/active download job.
+
+    Behavior:
+    - If the job corresponds to the direct-URL fast-lane, terminate the active yt-dlp CLI subprocess.
+    - If the job is a queued worker job, mark it CANCELLED in the download_jobs table and request
+      cancellation from the worker engine (if supported).
+    """
+    reason = (payload.reason or "Cancelled by user").strip() if payload else "Cancelled by user"
+    # 1) Direct URL fast-lane: terminate current CLI process (if this matches)
+    try:
+        current_job_id = getattr(app.state, "current_download_job_id", None)
+        current_proc = getattr(app.state, "current_download_proc", None)
+        if current_job_id and current_job_id == job_id and current_proc:
+            app.state.cancel_requested = True
+            await anyio.to_thread.run_sync(_terminate_subprocess, current_proc)
+            return {"ok": True, "job_id": job_id, "status": "cancelled", "scope": "direct_url"}
+    except Exception:
+        logging.exception("Direct URL cancel path failed")
+
+    # 2) Unified queue jobs: mark cancelled and ask worker to stop if possible
+    try:
+        store = DownloadJobStore(app.state.paths.db_path)
+        try:
+            store.mark_canceled(job_id, reason=reason)
+        except AttributeError:
+            # Backward compatibility: if store method is named differently in this build
+            store.mark_canceled(job_id)
+
+        engine = getattr(app.state, "worker_engine", None)
+        if engine is not None:
+            # Best-effort: only call if the engine exposes a cancellation hook.
+            for attr in ("cancel_job", "request_cancel", "kill_job", "cancel"):
+                fn = getattr(engine, attr, None)
+                if callable(fn):
+                    try:
+                        fn(job_id, reason=reason)
+                    except TypeError:
+                        fn(job_id)
+                    break
+
+        return {"ok": True, "job_id": job_id, "status": "cancelled", "scope": "queue"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.exception("Cancel job failed")
+        raise HTTPException(status_code=500, detail=f"Cancel failed: {exc}")

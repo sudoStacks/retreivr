@@ -1,3 +1,54 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+MAX_PARALLEL_ADAPTERS = 4
+
+# Helper to run one adapter safely
+def _run_adapter_search(adapter, item, max_candidates, canonical_payload):
+    """
+    Execute a single adapter search safely.
+    - Adapter exceptions are contained
+    - Invalid URLs are dropped here
+    - Never raises
+    """
+    try:
+        if item["item_type"] == "album":
+            candidates = adapter.search_album(
+                item["artist"],
+                item.get("album"),
+                max_candidates,
+            )
+        else:
+            candidates = adapter.search_track(
+                item["artist"],
+                item.get("track"),
+                item.get("album"),
+                max_candidates,
+            )
+    except Exception as exc:
+        logging.exception(
+            "adapter_search_exception",
+            extra={
+                "adapter": getattr(adapter, "name", repr(adapter)),
+                "artist": item.get("artist"),
+                "album": item.get("album"),
+                "track": item.get("track"),
+                "error": str(exc),
+            },
+        )
+        return []
+
+    out = []
+    for cand in candidates or []:
+        try:
+            url = cand.get("url")
+            if not _is_http_url(url):
+                continue
+            cand = dict(cand)
+            cand["canonical_metadata"] = canonical_payload
+            out.append(cand)
+        except Exception:
+            continue
+
+    return out
 import json
 import logging
 import os
@@ -9,7 +60,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from engine.job_queue import DownloadJobStore, build_output_template, ensure_download_jobs_table
+from engine.job_queue import DownloadJobStore, build_output_template, ensure_download_jobs_table, canonicalize_url
 from engine.json_utils import safe_json_dumps
 from engine.paths import DATA_DIR
 from engine.search_adapters import default_adapters
@@ -20,6 +71,7 @@ REQUEST_STATUSES = {"pending", "resolving", "completed", "completed_with_skips",
 ITEM_STATUSES = {
     "queued",
     "searching",
+    "searching_source",
     "candidate_found",
     "selected",
     "enqueued",
@@ -50,6 +102,15 @@ class SearchRequest:
 def _utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
+def _is_http_url(value: str | None) -> bool:
+    if not value or not isinstance(value, str):
+        return False
+    value = value.strip().lower()
+    return value.startswith("http://") or value.startswith("https://")
+
+# Helper: Coerce to HTTP(S) URL or None
+def _coerce_http_url(value: str | None) -> str | None:
+    return value if _is_http_url(value) else None
 
 # Helper: Detect if a value is a URL
 def _is_url(value: str | None) -> bool:
@@ -93,6 +154,19 @@ def _normalize_media_type(value, *, default="generic"):
     if value in {"generic", "general"}:
         return "generic"
     return None
+
+
+# Audio formats that require the audio-mode download pipeline
+_AUDIO_FINAL_FORMATS = {"mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"}
+
+def _is_audio_final_format(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        v = str(value).strip().lower()
+    except Exception:
+        return False
+    return v in _AUDIO_FINAL_FORMATS
 
 
 def _extract_canonical_id(metadata):
@@ -144,6 +218,10 @@ def ensure_search_tables(conn):
         cur.execute("ALTER TABLE search_requests ADD COLUMN destination_dir TEXT")
     if "auto_enqueue" not in existing_requests:
         cur.execute("ALTER TABLE search_requests ADD COLUMN auto_enqueue INTEGER DEFAULT 1")
+    if "adapters_total" not in existing_requests:
+        cur.execute("ALTER TABLE search_requests ADD COLUMN adapters_total INTEGER")
+    if "adapters_completed" not in existing_requests:
+        cur.execute("ALTER TABLE search_requests ADD COLUMN adapters_completed INTEGER")
 
 
     cur.execute(
@@ -550,7 +628,7 @@ class SearchJobStore:
                         candidate["id"],
                         item_id,
                         candidate.get("source"),
-                        candidate.get("url"),
+                        _coerce_http_url(candidate.get("url")),
                         candidate.get("title"),
                         candidate.get("uploader"),
                         candidate.get("artist_detected"),
@@ -587,7 +665,7 @@ class SearchJobStore:
                 (
                     status,
                     chosen.get("source") if chosen else None,
-                    chosen.get("url") if chosen else None,
+                    _coerce_http_url(chosen.get("url")) if chosen else None,
                     chosen.get("final_score") if chosen else None,
                     error,
                     item_id,
@@ -604,6 +682,34 @@ class SearchJobStore:
             cur.execute(
                 "UPDATE search_requests SET status=?, updated_at=?, error=? WHERE id=?",
                 (status, _utc_now(), error, request_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    
+    def update_request_progress(self, request_id, *, adapters_total=None, adapters_completed=None):
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            fields = []
+            params = []
+            if adapters_total is not None:
+                fields.append("adapters_total=?")
+                params.append(adapters_total)
+            if adapters_completed is not None:
+                fields.append("adapters_completed=?")
+                params.append(adapters_completed)
+            if not fields:
+                return
+            params.append(_utc_now())
+            params.append(request_id)
+            cur.execute(
+                f"""
+                UPDATE search_requests
+                SET {", ".join(fields)}, updated_at=?
+                WHERE id=?
+                """,
+                params,
             )
             conn.commit()
         finally:
@@ -643,6 +749,12 @@ class SearchResolutionService:
             return template.get("output_dir")
         except ValueError:
             return destination
+
+    def _get_request_override(self, request_id):
+        overrides = getattr(self, "request_overrides", None)
+        if isinstance(overrides, dict):
+            return overrides.get(request_id)
+        return None
 
 
     def _ensure_queue_schema(self):
@@ -730,6 +842,15 @@ class SearchResolutionService:
             self.store.update_item_status(item["id"], "searching")
             _log_event(logging.INFO, "item_searching", request_id=request_id, item_id=item["id"])
 
+            # Step #1: Progressive search results - adapter progress state
+            adapters_total = len(_parse_source_priority(request_row.get("source_priority_json")))
+            adapters_completed = 0
+            self.store.update_request_progress(
+                request_id,
+                adapters_total=adapters_total,
+                adapters_completed=0,
+            )
+
             canonical_payload = None
             if self.canonical_resolver:
                 if item["item_type"] == "album":
@@ -745,32 +866,121 @@ class SearchResolutionService:
             max_candidates = int(request_row.get("max_candidates_per_source") or 5)
             scored = []
 
-            for source in source_priority:
-                adapter = self.adapters.get(source)
-                if not adapter:
-                    _log_event(logging.ERROR, "adapter_missing", request_id=request_id, item_id=item["id"], source=source)
-                    continue
+            # --- Parallel adapter execution (bounded) ---
+            futures = {}
+            with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ADAPTERS, len(source_priority))) as pool:
+                for source in source_priority:
+                    adapter = self.adapters.get(source)
+                    if not adapter:
+                        _log_event(
+                            logging.ERROR,
+                            "adapter_missing",
+                            request_id=request_id,
+                            item_id=item["id"],
+                            source=source,
+                        )
+                        adapters_completed += 1
+                        self.store.update_request_progress(
+                            request_id,
+                            adapters_completed=adapters_completed,
+                        )
+                        continue
 
-                if item["item_type"] == "album":
-                    candidates = adapter.search_album(item["artist"], item.get("album"), max_candidates)
-                else:
-                    candidates = adapter.search_track(
-                        item["artist"],
-                        item.get("track"),
-                        item.get("album"),
-                        max_candidates,
+                    self.store.update_item_status(item["id"], "searching_source")
+                    _log_event(
+                        logging.INFO,
+                        "adapter_search_started",
+                        request_id=request_id,
+                        item_id=item["id"],
+                        source=source,
+                        adapters_completed=adapters_completed,
+                        adapters_total=adapters_total,
                     )
 
-                for cand in candidates:
-                    cand["source"] = source
-                    cand["canonical_metadata"] = canonical_payload
-                    modifier = adapter.source_modifier(cand)
-                    scores = score_candidate(item, cand, source_modifier=modifier)
-                    cand.update(scores)
-                    cand["canonical_json"] = safe_json_dumps(canonical_payload) if canonical_payload else None
-                    cand["id"] = uuid4().hex
-                    scored.append(cand)
+                    futures[
+                        pool.submit(
+                            _run_adapter_search,
+                            adapter,
+                            item,
+                            max_candidates,
+                            canonical_payload,
+                        )
+                    ] = source
 
+                for fut in as_completed(futures):
+                    source = futures[fut]
+                    try:
+                        candidates = fut.result()
+                    except Exception as exc:
+                        _log_event(
+                            logging.ERROR,
+                            "adapter_search_failed",
+                            request_id=request_id,
+                            item_id=item["id"],
+                            source=source,
+                            error=str(exc),
+                        )
+                        adapters_completed += 1
+                        self.store.update_request_progress(
+                            request_id,
+                            adapters_completed=adapters_completed,
+                        )
+                        continue
+
+                    for cand in candidates:
+                        if not _is_http_url(cand.get("url")):
+                            _log_event(
+                                logging.WARNING,
+                                "adapter_candidate_invalid_url",
+                                request_id=request_id,
+                                item_id=item["id"],
+                                source=source,
+                                url=cand.get("url"),
+                            )
+                            continue
+                        cand["source"] = source
+                        modifier = self.adapters[source].source_modifier(cand)
+                        scores = score_candidate(item, cand, source_modifier=modifier)
+                        cand.update(scores)
+                        cand["canonical_json"] = safe_json_dumps(canonical_payload) if canonical_payload else None
+                        cand["id"] = uuid4().hex
+                        scored.append(cand)
+
+                    if candidates:
+                        # Insert partial candidates immediately for progressive UI updates
+                        partial_ranked = rank_candidates(
+                            scored,
+                            source_priority=source_priority,
+                        )
+                        self.store.reset_candidates_for_item(item["id"])
+                        self.store.insert_candidates(item["id"], partial_ranked)
+                        _log_event(
+                            logging.INFO,
+                            "adapter_candidates_emitted",
+                            request_id=request_id,
+                            item_id=item["id"],
+                            source=source,
+                            candidates_total=len(partial_ranked),
+                            adapters_completed=adapters_completed,
+                            adapters_total=adapters_total,
+                        )
+
+                    adapters_completed += 1
+                    _log_event(
+                        logging.INFO,
+                        "adapter_search_completed",
+                        request_id=request_id,
+                        item_id=item["id"],
+                        source=source,
+                        adapters_completed=adapters_completed,
+                        adapters_total=adapters_total,
+                    )
+                    self.store.update_request_progress(
+                        request_id,
+                        adapters_completed=adapters_completed,
+                    )
+
+            # --- Final selection logic below: do not change ---
             if not scored:
                 self.store.update_item_status(item["id"], "failed", error="no_candidates")
                 _log_event(logging.WARNING, "item_failed", request_id=request_id, item_id=item["id"], error="no_candidates")
@@ -840,6 +1050,17 @@ class SearchResolutionService:
                         error=f"invalid_destination: {exc}",
                     )
                     continue
+            request_override = self._get_request_override(request_id)
+            final_format_override = request_override.get("final_format") if request_override else None
+            if final_format_override:
+                if output_template is None:
+                    output_template = {}
+                output_template["final_format"] = final_format_override
+
+                # Invariant: if an audio codec is requested (e.g. mp3), force the audio-mode pipeline
+                # even when the search request/item media_type is generic.
+                if _is_audio_final_format(final_format_override):
+                    output_template["audio_mode"] = True
 
             canonical_for_job = chosen.get("canonical_metadata") if isinstance(chosen, dict) else None
             if not canonical_for_job and isinstance(chosen, dict) and chosen.get("canonical_json"):
@@ -855,13 +1076,18 @@ class SearchResolutionService:
             canonical_id = _extract_canonical_id(canonical_for_job or chosen)
             trace_id = uuid4().hex
             media_intent = "album" if item["item_type"] == "album" else "track"
+            external_id = chosen.get("external_id") if isinstance(chosen, dict) else None
+            canonical_url = canonicalize_url(chosen.get("source"), chosen.get("url"), external_id)
             job_id, created, dedupe_reason = self.queue_store.enqueue_job(
                 origin=job_origin,
                 origin_id=request_id,
-                media_type=item["media_type"],
+                media_type=("music" if _is_audio_final_format(final_format_override) else item["media_type"]),
                 media_intent=media_intent,
                 source=chosen["source"],
                 url=chosen["url"],
+                input_url=chosen.get("url"),
+                canonical_url=canonical_url,
+                external_id=external_id,
                 output_template=output_template,
                 trace_id=trace_id,
                 resolved_destination=resolved_destination,
@@ -948,20 +1174,29 @@ class SearchResolutionService:
             self.store.update_request_status(request_id, "completed_with_skips")
         else:
             self.store.update_request_status(request_id, "failed", error="no_items_enqueued")
+            self.store.update_request_progress(
+                request_id,
+                adapters_completed=adapters_total,
+            )
         return request_id
 
-    def enqueue_item_candidate(self, item_id, candidate_id):
+    def enqueue_item_candidate(self, item_id, candidate_id, *, final_format_override=None):
         item = self.store.get_item(item_id)
         if not item:
             return None
         candidate = self.store.get_candidate(candidate_id)
         if not candidate or candidate.get("item_id") != item_id:
             return None
-        if not candidate.get("url"):
+        candidate_url = candidate.get("url")
+        if not _is_http_url(candidate_url):
             return None
         request = self.store.get_request_row(item.get("request_id"))
         if not request:
             return None
+        if final_format_override is None:
+            request_override = self._get_request_override(request.get("id"))
+            if request_override:
+                final_format_override = request_override.get("final_format")
 
         destination_dir = request.get("destination_dir") or None
         output_template = None
@@ -974,6 +1209,15 @@ class SearchResolutionService:
                 )
             except ValueError as exc:
                 raise ValueError(f"invalid_destination: {exc}")
+        if final_format_override:
+            if output_template is None:
+                output_template = {}
+            output_template["final_format"] = final_format_override
+
+            # Invariant: if an audio codec is requested (e.g. mp3), force the audio-mode pipeline
+            # even when the item media_type is generic.
+            if _is_audio_final_format(final_format_override):
+                output_template["audio_mode"] = True
 
         canonical_payload = None
         canonical_raw = candidate.get("canonical_json")
@@ -991,13 +1235,18 @@ class SearchResolutionService:
         canonical_id = _extract_canonical_id(canonical_payload or candidate)
         trace_id = uuid4().hex
         media_intent = "album" if item.get("item_type") == "album" else "track"
+        external_id = candidate.get("external_id") if isinstance(candidate, dict) else None
+        canonical_url = canonicalize_url(candidate.get("source"), candidate_url, external_id)
         job_id, created, dedupe_reason = self.queue_store.enqueue_job(
             origin="search",
             origin_id=request["id"],
-            media_type=item.get("media_type") or "generic",
+            media_type=("music" if _is_audio_final_format(final_format_override) else (item.get("media_type") or "generic")),
             media_intent=media_intent,
             source=candidate.get("source"),
-            url=candidate.get("url"),
+            url=candidate_url,
+            input_url=candidate_url,
+            canonical_url=canonical_url,
+            external_id=external_id,
             output_template=output_template,
             trace_id=trace_id,
             resolved_destination=resolved_destination,

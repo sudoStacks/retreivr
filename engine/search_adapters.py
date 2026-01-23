@@ -1,8 +1,17 @@
 import logging
+from urllib.parse import urlparse
 
 from yt_dlp import YoutubeDL
 
 from engine.json_utils import safe_json_dumps
+
+def _is_http_url(value):
+    if not value or not isinstance(value, str):
+        return False
+    try:
+        return urlparse(value).scheme in ("http", "https")
+    except Exception:
+        return False
 
 class SearchAdapter:
     source = ""
@@ -19,6 +28,9 @@ class SearchAdapter:
     def source_modifier(self, candidate):
         return 1.0
 
+    def _candidate_thumbnail_url(self, entry):
+        return None
+
 
 class _YtDlpSearchMixin(SearchAdapter):
     search_prefix = ""
@@ -34,6 +46,7 @@ class _YtDlpSearchMixin(SearchAdapter):
             "ignoreerrors": True,
             "noplaylist": True,
             "cachedir": False,
+            "socket_timeout": 10,
         }
         try:
             with YoutubeDL(opts) as ydl:
@@ -50,9 +63,19 @@ class _YtDlpSearchMixin(SearchAdapter):
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            url = entry.get("webpage_url") or entry.get("url")
+            url = entry.get("webpage_url")
+            if not _is_http_url(url):
+                # yt-dlp search extractors often expose internal extractor URLs (e.g. bandcampsearch5)
+                # which must never be treated as real URLs.
+                logging.debug(
+                    "Skipping non-http search result from %s: %r",
+                    self.source,
+                    entry.get("url"),
+                )
+                continue
+
             title = entry.get("title")
-            if not url or not title:
+            if not title:
                 continue
             isrc = entry.get("isrc")
             if not isrc:
@@ -75,6 +98,10 @@ class _YtDlpSearchMixin(SearchAdapter):
                 "isrc": isrc,
                 "track_count": track_count,
             }
+            candidate["thumbnail_url"] = None
+            thumbnail_url = self._candidate_thumbnail_url(entry)
+            if thumbnail_url:
+                candidate["thumbnail_url"] = thumbnail_url
             results.append(candidate)
         return results
 
@@ -93,6 +120,15 @@ class YouTubeMusicAdapter(_YtDlpSearchMixin):
     source = "youtube_music"
     search_prefix = "ytsearch"
 
+    def _candidate_thumbnail_url(self, entry):
+        video_id = entry.get("id")
+        if not isinstance(video_id, str):
+            return None
+        video_id = video_id.strip()
+        if not video_id:
+            return None
+        return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
     def source_modifier(self, candidate):
         if candidate.get("official"):
             return 1.0
@@ -103,6 +139,15 @@ class YouTubeAdapter(_YtDlpSearchMixin):
     source = "youtube"
     search_prefix = "ytsearch"
 
+    def _candidate_thumbnail_url(self, entry):
+        video_id = entry.get("id")
+        if not isinstance(video_id, str):
+            return None
+        video_id = video_id.strip()
+        if not video_id:
+            return None
+        return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
     def source_modifier(self, candidate):
         # Neutral weight for general video content
         return 0.85
@@ -112,6 +157,16 @@ class SoundCloudAdapter(_YtDlpSearchMixin):
     source = "soundcloud"
     search_prefix = "scsearch"
 
+    def _candidate_thumbnail_url(self, entry):
+        artwork_url = entry.get("artwork_url")
+        if not isinstance(artwork_url, str):
+            return None
+        artwork_url = artwork_url.strip()
+        if not artwork_url:
+            return None
+        upgraded = artwork_url.replace("-large", "-t500x500")
+        return upgraded if _is_http_url(upgraded) else None
+
     def source_modifier(self, candidate):
         return 0.95
 
@@ -119,6 +174,15 @@ class SoundCloudAdapter(_YtDlpSearchMixin):
 class BandcampAdapter(_YtDlpSearchMixin):
     source = "bandcamp"
     search_prefix = "bandcampsearch"
+
+    def _candidate_thumbnail_url(self, entry):
+        for key in ("thumbnail_url", "image"):
+            value = entry.get(key)
+            if isinstance(value, str):
+                value = value.strip()
+                if value and _is_http_url(value):
+                    return value
+        return None
 
     def source_modifier(self, candidate):
         return 1.05

@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import tempfile
@@ -30,8 +31,21 @@ JOB_STATUS_POSTPROCESSING = "postprocessing"
 JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_SKIPPED_DUPLICATE = "skipped_duplicate"
 JOB_STATUS_FAILED = "failed"
+JOB_STATUS_CANCELLED = "cancelled"
 
-TERMINAL_STATUSES = (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_SKIPPED_DUPLICATE)
+TERMINAL_STATUSES = (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_SKIPPED_DUPLICATE,
+    JOB_STATUS_CANCELLED,
+)
+
+# --- CancelledError for job cancellation
+class CancelledError(Exception):
+    """Raised to abort an in-flight download due to user cancellation."""
+
+class PostprocessingError(Exception):
+    pass
 
 _FORMAT_VIDEO = (
     "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
@@ -40,7 +54,9 @@ _FORMAT_VIDEO = (
     "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
     "bestvideo*+bestaudio/best"
 )
-_FORMAT_AUDIO = "bestaudio/best"
+# Prefer audio-only formats first; fall back to any best format only if needed.
+# Keep this quoted/argument-safe in CLI execution (we do NOT use shell=True).
+_FORMAT_AUDIO = "bestaudio[acodec!=none]/bestaudio/best"
 
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
 
@@ -88,6 +104,9 @@ class DownloadJob:
     media_intent: str
     source: str
     url: str
+    input_url: str | None
+    canonical_url: str | None
+    external_id: str | None
     status: str
     queued: str | None
     claimed: str | None
@@ -132,6 +151,9 @@ def ensure_download_jobs_table(conn):
             media_intent TEXT NOT NULL,
             source TEXT NOT NULL,
             url TEXT NOT NULL,
+            input_url TEXT,
+            canonical_url TEXT,
+            external_id TEXT,
             status TEXT NOT NULL,
             queued TEXT,
             claimed TEXT,
@@ -162,6 +184,9 @@ def ensure_download_jobs_table(conn):
         "resolved_destination",
         "canonical_id",
         "file_path",
+        "input_url",
+        "canonical_url",
+        "external_id",
     ):
         if column not in existing_columns:
             cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} TEXT")
@@ -187,6 +212,43 @@ def ensure_downloads_table(conn):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_downloaded_at ON downloads (downloaded_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_playlist_id ON downloads (playlist_id)")
+    conn.commit()
+
+
+def ensure_download_history_table(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS download_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id TEXT,
+            title TEXT,
+            filename TEXT,
+            destination TEXT,
+            source TEXT,
+            status TEXT,
+            created_at TEXT,
+            completed_at TEXT,
+            file_size_bytes INTEGER,
+            input_url TEXT,
+            canonical_url TEXT,
+            external_id TEXT
+        )
+        """
+    )
+    cur.execute("PRAGMA table_info(download_history)")
+    existing_columns = {row[1] for row in cur.fetchall()}
+    for column in ("input_url", "canonical_url", "external_id", "source"):
+        if column not in existing_columns:
+            cur.execute(f"ALTER TABLE download_history ADD COLUMN {column} TEXT")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_history_source_extid "
+        "ON download_history (source, external_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_history_canonical_url "
+        "ON download_history (canonical_url)"
+    )
     conn.commit()
 
 def is_music_media_type(value):
@@ -215,7 +277,7 @@ class DownloadJobStore:
         self.db_path = db_path
 
     def _connect(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -237,6 +299,9 @@ class DownloadJobStore:
             media_intent=row["media_intent"],
             source=row["source"],
             url=row["url"],
+            input_url=row.get("input_url"),
+            canonical_url=row.get("canonical_url"),
+            external_id=row.get("external_id"),
             status=row["status"],
             queued=row["queued"],
             claimed=row["claimed"],
@@ -406,6 +471,9 @@ class DownloadJobStore:
         media_intent,
         source,
         url,
+        input_url=None,
+        canonical_url=None,
+        external_id=None,
         output_template=None,
         max_attempts=3,
         trace_id=None,
@@ -417,6 +485,12 @@ class DownloadJobStore:
         destination = resolved_destination
         if destination is None and output_template:
             destination = (output_template or {}).get("output_dir")
+
+        input_url = input_url or url
+        if external_id is None and source in {"youtube", "youtube_music"}:
+            external_id = extract_video_id(url)
+        if canonical_url is None:
+            canonical_url = canonicalize_url(source, input_url, external_id)
 
         duplicate = self.find_duplicate_job(
             canonical_id=canonical_id,
@@ -448,14 +522,19 @@ class DownloadJobStore:
         conn = self._connect()
         try:
             cur = conn.cursor()
-            cur.execute(
-                """
+            # Retry a few times on transient SQLite write contention (rapid multi-click enqueue).
+            for attempt in range(5):
+                try:
+                    cur.execute("BEGIN IMMEDIATE")
+                    cur.execute(
+                        """
                 INSERT INTO download_jobs (
                     id, origin, origin_id, media_type, media_intent, source, url,
+                    input_url, canonical_url, external_id,
                     status, queued, claimed, downloading, postprocessing, completed,
                     failed, canceled, attempts, max_attempts, created_at, updated_at,
                     last_error, trace_id, output_template, resolved_destination, canonical_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -465,27 +544,37 @@ class DownloadJobStore:
                     media_intent,
                     source,
                     url,
+                    input_url,
+                    canonical_url,
+                    external_id,
                     JOB_STATUS_QUEUED,
                     now,
                     None,
                     None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    0,
-                    max_attempts,
-                    now,
-                    now,
-                    None,
-                    trace_id,
-                    output_template_json,
-                    destination,
-                    canonical_id,
-                ),
-            )
-            conn.commit()
-            return job_id, True, None
+                            None,
+                            None,
+                            None,
+                            None,
+                            0,
+                            max_attempts,
+                            now,
+                            now,
+                            None,
+                            trace_id,
+                            output_template_json,
+                            destination,
+                            canonical_id,
+                        ),
+                    )
+                    conn.commit()
+                    return job_id, True, None
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    if "locked" in msg or "busy" in msg:
+                        conn.rollback()
+                        time.sleep(0.05 * (2**attempt))
+                        continue
+                    raise
         finally:
             conn.close()
 
@@ -571,10 +660,10 @@ class DownloadJobStore:
             cur.execute(
                 """
                 UPDATE download_jobs
-                SET status=?, canceled=?, failed=?, updated_at=?, last_error=?
+                SET status=?, canceled=?, updated_at=?, last_error=?
                 WHERE id=?
                 """,
-                (JOB_STATUS_FAILED, now, now, now, reason, job_id),
+                (JOB_STATUS_CANCELLED, now, now, reason, job_id),
             )
             conn.commit()
         finally:
@@ -588,12 +677,11 @@ class DownloadJobStore:
             cur.execute(
                 """
                 UPDATE download_jobs
-                SET status=?, canceled=?, failed=?, updated_at=?, last_error=?
+                SET status=?, canceled=?, updated_at=?, last_error=?
                 WHERE status IN (?, ?, ?, ?)
                 """,
                 (
-                    JOB_STATUS_FAILED,
-                    now,
+                    JOB_STATUS_CANCELLED,
                     now,
                     now,
                     reason,
@@ -701,6 +789,8 @@ class DownloadWorkerEngine:
             conn.close()
         self._locks = {}
         self._locks_lock = threading.Lock()
+        self._cancel_flags = {}
+        self._cancel_lock = threading.Lock()
 
     def run_once(self, *, stop_event=None):
         sources = self.store.list_sources_with_queued_jobs()
@@ -739,12 +829,50 @@ class DownloadWorkerEngine:
                 self._locks[source] = lock
             return lock
 
+    def cancel_job(self, job_id: str, *, reason: str | None = None) -> bool:
+        """
+        Request cancellation of a specific job.
+        - Marks the job as CANCELLED in the DB (so UI updates immediately).
+        - If the job is actively downloading, the progress hook will abort the yt-dlp run.
+        """
+        reason = reason or "Cancelled by user"
+        try:
+            # Mark cancelled immediately for UI/state correctness.
+            self.store.mark_canceled(job_id, reason=reason)
+        except Exception:
+            logging.exception("Failed to mark job cancelled in store: %s", job_id)
+
+        with self._cancel_lock:
+            evt = self._cancel_flags.get(job_id)
+            if evt is None:
+                evt = threading.Event()
+                self._cancel_flags[job_id] = evt
+            evt.set()
+        return True
+
+    def _is_job_cancelled(self, job_id: str, stop_event: threading.Event | None) -> bool:
+        if stop_event and stop_event.is_set():
+            return True
+        try:
+            if self.store.get_job_status(job_id) == JOB_STATUS_CANCELLED:
+                return True
+        except Exception:
+            pass
+        with self._cancel_lock:
+            evt = self._cancel_flags.get(job_id)
+            return bool(evt and evt.is_set())
+
     def _run_source_once(self, source, lock, stop_event):
         try:
             if stop_event and stop_event.is_set():
                 return
             job = self.store.claim_next_job(source)
             if not job:
+                return
+            # If a cancel request came in while this job was queued, honor it immediately.
+            if self._is_job_cancelled(job.id, stop_event):
+                self.store.mark_canceled(job.id, reason="Cancelled by user")
+                _log_event(logging.INFO, "job_cancelled", job_id=job.id, trace_id=job.trace_id, source=job.source)
                 return
             _log_event(
                 logging.INFO,
@@ -771,25 +899,16 @@ class DownloadWorkerEngine:
                 media_intent=job.media_intent,
             )
             return
-        if stop_event and stop_event.is_set():
-            error_message = "cancel_requested"
-            self.store.record_failure(
-                job,
-                error_message=error_message,
-                retryable=False,
-                retry_delay_seconds=self.retry_delay_seconds,
-            )
+        if self._is_job_cancelled(job.id, stop_event):
+            self.store.mark_canceled(job.id, reason="Cancelled by user")
             _log_event(
-                logging.ERROR,
-                "job_failed",
+                logging.INFO,
+                "job_cancelled",
                 job_id=job.id,
                 trace_id=job.trace_id,
                 source=job.source,
                 origin=job.origin,
                 media_intent=job.media_intent,
-                retryable=False,
-                status=JOB_STATUS_FAILED,
-                error=error_message,
             )
             return
         adapter = self.adapters.get(job.source)
@@ -823,7 +942,9 @@ class DownloadWorkerEngine:
                 job,
                 self.config,
                 self.paths,
-                stop_event=stop_event,
+                stop_event=None,
+                cancel_check=lambda: self._is_job_cancelled(job.id, stop_event),
+                cancel_reason="Cancelled by user",
                 media_type=job.media_type,
                 media_intent=job.media_intent,
             )
@@ -832,25 +953,16 @@ class DownloadWorkerEngine:
             final_path, meta = result
             if self.store.get_job_status(job.id) == JOB_STATUS_FAILED:
                 return
-            if stop_event and stop_event.is_set():
-                error_message = "cancel_requested"
-                self.store.record_failure(
-                    job,
-                    error_message=error_message,
-                    retryable=False,
-                    retry_delay_seconds=self.retry_delay_seconds,
-                )
+            if self._is_job_cancelled(job.id, stop_event):
+                self.store.mark_canceled(job.id, reason="Cancelled by user")
                 _log_event(
-                    logging.ERROR,
-                    "job_failed",
+                    logging.INFO,
+                    "job_cancelled",
                     job_id=job.id,
                     trace_id=job.trace_id,
                     source=job.source,
                     origin=job.origin,
                     media_intent=job.media_intent,
-                    retryable=False,
-                    status=JOB_STATUS_FAILED,
-                    error=error_message,
                 )
                 return
             self.store.mark_postprocessing(job.id)
@@ -872,6 +984,18 @@ class DownloadWorkerEngine:
                 path=final_path,
             )
         except Exception as exc:
+            if isinstance(exc, CancelledError):
+                self.store.mark_canceled(job.id, reason=str(exc) or "Cancelled by user")
+                _log_event(
+                    logging.INFO,
+                    "job_cancelled",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    origin=job.origin,
+                    media_intent=job.media_intent,
+                )
+                return
             if (
                 isinstance(exc, TypeError)
                 and "set" in str(exc)
@@ -908,7 +1032,7 @@ class DownloadWorkerEngine:
 
 
 class YouTubeAdapter:
-    def execute(self, job, config, paths, *, stop_event=None, media_type=None, media_intent=None):
+    def execute(self, job, config, paths, *, stop_event=None, cancel_check=None, cancel_reason=None, media_type=None, media_intent=None):
         output_template = job.output_template or {}
         output_dir = output_template.get("output_dir") or paths.single_downloads_dir
         raw_final_format = output_template.get("final_format")
@@ -948,6 +1072,8 @@ class YouTubeAdapter:
                 job_id=job.id,
                 origin=job.origin,
                 resolved_destination=job.resolved_destination,
+                cancel_check=cancel_check,
+                cancel_reason=cancel_reason,
             )
             if not info or not local_file:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1113,6 +1239,36 @@ def resolve_source(url):
     return "unknown"
 
 
+def canonicalize_url(source: str, url: str | None, external_id: str | None) -> str | None:
+    """
+    Return a stable canonical URL for matching and deduplication.
+    """
+    try:
+        source = (source or "").strip().lower()
+        if source in {"youtube", "youtube_music"}:
+            video_id = external_id or extract_video_id(url)
+            if not video_id:
+                return None
+            return f"https://www.youtube.com/watch?v={video_id}"
+        if source == "soundcloud":
+            if not url or not isinstance(url, str):
+                return None
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return None
+            return url
+        if source == "bandcamp":
+            if not url or not isinstance(url, str):
+                return None
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return None
+            return urllib.parse.urlunparse(parsed._replace(scheme="https"))
+        return None
+    except Exception:
+        return None
+
+
 def is_youtube_music_url(url):
     parsed = urllib.parse.urlparse(url)
     return "music.youtube.com" in (parsed.netloc or "").lower()
@@ -1125,6 +1281,14 @@ def build_ytdlp_opts(context):
     output_template = context.get("output_template")
     overrides = context.get("overrides") or {}
     allow_chapter_outtmpl = bool(context.get("allow_chapter_outtmpl"))
+
+    normalized_audio_target = _normalize_audio_format(target_format)
+    normalized_target = _normalize_format(target_format)
+
+    # If a video job accidentally receives an audio codec as "final_format" (e.g. global config),
+    # do NOT interpret it as a yt-dlp "format" selector. That causes invalid downloads.
+    # We only treat webm/mp4/mkv as container preferences for video mode here.
+    video_container_target = normalized_target if normalized_target in {"webm", "mp4", "mkv"} else None
 
     def _url_looks_like_playlist(u: str | None) -> bool:
         if not u:
@@ -1197,9 +1361,8 @@ def build_ytdlp_opts(context):
         # Only enable addmetadata, embedthumbnail, writethumbnail, and audio postprocessors
         # when both audio_mode and media_type is music/audio
         if audio_mode and is_music_media_type(context.get("media_type")):
-            normalized_audio = _normalize_audio_format(target_format)
-            if normalized_audio and normalized_audio in _AUDIO_FORMATS:
-                opts["postprocessors"] = _build_audio_postprocessors(normalized_audio)
+            if normalized_audio_target and normalized_audio_target in _AUDIO_FORMATS:
+                opts["postprocessors"] = _build_audio_postprocessors(normalized_audio_target)
             else:
                 opts["postprocessors"] = _build_audio_postprocessors(None)
             opts["format"] = _FORMAT_AUDIO
@@ -1209,17 +1372,23 @@ def build_ytdlp_opts(context):
         elif audio_mode:
             opts["format"] = _FORMAT_AUDIO
         else:
-            normalized = _normalize_format(target_format)
-            if normalized in {"webm", "mp4", "mkv"}:
+            # Video mode: honor only container preferences (webm/mp4/mkv).
+            # Never treat an audio codec (mp3/m4a/flac/...) as a yt-dlp format selector.
+            if video_container_target:
                 opts["format"] = "bestvideo+bestaudio/best"
-                opts["merge_output_format"] = normalized
-            elif normalized:
-                opts["format"] = normalized
+                opts["merge_output_format"] = video_container_target
             else:
-                opts["format"] = _FORMAT_VIDEO
+                opts["format"] = "best"
 
-    opts = _merge_overrides(opts, overrides, operation=operation, lock_format=bool(target_format))
+    # Only lock down format-related overrides when the target_format was actually applied
+    # (audio codec in audio_mode, or video container preference in video mode).
+    lock_format = False
+    if audio_mode and normalized_audio_target:
+        lock_format = True
+    if (not audio_mode) and video_container_target:
+        lock_format = True
 
+    opts = _merge_overrides(opts, overrides, operation=operation, lock_format=lock_format)
     if operation == "download":
         for key in _YTDLP_DOWNLOAD_UNSAFE_KEYS:
             opts.pop(key, None)
@@ -1242,6 +1411,27 @@ def build_ytdlp_opts(context):
     )
 
     return opts
+
+
+# Canonical yt-dlp invocation wrapper.
+# This function does NOT change behavior.
+# It centralizes intent + opts generation for reuse by
+# both Python API and CLI execution paths.
+def build_ytdlp_invocation(job, context):
+    """
+    Canonical yt-dlp invocation wrapper.
+    This function does NOT change behavior.
+    It centralizes intent + opts generation for reuse by
+    both Python API and CLI execution paths.
+    """
+    opts = build_ytdlp_opts(context)
+    return {
+        "media_type": job.media_type if job else context.get("media_type"),
+        "media_intent": job.media_intent if job else context.get("media_intent"),
+        "audio_mode": context.get("audio_mode"),
+        "final_format": context.get("final_format"),
+        "opts": opts,
+    }
 
 
 def _build_audio_postprocessors(target_format):
@@ -1275,6 +1465,7 @@ def _merge_overrides(opts, overrides, *, operation, lock_format=False):
     return opts
 
 
+
 def _redact_ytdlp_opts(opts):
     redacted = {}
     for key, value in (opts or {}).items():
@@ -1286,6 +1477,62 @@ def _redact_ytdlp_opts(opts):
             continue
         redacted[key] = value
     return redacted
+
+
+# Render yt-dlp CLI argv for subprocess.run(shell=False), supporting cookies and safe quoting.
+def _render_ytdlp_cli_argv(opts, url):
+    """Return a yt-dlp argv list suitable for subprocess.run(shell=False)."""
+    argv = ["yt-dlp"]
+
+    # Core selection/output
+    if opts.get("format"):
+        argv.extend(["--format", str(opts["format"])])
+    if opts.get("merge_output_format"):
+        argv.extend(["--merge-output-format", str(opts["merge_output_format"])])
+    if opts.get("outtmpl"):
+        argv.extend(["--output", str(opts["outtmpl"])])
+
+    # Playlist behavior
+    if opts.get("noplaylist") is True:
+        argv.append("--no-playlist")
+    elif opts.get("noplaylist") is False:
+        argv.append("--yes-playlist")
+
+    # Retries
+    if opts.get("retries") is not None:
+        argv.extend(["--retries", str(opts.get("retries"))])
+    if opts.get("fragment_retries") is not None:
+        argv.extend(["--fragment-retries", str(opts.get("fragment_retries"))])
+
+    # Cookies (python opts uses cookiefile, CLI uses --cookies)
+    if opts.get("cookiefile"):
+        argv.extend(["--cookies", str(opts.get("cookiefile"))])
+
+    # Audio extraction (CLI parity for FFmpegExtractAudio)
+    if opts.get("postprocessors"):
+        for pp in opts.get("postprocessors") or []:
+            if pp.get("key") == "FFmpegExtractAudio":
+                argv.append("--extract-audio")
+                if pp.get("preferredcodec"):
+                    argv.extend(["--audio-format", str(pp.get("preferredcodec"))])
+
+    argv.append(str(url))
+    return argv
+
+
+def _argv_to_redacted_cli(argv):
+    """Render argv as a single command string with shell-escaping, redacting sensitive paths."""
+    redacted = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in {"--cookies"} and i + 1 < len(argv):
+            redacted.extend([tok, "<redacted>"])
+            i += 2
+            continue
+        redacted.append(tok)
+        i += 1
+    return shlex.join(redacted)
 
 
 def _format_summary(info):
@@ -1315,9 +1562,11 @@ def download_with_ytdlp(
     job_id=None,
     origin=None,
     resolved_destination=None,
+    cancel_check=None,
+    cancel_reason=None,
 ):
-    if stop_event and stop_event.is_set():
-        return None, None
+    if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
+        raise CancelledError(cancel_reason or "Cancelled by user")
     # Use an ID-based template in temp_dir (CLI parity and avoids title/path edge cases).
     # The final user-facing name is applied later when we move/rename the completed file.
     output_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
@@ -1333,7 +1582,11 @@ def download_with_ytdlp(
         "media_intent": media_intent,
         "origin": origin,
     }
-    opts = build_ytdlp_opts(context)
+    invocation = build_ytdlp_invocation(
+        job=None,
+        context=context,
+    )
+    opts = invocation["opts"]
 
     _log_event(
         logging.INFO,
@@ -1386,58 +1639,76 @@ def download_with_ytdlp(
             or "forbidden" in msg_l
         )
 
+    from subprocess import DEVNULL, CalledProcessError
     info = None
+    # Always get metadata via API (for output file info, etc.)
     try:
-        # yt-dlp may mutate the options dict internally; always pass a copy.
-        opts_for_run = dict(opts)
-        # HARD GUARD again on the copy.
-        if isinstance(opts_for_run.get("outtmpl"), dict):
-            default_tmpl = opts_for_run["outtmpl"].get("default")
-            opts_for_run["outtmpl"] = (
-                default_tmpl
-                if isinstance(default_tmpl, str) and default_tmpl.strip()
-                else "%(title).200s-%(id)s.%(ext)s"
-            )
-        with YoutubeDL(opts_for_run) as ydl:
-            info = ydl.extract_info(url, download=True)
+        opts_for_probe = dict(opts)
+        opts_for_probe["skip_download"] = True
+        with YoutubeDL(opts_for_probe) as ydl:
+            info = ydl.extract_info(url, download=False)
     except Exception as exc:
-        # If a cookiefile is present and yt-dlp reports an empty download, retry once WITHOUT cookies.
-        # This matches the observed CLI behavior (no cookies) and avoids poisoning downloads with bad/expired cookies.
-        if _is_empty_download_error(exc) and opts.get("cookiefile"):
-            retry_opts = dict(opts)
-            retry_opts.pop("cookiefile", None)
-            # Keep worker logs quiet, but allow yt-dlp to behave normally.
-            _log_event(
-                logging.WARNING,
-                "YTDLP_EMPTY_FILE_RETRY_NO_COOKIES",
-                job_id=job_id,
-                url=url,
-                origin=origin,
-                media_type=media_type,
-                media_intent=media_intent,
-                audio_mode=audio_mode,
-                final_format=final_format,
-                format=opts.get("format"),
-                merge_output_format=opts.get("merge_output_format"),
-                outtmpl=opts.get("outtmpl"),
-                noplaylist=opts.get("noplaylist"),
-            )
-            try:
-                retry_opts = dict(opts)
-                retry_opts.pop("cookiefile", None)
-                if isinstance(retry_opts.get("outtmpl"), dict):
-                    default_tmpl = retry_opts["outtmpl"].get("default")
-                    retry_opts["outtmpl"] = (
-                        default_tmpl
-                        if isinstance(default_tmpl, str) and default_tmpl.strip()
-                        else "%(title).200s-%(id)s.%(ext)s"
-                    )
-                with YoutubeDL(retry_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-            except Exception as retry_exc:
+        _log_event(
+            logging.ERROR,
+            "ytdlp_metadata_probe_failed",
+            job_id=job_id,
+            url=url,
+            error=str(exc),
+        )
+        raise RuntimeError(f"yt_dlp_metadata_probe_failed: {exc}")
+
+    def _is_empty_download_error(e: Exception) -> bool:
+        msg = str(e) or ""
+        msg_l = msg.lower()
+        return (
+            "downloaded file is empty" in msg_l
+            or "http error 403" in msg_l
+            or "forbidden" in msg_l
+        )
+
+    # Prepare CLI command for download
+    opts_for_run = dict(opts)
+    # HARD GUARD again on the copy.
+    if isinstance(opts_for_run.get("outtmpl"), dict):
+        default_tmpl = opts_for_run["outtmpl"].get("default")
+        opts_for_run["outtmpl"] = (
+            default_tmpl
+            if isinstance(default_tmpl, str) and default_tmpl.strip()
+            else "%(title).200s-%(id)s.%(ext)s"
+        )
+    # Remove progress_hooks if present
+    if "progress_hooks" in opts_for_run:
+        opts_for_run.pop("progress_hooks")
+    # Build CLI argv and run without a shell (prevents globbing of format strings like [acodec!=none])
+    cmd_argv = _render_ytdlp_cli_argv(opts_for_run, url)
+    cmd_log = _argv_to_redacted_cli(cmd_argv)
+
+    try:
+        subprocess.run(cmd_argv, check=True, stdout=DEVNULL, stderr=DEVNULL)
+        # Log AFTER the command has been executed, per requirement.
+        _log_event(
+            logging.INFO,
+            "YTDLP_CLI_EQUIVALENT",
+            job_id=job_id,
+            url=url,
+            cli=cmd_log,
+        )
+    except CalledProcessError as exc:
+        # If a cookiefile is present and yt-dlp produced no completed file in temp_dir, retry once WITHOUT cookies.
+        if opts.get("cookiefile"):
+            found = False
+            for entry in os.listdir(temp_dir):
+                if entry.endswith((".part", ".ytdl", ".temp")):
+                    continue
+                candidate = os.path.join(temp_dir, entry)
+                if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                    found = True
+                    break
+
+            if not found:
                 _log_event(
-                    logging.ERROR,
-                    "YTDLP_EMPTY_FILE_RETRY_FAILED",
+                    logging.WARNING,
+                    "YTDLP_EMPTY_FILE_RETRY_NO_COOKIES",
                     job_id=job_id,
                     url=url,
                     origin=origin,
@@ -1445,29 +1716,59 @@ def download_with_ytdlp(
                     media_intent=media_intent,
                     audio_mode=audio_mode,
                     final_format=final_format,
-                    error=str(retry_exc),
-                    opts=_redact_ytdlp_opts(retry_opts),
+                    format=opts.get("format"),
+                    merge_output_format=opts.get("merge_output_format"),
+                    outtmpl=opts.get("outtmpl"),
+                    noplaylist=opts.get("noplaylist"),
                 )
-                # Fall through to normal failure handling using the original exception.
 
-        if info is None:
-            _log_event(
-                logging.ERROR,
-                "YTDLP_FAILED",
-                job_id=job_id,
-                url=url,
-                origin=origin,
-                media_type=media_type,
-                media_intent=media_intent,
-                audio_mode=audio_mode,
-                final_format=final_format,
-                format=opts.get("format"),
-                merge_output_format=opts.get("merge_output_format"),
-                outtmpl=opts.get("outtmpl"),
-                noplaylist=opts.get("noplaylist"),
-                error=str(exc),
-                opts=_redact_ytdlp_opts(opts),
-            )
+                retry_opts = dict(opts_for_run)
+                retry_opts.pop("cookiefile", None)
+                cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
+                cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
+                try:
+                    subprocess.run(cmd_retry_argv, check=True, stdout=DEVNULL, stderr=DEVNULL)
+                    _log_event(
+                        logging.INFO,
+                        "YTDLP_CLI_EQUIVALENT",
+                        job_id=job_id,
+                        url=url,
+                        cli=cmd_retry_log,
+                    )
+                except CalledProcessError as retry_exc:
+                    _log_event(
+                        logging.ERROR,
+                        "YTDLP_EMPTY_FILE_RETRY_FAILED",
+                        job_id=job_id,
+                        url=url,
+                        origin=origin,
+                        media_type=media_type,
+                        media_intent=media_intent,
+                        audio_mode=audio_mode,
+                        final_format=final_format,
+                        error=str(retry_exc),
+                        opts=_redact_ytdlp_opts(retry_opts),
+                    )
+                    raise RuntimeError(f"yt_dlp_download_failed: {retry_exc}")
+            else:
+                _log_event(
+                    logging.ERROR,
+                    "ytdlp_download_failed",
+                    job_id=job_id,
+                    url=url,
+                    origin=origin,
+                    media_type=media_type,
+                    media_intent=media_intent,
+                    audio_mode=audio_mode,
+                    final_format=final_format,
+                    format=opts.get("format"),
+                    merge_output_format=opts.get("merge_output_format"),
+                    outtmpl=opts.get("outtmpl"),
+                    noplaylist=opts.get("noplaylist"),
+                    error=str(exc),
+                )
+                raise RuntimeError(f"yt_dlp_download_failed: {exc}")
+        else:
             _log_event(
                 logging.ERROR,
                 "ytdlp_download_failed",
@@ -1484,37 +1785,10 @@ def download_with_ytdlp(
                 noplaylist=opts.get("noplaylist"),
                 error=str(exc),
             )
-            if "Requested format is not available" in str(exc):
-                try:
-                    list_opts = dict(opts)
-                    list_opts["skip_download"] = True
-                    with YoutubeDL(list_opts) as ydl:
-                        info_probe = ydl.extract_info(url, download=False)
-                    summary = _format_summary(info_probe)
-                    _log_event(
-                        logging.ERROR,
-                        "ytdlp_format_summary",
-                        job_id=job_id,
-                        url=url,
-                        format=opts.get("format"),
-                        merge_output_format=opts.get("merge_output_format"),
-                        format_count=summary["format_count"],
-                        exts=summary["exts"],
-                        has_webm=summary["has_webm"],
-                    )
-                except Exception as probe_exc:
-                    _log_event(
-                        logging.ERROR,
-                        "ytdlp_format_summary_failed",
-                        job_id=job_id,
-                        url=url,
-                        format=opts.get("format"),
-                        error=str(probe_exc),
-                    )
             raise RuntimeError(f"yt_dlp_download_failed: {exc}")
 
-    if stop_event and stop_event.is_set():
-        return None, None
+    if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
+        raise CancelledError(cancel_reason or "Cancelled by user")
 
     local_path = None
     if isinstance(info, dict):
@@ -1524,23 +1798,41 @@ def download_with_ytdlp(
                 local_path = req.get("filepath") or req.get("filename")
                 if local_path:
                     break
-    if local_path and os.path.exists(local_path):
+
+    # If yt-dlp reported a concrete output file, use it
+    if local_path and os.path.exists(local_path) and os.path.getsize(local_path) > 0:
         return info, local_path
 
+    # Otherwise, scan temp_dir for completed artifacts
     candidates = []
+    audio_candidates = []
     for entry in os.listdir(temp_dir):
         # Ignore yt-dlp temporary/partial artifacts
         if entry.endswith((".part", ".ytdl", ".temp")):
             continue
         candidate = os.path.join(temp_dir, entry)
-        if os.path.isfile(candidate):
-            try:
-                size = os.path.getsize(candidate)
-            except OSError:
-                size = 0
-            if size > 0:
-                candidates.append((size, candidate))
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            size = os.path.getsize(candidate)
+        except OSError:
+            size = 0
+        if size <= 0:
+            continue
+        candidates.append((size, candidate))
+        if os.path.splitext(candidate)[1].lower() in {".m4a", ".webm", ".opus", ".aac", ".mp3", ".flac"}:
+            audio_candidates.append((size, candidate))
 
+    # In audio_mode, we MUST have an audio-capable artifact
+    if audio_mode:
+        if not audio_candidates:
+            raise PostprocessingError(
+                "No audio stream resolved (video-only format selected)"
+            )
+        audio_candidates.sort(reverse=True)
+        return info, audio_candidates[0][1]
+
+    # Video mode fallback: pick the largest completed artifact
     if candidates:
         candidates.sort(reverse=True)
         return info, candidates[0][1]
@@ -1727,6 +2019,16 @@ def atomic_move(src, dst):
 
 
 def embed_metadata(local_file, meta, video_id, thumbs_dir):
+    """
+    Best-effort metadata embed.
+
+    IMPORTANT:
+    - This must NEVER fail the job. Any ffmpeg failure is logged and ignored.
+    - Artwork embedding differs by container:
+        * MP4/M4A/MOV: use second input + attached_pic stream.
+        * MKV/WEBM: use -attach.
+        * Otherwise: skip artwork.
+    """
     if not meta:
         return
 
@@ -1745,14 +2047,55 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
     url = meta.get("url") or f"https://www.youtube.com/watch?v={video_id}"
     thumb_url = meta.get("thumbnail_url")
 
+    # Normalize date tag to YYYY-MM-DD
     date_tag = ""
     raw_date = release_date or upload_date
     if raw_date and len(str(raw_date)) == 8 and str(raw_date).isdigit():
         raw_date = str(raw_date)
         date_tag = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
 
-    keywords = ", ".join(tags) if tags else ""
+    # Normalize tags
+    try:
+        if isinstance(tags, set):
+            tags = sorted(tags)
+        elif isinstance(tags, tuple):
+            tags = list(tags)
+        elif not isinstance(tags, list):
+            tags = [str(tags)]
+    except Exception:
+        tags = []
+
+    keywords = ", ".join([str(t) for t in tags if t]) if tags else ""
     comment = f"YouTubeID={video_id} URL={url}"
+
+    # Truncate potentially huge fields to avoid container/tag limits
+    def _truncate(s: str, limit: int) -> str:
+        s = (s or "").replace("\x00", " ")
+        s = re.sub(r"\s+", " ", s).strip()
+        if len(s) > limit:
+            return s[:limit] + "…"
+        return s
+
+    # Conservative limits; MP4 atoms can be picky.
+    title = _truncate(title, 256)
+    artist = _truncate(artist, 256)
+    album = _truncate(album, 256) if album else None
+    album_artist = _truncate(album_artist, 256) if album_artist else None
+    track = _truncate(track, 256) if track else None
+    description = _truncate(description, 2048)
+    keywords = _truncate(keywords, 512) if keywords else ""
+    comment = _truncate(comment, 512)
+
+    base_ext = os.path.splitext(local_file)[1] or ".webm"
+    ext_lower = base_ext.lower()
+
+    # If this is audio-only, we currently skip embedding (to avoid regressions).
+    audio_only = ext_lower in {".mp3", ".m4a", ".opus", ".aac", ".flac"}
+    if audio_only:
+        return
+
+    is_mp4_family = ext_lower in {".mp4", ".m4v", ".mov", ".m4a"}
+    is_mkv_family = ext_lower in {".mkv", ".webm"}
 
     thumb_path = None
     if thumb_url and thumbs_dir:
@@ -1766,73 +2109,113 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
             else:
                 thumb_path = None
         except Exception:
-            logging.exception("Thumbnail download failed for %s", video_id)
+            # Never fail on thumbs
+            logging.warning("Thumbnail download failed for %s", video_id)
             thumb_path = None
 
-    base_ext = os.path.splitext(local_file)[1] or ".webm"
-    ext_lower = base_ext.lower()
-    audio_only = ext_lower in [".mp3", ".m4a", ".opus", ".aac", ".flac"]
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=f".tagged{base_ext}", dir=os.path.dirname(local_file))
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        suffix=f".tagged{base_ext}",
+        dir=os.path.dirname(local_file),
+    )
     os.close(tmp_fd)
 
-    try:
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            local_file,
-        ]
-
-        if thumb_path and os.path.exists(thumb_path) and not audio_only:
-            cmd.extend([
-                "-attach",
-                thumb_path,
-                "-metadata:s:t",
-                "mimetype=image/jpeg",
-                "-metadata:s:t",
-                "filename=cover.jpg",
-            ])
-
+    def _add_common_metadata(cmd_list: list[str]):
         if title:
-            cmd.extend(["-metadata", f"title={title}"])
+            cmd_list.extend(["-metadata", f"title={title}"])
         if artist:
-            cmd.extend(["-metadata", f"artist={artist}"])
+            cmd_list.extend(["-metadata", f"artist={artist}"])
         if album:
-            cmd.extend(["-metadata", f"album={album}"])
+            cmd_list.extend(["-metadata", f"album={album}"])
         if album_artist:
-            cmd.extend(["-metadata", f"album_artist={album_artist}"])
+            cmd_list.extend(["-metadata", f"album_artist={album_artist}"])
         if track:
-            cmd.extend(["-metadata", f"track={track}"])
+            # Track name
+            cmd_list.extend(["-metadata", f"track={track}"])
         if track_number is not None:
-            cmd.extend(["-metadata", f"track={track_number}"])
+            # Prefer common track number tag in a safe form
+            try:
+                tn = int(track_number)
+                cmd_list.extend(["-metadata", f"track_number={tn}"])
+            except Exception:
+                pass
         if disc is not None:
-            cmd.extend(["-metadata", f"disc={disc}"])
+            try:
+                dn = int(disc)
+                cmd_list.extend(["-metadata", f"disc={dn}"])
+            except Exception:
+                pass
         if date_tag:
-            cmd.extend(["-metadata", f"date={date_tag}"])
+            cmd_list.extend(["-metadata", f"date={date_tag}"])
         if description:
-            cmd.extend(["-metadata", f"description={description}"])
+            cmd_list.extend(["-metadata", f"description={description}"])
         if keywords:
-            cmd.extend(["-metadata", f"keywords={keywords}"])
+            cmd_list.extend(["-metadata", f"keywords={keywords}"])
         if comment:
-            cmd.extend(["-metadata", f"comment={comment}"])
+            cmd_list.extend(["-metadata", f"comment={comment}"])
 
-        cmd.extend([
-            "-c",
-            "copy",
-            tmp_path,
-        ])
+    try:
+        cmd: list[str] = ["ffmpeg", "-y", "-i", local_file]
 
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        # Artwork embedding
+        if thumb_path and os.path.exists(thumb_path):
+            if is_mp4_family:
+                # MP4: add image as attached_pic stream
+                cmd.extend(["-i", thumb_path])
+                cmd.extend(["-map", "0", "-map", "1"])
+                cmd.extend(["-c", "copy"])
+                # Ensure the cover stream is a compatible codec
+                cmd.extend(["-c:v:1", "mjpeg"])
+                cmd.extend(["-disposition:v:1", "attached_pic"])
+                cmd.extend(["-metadata:s:v:1", "title=cover", "-metadata:s:v:1", "comment=Cover (front)"])
+            elif is_mkv_family:
+                # MKV/WEBM: attachments are supported
+                cmd.extend([
+                    "-attach",
+                    thumb_path,
+                    "-metadata:s:t",
+                    "mimetype=image/jpeg",
+                    "-metadata:s:t",
+                    "filename=cover.jpg",
+                ])
+                cmd.extend(["-c", "copy"])
+            else:
+                # Unknown container: skip artwork
+                cmd.extend(["-c", "copy"])
+        else:
+            cmd.extend(["-c", "copy"])
+
+        _add_common_metadata(cmd)
+        cmd.append(tmp_path)
+
+        # Capture stderr for debugging, but NEVER raise out of this function.
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip()
+            if err:
+                err = _truncate(err, 800)
+            logging.warning(
+                "ffmpeg metadata embedding skipped for %s (rc=%s)%s",
+                video_id,
+                proc.returncode,
+                f" err={err}" if err else "",
+            )
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            return
+
         os.replace(tmp_path, local_file)
         logging.info("[%s] Metadata embedded successfully", video_id)
-    except subprocess.CalledProcessError:
-        logging.exception("ffmpeg metadata embedding failed for %s", video_id)
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-    except Exception:
-        logging.exception("Unexpected error during metadata embedding for %s", video_id)
+
+    except Exception as exc:
+        # Absolute last-resort: never fail the download
+        logging.warning("ffmpeg metadata embedding skipped for %s (%s)", video_id, exc)
         try:
             os.unlink(tmp_path)
         except Exception:
@@ -1861,13 +2244,50 @@ def record_download_history(db_path, job, filepath, *, meta=None):
     if not video_id:
         video_id = extract_video_id(job.url) or job.id
     playlist_id = job.origin_id if job.origin == "playlist" else None
+    input_url = job.input_url or job.url
+    external_id = job.external_id
+    source = job.source
+    canonical_url = job.canonical_url
+    if not canonical_url:
+        canonical_url = canonicalize_url(source, input_url, external_id)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         ensure_downloads_table(conn)
+        ensure_download_history_table(conn)
         cur = conn.cursor()
         cur.execute(
             "INSERT OR REPLACE INTO downloads (video_id, playlist_id, downloaded_at, filepath) VALUES (?, ?, ?, ?)",
             (video_id, playlist_id, utc_now(), filepath),
+        )
+        file_size_bytes = None
+        try:
+            file_size_bytes = int(os.stat(filepath).st_size)
+        except OSError:
+            file_size_bytes = None
+        now = utc_now()
+        title = meta.get("title") if isinstance(meta, dict) else None
+        cur.execute(
+            """
+            INSERT INTO download_history (
+                video_id, title, filename, destination, source, status,
+                created_at, completed_at, file_size_bytes,
+                input_url, canonical_url, external_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                video_id,
+                title,
+                os.path.basename(filepath),
+                os.path.dirname(filepath),
+                source,
+                "completed",
+                now,
+                now,
+                file_size_bytes,
+                input_url,
+                canonical_url,
+                external_id,
+            ),
         )
         conn.commit()
     finally:
@@ -1891,10 +2311,14 @@ def extract_video_id(url):
 def is_retryable_error(error):
     if isinstance(error, TypeError):
         return False
+    if isinstance(error, PostprocessingError):
+        return False
     if isinstance(error, (DownloadError, ExtractorError)):
         message = str(error).lower()
     else:
         message = str(error).lower()
+    if "postprocessing" in message or "postprocessor" in message or "ffmpeg" in message:
+        return False
     if "json serializable" in message or "not json" in message:
         return False
     if "drm" in message:
