@@ -50,10 +50,20 @@ from google.auth.exceptions import RefreshError
 from engine.job_queue import (
     DownloadJobStore,
     DownloadWorkerEngine,
+    atomic_move,
+    build_output_filename,
     preview_direct_url,
     canonicalize_url,
+    download_with_ytdlp,
+    embed_metadata,
+    extract_meta,
     resolve_source,
+    resolve_media_intent,
+    resolve_media_type,
+    resolve_cookie_file,
     extract_video_id,
+    _normalize_audio_format,
+    _normalize_format,
 )
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
@@ -74,6 +84,7 @@ from engine.core import (
     _acquire_client_delivery,
     _finalize_client_delivery,
     _mark_client_delivery,
+    _register_client_delivery,
     load_config,
     mark_video_seen,
     playlist_has_seen,
@@ -913,6 +924,115 @@ def _record_direct_url_history(db_path, files, source_url):
     conn.commit()
     conn.close()
 
+# Execution router: client delivery runs immediately, server delivery enqueues.
+def execute_download(*, delivery_mode: str | None, run_immediate, enqueue):
+    mode = (delivery_mode or "server").strip().lower()
+    if mode == "client":
+        return run_immediate()
+    return enqueue()
+
+def _run_immediate_download_to_client(
+    *,
+    url: str,
+    config: dict,
+    paths,
+    media_type: str | None,
+    media_intent: str | None,
+    final_format_override: str | None,
+    stop_event: threading.Event | None = None,
+    status: EngineStatus | None = None,
+    origin: str | None = None,
+):
+    job_id = uuid4().hex
+    temp_dir = os.path.join(paths.temp_downloads_dir, job_id)
+    ensure_dir(temp_dir)
+
+    config = config or {}
+    filename_template = config.get("filename_template")
+    audio_template = config.get("audio_filename_template") or config.get("music_filename_template")
+
+    raw_final_format = final_format_override
+    normalized_format = _normalize_format(raw_final_format)
+    normalized_audio_format = _normalize_audio_format(raw_final_format)
+    audio_mode = bool(normalized_audio_format)
+    final_format = normalized_audio_format if audio_mode else normalized_format
+
+    cookie_file = resolve_cookie_file(config or {})
+
+    try:
+        info, local_file = download_with_ytdlp(
+            url,
+            temp_dir,
+            config,
+            audio_mode=audio_mode,
+            final_format=final_format,
+            cookie_file=cookie_file,
+            stop_event=stop_event,
+            media_type=media_type,
+            media_intent=media_intent,
+            job_id=job_id,
+            origin=origin,
+            resolved_destination=None,
+        )
+        if not info or not local_file:
+            raise RuntimeError("yt_dlp_no_output")
+
+        meta = extract_meta(info, fallback_url=url)
+        video_id = meta.get("video_id") or job_id
+        ext = os.path.splitext(local_file)[1].lstrip(".")
+        if audio_mode:
+            ext = final_format or "mp3"
+        elif not ext:
+            ext = final_format or "webm"
+        template = audio_template if audio_mode else filename_template
+        cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
+        final_path = os.path.join(temp_dir, cleaned_name)
+
+        if not audio_mode:
+            embed_metadata(local_file, meta, video_id, paths.thumbs_dir)
+        if final_path != local_file:
+            atomic_move(local_file, final_path)
+
+        size = 0
+        try:
+            size = os.path.getsize(final_path)
+        except OSError:
+            size = 0
+        if size <= 0:
+            raise RuntimeError("empty_output_file")
+
+        delivery_id, expires_at, _event = _register_client_delivery(
+            final_path,
+            os.path.basename(final_path),
+        )
+
+        if status is not None:
+            lock = getattr(status, "lock", None)
+            if lock:
+                with lock:
+                    status.client_delivery_id = delivery_id
+                    status.client_delivery_filename = os.path.basename(final_path)
+                    status.client_delivery_expires_at = expires_at.isoformat()
+                    status.single_download_ok = True
+                    status.last_completed_path = final_path
+                    status.last_completed_at = datetime.now(timezone.utc).isoformat()
+            else:
+                status.client_delivery_id = delivery_id
+                status.client_delivery_filename = os.path.basename(final_path)
+                status.client_delivery_expires_at = expires_at.isoformat()
+                status.single_download_ok = True
+                status.last_completed_path = final_path
+                status.last_completed_at = datetime.now(timezone.utc).isoformat()
+
+        return {
+            "delivery_id": delivery_id,
+            "filename": os.path.basename(final_path),
+            "expires_at": expires_at.isoformat(),
+        }
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
 # Fast-lane direct URL download via yt-dlp CLI
 def _build_direct_url_cli_args(*, url: str, outtmpl: str, final_format_override: str | None) -> list[str]:
     """
@@ -1652,15 +1772,32 @@ async def _start_run_with_config(
                     )
                 else:
                     if single_url:
-                        run_callable = functools.partial(
-                            _run_direct_url_with_cli,
-                            url=single_url,
-                            paths=app.state.paths,
-                            config=config,
-                            destination=destination,
-                            final_format_override=effective_final_format_override,
-                            stop_event=app.state.stop_event,
-                            status=status,
+                        resolved_media_type = resolve_media_type(config, url=single_url)
+                        resolved_media_intent = resolve_media_intent("manual", resolved_media_type)
+                        run_callable = execute_download(
+                            delivery_mode=delivery_mode or "server",
+                            run_immediate=lambda: functools.partial(
+                                _run_immediate_download_to_client,
+                                url=single_url,
+                                config=config,
+                                paths=app.state.paths,
+                                media_type=resolved_media_type,
+                                media_intent=resolved_media_intent,
+                                final_format_override=effective_final_format_override,
+                                stop_event=app.state.stop_event,
+                                status=status,
+                                origin=run_source,
+                            ),
+                            enqueue=lambda: functools.partial(
+                                _run_direct_url_with_cli,
+                                url=single_url,
+                                paths=app.state.paths,
+                                config=config,
+                                destination=destination,
+                                final_format_override=effective_final_format_override,
+                                stop_event=app.state.stop_event,
+                                status=status,
+                            ),
                         )
                     else:
                         run_callable = functools.partial(
@@ -3368,14 +3505,6 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
     delivery_mode = normalized_request.get("delivery_mode")
     if request_overrides and request_overrides.get("delivery_mode"):
         delivery_mode = request_overrides.get("delivery_mode")
-    if delivery_mode == "client":
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "Client delivery is not available for queued downloads.",
-                "code": "CLIENT_DELIVERY_UNSUPPORTED",
-            },
-        )
 
     url = candidate.get("url")
     source = candidate.get("source")
@@ -3451,61 +3580,129 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
     final_format_override = getattr(payload, "final_format", None)
     if not final_format_override and request_overrides:
         final_format_override = request_overrides.get("final_format")
-    try:
-        result = service.enqueue_item_candidate(
-            item_id,
-            candidate_id,
-            final_format_override=final_format_override,
-        )
-    except ValueError as exc:
-        logging.warning(
-            "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
-            str(exc),
-            request_id,
-            item_id,
-            candidate_id,
-            source,
-        )
-        error_msg = "Invalid destination"
-        code = "INVALID_DESTINATION"
-        if "invalid_destination" not in str(exc).lower():
-            error_msg = "Invalid request"
-            code = "INVALID_REQUEST"
-        return JSONResponse(status_code=422, content={"error": error_msg, "code": code})
-    except Exception as exc:
-        logging.warning(
-            "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
-            exc,
-            request_id,
-            item_id,
-            candidate_id,
-            source,
-            exc_info=True,
-        )
+
+    async def _run_immediate():
+        config = _read_config_or_404()
+        effective_final_format = final_format_override or config.get("final_format")
+        media_type = item.get("media_type") or "generic"
+        if _normalize_audio_format(effective_final_format):
+            media_type = "music"
+        media_intent = "album" if item.get("item_type") == "album" else "track"
+        try:
+            result = await anyio.to_thread.run_sync(
+                _run_immediate_download_to_client,
+                url=url,
+                config=config,
+                paths=app.state.paths,
+                media_type=media_type,
+                media_intent=media_intent,
+                final_format_override=effective_final_format,
+                origin="search",
+            )
+        except Exception as exc:
+            logging.warning(
+                "Search client delivery failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+                exc,
+                request_id,
+                item_id,
+                candidate_id,
+                source,
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Client delivery failed.", "code": "CLIENT_DELIVERY_FAILED"},
+            )
+
+        service.store.update_item_status(item_id, "enqueued", chosen=candidate)
+        if request_row.get("status") not in {"completed", "completed_with_skips", "failed"}:
+            service.store.update_request_status(request_id, "completed")
+
         return JSONResponse(
-            status_code=500,
-            content={"error": "Enqueue failed.", "code": "ENQUEUE_FAILED"},
+            status_code=200,
+            content={
+                "created": True,
+                "job_id": result.get("delivery_id"),
+                "delivery_id": result.get("delivery_id"),
+                "delivery_url": f"/api/deliveries/{result.get('delivery_id')}/download",
+                "filename": result.get("filename"),
+                "expires_at": result.get("expires_at"),
+            },
         )
 
-    if not result:
-        logging.warning(
-            "Search enqueue failed: unresolved request_id=%s item_id=%s candidate_id=%s source=%s",
-            request_id,
-            item_id,
-            candidate_id,
-            source,
-        )
-        return JSONResponse(
-            status_code=404,
-            content={"error": "Search item not found", "code": "ITEM_NOT_FOUND"},
-        )
+    def _enqueue():
+        if delivery_mode == "client":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "Client delivery is not available for queued downloads.",
+                    "code": "CLIENT_DELIVERY_UNSUPPORTED",
+                },
+            )
+        try:
+            result = service.enqueue_item_candidate(
+                item_id,
+                candidate_id,
+                final_format_override=final_format_override,
+            )
+        except ValueError as exc:
+            logging.warning(
+                "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+                str(exc),
+                request_id,
+                item_id,
+                candidate_id,
+                source,
+            )
+            error_msg = "Invalid destination"
+            code = "INVALID_DESTINATION"
+            if "invalid_destination" not in str(exc).lower():
+                error_msg = "Invalid request"
+                code = "INVALID_REQUEST"
+            return JSONResponse(status_code=422, content={"error": error_msg, "code": code})
+        except Exception as exc:
+            logging.warning(
+                "Search enqueue failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
+                exc,
+                request_id,
+                item_id,
+                candidate_id,
+                source,
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Enqueue failed.", "code": "ENQUEUE_FAILED"},
+            )
 
-    if not result.get("created") and result.get("job_id"):
-        return JSONResponse(
-            status_code=409,
-            content={"error": "Already downloaded.", "code": "ALREADY_DOWNLOADED"},
-        )
+        if not result:
+            logging.warning(
+                "Search enqueue failed: unresolved request_id=%s item_id=%s candidate_id=%s source=%s",
+                request_id,
+                item_id,
+                candidate_id,
+                source,
+            )
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Search item not found", "code": "ITEM_NOT_FOUND"},
+            )
 
+        if not result.get("created") and result.get("job_id"):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Already downloaded.", "code": "ALREADY_DOWNLOADED"},
+            )
+
+        return result
+
+    result = execute_download(
+        delivery_mode=delivery_mode,
+        run_immediate=_run_immediate,
+        enqueue=_enqueue,
+    )
+    if asyncio.iscoroutine(result):
+        return await result
     return result
 
 

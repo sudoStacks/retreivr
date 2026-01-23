@@ -2019,6 +2019,16 @@ def atomic_move(src, dst):
 
 
 def embed_metadata(local_file, meta, video_id, thumbs_dir):
+    """
+    Best-effort metadata embed.
+
+    IMPORTANT:
+    - This must NEVER fail the job. Any ffmpeg failure is logged and ignored.
+    - Artwork embedding differs by container:
+        * MP4/M4A/MOV: use second input + attached_pic stream.
+        * MKV/WEBM: use -attach.
+        * Otherwise: skip artwork.
+    """
     if not meta:
         return
 
@@ -2037,14 +2047,55 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
     url = meta.get("url") or f"https://www.youtube.com/watch?v={video_id}"
     thumb_url = meta.get("thumbnail_url")
 
+    # Normalize date tag to YYYY-MM-DD
     date_tag = ""
     raw_date = release_date or upload_date
     if raw_date and len(str(raw_date)) == 8 and str(raw_date).isdigit():
         raw_date = str(raw_date)
         date_tag = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
 
-    keywords = ", ".join(tags) if tags else ""
+    # Normalize tags
+    try:
+        if isinstance(tags, set):
+            tags = sorted(tags)
+        elif isinstance(tags, tuple):
+            tags = list(tags)
+        elif not isinstance(tags, list):
+            tags = [str(tags)]
+    except Exception:
+        tags = []
+
+    keywords = ", ".join([str(t) for t in tags if t]) if tags else ""
     comment = f"YouTubeID={video_id} URL={url}"
+
+    # Truncate potentially huge fields to avoid container/tag limits
+    def _truncate(s: str, limit: int) -> str:
+        s = (s or "").replace("\x00", " ")
+        s = re.sub(r"\s+", " ", s).strip()
+        if len(s) > limit:
+            return s[:limit] + "…"
+        return s
+
+    # Conservative limits; MP4 atoms can be picky.
+    title = _truncate(title, 256)
+    artist = _truncate(artist, 256)
+    album = _truncate(album, 256) if album else None
+    album_artist = _truncate(album_artist, 256) if album_artist else None
+    track = _truncate(track, 256) if track else None
+    description = _truncate(description, 2048)
+    keywords = _truncate(keywords, 512) if keywords else ""
+    comment = _truncate(comment, 512)
+
+    base_ext = os.path.splitext(local_file)[1] or ".webm"
+    ext_lower = base_ext.lower()
+
+    # If this is audio-only, we currently skip embedding (to avoid regressions).
+    audio_only = ext_lower in {".mp3", ".m4a", ".opus", ".aac", ".flac"}
+    if audio_only:
+        return
+
+    is_mp4_family = ext_lower in {".mp4", ".m4v", ".mov", ".m4a"}
+    is_mkv_family = ext_lower in {".mkv", ".webm"}
 
     thumb_path = None
     if thumb_url and thumbs_dir:
@@ -2058,76 +2109,113 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
             else:
                 thumb_path = None
         except Exception:
-            logging.exception("Thumbnail download failed for %s", video_id)
+            # Never fail on thumbs
+            logging.warning("Thumbnail download failed for %s", video_id)
             thumb_path = None
 
-    base_ext = os.path.splitext(local_file)[1] or ".webm"
-    ext_lower = base_ext.lower()
-    audio_only = ext_lower in [".mp3", ".m4a", ".opus", ".aac", ".flac"]
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=f".tagged{base_ext}", dir=os.path.dirname(local_file))
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        suffix=f".tagged{base_ext}",
+        dir=os.path.dirname(local_file),
+    )
     os.close(tmp_fd)
-    MAX_DESC = 2048  # conservative
-    try:
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            local_file,
-        ]
 
-        if thumb_path and os.path.exists(thumb_path) and not audio_only:
-            cmd.extend([
-                "-attach",
-                thumb_path,
-                "-metadata:s:t",
-                "mimetype=image/jpeg",
-                "-metadata:s:t",
-                "filename=cover.jpg",
-            ])
-
+    def _add_common_metadata(cmd_list: list[str]):
         if title:
-            cmd.extend(["-metadata", f"title={title}"])
+            cmd_list.extend(["-metadata", f"title={title}"])
         if artist:
-            cmd.extend(["-metadata", f"artist={artist}"])
+            cmd_list.extend(["-metadata", f"artist={artist}"])
         if album:
-            cmd.extend(["-metadata", f"album={album}"])
+            cmd_list.extend(["-metadata", f"album={album}"])
         if album_artist:
-            cmd.extend(["-metadata", f"album_artist={album_artist}"])
+            cmd_list.extend(["-metadata", f"album_artist={album_artist}"])
         if track:
-            cmd.extend(["-metadata", f"track={track}"])
+            # Track name
+            cmd_list.extend(["-metadata", f"track={track}"])
         if track_number is not None:
-            cmd.extend(["-metadata", f"track={track_number}"])
+            # Prefer common track number tag in a safe form
+            try:
+                tn = int(track_number)
+                cmd_list.extend(["-metadata", f"track_number={tn}"])
+            except Exception:
+                pass
         if disc is not None:
-            cmd.extend(["-metadata", f"disc={disc}"])
+            try:
+                dn = int(disc)
+                cmd_list.extend(["-metadata", f"disc={dn}"])
+            except Exception:
+                pass
         if date_tag:
-            cmd.extend(["-metadata", f"date={date_tag}"]) 
+            cmd_list.extend(["-metadata", f"date={date_tag}"])
         if description:
-            safe_desc = description.replace("\n", " ").strip()
-            if len(safe_desc) > MAX_DESC:
-                safe_desc = safe_desc[:MAX_DESC] + "…"
-            cmd.extend(["-metadata", f"description={safe_desc}"])
+            cmd_list.extend(["-metadata", f"description={description}"])
         if keywords:
-            cmd.extend(["-metadata", f"keywords={keywords}"])
+            cmd_list.extend(["-metadata", f"keywords={keywords}"])
         if comment:
-            cmd.extend(["-metadata", f"comment={comment}"])
+            cmd_list.extend(["-metadata", f"comment={comment}"])
 
-        cmd.extend([
-            "-c",
-            "copy",
-            tmp_path,
-        ])
+    try:
+        cmd: list[str] = ["ffmpeg", "-y", "-i", local_file]
 
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        # Artwork embedding
+        if thumb_path and os.path.exists(thumb_path):
+            if is_mp4_family:
+                # MP4: add image as attached_pic stream
+                cmd.extend(["-i", thumb_path])
+                cmd.extend(["-map", "0", "-map", "1"])
+                cmd.extend(["-c", "copy"])
+                # Ensure the cover stream is a compatible codec
+                cmd.extend(["-c:v:1", "mjpeg"])
+                cmd.extend(["-disposition:v:1", "attached_pic"])
+                cmd.extend(["-metadata:s:v:1", "title=cover", "-metadata:s:v:1", "comment=Cover (front)"])
+            elif is_mkv_family:
+                # MKV/WEBM: attachments are supported
+                cmd.extend([
+                    "-attach",
+                    thumb_path,
+                    "-metadata:s:t",
+                    "mimetype=image/jpeg",
+                    "-metadata:s:t",
+                    "filename=cover.jpg",
+                ])
+                cmd.extend(["-c", "copy"])
+            else:
+                # Unknown container: skip artwork
+                cmd.extend(["-c", "copy"])
+        else:
+            cmd.extend(["-c", "copy"])
+
+        _add_common_metadata(cmd)
+        cmd.append(tmp_path)
+
+        # Capture stderr for debugging, but NEVER raise out of this function.
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip()
+            if err:
+                err = _truncate(err, 800)
+            logging.warning(
+                "ffmpeg metadata embedding skipped for %s (rc=%s)%s",
+                video_id,
+                proc.returncode,
+                f" err={err}" if err else "",
+            )
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            return
+
         os.replace(tmp_path, local_file)
         logging.info("[%s] Metadata embedded successfully", video_id)
-    except subprocess.CalledProcessError:
-        logging.warning("ffmpeg metadata embedding skipped for %s", video_id)
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-    except Exception:
-        logging.exception("Unexpected error during metadata embedding for %s", video_id)
+
+    except Exception as exc:
+        # Absolute last-resort: never fail the download
+        logging.warning("ffmpeg metadata embedding skipped for %s (%s)", video_id, exc)
         try:
             os.unlink(tmp_path)
         except Exception:
