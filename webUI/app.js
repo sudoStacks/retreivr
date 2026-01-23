@@ -167,6 +167,7 @@ function setPage(page) {
     if (state.homeSearchRequestId) {
       startHomeResultPolling(state.homeSearchRequestId);
     }
+    setHomeSearchActive(Boolean(state.homeSearchRequestId || state.homeDirectPreview));
     updateHomeViewAdvancedLink();
   } else {
     stopHomeResultPolling();
@@ -175,6 +176,10 @@ function setPage(page) {
   document.body.classList.remove("nav-open");
   // Home-only root class for scoping styles
   document.body.classList.toggle("home-page", target === "home");
+  if (target !== "home") {
+    setHomeSearchActive(false);
+    setHomeResultsState({ hasResults: false, terminal: false });
+  }
   document.body.dataset.page = target;
   const navToggle = $("#nav-toggle");
   if (navToggle) {
@@ -1480,6 +1485,12 @@ function updateHomeSourceToggleLabel() {
   );
   if (!inputs.length) return;
   const checked = inputs.filter((input) => input.checked);
+  inputs.forEach((input) => {
+    const label = input.closest("label");
+    if (label) {
+      label.classList.toggle("selected", input.checked);
+    }
+  });
   if (checked.length === inputs.length) {
     toggle.textContent = "Sources: All";
     return;
@@ -1586,6 +1597,41 @@ function showHomeResults(visible) {
   if (!section) return;
   section.classList.toggle("hidden", !visible);
   section.classList.remove("has-results");
+  section.classList.remove("search-complete");
+}
+
+function setHomeSearchActive(active) {
+  const shell = document.querySelector(".home-search-shell");
+  document.body.classList.toggle("search-active", !!active);
+  if (shell) {
+    shell.classList.toggle("search-active", !!active);
+  }
+}
+
+function setHomeResultsState({ hasResults = false, terminal = false } = {}) {
+  const section = $("#home-results");
+  if (!section) return;
+  section.classList.toggle("has-results", !!hasResults);
+  section.classList.toggle("search-complete", !!terminal);
+}
+
+function clearHomeEnqueueError(container) {
+  if (!container) return;
+  const existing = container.querySelector(".home-enqueue-error");
+  if (existing) {
+    existing.remove();
+  }
+}
+
+function showHomeEnqueueError(container, message) {
+  if (!container) return;
+  let errorEl = container.querySelector(".home-enqueue-error");
+  if (!errorEl) {
+    errorEl = document.createElement("div");
+    errorEl.className = "home-enqueue-error";
+    container.appendChild(errorEl);
+  }
+  errorEl.textContent = message;
 }
 
 function updateHomeViewAdvancedLink() {
@@ -1756,6 +1802,7 @@ function updateHomeResultsStatusForRequest(requestId) {
   if (!requestId) {
     setHomeResultsStatus("Ready to discover media");
     setHomeResultsDetail("Search Only is the default discovery action; use Search & Download to enqueue jobs.", false);
+    setHomeSearchActive(false);
     return;
   }
   const info = buildHomeResultsStatusInfo(requestId);
@@ -1923,10 +1970,7 @@ async function loadHomeCandidates(item, container) {
     if (placeholder.parentElement) {
       placeholder.remove();
     }
-    const resultsSection = $("#home-results");
-    if (resultsSection) {
-      resultsSection.classList.add("has-results");
-    }
+    setHomeResultsState({ hasResults: true, terminal: false });
     let rendered = state.homeCandidateCache[item.id];
     if (!rendered) {
       rendered = new Set();
@@ -2173,10 +2217,7 @@ function showHomeDirectUrlError(url, message, messageEl) {
     container.textContent = "";
     container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "failed"));
   }
-  const resultsSection = $("#home-results");
-  if (resultsSection) {
-    resultsSection.classList.add("has-results");
-  }
+  setHomeResultsState({ hasResults: true, terminal: true });
 }
 
 function showHomeDirectUrlPreview(preview) {
@@ -2197,10 +2238,7 @@ function showHomeDirectUrlPreview(preview) {
   container.textContent = "";
   const card = renderHomeDirectUrlCard(preview, "candidate_found");
   container.appendChild(card);
-  const resultsSection = $("#home-results");
-  if (resultsSection) {
-    resultsSection.classList.add("has-results");
-  }
+  setHomeResultsState({ hasResults: true, terminal: false });
 }
 
 function stopHomeDirectJobPolling() {
@@ -2236,6 +2274,10 @@ async function refreshHomeDirectJobStatus() {
       container.appendChild(card);
       setHomeResultsStatus(formatDirectJobStatus(job.status));
       setHomeResultsDetail(job.last_error || "", Boolean(job.last_error));
+      setHomeResultsState({
+        hasResults: true,
+        terminal: ["completed", "failed", "cancelled"].includes(job.status),
+      });
       if (["completed", "failed"].includes(job.status)) {
         stopHomeDirectJobPolling();
         setHomeSearchControlsEnabled(true);
@@ -2271,6 +2313,10 @@ async function refreshHomeDirectJobStatus() {
     container.appendChild(card);
     setHomeResultsStatus(formatDirectJobStatus(runStatus));
     setHomeResultsDetail(runError || "", Boolean(runError));
+    setHomeResultsState({
+      hasResults: true,
+      terminal: ["completed", "failed", "cancelled"].includes(runStatus),
+    });
     if (["completed", "failed"].includes(runStatus)) {
       stopHomeDirectJobPolling();
       setHomeSearchControlsEnabled(true);
@@ -2329,11 +2375,8 @@ async function refreshHomeResults(requestId) {
       placeholder.className = "home-results-empty";
       placeholder.textContent = "Searching sources…";
       container.appendChild(placeholder);
-      const resultsSection = $("#home-results");
       const terminal = ["completed", "completed_with_skips", "failed"].includes(requestStatus);
-      if (resultsSection) {
-        resultsSection.classList.toggle("has-results", terminal);
-      }
+      setHomeResultsState({ hasResults: terminal, terminal });
       return requestStatus;
     }
     const currentIds = new Set();
@@ -2360,10 +2403,7 @@ async function refreshHomeResults(requestId) {
     });
     const hasResults = items.some((entry) => entry.candidate_count > 0);
     const terminal = ["completed", "completed_with_skips", "failed"].includes(requestStatus);
-    const resultsSection = $("#home-results");
-    if (resultsSection) {
-      resultsSection.classList.toggle("has-results", hasResults || terminal);
-    }
+    setHomeResultsState({ hasResults: hasResults || terminal, terminal });
     Object.keys(state.homeCandidateCache).forEach((key) => {
       if (!currentIds.has(key)) {
         delete state.homeCandidateCache[key];
@@ -2377,10 +2417,7 @@ async function refreshHomeResults(requestId) {
     errorEl.className = "home-results-empty";
     errorEl.textContent = `Failed to refresh results: ${err.message}`;
     container.appendChild(errorEl);
-    const resultsSection = $("#home-results");
-    if (resultsSection) {
-      resultsSection.classList.add("has-results");
-    }
+    setHomeResultsState({ hasResults: true, terminal: true });
     setHomeResultsStatus("FAILED");
     setHomeResultsDetail(`Failed to refresh results: ${err.message}`, true);
     setHomeSearchControlsEnabled(true);
@@ -2405,6 +2442,7 @@ function guardHomeSearchNoCandidates(requestId, requestStatus, items) {
         "Adapters are not returning results for this query. Try refining the search or use Advanced Search.",
         true
       );
+      setHomeResultsState({ hasResults: false, terminal: true });
       setHomeSearchControlsEnabled(true);
     }
     return;
@@ -2416,6 +2454,7 @@ function abortHomeResultPolling(message) {
   stopHomeResultPolling();
   setHomeResultsStatus("Search timed out");
   setHomeResultsDetail(message || "Adapters took too long; try again or use Advanced Search.", true);
+  setHomeResultsState({ hasResults: false, terminal: true });
   setHomeSearchControlsEnabled(true);
 }
 
@@ -2448,6 +2487,15 @@ async function submitHomeSearch(autoEnqueue) {
   const destinationValue = $("#home-destination")?.value.trim() || "";
   if (!state.homeSearchControlsEnabled) {
     return;
+  }
+  setHomeSearchActive(true);
+  showHomeResults(true);
+  setHomeResultsState({ hasResults: false, terminal: false });
+  setHomeResultsStatus("Searching sources…");
+  setHomeResultsDetail("Results appear as soon as each source responds.", false);
+  const resultsList = $("#home-results-list");
+  if (resultsList) {
+    resultsList.textContent = "";
   }
   setHomeSearchControlsEnabled(false);
   stopHomeDirectJobPolling();
@@ -2489,11 +2537,14 @@ async function submitHomeSearch(autoEnqueue) {
   } catch (err) {
     setHomeSearchControlsEnabled(true);
     setNotice(messageEl, `Search failed: ${err.message}`, true);
+    setHomeResultsState({ hasResults: false, terminal: true });
+    setHomeSearchActive(false);
   }
 }
 
 async function handleHomeDirectUrl(url, destination, messageEl) {
   if (!messageEl) return;
+  setHomeSearchActive(true);
   const formatOverride = $("#home-format")?.value.trim();
   const treatAsMusic = $("#home-treat-music")?.checked ?? false;
   const playlistId = extractPlaylistIdFromUrl(url);
@@ -2537,6 +2588,7 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
       container.textContent = "";
       container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "enqueued"));
     }
+    setHomeResultsState({ hasResults: true, terminal: false });
     startHomeDirectJobPolling();
     setNotice(messageEl, "Direct URL download started", false);
   } catch (err) {
@@ -2548,6 +2600,7 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
 
 async function handleHomeDirectUrlPreview(url, destination, messageEl) {
   if (!messageEl) return;
+  setHomeSearchActive(true);
   const playlistId = extractPlaylistIdFromUrl(url);
   if (playlistId) {
     showHomeDirectUrlError(url, DIRECT_URL_PLAYLIST_ERROR, messageEl);
@@ -3867,12 +3920,19 @@ if (homeAdvancedToggle && homeAdvancedPanel) {
       if (!itemId || !candidateId) return;
       if (button.disabled) return;
       button.disabled = true;
+      const actionContainer = button.closest(".home-candidate-action");
+      clearHomeEnqueueError(actionContainer);
       const originalText = button.textContent;
       button.textContent = "Queued";
-      await enqueueSearchCandidate(itemId, candidateId, { messageEl: $("#home-search-message") });
-      await refreshHomeResults(state.homeSearchRequestId);
-      button.disabled = false;
-      button.textContent = originalText;
+      try {
+        await enqueueSearchCandidate(itemId, candidateId, { messageEl: $("#home-search-message") });
+        await refreshHomeResults(state.homeSearchRequestId);
+      } catch (err) {
+        showHomeEnqueueError(actionContainer, err.message || "Failed to enqueue download.");
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
     });
   }
   $("#search-requests-body").addEventListener("click", async (event) => {
