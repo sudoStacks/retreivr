@@ -53,8 +53,8 @@ _FORMAT_VIDEO = (
     "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
     "bestvideo*+bestaudio/best"
 )
-# Audio-only selector: explicitly require an audio codec to avoid video-only DASH streams
-_FORMAT_AUDIO = "bestaudio[acodec!=none]/bestaudio"
+# Audio selector chain: prefer audio-only, then muxed with audio, then best as last resort.
+_FORMAT_AUDIO = "bestaudio[acodec!=none]/bestaudio/best[acodec!=none]/best"
 
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
 
@@ -1508,7 +1508,6 @@ def download_with_ytdlp(
 ):
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
         raise CancelledError(cancel_reason or "Cancelled by user")
-    attempted_audio_fallback = False
     # Use an ID-based template in temp_dir (CLI parity and avoids title/path edge cases).
     # The final user-facing name is applied later when we move/rename the completed file.
     output_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
@@ -1614,41 +1613,9 @@ def download_with_ytdlp(
             or "conversion failed" in lowered
         ):
             raise PostprocessingError(message)
-        if audio_mode and "requested format is not available" in lowered and not attempted_audio_fallback:
-            attempted_audio_fallback = True
-            _log_event(
-                logging.WARNING,
-                "AUDIO_FALLBACK_TO_VIDEO_EXTRACT",
-                job_id=job_id,
-                url=url,
-                original_format=opts.get("format"),
-                final_format=final_format,
-            )
-            try:
-                fallback_opts = dict(opts)
-                fallback_opts["format"] = "bestvideo+bestaudio/best"
-                fallback_opts.pop("merge_output_format", None)
-                def _fallback_cancel_hook(d):
-                    if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
-                        raise CancelledError(cancel_reason or "Cancelled by user")
-                hooks = list(fallback_opts.get("progress_hooks") or [])
-                hooks.append(_fallback_cancel_hook)
-                fallback_opts["progress_hooks"] = hooks
-                with YoutubeDL(fallback_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
-                        raise CancelledError(cancel_reason or "Cancelled by user")
-            except Exception as fallback_exc:
-                exc = fallback_exc
-                message = str(exc) or ""
-                lowered = message.lower()
-            else:
-                pass
-        if info is not None:
-            pass
-        else:
-        # If a cookiefile is present and yt-dlp reports an empty download, retry once WITHOUT cookies.
-        # This matches the observed CLI behavior (no cookies) and avoids poisoning downloads with bad/expired cookies.
+        if info is None:
+            # If a cookiefile is present and yt-dlp reports an empty download, retry once WITHOUT cookies.
+            # This matches the observed CLI behavior (no cookies) and avoids poisoning downloads with bad/expired cookies.
             if _is_empty_download_error(exc) and opts.get("cookiefile"):
                 retry_opts = dict(opts)
                 retry_opts.pop("cookiefile", None)
