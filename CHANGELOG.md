@@ -2,10 +2,20 @@
 
 All notable changes to this project will be documented here.
 
+## [v0.9.3] – YouTube Cookie Fallback (post-release)
+
+Fixed:
+- Added an optional, fallback-only YouTube cookies.txt path that retries only access-gated failures once with cookies before marking video jobs as permanently failed; music mode and existing anonymous behavior continue to run unchanged.
+
 ## [v0.9.1] – Runtime Stability & Direct URL Fixes
 
 This release focuses on restoring and hardening runtime stability after refactors since yt-archiver v1.2.0.
 Primary goals were correctness, predictability, and eliminating regressions in downloads, scheduling, and search flows.
+
+## [v0.9.3] – YouTube Cookie Fallback (post-release)
+
+Fixed:
+- Added an optional, fallback-only YouTube cookies.txt path that retries only access-gated failures once with cookies before marking video jobs as permanently failed; music mode and existing anonymous behavior continue to run unchanged.
 
 Fixed:
 - Restored reliable Direct URL downloads for video and audio (mp3/m4a/etc).

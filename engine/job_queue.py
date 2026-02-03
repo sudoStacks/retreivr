@@ -47,6 +47,10 @@ class CancelledError(Exception):
 class PostprocessingError(Exception):
     pass
 
+
+class CookieFallbackError(RuntimeError):
+    """Raised when the optional YouTube cookie fallback fails."""
+
 _FORMAT_VIDEO = (
     "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
     "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
@@ -1154,6 +1158,69 @@ def resolve_cookie_file(config):
     return resolved
 
 
+def resolve_youtube_cookie_fallback_file(config):
+    youtube_cfg = (config or {}).get("youtube")
+    if not isinstance(youtube_cfg, dict):
+        return None
+    cookies_cfg = youtube_cfg.get("cookies")
+    if not isinstance(cookies_cfg, dict):
+        return None
+    if not cookies_cfg.get("enabled"):
+        return None
+    if not cookies_cfg.get("fallback_only"):
+        return None
+    path = cookies_cfg.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    try:
+        resolved = resolve_dir(path, TOKENS_DIR)
+    except ValueError as exc:
+        logging.error("Invalid youtube cookies path: %s", exc)
+        return None
+    if not os.path.exists(resolved):
+        logging.warning("youtube cookies file not found: %s", resolved)
+        return None
+    return resolved
+
+
+def _is_youtube_access_gate(message: str | None) -> bool:
+    if not message:
+        return False
+    lower_msg = message.lower()
+    triggers = [
+        "this video is not available",
+        "sign in to confirm your age",
+        "login required",
+        "access denied",
+        "age restricted",
+        "age-restricted",
+        "age restriction",
+    ]
+    blockers = [
+        "timed out",
+        "timeout",
+        "connection reset",
+        "temporary failure",
+        "network error",
+        "couldn't download webpage",
+        "unable to download webpage",
+        "http error 403",
+        "http error 404",
+        "geo-restricted",
+        "geoblocked",
+        "geo blocked",
+        "country",
+        "region",
+        "format not available",
+        "private",
+        "removed",
+    ]
+    if not any(trigger in lower_msg for trigger in triggers):
+        return False
+    if any(blocker in lower_msg for blocker in blockers):
+        return False
+    return True
+
 def resolve_media_type(config, *, playlist_entry=None, url=None):
     media_type = None
     if isinstance(playlist_entry, dict):
@@ -1548,6 +1615,28 @@ def _format_summary(info):
     }
 
 
+def _select_youtube_cookie_fallback(
+    config,
+    url,
+    stderr_text,
+    opts,
+    media_type,
+):
+    fallback_cookie = resolve_youtube_cookie_fallback_file(config)
+    if not fallback_cookie:
+        return None
+    if opts.get("cookiefile"):
+        return None
+    if is_music_media_type(media_type):
+        return None
+    source = resolve_source(url)
+    if source not in {"youtube", "youtube_music"}:
+        return None
+    if not _is_youtube_access_gate(stderr_text):
+        return None
+    return fallback_cookie
+
+
 def download_with_ytdlp(
     url,
     temp_dir,
@@ -1684,7 +1773,13 @@ def download_with_ytdlp(
     cmd_log = _argv_to_redacted_cli(cmd_argv)
 
     try:
-        subprocess.run(cmd_argv, check=True, stdout=DEVNULL, stderr=DEVNULL)
+        subprocess.run(
+            cmd_argv,
+            check=True,
+            stdout=DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         # Log AFTER the command has been executed, per requirement.
         _log_event(
             logging.INFO,
@@ -1694,7 +1789,71 @@ def download_with_ytdlp(
             cli=cmd_log,
         )
     except CalledProcessError as exc:
-        # If a cookiefile is present and yt-dlp produced no completed file in temp_dir, retry once WITHOUT cookies.
+        stderr_output = (exc.stderr or "").strip()
+        fallback_cookie = _select_youtube_cookie_fallback(
+            config=config,
+            url=url,
+            stderr_text=stderr_output,
+            opts=opts_for_run,
+            media_type=media_type,
+        )
+        if fallback_cookie:
+            _log_event(
+                logging.INFO,
+                "YTDLP_YOUTUBE_COOKIE_FALLBACK_ATTEMPT",
+                job_id=job_id,
+                url=url,
+                origin=origin,
+                media_type=media_type,
+                media_intent=media_intent,
+                error=stderr_output,
+            )
+            retry_opts = dict(opts_for_run)
+            retry_opts["cookiefile"] = fallback_cookie
+            cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
+            cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
+            try:
+                subprocess.run(
+                    cmd_retry_argv,
+                    check=True,
+                    stdout=DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                _log_event(
+                    logging.INFO,
+                    "YTDLP_YOUTUBE_COOKIE_FALLBACK_SUCCEEDED",
+                    job_id=job_id,
+                    url=url,
+                    origin=origin,
+                    media_type=media_type,
+                    media_intent=media_intent,
+                )
+                _log_event(
+                    logging.INFO,
+                    "YTDLP_CLI_EQUIVALENT",
+                    job_id=job_id,
+                    url=url,
+                    cli=cmd_retry_log,
+                )
+                if (stop_event and stop_event.is_set()) or (
+                    callable(cancel_check) and cancel_check()
+                ):
+                    raise CancelledError(cancel_reason or "Cancelled by user")
+                return info, _select_download_output(temp_dir, info, audio_mode)
+            except CalledProcessError as fallback_exc:
+                fallback_message = (fallback_exc.stderr or "").strip()
+                _log_event(
+                    logging.ERROR,
+                    "YTDLP_YOUTUBE_COOKIE_FALLBACK_FAILED",
+                    job_id=job_id,
+                    url=url,
+                    origin=origin,
+                    media_type=media_type,
+                    media_intent=media_intent,
+                    error=fallback_message,
+                )
+                raise CookieFallbackError(f"yt_dlp_cookie_fallback_failed: {fallback_exc}")
         if opts.get("cookiefile"):
             found = False
             for entry in os.listdir(temp_dir):
@@ -1789,7 +1948,10 @@ def download_with_ytdlp(
 
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
         raise CancelledError(cancel_reason or "Cancelled by user")
+    return info, _select_download_output(temp_dir, info, audio_mode)
 
+
+def _select_download_output(temp_dir, info, audio_mode):
     local_path = None
     if isinstance(info, dict):
         local_path = info.get("_filename")
@@ -1799,15 +1961,12 @@ def download_with_ytdlp(
                 if local_path:
                     break
 
-    # If yt-dlp reported a concrete output file, use it
     if local_path and os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-        return info, local_path
+        return local_path
 
-    # Otherwise, scan temp_dir for completed artifacts
     candidates = []
     audio_candidates = []
     for entry in os.listdir(temp_dir):
-        # Ignore yt-dlp temporary/partial artifacts
         if entry.endswith((".part", ".ytdl", ".temp")):
             continue
         candidate = os.path.join(temp_dir, entry)
@@ -1820,22 +1979,27 @@ def download_with_ytdlp(
         if size <= 0:
             continue
         candidates.append((size, candidate))
-        if os.path.splitext(candidate)[1].lower() in {".m4a", ".webm", ".opus", ".aac", ".mp3", ".flac"}:
+        if os.path.splitext(candidate)[1].lower() in {
+            ".m4a",
+            ".webm",
+            ".opus",
+            ".aac",
+            ".mp3",
+            ".flac",
+        }:
             audio_candidates.append((size, candidate))
 
-    # In audio_mode, we MUST have an audio-capable artifact
     if audio_mode:
         if not audio_candidates:
             raise PostprocessingError(
                 "No audio stream resolved (video-only format selected)"
             )
         audio_candidates.sort(reverse=True)
-        return info, audio_candidates[0][1]
+        return audio_candidates[0][1]
 
-    # Video mode fallback: pick the largest completed artifact
     if candidates:
         candidates.sort(reverse=True)
-        return info, candidates[0][1]
+        return candidates[0][1]
 
     raise RuntimeError("yt_dlp_no_output")
 
@@ -2312,6 +2476,8 @@ def is_retryable_error(error):
     if isinstance(error, TypeError):
         return False
     if isinstance(error, PostprocessingError):
+        return False
+    if isinstance(error, CookieFallbackError):
         return False
     if isinstance(error, (DownloadError, ExtractorError)):
         message = str(error).lower()

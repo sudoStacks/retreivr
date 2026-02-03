@@ -281,6 +281,26 @@ def validate_config(config):
     if cookie_file is not None and not isinstance(cookie_file, str):
         errors.append("yt_dlp_cookies must be a string")
 
+    youtube_cfg = config.get("youtube")
+    if youtube_cfg is not None:
+        if not isinstance(youtube_cfg, dict):
+            errors.append("youtube must be an object")
+        else:
+            cookies_cfg = youtube_cfg.get("cookies")
+            if cookies_cfg is not None:
+                if not isinstance(cookies_cfg, dict):
+                    errors.append("youtube.cookies must be an object")
+                else:
+                    enabled = cookies_cfg.get("enabled")
+                    if enabled is not None and not isinstance(enabled, bool):
+                        errors.append("youtube.cookies.enabled must be true/false")
+                    fallback_only = cookies_cfg.get("fallback_only")
+                    if fallback_only is not None and not isinstance(fallback_only, bool):
+                        errors.append("youtube.cookies.fallback_only must be true/false")
+                    path = cookies_cfg.get("path")
+                    if path is not None and not isinstance(path, str):
+                        errors.append("youtube.cookies.path must be a string")
+
     filename_template = config.get("filename_template")
     if filename_template is not None and not isinstance(filename_template, str):
         errors.append("filename_template must be a string")
