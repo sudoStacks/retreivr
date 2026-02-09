@@ -156,6 +156,40 @@ def _sanitize_non_http_urls(obj):
         return [_sanitize_non_http_urls(v) for v in obj]
     return obj
 
+def notify_run_summary(config, *, run_type: str, status, started_at, finished_at):
+    if run_type not in {"scheduled", "watcher"}:
+        return
+
+    successes = int(getattr(status, "run_successes", 0) or 0)
+    failures = int(getattr(status, "run_failures", 0) or 0)
+    attempted = successes + failures
+
+    if attempted <= 0:
+        return
+
+    duration_label = "unknown"
+    if started_at and finished_at:
+        start_dt = _parse_iso(started_at)
+        finish_dt = _parse_iso(finished_at)
+        if start_dt is not None and finish_dt is not None:
+            duration_sec = int((finish_dt - start_dt).total_seconds())
+            m, s = divmod(max(0, duration_sec), 60)
+            duration_label = f"{m}m {s}s" if m else f"{s}s"
+
+    msg = (
+        "Retreivr Run Summary\n"
+        f"Run type: {run_type}\n"
+        f"Attempted: {attempted}\n"
+        f"Succeeded: {successes}\n"
+        f"Failed: {failures}\n"
+        f"Duration: {duration_label}"
+    )
+
+    try:
+        telegram_notify(config, msg)
+    except Exception:
+        logging.exception("Telegram notify failed (run_type=%s)", run_type)
+
 
 def normalize_search_payload(payload: dict | None, *, default_sources: list[str]) -> dict:
     if payload is None:
@@ -1862,6 +1896,14 @@ async def _start_run_with_config(
                     logging.info("State reset to idle")
                 elif app.state.state in {"running", "completed"}:
                     app.state.state = "idle"
+                
+                notify_run_summary(
+                    config,
+                    run_type=run_source,
+                    status=status,
+                    started_at=app.state.started_at,
+                    finished_at=app.state.finished_at,
+                )
 
         app.state.run_task = asyncio.create_task(_runner())
 
