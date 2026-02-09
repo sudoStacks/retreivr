@@ -7,16 +7,6 @@ All notable changes to this project will be documented here.
 Fixed:
 - Added an optional, fallback-only YouTube cookies.txt path that retries only access-gated failures once with cookies before marking video jobs as permanently failed; music mode and existing anonymous behavior continue to run unchanged.
 
-## [v0.9.1] – Runtime Stability & Direct URL Fixes
-
-This release focuses on restoring and hardening runtime stability after refactors since yt-archiver v1.2.0.
-Primary goals were correctness, predictability, and eliminating regressions in downloads, scheduling, and search flows.
-
-## [v0.9.3] – YouTube Cookie Fallback (post-release)
-
-Fixed:
-- Added an optional, fallback-only YouTube cookies.txt path that retries only access-gated failures once with cookies before marking video jobs as permanently failed; music mode and existing anonymous behavior continue to run unchanged.
-
 Fixed:
 - Restored reliable Direct URL downloads for video and audio (mp3/m4a/etc).
 - Corrected yt-dlp invocation for audio formats (uses extract-audio instead of merge-output-format).
@@ -41,6 +31,66 @@ Notes:
 - Playlist URLs must be added via Scheduler / Playlist configuration, not Direct URL mode.
 - Kill-download button is not guaranteed during active runs and remains experimental.
 - Watcher functionality is present but considered beta and may change in later releases.
+
+## [v0.9.2] – Search Engine Dialed In // Home Page UI Update
+
+Highlights
+
+This release hardens the download pipeline (especially audio-only MP3), improves observability, and simplifies the Home UI ahead of broader feature work. Video downloads remain stable and unchanged.
+
+⸻
+
+🚀 Improvements • Reliable MP3 audio-only downloads • Audio mode now uses a robust bestaudio[acodec!=none]/bestaudio/best selector. • Prevents unnecessary video downloads when targeting MP3. • Matches known-working yt-dlp CLI behavior. • Works consistently for direct URLs and queued jobs. • Safer yt-dlp option handling • Avoids forced merge/remux unless explicitly required. • Reduces ffmpeg post-processing failures. • Audio and video paths are now clearly separated and predictable. • yt-dlp CLI observability • Job workers now log the exact yt-dlp CLI command executed (with secrets redacted). • Makes debugging format, cookie, and extractor issues significantly easier.
+
+⸻
+
+🧠 Behavior Fixes • Post-processing failures are now terminal • ffmpeg / post-processing errors correctly mark jobs as FAILED. • Prevents silent re-queue loops and misleading “Queued” states in the UI. • Video pipeline preserved • Default video behavior (bestvideo+bestaudio/best) remains unchanged. • MP4 / MKV / WebM downloads continue to work as before.
+
+⸻
+
+🎧 Music & Metadata • Music metadata enrichment remains optional • Failed or low-confidence enrichment no longer blocks successful downloads. • Clear logging when metadata is skipped due to confidence thresholds.
+
+⸻
+
+🖥 UI / UX • Home page cleanup • Reorganized source filters and advanced options into a single compact row. • Reduced visual noise without removing functionality. • Improved spacing and alignment for music mode, format, and destination controls. • Advanced Search remains available • Advanced functionality is still accessible via the dedicated Advanced Search page.
+
+⸻
+
+🧹 Internal / Maintenance • Improved internal option auditing logs. • Better separation between search, enqueue, and execution logic. • No schema or config migrations required.
+
+⸻
+
+⚠️ Known Notes • Client-side (“download to this device”) delivery is still being refined and may be disabled or hidden in some UI paths.
+
+## [v0.9.1] – Runtime Stability & Direct URL Fixes
+
+This release focuses on restoring and hardening runtime stability after refactors since yt-archiver v1.2.0. Primary goals were correctness, predictability, and eliminating regressions in downloads, scheduling, and search flows.
+
+Fixed:
+
+Restored reliable Direct URL downloads for video and audio (mp3/m4a/etc).
+Corrected yt-dlp invocation for audio formats (uses extract-audio instead of merge-output-format).
+Fixed Direct URL runs appearing permanently queued in the Home UI.
+Prevented empty or zero-byte output files from being recorded as completed.
+Fixed scheduler playlist downloads producing incorrect formats or audio-only output.
+Ensured scheduler and direct downloads can run concurrently without interference.
+Fixed missing database schema initialization for search-related tables.
+Normalized all filesystem paths via paths.py and environment variables (Docker-safe).
+Fixed Advanced Search “Failed to load requests” error caused by search DB store calling service-only logic.
+Fixed Home screen results remaining stuck in “Queued” by restoring reliable search request status hydration.
+Unified search job database usage to a single canonical path to prevent schema and state mismatches.
+Changed:
+
+Direct URL playlist links are now explicitly rejected with a clear user-facing error message.
+Direct URL runs bypass the job queue but still report progress and completion via run status.
+Search-only results can now be downloaded individually via the Home results UI.
+Default video downloads respect configured format preferences (e.g., webm/mp4).
+Metadata enrichment failures no longer block or corrupt completed downloads.
+Notes:
+
+Playlist URLs must be added via Scheduler / Playlist configuration, not Direct URL mode.
+Kill-download button is not guaranteed during active runs and remains experimental.
+Watcher functionality is present but considered beta and may change in later releases.
 
 ## [v0.9.0] – Retreivr Rebrand Release // Music Mode and Metadata
 - Project renamed to Retreivr
