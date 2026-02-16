@@ -28,6 +28,7 @@ import shutil
 import tempfile
 import threading
 import time
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
@@ -109,7 +110,9 @@ from engine.paths import (
 from engine.runtime import get_runtime_info
 from input.intent_router import IntentType, detect_intent
 from api.intent_dispatcher import execute_intent as dispatch_intent
+from spotify.oauth_client import SPOTIFY_TOKEN_URL, build_auth_url
 from spotify.client import SpotifyPlaylistClient
+from spotify.oauth_store import SpotifyOAuthStore, SpotifyOAuthToken
 from db.playlist_snapshots import PlaylistSnapshotStore
 
 APP_NAME = "Retreivr API"
@@ -3550,6 +3553,127 @@ async def import_spotify_playlist(payload: SpotifyPlaylistImportPayload):
 @app.get("/api/spotify/playlists/status")
 async def spotify_playlist_status():
     return {"statuses": app.state.spotify_import_status}
+
+
+@app.get("/api/spotify/oauth/connect")
+async def spotify_oauth_connect():
+    """Build Spotify OAuth connect URL and store anti-CSRF state in memory."""
+    config = _read_config_or_404()
+    spotify_cfg = (config.get("spotify") or {}) if isinstance(config, dict) else {}
+    client_id = (
+        str(spotify_cfg.get("client_id") or config.get("SPOTIFY_CLIENT_ID") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    redirect_uri = (
+        str(spotify_cfg.get("redirect_uri") or config.get("SPOTIFY_REDIRECT_URI") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    if not client_id:
+        raise HTTPException(status_code=400, detail="SPOTIFY_CLIENT_ID is required in config")
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="SPOTIFY_REDIRECT_URI is required in config")
+
+    state = str(uuid4())
+    app.state.spotify_oauth_state = state
+    scope = "user-library-read playlist-read-private playlist-read-collaborative"
+    auth_url = build_auth_url(
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        state=state,
+    )
+    return {"auth_url": auth_url}
+
+
+@app.get("/api/spotify/oauth/callback")
+async def spotify_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    """Handle Spotify OAuth callback and persist tokens."""
+    if error:
+        raise HTTPException(status_code=400, detail=f"spotify_oauth_error: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="missing code")
+    if not state:
+        raise HTTPException(status_code=400, detail="missing state")
+
+    expected_state = str(getattr(app.state, "spotify_oauth_state", "") or "")
+    if not expected_state or state != expected_state:
+        raise HTTPException(status_code=400, detail="invalid oauth state")
+
+    config = _read_config_or_404()
+    spotify_cfg = (config.get("spotify") or {}) if isinstance(config, dict) else {}
+    client_id = (
+        str(spotify_cfg.get("client_id") or config.get("SPOTIFY_CLIENT_ID") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    client_secret = (
+        str(spotify_cfg.get("client_secret") or config.get("SPOTIFY_CLIENT_SECRET") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    redirect_uri = (
+        str(spotify_cfg.get("redirect_uri") or config.get("SPOTIFY_REDIRECT_URI") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    if not client_id:
+        raise HTTPException(status_code=400, detail="SPOTIFY_CLIENT_ID is required in config")
+    if not client_secret:
+        raise HTTPException(status_code=400, detail="SPOTIFY_CLIENT_SECRET is required in config")
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="SPOTIFY_REDIRECT_URI is required in config")
+
+    try:
+        token_response = requests.post(
+            SPOTIFY_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout=20,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"token exchange failed: {exc}") from exc
+
+    if token_response.status_code != 200:
+        detail = (token_response.text or "").strip() or f"status={token_response.status_code}"
+        raise HTTPException(status_code=400, detail=f"token exchange failed: {detail}")
+
+    payload = token_response.json()
+    access_token = str(payload.get("access_token") or "").strip()
+    refresh_token = str(payload.get("refresh_token") or "").strip()
+    expires_in = payload.get("expires_in")
+    scope = str(payload.get("scope") or "").strip()
+    if not access_token:
+        raise HTTPException(status_code=400, detail="token exchange failed: missing access_token")
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="token exchange failed: missing refresh_token")
+    if expires_in is None:
+        raise HTTPException(status_code=400, detail="token exchange failed: missing expires_in")
+    if not scope:
+        raise HTTPException(status_code=400, detail="token exchange failed: missing scope")
+
+    try:
+        expires_at = int(time.time()) + int(expires_in)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="token exchange failed: invalid expires_in") from exc
+
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    store.save(
+        SpotifyOAuthToken(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            scope=scope,
+        )
+    )
+    app.state.spotify_oauth_state = None
+    return {"status": "connected"}
 
 
 @app.get("/api/search/items/{item_id}/candidates")

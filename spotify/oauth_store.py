@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from spotify.oauth_client import refresh_access_token
 
 
 @dataclass
@@ -113,3 +116,42 @@ class SpotifyOAuthStore:
             conn.commit()
         finally:
             conn.close()
+
+    def get_valid_token(self, client_id: str, client_secret: str) -> Optional[SpotifyOAuthToken]:
+        """Return a valid token, refreshing and persisting it when expired.
+
+        Behavior:
+        - If no token is stored, return ``None``.
+        - If token is not expired, return as-is.
+        - If expired, attempt refresh and persist updated token.
+        - If refresh fails, clear stored token and return ``None``.
+        """
+        token = self.load()
+        if token is None:
+            return None
+
+        now = int(time.time())
+        if int(token.expires_at) > now:
+            return token
+
+        try:
+            payload = refresh_access_token(
+                client_id=client_id,
+                client_secret=client_secret,
+                refresh_token=token.refresh_token,
+            )
+            new_access_token = str(payload.get("access_token") or "").strip()
+            expires_in = payload.get("expires_in")
+            if not new_access_token or expires_in is None:
+                raise ValueError("refresh payload missing access_token or expires_in")
+            refreshed = SpotifyOAuthToken(
+                access_token=new_access_token,
+                refresh_token=str(payload.get("refresh_token") or token.refresh_token),
+                expires_at=now + int(expires_in),
+                scope=str(payload.get("scope") or token.scope),
+            )
+            self.save(refreshed)
+            return refreshed
+        except Exception:
+            self.clear()
+            return None
