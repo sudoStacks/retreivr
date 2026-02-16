@@ -108,7 +108,9 @@ from engine.paths import (
 )
 from engine.runtime import get_runtime_info
 from input.intent_router import IntentType, detect_intent
+from api.intent_dispatcher import execute_intent as dispatch_intent
 from spotify.client import SpotifyPlaylistClient
+from db.playlist_snapshots import PlaylistSnapshotStore
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 1
@@ -523,6 +525,20 @@ class SpotifyPlaylistImportPayload(BaseModel):
 class IntentExecutePayload(BaseModel):
     intent_type: IntentType
     identifier: str
+
+
+class _IntentQueueAdapter:
+    """Minimal queue adapter for intent-dispatched Spotify payloads."""
+
+    def enqueue(self, payload: dict) -> None:
+        if not hasattr(app.state, "intent_dispatch_queue"):
+            app.state.intent_dispatch_queue = []
+        app.state.intent_dispatch_queue.append(payload)
+        logging.info(
+            "Intent payload queued playlist_id=%s spotify_track_id=%s",
+            payload.get("playlist_id"),
+            payload.get("spotify_track_id"),
+        )
 
 
 class SafeJSONResponse(JSONResponse):
@@ -3365,11 +3381,20 @@ async def execute_intent(payload: dict = Body(...)):
         intent_type = IntentType(intent_raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid intent_type") from exc
-    return {
-        "status": "accepted",
-        "intent_type": intent_type.value,
-        "identifier": identifier,
-    }
+    config = _read_config_or_404()
+    dispatcher_config = dict(config)
+    dispatcher_config["search_service"] = app.state.search_service
+    db = PlaylistSnapshotStore(app.state.paths.db_path)
+    queue = _IntentQueueAdapter()
+    spotify_client = SpotifyPlaylistClient()
+    return await dispatch_intent(
+        intent_type=intent_type.value,
+        identifier=identifier,
+        config=dispatcher_config,
+        db=db,
+        queue=queue,
+        spotify_client=spotify_client,
+    )
 
 
 @app.post("/api/intent/preview")
