@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
+from pathlib import Path
 from typing import Any, Optional, Protocol
 
 from config.settings import ENABLE_DURATION_VALIDATION, SPOTIFY_DURATION_TOLERANCE_SECONDS
 from db.downloaded_tracks import record_downloaded_track
 from media.ffprobe import get_media_duration
+from media.path_builder import build_music_path, ensure_parent_dir
 from media.validation import validate_duration
 from metadata.normalize import normalize_music_metadata
 from metadata.tagging import tag_file
@@ -89,16 +92,33 @@ class DownloadWorker:
 
                     metadata_obj = self._coerce_music_metadata(metadata)
                     normalized_metadata = normalize_music_metadata(metadata_obj)
-                    tag_file(file_path, normalized_metadata)
+                    # === Canonical Path Enforcement Starts Here ===
+                    temp_path = Path(file_path)
+                    ext = temp_path.suffix.lstrip(".")
+                    root_path = self._resolve_music_root(payload)
+                    canonical_path = build_music_path(root_path, normalized_metadata, ext)
+                    ensure_parent_dir(canonical_path)
+                    try:
+                        shutil.move(str(temp_path), str(canonical_path))
+                    except Exception:
+                        logger.exception("failed to move file to canonical path path=%s", canonical_path)
+                        self._set_job_status(job, payload, JOB_STATUS_FAILED)
+                        return {"status": JOB_STATUS_FAILED, "file_path": None}
+                    try:
+                        tag_file(str(canonical_path), normalized_metadata)
+                    except Exception:
+                        logger.exception("failed to tag canonical file path=%s", canonical_path)
+                        self._set_job_status(job, payload, JOB_STATUS_FAILED)
+                        return {"status": JOB_STATUS_FAILED, "file_path": None}
                     # Record idempotency state only after download and tagging both succeed.
                     playlist_id = payload.get("playlist_id")
                     isrc = getattr(metadata, "isrc", None)
                     if not isrc and isinstance(metadata, dict):
                         isrc = metadata.get("isrc")
                     if playlist_id and isrc:
-                        record_downloaded_track(str(playlist_id), str(isrc), file_path)
+                        record_downloaded_track(str(playlist_id), str(isrc), str(canonical_path))
                     self._set_job_status(job, payload, JOB_STATUS_COMPLETED)
-                    return {"status": JOB_STATUS_COMPLETED, "file_path": file_path}
+                    return {"status": JOB_STATUS_COMPLETED, "file_path": str(canonical_path)}
                 except Exception:
                     logger.exception("music job processing failed")
                     self._set_job_status(job, payload, JOB_STATUS_FAILED)
@@ -144,6 +164,24 @@ class DownloadWorker:
             artwork=payload.get("artwork"),
             lyrics=(str(payload.get("lyrics")).strip() if payload.get("lyrics") else None),
         )
+
+    @staticmethod
+    def _resolve_music_root(payload: dict[str, Any]) -> Path:
+        """Resolve music root path from existing payload/config fields."""
+        config = payload.get("config") if isinstance(payload, dict) else None
+        root_value = (
+            payload.get("music_root")
+            or payload.get("destination")
+            or payload.get("destination_dir")
+            or payload.get("output_dir")
+            or (config.get("music_download_folder") if isinstance(config, dict) else None)
+            or "."
+        )
+        root = Path(str(root_value))
+        # build_music_path already inserts the "Music/" segment.
+        if root.name.lower() == "music":
+            return root.parent if str(root.parent) != "" else Path(".")
+        return root
 
 
 def safe_int(value: Any) -> Optional[int]:

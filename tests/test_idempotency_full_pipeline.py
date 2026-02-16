@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -34,7 +35,9 @@ class _MockDownloader:
     def download(self, media_url: str) -> str:
         self.calls.append(media_url)
         tail = media_url.rsplit("/", 1)[-1] or "track"
-        return f"/tmp/{tail}.mp3"
+        path = Path(f"/tmp/{tail}.mp3")
+        path.write_bytes(b"mock-audio")
+        return str(path)
 
 
 def test_idempotency_full_pipeline_two_tracks(tmp_path, monkeypatch) -> None:
@@ -104,4 +107,3 @@ def test_idempotency_full_pipeline_two_tracks(tmp_path, monkeypatch) -> None:
 
     assert len(queue.items) == 2
     assert search_service.calls == first_pass_queries
-

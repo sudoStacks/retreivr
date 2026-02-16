@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from download.worker import (
@@ -11,7 +12,9 @@ from download.worker import (
 
 class _MockDownloader:
     def download(self, media_url: str) -> str:
-        return "/tmp/mock-audio.mp3"
+        path = Path("/tmp/mock-audio.mp3")
+        path.write_bytes(b"mock-audio")
+        return str(path)
 
 
 def _job() -> SimpleNamespace:
