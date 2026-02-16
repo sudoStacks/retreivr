@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any, Callable
 
+from db.downloaded_tracks import has_downloaded_isrc
 from metadata.merge import merge_metadata
 from spotify.client import SpotifyPlaylistClient, get_playlist_items
 from spotify.diff import diff_playlist
@@ -47,7 +48,17 @@ def _enqueue_added_track(queue: Any, item: dict[str, Any]) -> None:
 
 
 async def enqueue_spotify_track(queue, spotify_track: dict, search_service, playlist_id: str):
-    """Resolve a Spotify track, merge metadata, build payload, and enqueue it."""
+    """Resolve a Spotify track, merge metadata, build payload, and enqueue it.
+
+    Idempotency skip is applied only when a non-empty ISRC exists and that
+    `(playlist_id, isrc)` has already been recorded as downloaded. Tracks with
+    missing/empty ISRC are always treated as normal enqueue candidates.
+    """
+    track_isrc = str((spotify_track or {}).get("isrc") or "").strip()
+    if track_isrc and has_downloaded_isrc(playlist_id, track_isrc):
+        logging.info("skip duplicate isrc=%s playlist=%s", track_isrc, playlist_id)
+        return
+
     resolved_media = await resolve_spotify_track(spotify_track, search_service)
     merged_metadata = merge_metadata(spotify_track or {}, {}, resolved_media.get("extra") or {})
     payload = {

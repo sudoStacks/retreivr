@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from db.downloaded_tracks import record_downloaded_track
 from metadata.tagging import tag_file
 
 
@@ -31,6 +32,13 @@ class DownloadWorker:
                 # Download from the resolved media URL, then tag with attached metadata.
                 file_path = self._downloader.download(media_url)
                 tag_file(file_path, metadata)
+                # Record idempotency state only after download and tagging both succeed.
+                playlist_id = payload.get("playlist_id")
+                isrc = getattr(metadata, "isrc", None)
+                if not isrc and isinstance(metadata, dict):
+                    isrc = metadata.get("isrc")
+                if playlist_id and isrc:
+                    record_downloaded_track(str(playlist_id), str(isrc), file_path)
                 return file_path
 
         # Non-music or incomplete payloads use the existing default worker behavior.
@@ -39,4 +47,3 @@ class DownloadWorker:
     def default_download_and_tag(self, job: Any) -> str:
         """Fallback behavior implemented by existing worker flows."""
         raise NotImplementedError
-

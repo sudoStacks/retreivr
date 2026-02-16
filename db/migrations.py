@@ -44,3 +44,32 @@ def ensure_playlist_snapshot_tables(conn: sqlite3.Connection) -> None:
         "ON playlist_snapshot_items (snapshot_id, spotify_track_id, position)"
     )
     conn.commit()
+
+
+def ensure_downloaded_music_tracks_table(conn: sqlite3.Connection) -> None:
+    """Create downloaded Spotify tracks table and idempotency index."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS downloaded_music_tracks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playlist_id TEXT NOT NULL,
+            isrc TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_downloaded_music_tracks_playlist_isrc "
+        "ON downloaded_music_tracks (playlist_id, isrc)"
+    )
+    conn.commit()
+
+
+def rollback_downloaded_music_tracks_table(conn: sqlite3.Connection) -> None:
+    """Rollback downloaded Spotify tracks table migration."""
+    cur = conn.cursor()
+    cur.execute("DROP INDEX IF EXISTS uq_downloaded_music_tracks_playlist_isrc")
+    cur.execute("DROP TABLE IF EXISTS downloaded_music_tracks")
+    conn.commit()
