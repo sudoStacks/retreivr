@@ -107,6 +107,7 @@ from engine.paths import (
     resolve_dir,
 )
 from engine.runtime import get_runtime_info
+from input.intent_router import IntentType, detect_intent
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 1
@@ -3288,6 +3289,13 @@ async def create_search_request(request: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Client delivery does not use a server destination")
     if normalized["delivery_mode"] == "client" and not normalized["search_only"]:
         raise HTTPException(status_code=400, detail="Search & Download is not available for client delivery")
+
+    intent = detect_intent(str(normalized.get("query") or ""))
+    if intent.type != IntentType.SEARCH:
+        return {
+            "detected_intent": intent.type.value,
+            "identifier": intent.identifier,
+        }
 
     if "source_priority" not in raw_payload or not raw_payload.get("source_priority"):
         raw_payload["source_priority"] = normalized["sources"]
