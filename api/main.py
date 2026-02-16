@@ -31,7 +31,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from typing import Optional
 
 import anyio
@@ -108,6 +108,7 @@ from engine.paths import (
 )
 from engine.runtime import get_runtime_info
 from input.intent_router import IntentType, detect_intent
+from spotify.client import SpotifyPlaylistClient
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 1
@@ -517,6 +518,11 @@ class EnqueueCandidatePayload(BaseModel):
 
 class SpotifyPlaylistImportPayload(BaseModel):
     playlist_url: str
+
+
+class IntentExecutePayload(BaseModel):
+    intent_type: IntentType
+    identifier: str
 
 
 class SafeJSONResponse(JSONResponse):
@@ -3344,6 +3350,80 @@ async def create_search_request(request: dict = Body(...)):
         }
     logging.debug("Normalized search payload", extra={"payload": normalized, "request_id": request_id})
     return {"request_id": request_id}
+
+
+@app.post("/api/intent/execute")
+async def execute_intent(payload: dict = Body(...)):
+    """Accept intent execution requests (plumbing only; no ingestion side effects yet)."""
+    intent_raw = str((payload or {}).get("intent_type") or "").strip()
+    identifier = str((payload or {}).get("identifier") or "").strip()
+    if not intent_raw:
+        raise HTTPException(status_code=400, detail="intent_type is required")
+    if not identifier:
+        raise HTTPException(status_code=400, detail="identifier is required")
+    try:
+        intent_type = IntentType(intent_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid intent_type") from exc
+    return {
+        "status": "accepted",
+        "intent_type": intent_type.value,
+        "identifier": identifier,
+    }
+
+
+@app.post("/api/intent/preview")
+async def preview_intent(payload: dict = Body(...)):
+    """Fetch metadata preview for supported intents (plumbing only)."""
+    intent_raw = str((payload or {}).get("intent_type") or "").strip()
+    identifier = str((payload or {}).get("identifier") or "").strip()
+    if not intent_raw:
+        raise HTTPException(status_code=400, detail="intent_type is required")
+    if not identifier:
+        raise HTTPException(status_code=400, detail="identifier is required")
+    try:
+        intent_type = IntentType(intent_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid intent_type") from exc
+
+    if intent_type not in {IntentType.SPOTIFY_ALBUM, IntentType.SPOTIFY_PLAYLIST}:
+        raise HTTPException(status_code=400, detail="intent preview not supported for this intent_type")
+
+    client = SpotifyPlaylistClient()
+    encoded = quote(identifier, safe="")
+    try:
+        if intent_type == IntentType.SPOTIFY_ALBUM:
+            data = client._request_json(
+                f"https://api.spotify.com/v1/albums/{encoded}",
+                params={"fields": "name,artists(name),total_tracks"},
+            )
+            artists = data.get("artists") or []
+            artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else ""
+            track_count = int(data.get("total_tracks") or 0)
+            return {
+                "intent_type": intent_type.value,
+                "identifier": identifier,
+                "title": str(data.get("name") or ""),
+                "artist": str(artist or ""),
+                "track_count": track_count,
+            }
+
+        data = client._request_json(
+            f"https://api.spotify.com/v1/playlists/{encoded}",
+            params={"fields": "name,owner(display_name),tracks(total)"},
+        )
+        owner = (data.get("owner") or {}).get("display_name")
+        track_count = int(((data.get("tracks") or {}).get("total")) or 0)
+        return {
+            "intent_type": intent_type.value,
+            "identifier": identifier,
+            "title": str(data.get("name") or ""),
+            "artist": str(owner or ""),
+            "track_count": track_count,
+        }
+    except Exception as exc:
+        logging.exception("Intent preview failed for intent=%s identifier=%s", intent_type.value, identifier)
+        raise HTTPException(status_code=502, detail=f"intent preview failed: {exc}") from exc
 
 
 @app.get("/api/search/requests")

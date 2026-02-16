@@ -2369,6 +2369,138 @@ function renderHomeDirectUrlCard(preview, status) {
   return card;
 }
 
+function formatDetectedIntentLabel(intentType) {
+  const mapping = {
+    spotify_album: "Album",
+    spotify_playlist: "Playlist",
+    spotify_track: "Track",
+    spotify_artist: "Artist",
+    youtube_playlist: "Playlist",
+  };
+  return mapping[intentType] || intentType || "Unknown";
+}
+
+function isSpotifyPreviewIntent(intentType) {
+  return intentType === "spotify_album" || intentType === "spotify_playlist";
+}
+
+async function fetchIntentPreview(intentType, identifier) {
+  return fetchJson("/api/intent/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      intent_type: intentType,
+      identifier,
+    }),
+  });
+}
+
+function renderHomeIntentCard(intentType, identifier, options = {}) {
+  const {
+    loading = false,
+    error = "",
+    preview = null,
+    canConfirm = false,
+  } = options;
+  const card = document.createElement("article");
+  card.className = "home-result-card";
+  card.dataset.intentType = intentType || "";
+  card.dataset.intentIdentifier = identifier || "";
+
+  const header = document.createElement("div");
+  header.className = "home-result-header";
+  const title = document.createElement("div");
+  const strong = document.createElement("strong");
+  strong.textContent = `Detected: ${formatDetectedIntentLabel(intentType)}`;
+  title.appendChild(strong);
+  header.appendChild(title);
+  header.appendChild(renderHomeStatusBadge("candidate_found"));
+  card.appendChild(header);
+
+  if (loading) {
+    const loadingEl = document.createElement("div");
+    loadingEl.className = "home-candidate-title";
+    loadingEl.textContent = "Fetching Spotify metadata…";
+    card.appendChild(loadingEl);
+  } else if (error) {
+    const errorEl = document.createElement("div");
+    errorEl.className = "home-candidate-title";
+    errorEl.textContent = `Preview failed: ${error}`;
+    card.appendChild(errorEl);
+  } else if (preview) {
+    const titleEl = document.createElement("div");
+    titleEl.className = "home-candidate-title";
+    titleEl.textContent = `Title: ${preview.title || "-"}`;
+    card.appendChild(titleEl);
+
+    const artistEl = document.createElement("div");
+    artistEl.className = "home-candidate-meta";
+    artistEl.textContent = `Artist: ${preview.artist || "-"}`;
+    card.appendChild(artistEl);
+
+    const countEl = document.createElement("div");
+    countEl.className = "home-candidate-meta";
+    countEl.textContent = `Track count: ${Number.isFinite(preview.track_count) ? preview.track_count : "-"}`;
+    card.appendChild(countEl);
+  } else {
+    const detail = document.createElement("div");
+    detail.className = "home-candidate-title";
+    detail.textContent = `Identifier: ${identifier || "-"}`;
+    card.appendChild(detail);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "row";
+  if (canConfirm) {
+    const confirmButton = document.createElement("button");
+    confirmButton.className = "button";
+    confirmButton.dataset.action = "home-intent-confirm";
+    confirmButton.dataset.intentType = intentType || "";
+    confirmButton.dataset.identifier = identifier || "";
+    confirmButton.textContent = "Confirm Download";
+    actions.appendChild(confirmButton);
+  }
+
+  const cancelButton = document.createElement("button");
+  cancelButton.className = "button ghost";
+  cancelButton.dataset.action = "home-intent-cancel";
+  cancelButton.textContent = "Cancel";
+  actions.appendChild(cancelButton);
+  card.appendChild(actions);
+  return card;
+}
+
+function resetHomeIntentConfirmation() {
+  state.homeSearchRequestId = null;
+  updateHomeViewAdvancedLink();
+  stopHomeResultPolling();
+  stopHomeJobPolling();
+  setHomeSearchControlsEnabled(true);
+  setHomeSearchActive(false);
+  setHomeResultsState({ hasResults: false, terminal: false });
+  showHomeResults(false);
+  const list = $("#home-results-list");
+  if (list) {
+    list.textContent = "";
+  }
+  setHomeResultsStatus("Ready to discover media");
+  setHomeResultsDetail(
+    "Search Only is the default discovery action; use Search & Download to enqueue jobs.",
+    false
+  );
+}
+
+async function executeDetectedIntent(intentType, identifier) {
+  return fetchJson("/api/intent/execute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      intent_type: intentType,
+      identifier,
+    }),
+  });
+}
+
 function showHomeDirectUrlError(url, message, messageEl) {
   const text = message || DIRECT_URL_PLAYLIST_ERROR;
   if (messageEl) {
@@ -2741,6 +2873,60 @@ async function submitHomeSearch(autoEnqueue) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (data && data.detected_intent) {
+      state.homeSearchRequestId = null;
+      updateHomeViewAdvancedLink();
+      stopHomeResultPolling();
+      setHomeSearchActive(false);
+      setHomeSearchControlsEnabled(true);
+      showHomeResults(true);
+      setHomeResultsState({ hasResults: true, terminal: true });
+      setHomeResultsStatus("Intent detected");
+      setHomeResultsDetail("Preparing intent preview...", false);
+      const list = $("#home-results-list");
+      if (list) {
+        list.textContent = "";
+        const intentType = data.detected_intent;
+        const identifier = data.identifier || "";
+        const needsPreview = isSpotifyPreviewIntent(intentType);
+        list.appendChild(
+          renderHomeIntentCard(intentType, identifier, {
+            loading: needsPreview,
+            canConfirm: !needsPreview,
+          })
+        );
+        if (needsPreview) {
+          try {
+            const preview = await fetchIntentPreview(intentType, identifier);
+            list.textContent = "";
+            list.appendChild(
+              renderHomeIntentCard(intentType, identifier, {
+                preview,
+                canConfirm: true,
+              })
+            );
+            setHomeResultsStatus("Intent preview ready");
+            setHomeResultsDetail("Review metadata and confirm to continue.", false);
+            setNotice(messageEl, "Intent metadata loaded.", false);
+          } catch (previewErr) {
+            list.textContent = "";
+            list.appendChild(
+              renderHomeIntentCard(intentType, identifier, {
+                error: previewErr.message || "Failed to fetch metadata",
+                canConfirm: false,
+              })
+            );
+            setHomeResultsStatus("Intent preview failed");
+            setHomeResultsDetail("Could not fetch Spotify metadata. Please retry.", true);
+            setNotice(messageEl, `Intent preview failed: ${previewErr.message}`, true);
+          }
+        } else {
+          setHomeResultsDetail("Confirm to proceed or cancel to return to search.", false);
+          setNotice(messageEl, "Intent detected. Confirm to continue.", false);
+        }
+      }
+      return;
+    }
     state.homeRequestContext = {};
     state.homeBestScores = {};
     state.homeCandidateCache = {};
@@ -4144,6 +4330,36 @@ function bindEvents() {
   const homeResultsList = $("#home-results-list");
   if (homeResultsList) {
     homeResultsList.addEventListener("click", async (event) => {
+      const cancelIntentButton = event.target.closest('button[data-action="home-intent-cancel"]');
+      if (cancelIntentButton) {
+        resetHomeIntentConfirmation();
+        setNotice($("#home-search-message"), "Intent confirmation cancelled.", false);
+        return;
+      }
+      const confirmIntentButton = event.target.closest('button[data-action="home-intent-confirm"]');
+      if (confirmIntentButton) {
+        const messageEl = $("#home-search-message");
+        const intentType = confirmIntentButton.dataset.intentType || "";
+        const identifier = confirmIntentButton.dataset.identifier || "";
+        if (!intentType || !identifier) {
+          setNotice(messageEl, "Intent payload is incomplete.", true);
+          return;
+        }
+        confirmIntentButton.disabled = true;
+        setNotice(messageEl, "Submitting intent...", false);
+        try {
+          await executeDetectedIntent(intentType, identifier);
+          setNotice(messageEl, "Intent submitted.", false);
+          setHomeResultsStatus("Intent submitted");
+          setHomeResultsDetail("Download flow will continue once backend execution is implemented.", false);
+        } catch (err) {
+          setNotice(messageEl, `Intent submit failed: ${err.message}`, true);
+          setHomeResultsDetail(`Intent submit failed: ${err.message}`, true);
+        } finally {
+          confirmIntentButton.disabled = false;
+        }
+        return;
+      }
       const directButton = event.target.closest('button[data-action="home-direct-download"]');
       if (directButton) {
         if (directButton.disabled) return;
