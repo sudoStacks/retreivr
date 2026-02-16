@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import os
 import time
 import urllib.parse
@@ -36,15 +37,20 @@ class SpotifyPlaylistClient:
         *,
         client_id: str | None = None,
         client_secret: str | None = None,
+        access_token: str | None = None,
         timeout_sec: int = 20,
     ) -> None:
         self.client_id = client_id or os.environ.get("SPOTIFY_CLIENT_ID")
         self.client_secret = client_secret or os.environ.get("SPOTIFY_CLIENT_SECRET")
         self.timeout_sec = timeout_sec
+        self._provided_access_token = (access_token or "").strip() or None
         self._access_token: str | None = None
         self._access_token_expire_at: float = 0.0
 
     def _get_access_token(self) -> str:
+        if self._provided_access_token:
+            return self._provided_access_token
+
         if not self.client_id or not self.client_secret:
             raise RuntimeError("Spotify credentials are required")
 
@@ -140,6 +146,81 @@ class SpotifyPlaylistClient:
             tracks_page = self._request_json(str(next_url))
 
         return str(snapshot_id), items
+
+    async def get_liked_songs(self) -> tuple[str, list[dict[str, Any]]]:
+        """Fetch the authenticated user's saved tracks from Spotify.
+
+        Returns:
+            A tuple of ``(snapshot_id, items)`` where ``snapshot_id`` is a deterministic
+            SHA-256 hash of the ordered track-id sequence, and ``items`` is an ordered
+            list of normalized track dicts matching playlist ingestion structure.
+        """
+        if not self._provided_access_token:
+            raise RuntimeError("Spotify OAuth access_token is required for liked songs")
+
+        fields = (
+            "items(added_at,track(id,name,duration_ms,external_ids(isrc),"
+            "artists(name),album(id,name,release_date))),next,total"
+        )
+        offset = 0
+        limit = 50
+        position = 0
+        items: list[dict[str, Any]] = []
+        ordered_track_ids: list[str] = []
+
+        while True:
+            payload = await _request_json_with_retry(
+                self,
+                "https://api.spotify.com/v1/me/tracks",
+                params={"limit": limit, "offset": offset, "fields": fields},
+            )
+            raw_items = payload.get("items") or []
+
+            for raw in raw_items:
+                track = raw.get("track")
+                if not isinstance(track, dict):
+                    continue
+
+                track_id = track.get("id")
+                if not track_id:
+                    continue
+
+                artists = track.get("artists") or []
+                artist_names = [
+                    str(artist.get("name")).strip()
+                    for artist in artists
+                    if isinstance(artist, dict) and artist.get("name")
+                ]
+                first_artist = artist_names[0] if artist_names else None
+                album = track.get("album") or {}
+                external_ids = track.get("external_ids") or {}
+
+                items.append(
+                    {
+                        "spotify_track_id": track_id,
+                        "position": position,
+                        "added_at": raw.get("added_at"),
+                        "artist": first_artist,
+                        "title": track.get("name"),
+                        "album": album.get("name"),
+                        "duration_ms": track.get("duration_ms"),
+                        "isrc": external_ids.get("isrc"),
+                        "artists": artist_names,
+                        "album_id": album.get("id"),
+                        "album_release_date": album.get("release_date"),
+                    }
+                )
+                ordered_track_ids.append(str(track_id))
+                position += 1
+
+            next_url = payload.get("next")
+            if not next_url:
+                break
+            offset += limit
+
+        snapshot_source = "\n".join(ordered_track_ids).encode("utf-8")
+        snapshot_id = hashlib.sha256(snapshot_source).hexdigest()
+        return snapshot_id, items
 
 
 async def _request_json_with_retry(

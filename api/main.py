@@ -1710,6 +1710,40 @@ def _read_config_or_404():
     return safe_json(_strip_deprecated_fields(config))
 
 
+def _spotify_client_credentials(config: dict | None) -> tuple[str, str]:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    client_id = str(spotify_cfg.get("client_id") or cfg.get("SPOTIFY_CLIENT_ID") or "").strip()
+    client_secret = str(spotify_cfg.get("client_secret") or cfg.get("SPOTIFY_CLIENT_SECRET") or "").strip()
+    return client_id, client_secret
+
+
+def _build_spotify_client_with_optional_oauth(config: dict | None) -> SpotifyPlaylistClient:
+    """Build a Spotify client using OAuth access token when valid, else public mode."""
+    client_id, client_secret = _spotify_client_credentials(config)
+    if not client_id or not client_secret:
+        return SpotifyPlaylistClient()
+
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    existing = store.load()
+    try:
+        token = store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    except Exception as exc:
+        logging.warning("Spotify OAuth token validation failed; using public mode: %s", exc)
+        token = None
+
+    if token is not None:
+        return SpotifyPlaylistClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=token.access_token,
+        )
+
+    if existing is not None:
+        logging.warning("Spotify OAuth token expired/invalid and was cleared; using public mode")
+    return SpotifyPlaylistClient(client_id=client_id, client_secret=client_secret)
+
+
 def _read_config_for_scheduler():
     config_path = app.state.config_path
     if not os.path.exists(config_path):
@@ -3389,7 +3423,7 @@ async def execute_intent(payload: dict = Body(...)):
     dispatcher_config["search_service"] = app.state.search_service
     db = PlaylistSnapshotStore(app.state.paths.db_path)
     queue = _IntentQueueAdapter()
-    spotify_client = SpotifyPlaylistClient()
+    spotify_client = _build_spotify_client_with_optional_oauth(config)
     return await dispatch_intent(
         intent_type=intent_type.value,
         identifier=identifier,
@@ -3417,7 +3451,8 @@ async def preview_intent(payload: dict = Body(...)):
     if intent_type not in {IntentType.SPOTIFY_ALBUM, IntentType.SPOTIFY_PLAYLIST}:
         raise HTTPException(status_code=400, detail="intent preview not supported for this intent_type")
 
-    client = SpotifyPlaylistClient()
+    config = _read_config_or_404()
+    client = _build_spotify_client_with_optional_oauth(config)
     encoded = quote(identifier, safe="")
     try:
         if intent_type == IntentType.SPOTIFY_ALBUM:

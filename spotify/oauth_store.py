@@ -117,7 +117,12 @@ class SpotifyOAuthStore:
         finally:
             conn.close()
 
-    def get_valid_token(self, client_id: str, client_secret: str) -> Optional[SpotifyOAuthToken]:
+    def get_valid_token(
+        self,
+        client_id: str,
+        client_secret: str,
+        config: Optional[dict] = None,
+    ) -> Optional[SpotifyOAuthToken]:
         """Return a valid token, refreshing and persisting it when expired.
 
         Behavior:
@@ -154,4 +159,24 @@ class SpotifyOAuthStore:
             return refreshed
         except Exception:
             self.clear()
+            telegram_cfg = (config or {}).get("telegram") if isinstance(config, dict) else None
+            if isinstance(telegram_cfg, dict) and bool(telegram_cfg.get("enabled")):
+                try:
+                    send_telegram_message(
+                        config,
+                        "Spotify OAuth token expired and refresh failed. Reconnect required.",
+                    )
+                except Exception:
+                    # Notification path is best-effort only.
+                    pass
             return None
+
+
+def send_telegram_message(config: Optional[dict], message: str) -> bool:
+    """Best-effort Telegram notification hook for OAuth lifecycle events."""
+    try:
+        from engine.core import telegram_notify
+
+        return bool(telegram_notify(config or {}, message))
+    except Exception:
+        return False
