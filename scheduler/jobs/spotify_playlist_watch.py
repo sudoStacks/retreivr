@@ -16,6 +16,8 @@ from spotify.client import SpotifyPlaylistClient, get_playlist_items
 from spotify.diff import diff_playlist
 from spotify.resolve import resolve_spotify_track
 
+SPOTIFY_LIKED_SONGS_PLAYLIST_ID = "__spotify_liked_songs__"
+
 
 def _load_previous_snapshot(db: Any, playlist_id: str) -> tuple[str | None, list[dict[str, Any]]]:
     if not hasattr(db, "get_latest_snapshot"):
@@ -29,6 +31,24 @@ def _load_previous_snapshot(db: Any, playlist_id: str) -> tuple[str | None, list
     if isinstance(latest, dict):
         return latest.get("snapshot_id"), list(latest.get("items") or [])
     return None, []
+
+
+def get_liked_songs_playlist_name() -> str:
+    """Return the virtual playlist display name for Spotify Liked Songs."""
+    return "Spotify - Liked Songs"
+
+
+def run_liked_songs_sync() -> None:
+    """Placeholder for future OAuth-based liked songs sync.
+
+    Will:
+    - Fetch /me/tracks
+    - Diff snapshot
+    - Enqueue new tracks
+    - Rebuild M3U
+    Currently not implemented.
+    """
+    logging.info("Liked Songs sync not enabled (OAuth required)")
 
 
 def _run_async(coro):

@@ -27,9 +27,14 @@ def rebuild_playlist_from_tracks(
     Returns:
         Final path to the rebuilt M3U file.
     """
+    normalized_playlist_name = str(playlist_name or "").strip() or "playlist"
     track_paths = [Path(path) for path in track_file_paths if str(path).strip()]
     with _music_root_env(music_root):
-        return write_m3u(playlist_root=playlist_root, playlist_name=playlist_name, track_paths=track_paths)
+        return write_m3u(
+            playlist_root=playlist_root,
+            playlist_name=normalized_playlist_name,
+            track_paths=track_paths,
+        )
 
 
 @contextmanager
