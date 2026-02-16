@@ -40,6 +40,7 @@ const state = {
   homeDirectJobTimer: null,
   homeJobTimer: null,
   homeJobSnapshot: null,
+  spotifyOauthConnected: false,
 };
 const browserState = {
   open: false,
@@ -1121,15 +1122,33 @@ async function refreshStatus() {
       }
       const likedEl = $("#spotify-status-liked");
       if (likedEl) {
-        likedEl.textContent = formatTimestamp(spotifyStatus.last_liked_sync) || "-";
+        if (spotifyStatus.liked_sync_running) {
+          likedEl.textContent = "Running...";
+          likedEl.classList.add("running");
+        } else {
+          likedEl.classList.remove("running");
+          likedEl.textContent = formatTimestamp(spotifyStatus.last_liked_sync) || "-";
+        }
       }
       const savedEl = $("#spotify-status-saved");
       if (savedEl) {
-        savedEl.textContent = formatTimestamp(spotifyStatus.last_saved_sync) || "-";
+        if (spotifyStatus.saved_sync_running) {
+          savedEl.textContent = "Running...";
+          savedEl.classList.add("running");
+        } else {
+          savedEl.classList.remove("running");
+          savedEl.textContent = formatTimestamp(spotifyStatus.last_saved_sync) || "-";
+        }
       }
       const playlistsEl = $("#spotify-status-playlists");
       if (playlistsEl) {
-        playlistsEl.textContent = formatTimestamp(spotifyStatus.last_playlists_sync) || "-";
+        if (spotifyStatus.playlists_sync_running) {
+          playlistsEl.textContent = "Running...";
+          playlistsEl.classList.add("running");
+        } else {
+          playlistsEl.classList.remove("running");
+          playlistsEl.textContent = formatTimestamp(spotifyStatus.last_playlists_sync) || "-";
+        }
       }
     } catch (err) {
       // Best-effort status enrichment; ignore when endpoint is unavailable.
@@ -2051,6 +2070,12 @@ function renderHomeResultItem(item) {
   title.innerHTML = `<strong>${summary}</strong>`;
   header.appendChild(title);
   header.appendChild(renderHomeStatusBadge(item.status));
+  if (item.media_type === "music") {
+    const sourceTag = document.createElement("span");
+    sourceTag.className = "home-candidate-source-tag";
+    sourceTag.textContent = "Spotify Metadata";
+    header.appendChild(sourceTag);
+  }
   card.appendChild(header);
   // Remove destination line for Home page result cards (visual polish)
   // No destination line
@@ -3697,6 +3722,7 @@ function applySpotifyConfigState(cfg, oauthStatus) {
   const statusEl = $("#spotify-connection-status");
   if (statusEl) {
     statusEl.textContent = connected ? "Connected" : "Not connected";
+    statusEl.classList.toggle("running", connected);
   }
 
   const connectBtn = $("#spotify-connect-btn");
@@ -3733,6 +3759,35 @@ function applySpotifyConfigState(cfg, oauthStatus) {
   if (playlistsInterval) {
     playlistsInterval.value = spotifyCfg.user_playlists_sync_interval_minutes ?? 30;
   }
+
+  const syncControls = [
+    $("#spotify-sync-liked"),
+    $("#spotify-sync-saved"),
+    $("#spotify-sync-playlists"),
+    $("#spotify-liked-interval"),
+    $("#spotify-saved-interval"),
+    $("#spotify-playlists-interval"),
+  ];
+  syncControls.forEach((el) => {
+    if (!el) return;
+    el.disabled = !connected;
+    el.setAttribute("aria-disabled", (!connected).toString());
+  });
+
+  if (statusEl) {
+    let helperEl = $("#spotify-connection-helper");
+    if (!connected) {
+      if (!helperEl) {
+        helperEl = document.createElement("div");
+        helperEl.id = "spotify-connection-helper";
+        helperEl.className = "meta";
+        statusEl.insertAdjacentElement("afterend", helperEl);
+      }
+      helperEl.textContent = "Connect Spotify to enable sync options.";
+    } else if (helperEl) {
+      helperEl.remove();
+    }
+  }
 }
 
 async function refreshSpotifyConfig() {
@@ -3746,6 +3801,11 @@ async function refreshSpotifyConfig() {
       oauthStatus = { connected: false };
     }
     applySpotifyConfigState(cfg, oauthStatus);
+    const connected = !!oauthStatus.connected;
+    if (connected && !state.spotifyOauthConnected) {
+      window.dispatchEvent(new CustomEvent("spotify-oauth-complete"));
+    }
+    state.spotifyOauthConnected = connected;
   } catch (err) {
     setConfigNotice(`Spotify config refresh failed: ${err.message}`, true);
   }
@@ -4045,20 +4105,25 @@ function buildConfigFromForm() {
   base.spotify.sync_saved_albums = !!$("#spotify-sync-saved")?.checked;
   base.spotify.sync_user_playlists = !!$("#spotify-sync-playlists")?.checked;
 
-  const likedInterval = parseInt($("#spotify-liked-interval")?.value, 10);
-  base.spotify.liked_songs_sync_interval_minutes = Number.isInteger(likedInterval) && likedInterval > 0
-    ? likedInterval
-    : 15;
+  const clampSpotifyInterval = (rawValue) => {
+    const parsed = parseInt(rawValue, 10);
+    if (!Number.isFinite(parsed)) {
+      return 30;
+    }
+    if (parsed < 1) {
+      return 1;
+    }
+    return parsed;
+  };
 
-  const savedInterval = parseInt($("#spotify-saved-interval")?.value, 10);
-  base.spotify.saved_albums_sync_interval_minutes = Number.isInteger(savedInterval) && savedInterval > 0
-    ? savedInterval
-    : 30;
+  const likedInterval = clampSpotifyInterval($("#spotify-liked-interval")?.value);
+  base.spotify.liked_songs_sync_interval_minutes = likedInterval;
 
-  const playlistsInterval = parseInt($("#spotify-playlists-interval")?.value, 10);
-  base.spotify.user_playlists_sync_interval_minutes = Number.isInteger(playlistsInterval) && playlistsInterval > 0
-    ? playlistsInterval
-    : 30;
+  const savedInterval = clampSpotifyInterval($("#spotify-saved-interval")?.value);
+  base.spotify.saved_albums_sync_interval_minutes = savedInterval;
+
+  const playlistsInterval = clampSpotifyInterval($("#spotify-playlists-interval")?.value);
+  base.spotify.user_playlists_sync_interval_minutes = playlistsInterval;
 
   const accounts = {};
   $$(".account-row").forEach((row) => {
@@ -4762,6 +4827,13 @@ function bindEvents() {
 }
 
 async function init() {
+  window.addEventListener("spotify-oauth-complete", () => {
+    setNotice(
+      $("#home-results-detail"),
+      "Spotify connected successfully. Initial sync has started.",
+      false
+    );
+  });
   applyTheme(resolveTheme());
   bindEvents();
   setupNavActions();
