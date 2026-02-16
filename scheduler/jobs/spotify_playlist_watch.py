@@ -6,8 +6,10 @@ import asyncio
 import logging
 from typing import Any, Callable
 
+from metadata.merge import merge_metadata
 from spotify.client import SpotifyPlaylistClient, get_playlist_items
 from spotify.diff import diff_playlist
+from spotify.resolve import resolve_spotify_track
 
 
 def _load_previous_snapshot(db: Any, playlist_id: str) -> tuple[str | None, list[dict[str, Any]]]:
@@ -42,6 +44,19 @@ def _enqueue_added_track(queue: Any, item: dict[str, Any]) -> None:
             method(item)
             return
     raise TypeError("queue does not expose a supported enqueue method")
+
+
+async def enqueue_spotify_track(queue, spotify_track: dict, search_service, playlist_id: str):
+    """Resolve a Spotify track, merge metadata, build payload, and enqueue it."""
+    resolved_media = await resolve_spotify_track(spotify_track, search_service)
+    merged_metadata = merge_metadata(spotify_track or {}, {}, resolved_media.get("extra") or {})
+    payload = {
+        "playlist_id": playlist_id,
+        "spotify_track_id": (spotify_track or {}).get("spotify_track_id"),
+        "resolved_media": resolved_media,
+        "music_metadata": merged_metadata,
+    }
+    queue.enqueue(payload)
 
 
 def playlist_watch_job(spotify_client, db, queue, playlist_id: str) -> dict[str, Any]:
