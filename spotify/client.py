@@ -354,6 +354,59 @@ class SpotifyPlaylistClient:
         snapshot_id = hashlib.sha256(snapshot_source).hexdigest()
         return snapshot_id, album_items
 
+    async def get_user_playlists(self) -> tuple[str, list[dict[str, Any]]]:
+        """Fetch authenticated user's playlists from Spotify.
+
+        Returns:
+            A tuple ``(snapshot_id, items)`` where:
+            - ``snapshot_id`` is a deterministic SHA-256 hash of ordered playlist IDs.
+            - ``items`` is an ordered list of normalized playlist dicts with
+              keys: ``id``, ``name``, and ``track_count``.
+        """
+        if not self._provided_access_token:
+            raise RuntimeError("Spotify OAuth access_token is required for user playlists")
+
+        offset = 0
+        limit = 50
+        ordered_playlist_ids: list[str] = []
+        items: list[dict[str, Any]] = []
+
+        while True:
+            payload = await _request_json_with_retry(
+                self,
+                "https://api.spotify.com/v1/me/playlists",
+                params={
+                    "limit": limit,
+                    "offset": offset,
+                    "fields": "items(id,name,tracks(total)),next,total",
+                },
+            )
+            raw_items = payload.get("items") or []
+            for raw in raw_items:
+                if not isinstance(raw, dict):
+                    continue
+                playlist_id = str(raw.get("id") or "").strip()
+                if not playlist_id:
+                    continue
+                ordered_playlist_ids.append(playlist_id)
+                tracks = raw.get("tracks") or {}
+                items.append(
+                    {
+                        "id": playlist_id,
+                        "name": raw.get("name"),
+                        "track_count": int(tracks.get("total") or 0),
+                    }
+                )
+
+            next_url = payload.get("next")
+            if not next_url:
+                break
+            offset += limit
+
+        snapshot_source = "\n".join(ordered_playlist_ids).encode("utf-8")
+        snapshot_id = hashlib.sha256(snapshot_source).hexdigest()
+        return snapshot_id, items
+
 
 async def _request_json_with_retry(
     spotify_client: SpotifyPlaylistClient,

@@ -19,6 +19,7 @@ from spotify.resolve import resolve_spotify_track
 
 SPOTIFY_LIKED_SONGS_PLAYLIST_ID = "__spotify_liked_songs__"
 SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID = "__spotify_saved_albums__"
+SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID = "__spotify_user_playlists__"
 
 
 def _load_previous_snapshot(db: Any, playlist_id: str) -> tuple[str | None, list[dict[str, Any]]]:
@@ -460,6 +461,127 @@ async def spotify_saved_albums_watch_job(config, db, queue, spotify_client, sear
         "removed_count": len(diff["removed"]),
         "moved_count": len(diff["moved"]),
         "enqueue_errors": enqueue_errors,
+    }
+
+
+async def spotify_user_playlists_watch_job(config, db, queue, spotify_client, search_service):
+    """Sync authenticated user's Spotify playlists and trigger sync for new playlists."""
+    client_id, client_secret = _spotify_client_credentials_from_config(config if isinstance(config, dict) else None)
+    if not client_id or not client_secret:
+        logging.info("User Playlists sync skipped: Spotify credentials not configured")
+        return {"status": "skipped", "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID, "enqueued": 0}
+
+    oauth_store = SpotifyOAuthStore(Path(_resolve_db_path_from_runtime(db)))
+    token = oauth_store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    if token is None:
+        logging.info("User Playlists sync skipped: no valid Spotify OAuth token")
+        return {"status": "skipped", "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID, "enqueued": 0}
+
+    playlists_client: Any = spotify_client
+    if isinstance(playlists_client, SpotifyPlaylistClient):
+        playlists_client._provided_access_token = token.access_token
+    elif not hasattr(playlists_client, "get_user_playlists"):
+        playlists_client = SpotifyPlaylistClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=token.access_token,
+        )
+
+    try:
+        current_snapshot_id, current_playlists = await playlists_client.get_user_playlists()
+    except Exception as exc:
+        logging.exception("User Playlists fetch failed")
+        return {
+            "status": "error",
+            "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID,
+            "error": f"spotify_fetch_failed: {exc}",
+        }
+
+    current_snapshot_items: list[dict[str, Any]] = []
+    playlist_name_by_id: dict[str, str] = {}
+    for idx, playlist in enumerate(current_playlists or []):
+        playlist_id = str((playlist or {}).get("id") or "").strip()
+        if not playlist_id:
+            continue
+        playlist_name_by_id[playlist_id] = str((playlist or {}).get("name") or "").strip() or playlist_id
+        current_snapshot_items.append(
+            {
+                "spotify_track_id": playlist_id,
+                "position": idx,
+                "added_at": None,
+            }
+        )
+
+    try:
+        previous_snapshot_id, previous_items = _load_previous_snapshot(db, SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID)
+    except Exception as exc:
+        logging.exception("User Playlists snapshot load failed")
+        return {
+            "status": "error",
+            "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID,
+            "error": f"snapshot_read_failed: {exc}",
+        }
+
+    if previous_snapshot_id == current_snapshot_id:
+        return {
+            "status": "unchanged",
+            "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID,
+            "snapshot_id": current_snapshot_id,
+            "enqueued": 0,
+        }
+
+    diff = diff_playlist(previous_items, current_snapshot_items)
+    added_playlists = list(diff["added"])
+    synced = 0
+    sync_errors: list[str] = []
+    for playlist_item in added_playlists:
+        playlist_id = str((playlist_item or {}).get("spotify_track_id") or "").strip()
+        if not playlist_id:
+            continue
+        playlist_name = playlist_name_by_id.get(playlist_id, playlist_id)
+        try:
+            playlist_watch_job(
+                spotify_client=playlists_client,
+                db=db,
+                queue=queue,
+                playlist_id=playlist_id,
+                playlist_name=playlist_name,
+                config=config if isinstance(config, dict) else None,
+            )
+            synced += 1
+        except Exception as exc:
+            sync_errors.append(f"{playlist_id}: {exc}")
+            logging.exception("User Playlists sync failed for playlist %s", playlist_id)
+
+    try:
+        db.store_snapshot(
+            SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID,
+            str(current_snapshot_id),
+            current_snapshot_items,
+        )
+    except Exception as exc:
+        logging.exception("User Playlists snapshot store failed")
+        return {
+            "status": "error",
+            "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID,
+            "snapshot_id": current_snapshot_id,
+            "error": f"snapshot_store_failed: {exc}",
+            "enqueued": synced,
+            "added_count": len(added_playlists),
+            "removed_count": len(diff["removed"]),
+            "moved_count": len(diff["moved"]),
+            "enqueue_errors": sync_errors,
+        }
+
+    return {
+        "status": "updated",
+        "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID,
+        "snapshot_id": current_snapshot_id,
+        "enqueued": synced,
+        "added_count": len(added_playlists),
+        "removed_count": len(diff["removed"]),
+        "moved_count": len(diff["moved"]),
+        "enqueue_errors": sync_errors,
     }
 
 
