@@ -1,14 +1,28 @@
-"""Spotify API client for playlist snapshot reads."""
+"""Spotify API client for playlist snapshots and normalized playlist items."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import time
 import urllib.parse
-from typing import Any
+from typing import Any, TypedDict
 
 import requests
+
+
+class NormalizedItem(TypedDict):
+    """Normalized Spotify playlist item record."""
+
+    spotify_track_id: str | None
+    position: int
+    added_at: str | None
+    artist: str | None
+    title: str | None
+    album: str | None
+    duration_ms: int | None
+    isrc: str | None
 
 
 class SpotifyPlaylistClient:
@@ -16,7 +30,6 @@ class SpotifyPlaylistClient:
 
     _TOKEN_URL = "https://accounts.spotify.com/api/token"
     _PLAYLIST_URL = "https://api.spotify.com/v1/playlists/{playlist_id}"
-    _PLAYLIST_ITEMS_URL = "https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
 
     def __init__(
         self,
@@ -73,50 +86,161 @@ class SpotifyPlaylistClient:
             raise RuntimeError(f"Spotify request failed ({response.status_code})")
         return response.json()
 
-    def get_playlist_items(self, playlist_id: str) -> tuple[str, list[dict[str, Any]]]:
-        """Fetch a playlist snapshot id and ordered normalized item records."""
+    def get_playlist_items(self, playlist_id: str) -> tuple[str, list[NormalizedItem]]:
+        """Fetch playlist `snapshot_id` and normalized items in original playlist order."""
         playlist_id = (playlist_id or "").strip()
         if not playlist_id:
             raise ValueError("playlist_id is required")
 
         encoded_id = urllib.parse.quote(playlist_id, safe="")
-        metadata = self._request_json(
-            self._PLAYLIST_URL.format(playlist_id=encoded_id),
-            params={"fields": "snapshot_id"},
+        fields = (
+            "snapshot_id,"
+            "tracks(items(added_at,track(id,name,duration_ms,external_ids(isrc),album(name),artists(name))),next)"
         )
-        snapshot_id = metadata.get("snapshot_id")
+        payload = self._request_json(
+            self._PLAYLIST_URL.format(playlist_id=encoded_id),
+            params={"fields": fields, "limit": 100},
+        )
+
+        snapshot_id = payload.get("snapshot_id")
         if not snapshot_id:
             raise RuntimeError("Spotify playlist response missing snapshot_id")
 
-        items: list[dict[str, Any]] = []
-        offset = 0
-        limit = 100
+        items: list[NormalizedItem] = []
+        absolute_position = 0
+        tracks_page = payload.get("tracks") or {}
         while True:
-            payload = self._request_json(
-                self._PLAYLIST_ITEMS_URL.format(playlist_id=encoded_id),
-                params={
-                    "offset": offset,
-                    "limit": limit,
-                    "fields": "items(added_at,added_by(id),is_local,track(id,uri,name)),total,next",
-                },
-            )
-            raw_items = payload.get("items") or []
+            raw_items = tracks_page.get("items") or []
             for raw in raw_items:
-                track = raw.get("track") or {}
+                track = raw.get("track")
+                if track is None:
+                    absolute_position += 1
+                    continue
+                artists = track.get("artists") or []
+                first_artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else None
+                album = track.get("album") or {}
+                external_ids = track.get("external_ids") or {}
                 items.append(
                     {
-                        "uri": track.get("uri"),
-                        "track_id": track.get("id"),
+                        "spotify_track_id": track.get("id"),
+                        "position": absolute_position,
                         "added_at": raw.get("added_at"),
-                        "added_by": (raw.get("added_by") or {}).get("id"),
-                        "is_local": bool(raw.get("is_local")),
-                        "name": track.get("name"),
+                        "artist": first_artist,
+                        "title": track.get("name"),
+                        "album": album.get("name"),
+                        "duration_ms": track.get("duration_ms"),
+                        "isrc": external_ids.get("isrc"),
                     }
                 )
+                absolute_position += 1
 
-            if not payload.get("next"):
+            next_url = tracks_page.get("next")
+            if not next_url:
                 break
-            offset += len(raw_items)
+            tracks_page = self._request_json(str(next_url))
 
         return str(snapshot_id), items
 
+
+async def _request_json_with_retry(
+    spotify_client: SpotifyPlaylistClient,
+    url: str,
+    params: dict[str, Any] | None = None,
+    *,
+    max_rate_limit_retries: int = 3,
+) -> dict[str, Any]:
+    """Perform a Spotify GET request and retry on HTTP 429 responses."""
+    unauthorized_retry_used = False
+    attempts = 0
+    while True:
+        attempts += 1
+        token = await asyncio.to_thread(spotify_client._get_access_token)
+        headers = {"Authorization": f"Bearer {token}"}
+        response = await asyncio.to_thread(
+            requests.get,
+            url,
+            params=params,
+            headers=headers,
+            timeout=spotify_client.timeout_sec,
+        )
+
+        if response.status_code == 401 and not unauthorized_retry_used:
+            unauthorized_retry_used = True
+            spotify_client._access_token = None
+            continue
+
+        if response.status_code == 429:
+            if attempts > max_rate_limit_retries + 1:
+                raise RuntimeError("Spotify request failed (429: rate limit exceeded retries)")
+            retry_after = response.headers.get("Retry-After", "1")
+            try:
+                sleep_sec = float(retry_after)
+            except (TypeError, ValueError):
+                sleep_sec = 1.0
+            await asyncio.sleep(max(0.0, sleep_sec))
+            continue
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Spotify request failed ({response.status_code})")
+        return response.json()
+
+
+async def get_playlist_items(
+    spotify_client: SpotifyPlaylistClient,
+    playlist_id: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Fetch all Spotify playlist tracks with pagination and return `(snapshot_id, ordered_items)`."""
+    cleaned_playlist_id = (playlist_id or "").strip()
+    if not cleaned_playlist_id:
+        raise ValueError("playlist_id is required")
+
+    encoded_id = urllib.parse.quote(cleaned_playlist_id, safe="")
+    fields = (
+        "snapshot_id,"
+        "tracks(items(added_at,track(id,name,duration_ms,external_ids(isrc),album(name),artists(name))),next)"
+    )
+    payload = await _request_json_with_retry(
+        spotify_client,
+        spotify_client._PLAYLIST_URL.format(playlist_id=encoded_id),
+        params={"fields": fields, "limit": 100},
+    )
+
+    snapshot_id = payload.get("snapshot_id")
+    if not snapshot_id:
+        raise RuntimeError("Spotify playlist response missing snapshot_id")
+
+    ordered_items: list[dict[str, Any]] = []
+    absolute_position = 0
+    tracks_page = payload.get("tracks") or {}
+    while True:
+        raw_items = tracks_page.get("items") or []
+        for raw in raw_items:
+            track = raw.get("track")
+            if track is None:
+                absolute_position += 1
+                continue
+
+            artists = track.get("artists") or []
+            first_artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else None
+            album = track.get("album") or {}
+            external_ids = track.get("external_ids") or {}
+            ordered_items.append(
+                {
+                    "spotify_track_id": track.get("id"),
+                    "position": absolute_position,
+                    "added_at": raw.get("added_at"),
+                    "artist": first_artist,
+                    "title": track.get("name"),
+                    "album": album.get("name"),
+                    "duration_ms": track.get("duration_ms"),
+                    "isrc": external_ids.get("isrc"),
+                }
+            )
+            absolute_position += 1
+
+        next_url = tracks_page.get("next")
+        if not next_url:
+            break
+        tracks_page = await _request_json_with_retry(spotify_client, str(next_url))
+
+    return str(snapshot_id), ordered_items

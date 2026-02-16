@@ -1,47 +1,46 @@
-"""Deterministic playlist diff utilities."""
+"""Diff helpers for Spotify playlist snapshots."""
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict, deque
+from collections import defaultdict, deque
 
+def diff_playlist(prev: list[dict], curr: list[dict]) -> dict[str, list[dict]]:
+    """Return duplicate-aware `added`, `removed`, and `moved` playlist items."""
+    prev_occurrences: dict[str | None, deque[int]] = defaultdict(deque)
+    for idx, item in enumerate(prev):
+        prev_occurrences[item.get("spotify_track_id")].append(idx)
 
-def diff_playlist(prev: list[str], curr: list[str]) -> dict[str, list]:
-    """Return duplicate-aware added/removed/moved changes from prev to curr order."""
-    prev_list = [value for value in prev if value]
-    curr_list = [value for value in curr if value]
+    matched_curr_to_prev_index: dict[int, int] = {}
+    added: list[dict] = []
+    for curr_idx, curr_item in enumerate(curr):
+        item_id = curr_item.get("spotify_track_id")
+        remaining = prev_occurrences.get(item_id)
+        if remaining:
+            matched_curr_to_prev_index[curr_idx] = remaining.popleft()
+        else:
+            added.append(curr_item)
 
-    prev_counts = Counter(prev_list)
-    curr_counts = Counter(curr_list)
+    matched_prev_indices = set(matched_curr_to_prev_index.values())
+    removed: list[dict] = [
+        prev[prev_idx] for prev_idx in range(len(prev)) if prev_idx not in matched_prev_indices
+    ]
 
-    added: list[str] = []
-    running_curr = Counter()
-    for uri in curr_list:
-        running_curr[uri] += 1
-        if running_curr[uri] > prev_counts.get(uri, 0):
-            added.append(uri)
-
-    removed: list[str] = []
-    running_prev = Counter()
-    for uri in prev_list:
-        running_prev[uri] += 1
-        if running_prev[uri] > curr_counts.get(uri, 0):
-            removed.append(uri)
-
-    prev_positions: dict[str, deque[int]] = defaultdict(deque)
-    curr_positions: dict[str, deque[int]] = defaultdict(deque)
-    for idx, uri in enumerate(prev_list):
-        prev_positions[uri].append(idx)
-    for idx, uri in enumerate(curr_list):
-        curr_positions[uri].append(idx)
-
-    moved: list[dict[str, int | str]] = []
-    for uri in sorted(set(prev_positions).intersection(curr_positions)):
-        retained = min(len(prev_positions[uri]), len(curr_positions[uri]))
-        for _ in range(retained):
-            old_pos = prev_positions[uri].popleft()
-            new_pos = curr_positions[uri].popleft()
-            if old_pos != new_pos:
-                moved.append({"uri": uri, "from": old_pos, "to": new_pos})
+    moved: list[dict] = []
+    for curr_idx, curr_item in enumerate(curr):
+        prev_idx = matched_curr_to_prev_index.get(curr_idx)
+        if prev_idx is None:
+            continue
+        prev_item = prev[prev_idx]
+        prev_pos = int(prev_item.get("position", prev_idx))
+        curr_pos = int(curr_item.get("position", curr_idx))
+        if prev_pos != curr_pos:
+            moved.append(
+                {
+                    "spotify_track_id": curr_item.get("spotify_track_id"),
+                    "from_position": prev_pos,
+                    "to_position": curr_pos,
+                    "item": curr_item,
+                }
+            )
 
     return {"added": added, "removed": removed, "moved": moved}
-
