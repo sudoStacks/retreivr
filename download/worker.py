@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+import re
+from typing import Any, Optional, Protocol
 
 from config.settings import ENABLE_DURATION_VALIDATION, SPOTIFY_DURATION_TOLERANCE_SECONDS
 from db.downloaded_tracks import record_downloaded_track
@@ -38,8 +39,14 @@ class DownloadWorker:
     def __init__(self, downloader: _Downloader) -> None:
         self._downloader = downloader
 
-    def process_job(self, job: Any) -> str:
-        """Process one job with music-metadata-aware flow and safe fallback behavior."""
+    def process_job(self, job: Any) -> dict[str, str | None]:
+        """Process one job and return a structured status/file-path result.
+
+        Returns:
+            A dict with keys:
+            - ``status``: one of ``completed``, ``failed``, ``validation_failed``.
+            - ``file_path``: output path when completed, otherwise ``None``.
+        """
         payload = getattr(job, "payload", None) or {}
 
         if payload.get("music_metadata"):
@@ -48,52 +55,58 @@ class DownloadWorker:
             media_url = resolved_media.get("media_url")
             metadata = payload.get("music_metadata")
             if media_url:
-                # Download from the resolved media URL, then tag with attached metadata.
-                file_path = self._downloader.download(media_url)
-                # Optionally enforce duration validation before any file tagging/write side effects.
-                if ENABLE_DURATION_VALIDATION:
-                    expected_ms = None
-                    if isinstance(metadata, dict):
-                        expected_ms = metadata.get("expected_ms")
-                    else:
-                        expected_ms = getattr(metadata, "expected_ms", None)
+                try:
+                    # Download from the resolved media URL, then tag with attached metadata.
+                    file_path = self._downloader.download(media_url)
+                    # Optionally enforce duration validation before any file tagging/write side effects.
+                    if ENABLE_DURATION_VALIDATION:
+                        expected_ms = None
+                        if isinstance(metadata, dict):
+                            expected_ms = metadata.get("expected_ms")
+                        else:
+                            expected_ms = getattr(metadata, "expected_ms", None)
 
-                    if expected_ms is not None:
-                        if not validate_duration(
-                            file_path,
-                            int(expected_ms),
-                            SPOTIFY_DURATION_TOLERANCE_SECONDS,
-                        ):
-                            expected_seconds = int(expected_ms) / 1000.0
-                            actual_seconds = float("nan")
-                            try:
-                                actual_seconds = get_media_duration(file_path)
-                            except Exception:
-                                logger.exception("failed to retrieve actual duration for validation log")
-                            logger.warning(
-                                "validation_failed actual=%.2fs expected=%.2fs tolerance=%.2f",
-                                actual_seconds,
-                                expected_seconds,
+                        if expected_ms is not None:
+                            if not validate_duration(
+                                file_path,
+                                int(expected_ms),
                                 SPOTIFY_DURATION_TOLERANCE_SECONDS,
-                            )
-                            self._set_job_status(job, payload, JOB_STATUS_VALIDATION_FAILED)
-                            return file_path
+                            ):
+                                expected_seconds = int(expected_ms) / 1000.0
+                                actual_seconds = float("nan")
+                                try:
+                                    actual_seconds = get_media_duration(file_path)
+                                except Exception:
+                                    logger.exception("failed to retrieve actual duration for validation log")
+                                logger.warning(
+                                    "validation_failed actual=%.2fs expected=%.2fs tolerance=%.2f",
+                                    actual_seconds,
+                                    expected_seconds,
+                                    SPOTIFY_DURATION_TOLERANCE_SECONDS,
+                                )
+                                self._set_job_status(job, payload, JOB_STATUS_VALIDATION_FAILED)
+                                return {"status": JOB_STATUS_VALIDATION_FAILED, "file_path": None}
 
-                metadata_obj = self._coerce_music_metadata(metadata)
-                normalized_metadata = normalize_music_metadata(metadata_obj)
-                tag_file(file_path, normalized_metadata)
-                # Record idempotency state only after download and tagging both succeed.
-                playlist_id = payload.get("playlist_id")
-                isrc = getattr(metadata, "isrc", None)
-                if not isrc and isinstance(metadata, dict):
-                    isrc = metadata.get("isrc")
-                if playlist_id and isrc:
-                    record_downloaded_track(str(playlist_id), str(isrc), file_path)
-                self._set_job_status(job, payload, JOB_STATUS_COMPLETED)
-                return file_path
+                    metadata_obj = self._coerce_music_metadata(metadata)
+                    normalized_metadata = normalize_music_metadata(metadata_obj)
+                    tag_file(file_path, normalized_metadata)
+                    # Record idempotency state only after download and tagging both succeed.
+                    playlist_id = payload.get("playlist_id")
+                    isrc = getattr(metadata, "isrc", None)
+                    if not isrc and isinstance(metadata, dict):
+                        isrc = metadata.get("isrc")
+                    if playlist_id and isrc:
+                        record_downloaded_track(str(playlist_id), str(isrc), file_path)
+                    self._set_job_status(job, payload, JOB_STATUS_COMPLETED)
+                    return {"status": JOB_STATUS_COMPLETED, "file_path": file_path}
+                except Exception:
+                    logger.exception("music job processing failed")
+                    self._set_job_status(job, payload, JOB_STATUS_FAILED)
+                    return {"status": JOB_STATUS_FAILED, "file_path": None}
 
         # Non-music or incomplete payloads use the existing default worker behavior.
-        return self.default_download_and_tag(job)
+        file_path = self.default_download_and_tag(job)
+        return {"status": JOB_STATUS_COMPLETED, "file_path": file_path}
 
     def default_download_and_tag(self, job: Any) -> str:
         """Fallback behavior implemented by existing worker flows."""
@@ -115,13 +128,15 @@ class DownloadWorker:
             return metadata
 
         payload = metadata if isinstance(metadata, dict) else {}
+        track_num = safe_int(payload.get("track_num"))
+        disc_num = safe_int(payload.get("disc_num"))
         return MusicMetadata(
             title=str(payload.get("title") or "Unknown Title"),
             artist=str(payload.get("artist") or "Unknown Artist"),
             album=str(payload.get("album") or "Unknown Album"),
             album_artist=str(payload.get("album_artist") or payload.get("artist") or "Unknown Artist"),
-            track_num=int(payload.get("track_num") or 1),
-            disc_num=int(payload.get("disc_num") or 1),
+            track_num=track_num if track_num is not None and track_num > 0 else 1,
+            disc_num=disc_num if disc_num is not None and disc_num > 0 else 1,
             date=str(payload.get("date") or "Unknown"),
             genre=str(payload.get("genre") or "Unknown"),
             isrc=(str(payload.get("isrc")).strip() if payload.get("isrc") else None),
@@ -129,3 +144,25 @@ class DownloadWorker:
             artwork=payload.get("artwork"),
             lyrics=(str(payload.get("lyrics")).strip() if payload.get("lyrics") else None),
         )
+
+
+def safe_int(value: Any) -> Optional[int]:
+    """Parse an integer from mixed input, returning ``None`` when unavailable.
+
+    The parser extracts the first numeric portion from string inputs, e.g.
+    ``"01/12" -> 1`` and ``"Disc 1" -> 1``. ``None`` and non-numeric values
+    return ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    match = re.search(r"\d+", str(value))
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except (TypeError, ValueError):
+        return None
