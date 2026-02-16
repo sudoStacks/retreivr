@@ -17,3 +17,4 @@ mutagen>=1.47.0
 rapidfuzz>=3.8.1
 Pillow>=10.4.0
 lyricsgenius>=3.0.1
+requests>=2.31.0
