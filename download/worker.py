@@ -9,7 +9,9 @@ from config.settings import ENABLE_DURATION_VALIDATION, SPOTIFY_DURATION_TOLERAN
 from db.downloaded_tracks import record_downloaded_track
 from media.ffprobe import get_media_duration
 from media.validation import validate_duration
+from metadata.normalize import normalize_music_metadata
 from metadata.tagging import tag_file
+from metadata.types import MusicMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,9 @@ class DownloadWorker:
                             self._set_job_status(job, payload, JOB_STATUS_VALIDATION_FAILED)
                             return file_path
 
-                tag_file(file_path, metadata)
+                metadata_obj = self._coerce_music_metadata(metadata)
+                normalized_metadata = normalize_music_metadata(metadata_obj)
+                tag_file(file_path, normalized_metadata)
                 # Record idempotency state only after download and tagging both succeed.
                 playlist_id = payload.get("playlist_id")
                 isrc = getattr(metadata, "isrc", None)
@@ -103,3 +107,25 @@ class DownloadWorker:
         setattr(job, "status", status)
         if isinstance(payload, dict):
             payload["status"] = status
+
+    @staticmethod
+    def _coerce_music_metadata(metadata: Any) -> MusicMetadata:
+        """Coerce payload metadata into ``MusicMetadata`` for normalization/tagging."""
+        if isinstance(metadata, MusicMetadata):
+            return metadata
+
+        payload = metadata if isinstance(metadata, dict) else {}
+        return MusicMetadata(
+            title=str(payload.get("title") or "Unknown Title"),
+            artist=str(payload.get("artist") or "Unknown Artist"),
+            album=str(payload.get("album") or "Unknown Album"),
+            album_artist=str(payload.get("album_artist") or payload.get("artist") or "Unknown Artist"),
+            track_num=int(payload.get("track_num") or 1),
+            disc_num=int(payload.get("disc_num") or 1),
+            date=str(payload.get("date") or "Unknown"),
+            genre=str(payload.get("genre") or "Unknown"),
+            isrc=(str(payload.get("isrc")).strip() if payload.get("isrc") else None),
+            mbid=(str(payload.get("mbid")).strip() if payload.get("mbid") else None),
+            artwork=payload.get("artwork"),
+            lyrics=(str(payload.get("lyrics")).strip() if payload.get("lyrics") else None),
+        )
