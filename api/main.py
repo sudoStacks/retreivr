@@ -114,6 +114,10 @@ from spotify.oauth_client import SPOTIFY_TOKEN_URL, build_auth_url
 from spotify.client import SpotifyPlaylistClient
 from spotify.oauth_store import SpotifyOAuthStore, SpotifyOAuthToken
 from db.playlist_snapshots import PlaylistSnapshotStore
+from scheduler.jobs.spotify_playlist_watch import (
+    spotify_liked_songs_watch_job,
+    spotify_saved_albums_watch_job,
+)
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 1
@@ -125,8 +129,12 @@ _BASIC_AUTH_ENABLED = bool(_BASIC_AUTH_USER and _BASIC_AUTH_PASS)
 _TRUST_PROXY = os.environ.get("YT_ARCHIVER_TRUST_PROXY", "").strip().lower() in {"1", "true", "yes", "on"}
 SCHEDULE_JOB_ID = "archive_schedule"
 WATCHER_JOB_ID = "playlist_watcher"
+LIKED_SONGS_JOB_ID = "spotify_liked_songs_watch"
+SAVED_ALBUMS_JOB_ID = "spotify_saved_albums_watch"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
+DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
+DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES = 30
 OAUTH_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 OAUTH_SESSION_TTL = timedelta(minutes=15)
 _OAUTH_SESSIONS = {}
@@ -628,6 +636,8 @@ async def startup():
     app.state.schedule_config = schedule_config
     app.state.scheduler.start()
     _apply_schedule_config(schedule_config)
+    _apply_liked_songs_schedule(config)
+    _apply_saved_albums_schedule(config)
     if schedule_config.get("enabled") and schedule_config.get("run_on_startup"):
         asyncio.create_task(_handle_scheduled_run())
     if schedule_config.get("enabled"):
@@ -2047,6 +2057,20 @@ def _schedule_tick():
     asyncio.run_coroutine_threadsafe(_handle_scheduled_run(), loop)
 
 
+def _liked_songs_schedule_tick():
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return
+    asyncio.run_coroutine_threadsafe(_handle_liked_songs_scheduled_run(), loop)
+
+
+def _saved_albums_schedule_tick():
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return
+    asyncio.run_coroutine_threadsafe(_handle_saved_albums_scheduled_run(), loop)
+
+
 async def _handle_scheduled_run():
     if app.state.running:
         logging.info("Scheduled run skipped; run already active")
@@ -2065,6 +2089,151 @@ async def _handle_scheduled_run():
         _set_schedule_state(next_run=_format_iso(next_allowed))
     else:
         _set_schedule_state(next_run=_get_next_run_iso())
+
+
+def _resolve_liked_songs_interval_minutes(config: dict | None) -> int:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    raw_value = spotify_cfg.get("liked_songs_sync_interval_minutes")
+    if raw_value is None:
+        raw_value = cfg.get("liked_songs_sync_interval_minutes")
+    try:
+        interval = int(raw_value)
+    except (TypeError, ValueError):
+        interval = DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES
+    return max(1, interval)
+
+
+def _resolve_saved_albums_interval_minutes(config: dict | None) -> int:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    raw_value = spotify_cfg.get("saved_albums_sync_interval_minutes")
+    if raw_value is None:
+        raw_value = cfg.get("saved_albums_sync_interval_minutes")
+    try:
+        interval = int(raw_value)
+    except (TypeError, ValueError):
+        interval = DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES
+    return max(1, interval)
+
+
+def _has_connected_spotify_oauth_token(db_path: str) -> bool:
+    try:
+        return SpotifyOAuthStore(Path(db_path)).load() is not None
+    except Exception:
+        return False
+
+
+async def _handle_liked_songs_scheduled_run() -> None:
+    config = _read_config_for_scheduler()
+    if not config:
+        return
+
+    client_id, client_secret = _spotify_client_credentials(config)
+    if not client_id or not client_secret:
+        return
+
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    token = store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    if token is None:
+        return
+
+    try:
+        await spotify_liked_songs_watch_job(
+            config=config,
+            db=PlaylistSnapshotStore(app.state.paths.db_path),
+            queue=_IntentQueueAdapter(),
+            spotify_client=SpotifyPlaylistClient(
+                client_id=client_id,
+                client_secret=client_secret,
+                access_token=token.access_token,
+            ),
+            search_service=app.state.search_service,
+        )
+    except Exception:
+        logging.exception("Scheduled Spotify Liked Songs sync failed")
+
+
+async def _handle_saved_albums_scheduled_run() -> None:
+    config = _read_config_for_scheduler()
+    if not config:
+        return
+
+    client_id, client_secret = _spotify_client_credentials(config)
+    if not client_id or not client_secret:
+        return
+
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    token = store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    if token is None:
+        return
+
+    try:
+        await spotify_saved_albums_watch_job(
+            config=config,
+            db=PlaylistSnapshotStore(app.state.paths.db_path),
+            queue=_IntentQueueAdapter(),
+            spotify_client=SpotifyPlaylistClient(
+                client_id=client_id,
+                client_secret=client_secret,
+                access_token=token.access_token,
+            ),
+            search_service=app.state.search_service,
+        )
+    except Exception:
+        logging.exception("Scheduled Spotify Saved Albums sync failed")
+
+
+def _apply_liked_songs_schedule(config: dict | None) -> None:
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return
+
+    existing = scheduler.get_job(LIKED_SONGS_JOB_ID)
+    if existing:
+        scheduler.remove_job(LIKED_SONGS_JOB_ID)
+
+    # Do not schedule liked songs sync until OAuth has been connected at least once.
+    if not _has_connected_spotify_oauth_token(app.state.paths.db_path):
+        return
+
+    interval_min = _resolve_liked_songs_interval_minutes(config)
+    start_date = datetime.now(timezone.utc) + timedelta(minutes=interval_min)
+    scheduler.add_job(
+        _liked_songs_schedule_tick,
+        trigger=IntervalTrigger(minutes=interval_min, start_date=start_date),
+        id=LIKED_SONGS_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
+    )
+
+
+def _apply_saved_albums_schedule(config: dict | None) -> None:
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return
+
+    existing = scheduler.get_job(SAVED_ALBUMS_JOB_ID)
+    if existing:
+        scheduler.remove_job(SAVED_ALBUMS_JOB_ID)
+
+    # Do not schedule saved albums sync until OAuth has been connected at least once.
+    if not _has_connected_spotify_oauth_token(app.state.paths.db_path):
+        return
+
+    interval_min = _resolve_saved_albums_interval_minutes(config)
+    start_date = datetime.now(timezone.utc) + timedelta(minutes=interval_min)
+    scheduler.add_job(
+        _saved_albums_schedule_tick,
+        trigger=IntervalTrigger(minutes=interval_min, start_date=start_date),
+        id=SAVED_ALBUMS_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
+    )
 
 
 def _apply_schedule_config(schedule):
@@ -3103,6 +3272,8 @@ async def api_update_schedule(payload: ScheduleRequest):
 
     app.state.schedule_config = current
     _apply_schedule_config(current)
+    _apply_liked_songs_schedule(config)
+    _apply_saved_albums_schedule(config)
     return _schedule_response()
 
 
@@ -3707,6 +3878,8 @@ async def spotify_oauth_callback(code: str | None = None, state: str | None = No
             scope=scope,
         )
     )
+    _apply_liked_songs_schedule(config)
+    _apply_saved_albums_schedule(config)
     app.state.spotify_oauth_state = None
     return {"status": "connected"}
 
@@ -4099,6 +4272,8 @@ async def api_put_config(payload: dict = Body(...)):
         schedule = _merge_schedule_config(payload.get("schedule"))
         app.state.schedule_config = schedule
         _apply_schedule_config(schedule)
+    _apply_liked_songs_schedule(payload)
+    _apply_saved_albums_schedule(payload)
     policy = normalize_watch_policy(payload)
     if getattr(normalize_watch_policy, "valid", True):
         app.state.watch_policy = policy

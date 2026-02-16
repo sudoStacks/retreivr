@@ -14,9 +14,11 @@ from metadata.merge import merge_metadata
 from playlist.rebuild import rebuild_playlist_from_tracks
 from spotify.client import SpotifyPlaylistClient, get_playlist_items
 from spotify.diff import diff_playlist
+from spotify.oauth_store import SpotifyOAuthStore
 from spotify.resolve import resolve_spotify_track
 
 SPOTIFY_LIKED_SONGS_PLAYLIST_ID = "__spotify_liked_songs__"
+SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID = "__spotify_saved_albums__"
 
 
 def _load_previous_snapshot(db: Any, playlist_id: str) -> tuple[str | None, list[dict[str, Any]]]:
@@ -91,6 +93,39 @@ def _load_downloaded_track_paths(playlist_id: str) -> list[str]:
             pass
 
 
+def _load_downloaded_track_paths_for_playlist_ids(playlist_ids: list[str]) -> list[str]:
+    cleaned = [str(pid).strip() for pid in playlist_ids if str(pid).strip()]
+    if not cleaned:
+        return []
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(_resolve_db_path(), check_same_thread=False, timeout=30)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        placeholders = ", ".join(["?"] * len(cleaned))
+        cur.execute(
+            f"""
+            SELECT file_path
+            FROM downloaded_music_tracks
+            WHERE playlist_id IN ({placeholders})
+            ORDER BY downloaded_at ASC, id ASC
+            """,
+            tuple(cleaned),
+        )
+        rows = cur.fetchall()
+        return [str(row["file_path"]) for row in rows if row["file_path"]]
+    except sqlite3.Error:
+        logging.exception("Failed to load downloaded tracks for playlist IDs: %s", cleaned)
+        return []
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
 def _resolve_playlist_dirs(config: dict[str, Any] | None) -> tuple[Path, Path]:
     cfg = config or {}
     music_root = Path(str(cfg.get("music_download_folder") or "Music"))
@@ -102,6 +137,43 @@ def _resolve_playlist_dirs(config: dict[str, Any] | None) -> tuple[Path, Path]:
         )
     )
     return playlist_root, music_root
+
+
+def _spotify_client_credentials_from_config(config: dict[str, Any] | None) -> tuple[str, str]:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    client_id = str(spotify_cfg.get("client_id") or cfg.get("SPOTIFY_CLIENT_ID") or "").strip()
+    client_secret = str(spotify_cfg.get("client_secret") or cfg.get("SPOTIFY_CLIENT_SECRET") or "").strip()
+    return client_id, client_secret
+
+
+def _resolve_db_path_from_runtime(db: Any) -> str:
+    if hasattr(db, "db_path"):
+        value = str(getattr(db, "db_path") or "").strip()
+        if value:
+            return value
+    return _resolve_db_path()
+
+
+def _best_effort_rebuild_playlist_m3u(
+    *,
+    playlist_id: str,
+    playlist_name: str,
+    config: dict[str, Any] | None,
+) -> None:
+    """Rebuild playlist M3U from downloaded canonical paths without raising errors."""
+    try:
+        track_paths = _load_downloaded_track_paths(playlist_id)
+        playlist_root, music_root = _resolve_playlist_dirs(config)
+        rebuild_playlist_from_tracks(
+            playlist_name=(playlist_name or playlist_id).strip() or playlist_id,
+            playlist_root=playlist_root,
+            music_root=music_root,
+            track_file_paths=track_paths,
+        )
+        logging.info("Playlist M3U updated: %s (%d tracks)", playlist_name, len(track_paths))
+    except Exception:
+        logging.exception("Playlist M3U rebuild failed for playlist %s", playlist_id)
 
 
 def _enqueue_added_track(queue: Any, item: dict[str, Any]) -> None:
@@ -137,6 +209,258 @@ async def enqueue_spotify_track(queue, spotify_track: dict, search_service, play
         "music_metadata": merged_metadata,
     }
     queue.enqueue(payload)
+
+
+async def spotify_liked_songs_watch_job(config, db, queue, spotify_client, search_service):
+    """Sync Spotify Liked Songs using OAuth-backed `/v1/me/tracks` snapshots."""
+    client_id, client_secret = _spotify_client_credentials_from_config(config if isinstance(config, dict) else None)
+    if not client_id or not client_secret:
+        logging.info("Liked Songs sync skipped: Spotify credentials not configured")
+        return {"status": "skipped", "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID, "enqueued": 0}
+
+    oauth_store = SpotifyOAuthStore(Path(_resolve_db_path_from_runtime(db)))
+    token = oauth_store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    if token is None:
+        logging.info("Liked Songs sync skipped: no valid Spotify OAuth token")
+        return {"status": "skipped", "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID, "enqueued": 0}
+
+    liked_client: Any = spotify_client
+    if isinstance(liked_client, SpotifyPlaylistClient):
+        liked_client._provided_access_token = token.access_token
+    elif not hasattr(liked_client, "get_liked_songs"):
+        liked_client = SpotifyPlaylistClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=token.access_token,
+        )
+
+    try:
+        current_snapshot_id, current_items = await liked_client.get_liked_songs()
+    except Exception as exc:
+        logging.exception("Liked Songs fetch failed")
+        return {
+            "status": "error",
+            "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
+            "error": f"spotify_fetch_failed: {exc}",
+        }
+
+    try:
+        previous_snapshot_id, previous_items = _load_previous_snapshot(db, SPOTIFY_LIKED_SONGS_PLAYLIST_ID)
+    except Exception as exc:
+        logging.exception("Liked Songs snapshot load failed")
+        return {
+            "status": "error",
+            "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
+            "error": f"snapshot_read_failed: {exc}",
+        }
+
+    if previous_snapshot_id == current_snapshot_id:
+        return {
+            "status": "unchanged",
+            "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
+            "snapshot_id": current_snapshot_id,
+            "enqueued": 0,
+        }
+
+    diff = diff_playlist(previous_items, current_items)
+    added_items = list(diff["added"])
+    enqueued = 0
+    enqueue_errors: list[str] = []
+    for track in added_items:
+        try:
+            await enqueue_spotify_track(
+                queue,
+                track,
+                search_service,
+                playlist_id=SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
+            )
+            enqueued += 1
+        except Exception as exc:
+            track_id = track.get("spotify_track_id")
+            enqueue_errors.append(f"{track_id}: {exc}")
+            logging.exception("Failed to enqueue Liked Songs track %s", track_id)
+
+    try:
+        db.store_snapshot(
+            SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
+            str(current_snapshot_id),
+            current_items,
+        )
+    except Exception as exc:
+        logging.exception("Liked Songs snapshot store failed")
+        return {
+            "status": "error",
+            "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
+            "snapshot_id": current_snapshot_id,
+            "error": f"snapshot_store_failed: {exc}",
+            "enqueued": enqueued,
+            "added_count": len(added_items),
+            "removed_count": len(diff["removed"]),
+            "moved_count": len(diff["moved"]),
+            "enqueue_errors": enqueue_errors,
+        }
+
+    _best_effort_rebuild_playlist_m3u(
+        playlist_id=SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
+        playlist_name=get_liked_songs_playlist_name(),
+        config=config if isinstance(config, dict) else None,
+    )
+
+    return {
+        "status": "updated",
+        "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
+        "snapshot_id": current_snapshot_id,
+        "enqueued": enqueued,
+        "added_count": len(added_items),
+        "removed_count": len(diff["removed"]),
+        "moved_count": len(diff["moved"]),
+        "enqueue_errors": enqueue_errors,
+    }
+
+
+async def spotify_saved_albums_watch_job(config, db, queue, spotify_client, search_service):
+    """Sync Spotify Saved Albums via OAuth and enqueue newly added albums."""
+    client_id, client_secret = _spotify_client_credentials_from_config(config if isinstance(config, dict) else None)
+    if not client_id or not client_secret:
+        logging.info("Saved Albums sync skipped: Spotify credentials not configured")
+        return {"status": "skipped", "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID, "enqueued": 0}
+
+    oauth_store = SpotifyOAuthStore(Path(_resolve_db_path_from_runtime(db)))
+    token = oauth_store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    if token is None:
+        logging.info("Saved Albums sync skipped: no valid Spotify OAuth token")
+        return {"status": "skipped", "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID, "enqueued": 0}
+
+    saved_albums_client: Any = spotify_client
+    if isinstance(saved_albums_client, SpotifyPlaylistClient):
+        saved_albums_client._provided_access_token = token.access_token
+    elif not hasattr(saved_albums_client, "get_saved_albums"):
+        saved_albums_client = SpotifyPlaylistClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=token.access_token,
+        )
+
+    try:
+        current_snapshot_id, current_albums = await saved_albums_client.get_saved_albums()
+    except Exception as exc:
+        logging.exception("Saved Albums fetch failed")
+        return {
+            "status": "error",
+            "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID,
+            "error": f"spotify_fetch_failed: {exc}",
+        }
+
+    current_snapshot_items: list[dict[str, Any]] = []
+    album_map: dict[str, dict[str, Any]] = {}
+    for idx, album in enumerate(current_albums or []):
+        album_id = str((album or {}).get("album_id") or "").strip()
+        if not album_id:
+            continue
+        current_snapshot_items.append(
+            {
+                "spotify_track_id": album_id,
+                "position": idx,
+                "added_at": (album or {}).get("added_at"),
+            }
+        )
+        album_map[album_id] = dict(album)
+
+    try:
+        previous_snapshot_id, previous_items = _load_previous_snapshot(db, SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID)
+    except Exception as exc:
+        logging.exception("Saved Albums snapshot load failed")
+        return {
+            "status": "error",
+            "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID,
+            "error": f"snapshot_read_failed: {exc}",
+        }
+
+    if previous_snapshot_id == current_snapshot_id:
+        return {
+            "status": "unchanged",
+            "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID,
+            "snapshot_id": current_snapshot_id,
+            "enqueued": 0,
+        }
+
+    diff = diff_playlist(previous_items, current_snapshot_items)
+    added_albums = list(diff["added"])
+    enqueued = 0
+    enqueue_errors: list[str] = []
+
+    dispatcher_config = dict(config) if isinstance(config, dict) else {}
+    dispatcher_config["search_service"] = search_service
+
+    # Local import avoids a module import cycle with api.intent_dispatcher.
+    from api.intent_dispatcher import run_spotify_album_sync
+
+    for album_item in added_albums:
+        album_id = str((album_item or {}).get("spotify_track_id") or "").strip()
+        if not album_id:
+            continue
+        try:
+            await run_spotify_album_sync(
+                album_id=album_id,
+                config=dispatcher_config,
+                db=db,
+                queue=queue,
+                spotify_client=saved_albums_client,
+            )
+            enqueued += 1
+        except Exception as exc:
+            enqueue_errors.append(f"{album_id}: {exc}")
+            logging.exception("Saved Albums enqueue failed for album %s", album_id)
+
+    try:
+        db.store_snapshot(
+            SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID,
+            str(current_snapshot_id),
+            current_snapshot_items,
+        )
+    except Exception as exc:
+        logging.exception("Saved Albums snapshot store failed")
+        return {
+            "status": "error",
+            "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID,
+            "snapshot_id": current_snapshot_id,
+            "error": f"snapshot_store_failed: {exc}",
+            "enqueued": enqueued,
+            "added_count": len(added_albums),
+            "removed_count": len(diff["removed"]),
+            "moved_count": len(diff["moved"]),
+            "enqueue_errors": enqueue_errors,
+        }
+
+    # Best effort: rebuild a virtual "Saved Albums" M3U from album-scoped downloads.
+    try:
+        album_playlist_ids = [
+            f"spotify_album_{str((item or {}).get('spotify_track_id') or '').strip()}"
+            for item in current_snapshot_items
+            if str((item or {}).get("spotify_track_id") or "").strip()
+        ]
+        track_paths = _load_downloaded_track_paths_for_playlist_ids(album_playlist_ids)
+        playlist_root, music_root = _resolve_playlist_dirs(config if isinstance(config, dict) else None)
+        rebuild_playlist_from_tracks(
+            playlist_name="Spotify - Saved Albums",
+            playlist_root=playlist_root,
+            music_root=music_root,
+            track_file_paths=track_paths,
+        )
+        logging.info("Playlist M3U updated: Spotify - Saved Albums (%d tracks)", len(track_paths))
+    except Exception:
+        logging.exception("Saved Albums M3U rebuild failed")
+
+    return {
+        "status": "updated",
+        "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID,
+        "snapshot_id": current_snapshot_id,
+        "enqueued": enqueued,
+        "added_count": len(added_albums),
+        "removed_count": len(diff["removed"]),
+        "moved_count": len(diff["moved"]),
+        "enqueue_errors": enqueue_errors,
+    }
 
 
 def playlist_watch_job(
@@ -203,20 +527,11 @@ def playlist_watch_job(
             "enqueue_errors": enqueue_errors,
         }
 
-    # Best effort: refresh the playlist M3U from canonical downloaded file paths.
-    try:
-        track_paths = _load_downloaded_track_paths(pid)
-        resolved_playlist_name = (playlist_name or pid).strip() or pid
-        playlist_root, music_root = _resolve_playlist_dirs(config)
-        rebuild_playlist_from_tracks(
-            playlist_name=resolved_playlist_name,
-            playlist_root=playlist_root,
-            music_root=music_root,
-            track_file_paths=track_paths,
-        )
-        logging.info("Playlist M3U updated: %s (%d tracks)", resolved_playlist_name, len(track_paths))
-    except Exception:
-        logging.exception("Playlist M3U rebuild failed for playlist %s", pid)
+    _best_effort_rebuild_playlist_m3u(
+        playlist_id=pid,
+        playlist_name=(playlist_name or pid).strip() or pid,
+        config=config,
+    )
 
     return {
         "status": "updated",
