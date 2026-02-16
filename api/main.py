@@ -3959,11 +3959,50 @@ async def spotify_oauth_callback(code: str | None = None, state: str | None = No
             scope=scope,
         )
     )
+    try:
+        sync_db = PlaylistSnapshotStore(app.state.paths.db_path)
+        sync_queue = _IntentQueueAdapter()
+        sync_client = SpotifyPlaylistClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=access_token,
+        )
+        await spotify_liked_songs_watch_job(
+            config=config,
+            db=sync_db,
+            queue=sync_queue,
+            spotify_client=sync_client,
+            search_service=app.state.search_service,
+        )
+        await spotify_saved_albums_watch_job(
+            config=config,
+            db=sync_db,
+            queue=sync_queue,
+            spotify_client=sync_client,
+            search_service=app.state.search_service,
+        )
+        await spotify_user_playlists_watch_job(
+            config=config,
+            db=sync_db,
+            queue=sync_queue,
+            spotify_client=sync_client,
+            search_service=app.state.search_service,
+        )
+    except Exception:
+        logging.exception("Post-OAuth immediate Spotify sync failed")
     _apply_liked_songs_schedule(config)
     _apply_saved_albums_schedule(config)
     _apply_user_playlists_schedule(config)
     app.state.spotify_oauth_state = None
     return {"status": "connected"}
+
+
+@app.post("/api/spotify/oauth/disconnect")
+async def spotify_oauth_disconnect():
+    """Clear stored Spotify OAuth token state."""
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    store.clear()
+    return {"status": "disconnected"}
 
 
 @app.get("/api/search/items/{item_id}/candidates")

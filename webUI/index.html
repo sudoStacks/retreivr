@@ -80,7 +80,7 @@
         <div id="home-advanced-panel" class="home-advanced-panel hidden">
           <div class="home-advanced-row">
             <label class="home-advanced-field">
-              <span>Music mode</span>
+              <span>Music Mode (Spotify metadata, album structure, validation)</span>
               <input id="home-music-mode" type="checkbox">
             </label>
 
@@ -276,6 +276,29 @@
             <div class="stat">
               <span class="label">Quiet window remaining</span>
               <span id="watcher-quiet-remaining">-</span>
+            </div>
+          </div>
+        </div>
+        <div class="group">
+          <div class="group-title">Spotify Sync Status</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">OAuth</span>
+              <span id="spotify-status-oauth">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Last Liked Songs Sync</span>
+              <span id="spotify-status-liked">-</span>
+            </div>
+          </div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">Last Saved Albums Sync</span>
+              <span id="spotify-status-saved">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Last Playlists Sync</span>
+              <span id="spotify-status-playlists">-</span>
             </div>
           </div>
         </div>
@@ -598,6 +621,44 @@
         <div class="group">
           <div class="group-title">Spotify Playlists</div>
           <div id="spotify-playlists-list" class="stack"></div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Spotify Integration</div>
+          <div class="row">
+            <span class="label">Connection Status</span>
+            <span id="spotify-connection-status">Not connected</span>
+          </div>
+          <div class="row">
+            <button id="spotify-connect-btn" class="button" type="button">Connect Spotify</button>
+            <button id="spotify-disconnect-btn" class="button ghost" type="button" style="display: none;">Disconnect</button>
+          </div>
+          <div class="grid two">
+            <label class="field inline short">
+              <span>Sync Liked Songs</span>
+              <input id="spotify-sync-liked" type="checkbox">
+            </label>
+            <label class="field short">
+              <span>Liked Songs interval (minutes)</span>
+              <input id="spotify-liked-interval" type="number" min="1" step="1">
+            </label>
+            <label class="field inline short">
+              <span>Sync Saved Albums</span>
+              <input id="spotify-sync-saved" type="checkbox">
+            </label>
+            <label class="field short">
+              <span>Saved Albums interval (minutes)</span>
+              <input id="spotify-saved-interval" type="number" min="1" step="1">
+            </label>
+            <label class="field inline short">
+              <span>Sync My Playlists</span>
+              <input id="spotify-sync-playlists" type="checkbox">
+            </label>
+            <label class="field short">
+              <span>Playlists interval (minutes)</span>
+              <input id="spotify-playlists-interval" type="number" min="1" step="1">
+            </label>
+          </div>
         </div>
 
         <div class="group">

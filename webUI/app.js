@@ -210,7 +210,7 @@ function setPage(page) {
     refreshLogs();
   } else if (target === "config") {
     if (!state.config || !state.configDirty) {
-      loadConfig();
+      loadConfig().then(() => refreshSpotifyConfig());
     }
     refreshSchedule();
   } else if (target === "advanced") {
@@ -1110,6 +1110,29 @@ async function refreshStatus() {
           setNotice($("#run-message"), `Cancel failed: ${err.message}`, true);
         }
       };
+    }
+
+    try {
+      const spotifyStatus = await fetchJson("/api/spotify/status");
+      const oauthConnected = !!spotifyStatus.oauth_connected;
+      const oauthEl = $("#spotify-status-oauth");
+      if (oauthEl) {
+        oauthEl.textContent = oauthConnected ? "Connected" : "Not connected";
+      }
+      const likedEl = $("#spotify-status-liked");
+      if (likedEl) {
+        likedEl.textContent = formatTimestamp(spotifyStatus.last_liked_sync) || "-";
+      }
+      const savedEl = $("#spotify-status-saved");
+      if (savedEl) {
+        savedEl.textContent = formatTimestamp(spotifyStatus.last_saved_sync) || "-";
+      }
+      const playlistsEl = $("#spotify-status-playlists");
+      if (playlistsEl) {
+        playlistsEl.textContent = formatTimestamp(spotifyStatus.last_playlists_sync) || "-";
+      }
+    } catch (err) {
+      // Best-effort status enrichment; ignore when endpoint is unavailable.
     }
   } catch (err) {
     setNotice($("#run-message"), `Status error: ${err.message}`, true);
@@ -2457,7 +2480,15 @@ function renderHomeIntentCard(intentType, identifier, options = {}) {
     confirmButton.dataset.action = "home-intent-confirm";
     confirmButton.dataset.intentType = intentType || "";
     confirmButton.dataset.identifier = identifier || "";
-    confirmButton.textContent = "Confirm Download";
+    if (intentType === "spotify_album") {
+      confirmButton.textContent = "Download Album";
+    } else if (intentType === "spotify_playlist") {
+      confirmButton.textContent = "Download Playlist";
+    } else if (intentType === "spotify_track") {
+      confirmButton.textContent = "Download Track";
+    } else {
+      confirmButton.textContent = "Confirm Download";
+    }
     actions.appendChild(confirmButton);
   }
 
@@ -3659,6 +3690,94 @@ async function refreshSpotifyPlaylistStatus() {
   }
 }
 
+function applySpotifyConfigState(cfg, oauthStatus) {
+  const spotifyCfg = (cfg && cfg.spotify) || {};
+  const connected = !!(oauthStatus && oauthStatus.connected);
+
+  const statusEl = $("#spotify-connection-status");
+  if (statusEl) {
+    statusEl.textContent = connected ? "Connected" : "Not connected";
+  }
+
+  const connectBtn = $("#spotify-connect-btn");
+  if (connectBtn) {
+    connectBtn.style.display = connected ? "none" : "";
+  }
+  const disconnectBtn = $("#spotify-disconnect-btn");
+  if (disconnectBtn) {
+    disconnectBtn.style.display = connected ? "" : "none";
+  }
+
+  const syncLiked = $("#spotify-sync-liked");
+  if (syncLiked) {
+    syncLiked.checked = !!spotifyCfg.sync_liked_songs;
+  }
+  const syncSaved = $("#spotify-sync-saved");
+  if (syncSaved) {
+    syncSaved.checked = !!spotifyCfg.sync_saved_albums;
+  }
+  const syncPlaylists = $("#spotify-sync-playlists");
+  if (syncPlaylists) {
+    syncPlaylists.checked = !!spotifyCfg.sync_user_playlists;
+  }
+
+  const likedInterval = $("#spotify-liked-interval");
+  if (likedInterval) {
+    likedInterval.value = spotifyCfg.liked_songs_sync_interval_minutes ?? 15;
+  }
+  const savedInterval = $("#spotify-saved-interval");
+  if (savedInterval) {
+    savedInterval.value = spotifyCfg.saved_albums_sync_interval_minutes ?? 30;
+  }
+  const playlistsInterval = $("#spotify-playlists-interval");
+  if (playlistsInterval) {
+    playlistsInterval.value = spotifyCfg.user_playlists_sync_interval_minutes ?? 30;
+  }
+}
+
+async function refreshSpotifyConfig() {
+  try {
+    const cfg = await fetchJson("/api/config");
+    state.config = cfg;
+    let oauthStatus = { connected: false };
+    try {
+      oauthStatus = await fetchJson("/api/spotify/oauth/status");
+    } catch (err) {
+      oauthStatus = { connected: false };
+    }
+    applySpotifyConfigState(cfg, oauthStatus);
+  } catch (err) {
+    setConfigNotice(`Spotify config refresh failed: ${err.message}`, true);
+  }
+}
+
+async function connectSpotify() {
+  try {
+    const data = await fetchJson("/api/spotify/oauth/connect");
+    if (data && data.auth_url) {
+      window.open(data.auth_url, "_blank", "noopener");
+    }
+    setConfigNotice("Complete Spotify authorization in the opened window.", false);
+    await refreshSpotifyConfig();
+  } catch (err) {
+    setConfigNotice(`Spotify connect failed: ${err.message}`, true);
+  }
+}
+
+async function disconnectSpotify() {
+  try {
+    await fetchJson("/api/spotify/oauth/disconnect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    await refreshSpotifyConfig();
+    setConfigNotice("Spotify disconnected.", false);
+  } catch (err) {
+    setConfigNotice(`Spotify disconnect failed: ${err.message}`, true);
+  }
+}
+
 function updateSpotifyPlaylistStatusDisplay() {
   $$(".spotify-playlist-row").forEach((row) => {
     const url = row.dataset.playlistUrl;
@@ -3920,6 +4039,26 @@ function buildConfigFromForm() {
   } else {
     delete base.telegram;
   }
+
+  base.spotify = base.spotify || {};
+  base.spotify.sync_liked_songs = !!$("#spotify-sync-liked")?.checked;
+  base.spotify.sync_saved_albums = !!$("#spotify-sync-saved")?.checked;
+  base.spotify.sync_user_playlists = !!$("#spotify-sync-playlists")?.checked;
+
+  const likedInterval = parseInt($("#spotify-liked-interval")?.value, 10);
+  base.spotify.liked_songs_sync_interval_minutes = Number.isInteger(likedInterval) && likedInterval > 0
+    ? likedInterval
+    : 15;
+
+  const savedInterval = parseInt($("#spotify-saved-interval")?.value, 10);
+  base.spotify.saved_albums_sync_interval_minutes = Number.isInteger(savedInterval) && savedInterval > 0
+    ? savedInterval
+    : 30;
+
+  const playlistsInterval = parseInt($("#spotify-playlists-interval")?.value, 10);
+  base.spotify.user_playlists_sync_interval_minutes = Number.isInteger(playlistsInterval) && playlistsInterval > 0
+    ? playlistsInterval
+    : 30;
 
   const accounts = {};
   $$(".account-row").forEach((row) => {
@@ -4536,6 +4675,14 @@ function bindEvents() {
     }
   });
   $("#oauth-complete").addEventListener("click", completeOauth);
+  const spotifyConnectBtn = $("#spotify-connect-btn");
+  if (spotifyConnectBtn) {
+    spotifyConnectBtn.addEventListener("click", connectSpotify);
+  }
+  const spotifyDisconnectBtn = $("#spotify-disconnect-btn");
+  if (spotifyDisconnectBtn) {
+    spotifyDisconnectBtn.addEventListener("click", disconnectSpotify);
+  }
 
   $("#add-account").addEventListener("click", () => addAccountRow("", {}));
   $("#add-playlist").addEventListener("click", () => addPlaylistRow({}));
