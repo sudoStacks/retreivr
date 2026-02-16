@@ -625,6 +625,20 @@
 
         <div class="group">
           <div class="group-title">Spotify Integration</div>
+          <div class="grid two">
+            <label class="field full" for="spotify-client-id">
+              <span>Client ID</span>
+              <input id="spotify-client-id" type="text">
+            </label>
+            <label class="field full" for="spotify-client-secret">
+              <span>Client Secret</span>
+              <input id="spotify-client-secret" type="text">
+            </label>
+            <label class="field full" for="spotify-redirect-uri">
+              <span>Redirect URI</span>
+              <input id="spotify-redirect-uri" type="text" readonly>
+            </label>
+          </div>
           <div class="row">
             <span class="label">Connection Status</span>
             <span id="spotify-connection-status">Not connected</span>

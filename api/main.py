@@ -38,7 +38,7 @@ from typing import Optional
 
 import anyio
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.errors import HttpError
@@ -3863,6 +3863,7 @@ async def spotify_oauth_connect():
     if not redirect_uri:
         raise HTTPException(status_code=400, detail="SPOTIFY_REDIRECT_URI is required in config")
 
+    app.state.spotify_oauth_state = None
     state = str(uuid4())
     app.state.spotify_oauth_state = state
     scope = "user-library-read playlist-read-private playlist-read-collaborative"
@@ -3873,6 +3874,22 @@ async def spotify_oauth_connect():
         state=state,
     )
     return {"auth_url": auth_url}
+
+
+@app.get("/api/spotify/oauth/status")
+async def spotify_oauth_status():
+    """Return Spotify OAuth connection status without exposing sensitive tokens."""
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    token = store.load()
+    if token is None:
+        return {"connected": False}
+
+    scopes = [part for part in str(token.scope or "").split() if part]
+    payload: dict[str, object] = {"connected": True}
+    if scopes:
+        payload["scopes"] = scopes
+    payload["expires_at"] = int(token.expires_at)
+    return payload
 
 
 @app.get("/api/spotify/oauth/callback")
@@ -3995,7 +4012,7 @@ async def spotify_oauth_callback(code: str | None = None, state: str | None = No
     _apply_saved_albums_schedule(config)
     _apply_user_playlists_schedule(config)
     app.state.spotify_oauth_state = None
-    return {"status": "connected"}
+    return RedirectResponse(url="/#config?spotify=connected", status_code=302)
 
 
 @app.post("/api/spotify/oauth/disconnect")
@@ -4365,6 +4382,20 @@ async def api_get_config():
 async def api_put_config(payload: dict = Body(...)):
     payload = _strip_deprecated_fields(payload)
     errors = validate_config(payload)
+    # Saving config should not require Spotify OAuth client credentials.
+    # Those are validated only when the Spotify connect flow is invoked.
+    errors = [
+        err for err in errors
+        if not any(
+            marker in str(err)
+            for marker in (
+                "SPOTIFY_CLIENT_ID",
+                "SPOTIFY_CLIENT_SECRET",
+                "spotify.client_id",
+                "spotify.client_secret",
+            )
+        )
+    ]
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 

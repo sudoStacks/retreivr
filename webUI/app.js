@@ -41,6 +41,7 @@ const state = {
   homeJobTimer: null,
   homeJobSnapshot: null,
   spotifyOauthConnected: false,
+  spotifyConnectedNoticeShown: false,
 };
 const browserState = {
   open: false,
@@ -119,13 +120,14 @@ function normalizePageName(page) {
   if (!page) {
     return "home";
   }
-  if (page === "search") {
+  const cleanPage = String(page).split("?")[0] || page;
+  if (cleanPage === "search") {
     return "advanced";
   }
-  if (["downloads", "history", "logs"].includes(page)) {
+  if (["downloads", "history", "logs"].includes(cleanPage)) {
     return "status";
   }
-  return page;
+  return cleanPage;
 }
 
 function setNotice(el, message, isError = false) {
@@ -211,7 +213,13 @@ function setPage(page) {
     refreshLogs();
   } else if (target === "config") {
     if (!state.config || !state.configDirty) {
-      loadConfig().then(() => refreshSpotifyConfig());
+      loadConfig().then(async () => {
+        await refreshSpotifyConfig();
+        if (consumeSpotifyConnectedHashFlag()) {
+          await refreshSpotifyConfig();
+          setConfigNotice("Spotify connected successfully.", false, true);
+        }
+      });
     }
     refreshSchedule();
   } else if (target === "advanced") {
@@ -237,6 +245,19 @@ function setPage(page) {
       .catch(() => {});
     refreshSearchQueue();
   }
+}
+
+function consumeSpotifyConnectedHashFlag() {
+  const hash = window.location.hash || "";
+  if (!hash.includes("spotify=connected")) {
+    return false;
+  }
+  if (state.spotifyConnectedNoticeShown) {
+    return false;
+  }
+  history.replaceState(null, "", window.location.pathname + window.location.search);
+  state.spotifyConnectedNoticeShown = true;
+  return true;
 }
 
 function isValidHttpUrl(value) {
@@ -2432,6 +2453,56 @@ function isSpotifyPreviewIntent(intentType) {
   return intentType === "spotify_album" || intentType === "spotify_playlist";
 }
 
+function detectSpotifyUrlIntent(raw) {
+  const value = (raw || "").trim();
+  if (!value) {
+    return null;
+  }
+  try {
+    const parsed = new URL(value);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (host !== "open.spotify.com" && host !== "spotify.com" && host !== "www.spotify.com") {
+      return null;
+    }
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (segments.length < 2) {
+      return null;
+    }
+    const kind = String(segments[0] || "").toLowerCase();
+    const identifier = String(segments[1] || "").trim();
+    if (!identifier) {
+      return null;
+    }
+    const mapping = {
+      album: "spotify_album",
+      playlist: "spotify_playlist",
+      track: "spotify_track",
+      artist: "spotify_artist",
+    };
+    const intentType = mapping[kind] || null;
+    if (!intentType) {
+      return null;
+    }
+    return { intentType, identifier };
+  } catch (err) {
+    return null;
+  }
+}
+
+function detect_intent(rawInput) {
+  const spotifyIntent = detectSpotifyUrlIntent(rawInput);
+  if (spotifyIntent) {
+    return {
+      type: spotifyIntent.intentType,
+      identifier: spotifyIntent.identifier,
+    };
+  }
+  return {
+    type: "search",
+    identifier: (rawInput || "").trim(),
+  };
+}
+
 async function fetchIntentPreview(intentType, identifier) {
   return fetchJson("/api/intent/preview", {
     method: "POST",
@@ -2441,6 +2512,69 @@ async function fetchIntentPreview(intentType, identifier) {
       identifier,
     }),
   });
+}
+
+async function runSpotifyIntentFlow(spotifyIntent, messageEl) {
+  const intentType = spotifyIntent?.intentType || "";
+  const identifier = spotifyIntent?.identifier || "";
+  if (!intentType || !identifier) {
+    return;
+  }
+
+  state.homeSearchRequestId = null;
+  updateHomeViewAdvancedLink();
+  stopHomeResultPolling();
+  setHomeSearchActive(false);
+  setHomeSearchControlsEnabled(true);
+  showHomeResults(true);
+  setHomeResultsState({ hasResults: true, terminal: true });
+  setHomeResultsStatus("Intent detected");
+  setHomeResultsDetail("Preparing intent preview...", false);
+
+  const list = $("#home-results-list");
+  if (!list) {
+    return;
+  }
+  list.textContent = "";
+
+  const needsPreview = isSpotifyPreviewIntent(intentType);
+  list.appendChild(
+    renderHomeIntentCard(intentType, identifier, {
+      loading: needsPreview,
+      canConfirm: !needsPreview,
+    })
+  );
+
+  if (needsPreview) {
+    try {
+      const preview = await fetchIntentPreview(intentType, identifier);
+      list.textContent = "";
+      list.appendChild(
+        renderHomeIntentCard(intentType, identifier, {
+          preview,
+          canConfirm: true,
+        })
+      );
+      setHomeResultsStatus("Intent preview ready");
+      setHomeResultsDetail("Review metadata and confirm to continue.", false);
+      setNotice(messageEl, "Intent metadata loaded.", false);
+    } catch (previewErr) {
+      list.textContent = "";
+      list.appendChild(
+        renderHomeIntentCard(intentType, identifier, {
+          error: previewErr.message || "Failed to fetch metadata",
+          canConfirm: false,
+        })
+      );
+      setHomeResultsStatus("Intent preview failed");
+      setHomeResultsDetail("Could not fetch Spotify metadata. Please retry.", true);
+      setNotice(messageEl, `Intent preview failed: ${previewErr.message}`, true);
+      setHomeSearchControlsEnabled(true);
+    }
+  } else {
+    setHomeResultsDetail("Confirm to proceed or cancel to return to search.", false);
+    setNotice(messageEl, "Intent detected. Confirm to continue.", false);
+  }
 }
 
 function renderHomeIntentCard(intentType, identifier, options = {}) {
@@ -2591,6 +2725,7 @@ function showHomeDirectUrlError(url, message, messageEl) {
     container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "failed"));
   }
   setHomeResultsState({ hasResults: true, terminal: true });
+  setHomeSearchControlsEnabled(true);
 }
 
 function showHomeDirectUrlPreview(preview) {
@@ -2895,6 +3030,24 @@ async function submitHomeSearch(autoEnqueue) {
   state.homeDirectPreview = null;
   stopHomeJobPolling();
   state.homeCandidateData = {};
+
+  const intent = detect_intent(inputValue);
+  if (intent.type !== "search") {
+    try {
+      await runSpotifyIntentFlow(
+        {
+          intentType: intent.type,
+          identifier: intent.identifier,
+        },
+        messageEl
+      );
+    } catch (spotifyIntentErr) {
+      setNotice(messageEl, `Intent preview failed: ${spotifyIntentErr.message}`, true);
+      setHomeSearchControlsEnabled(true);
+    }
+    return;
+  }
+
   if (deliveryMode === "client" && destinationValue) {
     setNotice(messageEl, "Client delivery does not use a server destination.", true);
     setHomeSearchControlsEnabled(true);
@@ -2930,57 +3083,13 @@ async function submitHomeSearch(autoEnqueue) {
       body: JSON.stringify(payload),
     });
     if (data && data.detected_intent) {
-      state.homeSearchRequestId = null;
-      updateHomeViewAdvancedLink();
-      stopHomeResultPolling();
-      setHomeSearchActive(false);
-      setHomeSearchControlsEnabled(true);
-      showHomeResults(true);
-      setHomeResultsState({ hasResults: true, terminal: true });
-      setHomeResultsStatus("Intent detected");
-      setHomeResultsDetail("Preparing intent preview...", false);
-      const list = $("#home-results-list");
-      if (list) {
-        list.textContent = "";
-        const intentType = data.detected_intent;
-        const identifier = data.identifier || "";
-        const needsPreview = isSpotifyPreviewIntent(intentType);
-        list.appendChild(
-          renderHomeIntentCard(intentType, identifier, {
-            loading: needsPreview,
-            canConfirm: !needsPreview,
-          })
-        );
-        if (needsPreview) {
-          try {
-            const preview = await fetchIntentPreview(intentType, identifier);
-            list.textContent = "";
-            list.appendChild(
-              renderHomeIntentCard(intentType, identifier, {
-                preview,
-                canConfirm: true,
-              })
-            );
-            setHomeResultsStatus("Intent preview ready");
-            setHomeResultsDetail("Review metadata and confirm to continue.", false);
-            setNotice(messageEl, "Intent metadata loaded.", false);
-          } catch (previewErr) {
-            list.textContent = "";
-            list.appendChild(
-              renderHomeIntentCard(intentType, identifier, {
-                error: previewErr.message || "Failed to fetch metadata",
-                canConfirm: false,
-              })
-            );
-            setHomeResultsStatus("Intent preview failed");
-            setHomeResultsDetail("Could not fetch Spotify metadata. Please retry.", true);
-            setNotice(messageEl, `Intent preview failed: ${previewErr.message}`, true);
-          }
-        } else {
-          setHomeResultsDetail("Confirm to proceed or cancel to return to search.", false);
-          setNotice(messageEl, "Intent detected. Confirm to continue.", false);
-        }
-      }
+      await runSpotifyIntentFlow(
+        {
+          intentType: data.detected_intent,
+          identifier: data.identifier || "",
+        },
+        messageEl
+      );
       return;
     }
     state.homeRequestContext = {};
@@ -3719,6 +3828,22 @@ function applySpotifyConfigState(cfg, oauthStatus) {
   const spotifyCfg = (cfg && cfg.spotify) || {};
   const connected = !!(oauthStatus && oauthStatus.connected);
 
+  const spotifyClientId = $("#spotify-client-id");
+  if (spotifyClientId) {
+    spotifyClientId.value = spotifyCfg.client_id ?? "";
+  }
+  const spotifyClientSecret = $("#spotify-client-secret");
+  if (spotifyClientSecret) {
+    spotifyClientSecret.value = spotifyCfg.client_secret ?? "";
+  }
+  const spotifyRedirectUri = $("#spotify-redirect-uri");
+  if (spotifyRedirectUri) {
+    const explicitRedirectUri = String(spotifyCfg.redirect_uri || "").trim();
+    const defaultRedirectUri = `${window.location.protocol}//${window.location.host}/api/spotify/oauth/callback`;
+    spotifyRedirectUri.value = explicitRedirectUri || defaultRedirectUri;
+    spotifyRedirectUri.readOnly = true;
+  }
+
   const statusEl = $("#spotify-connection-status");
   if (statusEl) {
     statusEl.textContent = connected ? "Connected" : "Not connected";
@@ -4101,6 +4226,24 @@ function buildConfigFromForm() {
   }
 
   base.spotify = base.spotify || {};
+  const spotifyClientId = $("#spotify-client-id")?.value.trim() || "";
+  const spotifyClientSecret = $("#spotify-client-secret")?.value.trim() || "";
+  const spotifyRedirectUri = $("#spotify-redirect-uri")?.value.trim() || "";
+  if (spotifyClientId) {
+    base.spotify.client_id = spotifyClientId;
+  } else {
+    delete base.spotify.client_id;
+  }
+  if (spotifyClientSecret) {
+    base.spotify.client_secret = spotifyClientSecret;
+  } else {
+    delete base.spotify.client_secret;
+  }
+  if (spotifyRedirectUri) {
+    base.spotify.redirect_uri = spotifyRedirectUri;
+  } else {
+    delete base.spotify.redirect_uri;
+  }
   base.spotify.sync_liked_songs = !!$("#spotify-sync-liked")?.checked;
   base.spotify.sync_saved_albums = !!$("#spotify-sync-saved")?.checked;
   base.spotify.sync_user_playlists = !!$("#spotify-sync-playlists")?.checked;
