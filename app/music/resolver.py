@@ -153,13 +153,17 @@ def fetch_album_tracks(album_id: str) -> Optional[list]:
         tracks = []
 
         for disc in media:
+            disc_number = disc.get("position")
             for t in disc.get("tracks", []):
                 tracks.append({
                     "title": t.get("title"),
                     "track_number": t.get("position"),
+                    "disc_number": disc_number,
                     "artist": data.get("artist-credit", [{}])[0].get("name"),
                     "album": data.get("title"),
-                    "release_date": data.get("date")
+                    "release_date": data.get("date"),
+                    "duration_ms": t.get("length"),
+                    "artwork_url": None,
                 })
 
         return tracks

@@ -74,7 +74,13 @@ from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
 )
-from app.music.resolver import fetch_album_tracks, resolve_album, search_albums
+from app.music.resolver import fetch_album_tracks as legacy_fetch_album_tracks
+from app.musicbrainz import (
+    MUSICBRAINZ_USER_AGENT,
+    fetch_release_tracks,
+    pick_best_release_with_reason,
+    search_release_groups,
+)
 
 from engine.core import (
     EngineStatus,
@@ -3713,12 +3719,11 @@ async def create_search_request(request: dict = Body(...)):
         normalized = normalize_search_payload(raw_payload, default_sources=enabled_sources)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    music_candidates = []
     music_resolution = None
     if bool(normalized.get("music_mode")):
-        music_resolution = resolve_album(str(normalized.get("query") or ""))
-    logger.info(
-        f"[MUSIC] resolution={music_resolution} query={str(normalized.get('query') or '')}"
-    )
+        music_candidates = search_release_groups(str(normalized.get("query") or ""), limit=5)
+        logger.info(f"[MUSIC] mode=ON candidates={len(music_candidates)} resolution=null")
     logging.debug(
         "Home search: music_mode=%s query=%s",
         bool(normalized.get("music_mode")),
@@ -3735,6 +3740,7 @@ async def create_search_request(request: dict = Body(...)):
             "detected_intent": intent.type.value,
             "identifier": intent.identifier,
             "music_mode": bool(normalized["music_mode"]),
+            "music_candidates": music_candidates,
             "music_resolution": music_resolution,
         }
 
@@ -3790,6 +3796,7 @@ async def create_search_request(request: dict = Body(...)):
     return {
         "request_id": request_id,
         "music_mode": bool(normalized["music_mode"]),
+        "music_candidates": music_candidates,
         "music_resolution": music_resolution,
     }
 
@@ -3914,15 +3921,35 @@ async def run_search_resolution_once():
 
 @app.post("/api/music/album/download")
 def download_full_album(data: dict):
+    release_group_id = str((data or {}).get("release_group_id") or "").strip() or None
+    album_id = str((data or {}).get("album_id") or "").strip() or None
+    release_id = str((data or {}).get("release_id") or album_id or "").strip() or None
+    if not release_group_id and not album_id:
+        return {"error": "release_group_id or album_id required"}
+    logger.info(f"[MUSIC] explicit album download request release_group={release_group_id}")
 
-    album_id = data.get("album_id")
-    if not album_id:
-        return {"error": "album_id required"}
+    selected_reason = "explicit_release_id"
+    if release_group_id:
+        prefer_country = None
+        try:
+            cfg = _read_config_or_404()
+            configured_country = str((cfg or {}).get("locale_country") or (cfg or {}).get("country") or "").strip().upper()
+            prefer_country = configured_country or None
+        except Exception:
+            prefer_country = None
+        selection = pick_best_release_with_reason(release_group_id, prefer_country=prefer_country)
+        release_id = str(selection.get("release_id") or "").strip() or None
+        selected_reason = str(selection.get("reason") or "release_group_selection")
+        if not release_id:
+            return {"error": "unable to select release from release_group"}
+        logger.info(f"[MUSIC] selected_release={release_id} from release_group={release_group_id} reason={selected_reason}")
 
-    tracks = fetch_album_tracks(album_id)
+    tracks = fetch_release_tracks(release_id or "")
+    if not tracks and release_id:
+        tracks = legacy_fetch_album_tracks(release_id)
     if not tracks:
         return {"error": "unable to fetch tracks"}
-    logger.info(f"[MUSIC] Album {album_id} fetched {len(tracks)} tracks")
+    logger.info(f"[MUSIC] Album {release_group_id or release_id} fetched {len(tracks)} tracks")
     if len(tracks) == 0:
         raise HTTPException(
             status_code=404,
@@ -3936,10 +3963,15 @@ def download_full_album(data: dict):
         artist = track.get("artist")
         title = track.get("title")
         track_number_raw = track.get("track_number")
+        disc_number_raw = track.get("disc_number")
         try:
             track_number = int(track_number_raw) if track_number_raw is not None else None
         except (TypeError, ValueError):
             track_number = None
+        try:
+            disc_number = int(disc_number_raw) if disc_number_raw is not None else None
+        except (TypeError, ValueError):
+            disc_number = None
         logger.debug(f"[MUSIC] enqueue track {artist} - {title}")
         payload = {
             "media_intent": "music_track",
@@ -3947,7 +3979,14 @@ def download_full_album(data: dict):
             "album": track.get("album"),
             "track": title,
             "track_number": track_number,
-            "release_date": track.get("release_date")
+            "disc_number": disc_number,
+            "release_date": track.get("release_date"),
+            "mb_release_id": release_id,
+            "mb_release_group_id": release_group_id,
+            "release_id": release_id,
+            "release_group_id": release_group_id,
+            "duration_ms": track.get("duration_ms"),
+            "artwork_url": track.get("artwork_url"),
         }
         queue.enqueue(payload)
         enqueued += 1
@@ -3962,11 +4001,30 @@ def download_full_album(data: dict):
 @app.post("/api/music/album/candidates")
 def music_album_candidates(payload: dict):
     query = str((payload or {}).get("query") or "").strip()
-    candidates = search_albums(query) if query else []
+    raw_candidates = search_release_groups(query, limit=10) if query else []
+    candidates = [
+        {
+            "album_id": item.get("release_group_id"),
+            "title": item.get("title"),
+            "artist": item.get("artist_credit"),
+            "first_released": item.get("first_release_date"),
+            "track_count": item.get("track_count"),
+            "score": item.get("score"),
+        }
+        for item in raw_candidates
+    ]
     return {
         "status": "ok",
         "album_candidates": candidates or [],
     }
+
+
+@app.get("/api/music/albums/search")
+def music_albums_search(q: str = Query("", alias="q"), limit: int = Query(10, ge=1, le=50)):
+    query = str(q or "").strip()
+    if not query:
+        return []
+    return search_release_groups(query, limit=limit)
 
 
 @app.get("/api/music/album/art/{album_id}")
@@ -3989,7 +4047,7 @@ def music_album_art(album_id: str):
         resp = requests.get(
             f"https://coverartarchive.org/release-group/{album_id}",
             timeout=8,
-            headers={"User-Agent": USER_AGENT},
+            headers={"User-Agent": MUSICBRAINZ_USER_AGENT},
         )
         if resp.status_code == 200:
             payload = resp.json() if resp.content else {}

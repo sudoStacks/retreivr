@@ -76,6 +76,7 @@ _AUDIO_TITLE_TRAIL_RE = re.compile(
     re.IGNORECASE,
 )
 _AUDIO_ARTIST_VEVO_RE = re.compile(r"(vevo)$", re.IGNORECASE)
+_WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _YTDLP_DOWNLOAD_UNSAFE_KEYS = {"download", "skip_download", "simulate", "extract_flat"}
 
@@ -100,6 +101,10 @@ _YTDLP_DOWNLOAD_ALLOWLIST = {
     "throttledratelimit",
     "user_agent",
 }
+
+_MUSIC_TRACK_SOURCE_PRIORITY = ("youtube_music", "youtube", "soundcloud", "bandcamp")
+_MUSIC_TRACK_THRESHOLD = 0.67
+_MUSIC_TRACK_PENALTY_TERMS = ("live", "cover", "karaoke", "remix")
 
 
 @dataclass(frozen=True)
@@ -810,18 +815,95 @@ class DownloadWorkerEngine:
         source = getattr(resolved, "source", None)
         return url, source
 
-    def _resolve_music_track_with_adapters(self, artist, track, album=None):
+    def _music_tokens(self, value):
+        return _WORD_TOKEN_RE.findall(str(value or "").lower())
+
+    def _music_track_is_live(self, artist, track, album):
+        combined = " ".join([str(artist or ""), str(track or ""), str(album or "")]).lower()
+        return " live " in f" {combined} "
+
+    def _build_music_track_query(self, artist, track, album=None, *, is_live=False):
+        parts = [f'"{artist}"', f'"{track}"']
+        if album:
+            parts.append(f'"{album}"')
+        parts.extend(["topic", '"Provided to YouTube"', "audio", "lyrics"])
+        if not is_live:
+            parts.append("studio")
+        return " ".join(part for part in parts if part).strip()
+
+    def _music_track_adjust_score(self, expected, candidate, *, allow_live=False):
+        title = str(candidate.get("title") or "")
+        uploader = str(candidate.get("uploader") or candidate.get("artist_detected") or "")
+        source = str(candidate.get("source") or "")
+        title_tokens = self._music_tokens(title)
+        uploader_tokens = set(self._music_tokens(uploader))
+        track_tokens = set(self._music_tokens(expected.get("track")))
+        artist_tokens = set(self._music_tokens(expected.get("artist")))
+
+        adjustment = 0.0
+        reasons = []
+
+        if track_tokens and track_tokens.issubset(set(title_tokens)):
+            adjustment += 0.12
+            reasons.append("exact_track_tokens")
+
+        if artist_tokens and uploader_tokens:
+            overlap = len(artist_tokens & uploader_tokens) / max(len(artist_tokens), 1)
+            if overlap >= 0.60:
+                adjustment += 0.10
+                reasons.append("artist_uploader_overlap_high")
+            elif overlap >= 0.30:
+                adjustment += 0.05
+                reasons.append("artist_uploader_overlap")
+
+        expected_duration = expected.get("duration_hint_sec")
+        candidate_duration = candidate.get("duration_sec")
+        try:
+            if expected_duration is not None and candidate_duration is not None:
+                if abs(int(expected_duration) - int(candidate_duration)) <= 3:
+                    adjustment += 0.08
+                    reasons.append("duration_within_3s")
+        except Exception:
+            pass
+
+        title_lower = title.lower()
+        if "provided to youtube" in title_lower:
+            adjustment += 0.08
+            reasons.append("provided_to_youtube")
+        if "topic" in uploader.lower() and source in {"youtube", "youtube_music"}:
+            adjustment += 0.08
+            reasons.append("topic_channel")
+        if "lyrics" in title_lower:
+            adjustment += 0.02
+            reasons.append("lyrics_hint")
+
+        if not allow_live:
+            for token in _MUSIC_TRACK_PENALTY_TERMS:
+                if token in title_lower:
+                    adjustment -= 0.14
+                    reasons.append(f"penalty_{token}")
+        return adjustment, reasons
+
+    def _resolve_music_track_with_adapters(self, artist, track, album=None, *, duration_hint_sec=None, allow_live=False):
         expected = {
             "artist": artist,
             "track": track,
             "album": album,
-            "duration_hint_sec": None,
+            "duration_hint_sec": duration_hint_sec,
         }
         scored = []
-        source_priority = list(self.adapters.keys())
-        for source, adapter in self.adapters.items():
+        source_priority = [name for name in _MUSIC_TRACK_SOURCE_PRIORITY if name in self.adapters]
+        source_priority.extend([name for name in self.adapters.keys() if name not in source_priority])
+        for source in source_priority:
+            adapter = self.adapters.get(source)
+            if not adapter:
+                continue
+            query = self._build_music_track_query(artist, track, album, is_live=allow_live)
             try:
-                candidates = adapter.search_track(artist, track, album, 3)
+                if hasattr(adapter, "_search"):
+                    candidates = adapter._search(query, 6)
+                else:
+                    candidates = adapter.search_track(artist, track, album, 6)
             except Exception:
                 logging.exception("Music track search adapter failed source=%s", source)
                 continue
@@ -833,11 +915,32 @@ class DownloadWorkerEngine:
                 candidate["source"] = candidate.get("source") or source
                 modifier = adapter.source_modifier(candidate)
                 candidate.update(score_candidate(expected, candidate, source_modifier=modifier))
+                base_score = float(candidate.get("final_score") or 0.0)
+                adjustment, reasons = self._music_track_adjust_score(expected, candidate, allow_live=allow_live)
+                candidate["music_adjustment"] = adjustment
+                candidate["music_adjustment_reasons"] = ",".join(reasons)
+                candidate["base_score"] = base_score
+                candidate["final_score"] = max(0.0, min(1.0, base_score + adjustment))
                 scored.append(candidate)
         if not scored:
             return None
         ranked = rank_candidates(scored, source_priority=source_priority)
-        return select_best_candidate(ranked, 0.0)
+        chosen = select_best_candidate(ranked, _MUSIC_TRACK_THRESHOLD)
+        if chosen:
+            return chosen
+        logger.info(f"[MUSIC] threshold={_MUSIC_TRACK_THRESHOLD:.2f} selected_score=none candidate=none")
+        for candidate in ranked[:5]:
+            logger.debug(
+                "[MUSIC] top_candidate score=%.3f base=%.3f source=%s title=%s uploader=%s reasons=%s url=%s",
+                float(candidate.get("final_score") or 0.0),
+                float(candidate.get("base_score") or 0.0),
+                candidate.get("source"),
+                candidate.get("title"),
+                candidate.get("uploader"),
+                candidate.get("music_adjustment_reasons") or "",
+                candidate.get("url"),
+            )
+        return None
 
     def _resolve_music_track_job(self, job):
         payload = job.output_template if isinstance(job.output_template, dict) else {}
@@ -845,32 +948,56 @@ class DownloadWorkerEngine:
         artist = str(payload.get("artist") or canonical.get("artist") or "").strip()
         track = str(payload.get("track") or canonical.get("track") or canonical.get("title") or "").strip()
         album = str(payload.get("album") or canonical.get("album") or "").strip() or None
+        duration_ms_raw = payload.get("duration_ms")
+        if duration_ms_raw is None:
+            duration_ms_raw = canonical.get("duration_ms")
+        if duration_ms_raw is None:
+            duration_ms_raw = canonical.get("duration")
+        duration_hint_sec = None
+        try:
+            if duration_ms_raw is not None:
+                duration_hint_sec = max(int(duration_ms_raw) // 1000, 1)
+        except Exception:
+            duration_hint_sec = None
+        allow_live = self._music_track_is_live(artist, track, album)
         if not artist or not track:
             logging.error("Music track search failed")
             raise RuntimeError("music_track_metadata_missing")
         logger.info(f"[WORKER] processing music_track artist={artist} track={track}")
 
-        album_clause = f" album:{album}" if album else ""
-        search_query = f"{artist} {track}{album_clause} audio".strip()
+        search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
         resolved = None
         if self.search_service and hasattr(self.search_service, "search_best_match"):
-            relaxed_threshold = 0.68
             try:
                 resolved = self.search_service.search_best_match(
                     search_query,
-                    threshold=relaxed_threshold,
+                    threshold=_MUSIC_TRACK_THRESHOLD,
                 )
             except TypeError:
-                resolved = self.search_service.search_best_match(search_query)
+                resolved = None
             except Exception:
                 logging.exception("Music track search service failed query=%s", search_query)
         if not resolved:
-            resolved = self._resolve_music_track_with_adapters(artist, track, album)
+            resolved = self._resolve_music_track_with_adapters(
+                artist,
+                track,
+                album,
+                duration_hint_sec=duration_hint_sec,
+                allow_live=allow_live,
+            )
 
         resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
         if not _is_http_url(resolved_url):
             logging.error("Music track search failed")
-            raise RuntimeError("music_track_search_failed")
+            raise RuntimeError("music_track_no_candidate_above_threshold")
+        selected_score = None
+        if isinstance(resolved, dict):
+            selected_score = resolved.get("final_score")
+        logger.info(
+            f"[MUSIC] threshold={_MUSIC_TRACK_THRESHOLD:.2f} "
+            f"selected_score={selected_score if selected_score is not None else 'n/a'} "
+            f"candidate={resolved_url}"
+        )
 
         source = resolved_source or resolve_source(resolved_url)
         external_id = extract_video_id(resolved_url) if source in {"youtube", "youtube_music"} else None

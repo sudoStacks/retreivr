@@ -26,6 +26,7 @@ const state = {
   homeSearchMode: "searchOnly",
   homeMusicMode: false,
   homeAlbumCandidatesRequestId: null,
+  homeQueuedAlbumReleaseGroups: new Set(),
   homeAlbumCoverCache: {},
   homeRequestContext: {},
   homeBestScores: {},
@@ -76,6 +77,7 @@ const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at";
 const RELEASE_CACHE_KEY = "yt_archiver_release_cache";
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version";
 const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
+const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
 const HOME_SOURCE_PRIORITY_MAP = {
   auto: null,
   youtube: ["youtube"],
@@ -1634,6 +1636,21 @@ function parseHomeSearchQuery(value, preferAlbum) {
   };
 }
 
+function homeMusicDebugEnabled() {
+  try {
+    return localStorage.getItem(HOME_MUSIC_DEBUG_KEY) === "1";
+  } catch (_err) {
+    return false;
+  }
+}
+
+function homeMusicDebugLog(...args) {
+  if (!homeMusicDebugEnabled()) {
+    return;
+  }
+  console.debug(...args);
+}
+
 function ensureHomeMusicModeBadge() {
   let badge = $("#home-music-mode-badge");
   if (badge) {
@@ -1831,22 +1848,79 @@ function clearHomeAlbumCandidates() {
   }
 }
 
-function renderHomeAlbumCandidates(candidates) {
-  clearHomeAlbumCandidates();
-  if (!Array.isArray(candidates) || !candidates.length) {
-    return;
+function normalizeMusicAlbumCandidates(rawCandidates) {
+  if (!Array.isArray(rawCandidates)) {
+    return [];
   }
+  return rawCandidates
+    .map((item) => {
+      const releaseGroupId = item?.release_group_id || item?.album_id || null;
+      if (!releaseGroupId) {
+        return null;
+      }
+      return {
+        release_group_id: releaseGroupId,
+        title: item?.title || "",
+        artist_credit: item?.artist_credit || item?.artist || "",
+        first_release_date: item?.first_release_date || item?.first_released || "",
+        primary_type: item?.primary_type || "Album",
+        secondary_types: Array.isArray(item?.secondary_types) ? item.secondary_types : [],
+        score: Number.isFinite(Number(item?.score)) ? Number(item.score) : null,
+        track_count: Number.isFinite(Number(item?.track_count)) ? Number(item.track_count) : null,
+      };
+    })
+    .filter(Boolean);
+}
+
+function uniqueMusicAlbumCandidates(candidates) {
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = String(candidate?.release_group_id || "").trim();
+    if (!key || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function renderHomeAlbumCandidates(candidates, query = "") {
+  clearHomeAlbumCandidates();
   const homeResults = document.getElementById("home-results");
   const header = homeResults?.querySelector(".home-results-header");
   if (!homeResults || !header) {
     return;
   }
+
+  const showPanel = !!state.homeMusicMode && !!String(query || "").trim();
+  if (!showPanel) {
+    return;
+  }
+
+  const normalized = uniqueMusicAlbumCandidates(normalizeMusicAlbumCandidates(candidates));
   const container = document.createElement("div");
   container.id = "home-album-candidates";
   container.className = "stack";
-  candidates.forEach((candidate) => {
+  const panelHeader = document.createElement("div");
+  panelHeader.className = "row";
+  const panelTitle = document.createElement("div");
+  panelTitle.className = "group-title";
+  panelTitle.textContent = "Albums (MusicBrainz)";
+  panelHeader.appendChild(panelTitle);
+  container.appendChild(panelHeader);
+
+  if (!normalized.length) {
+    const empty = document.createElement("div");
+    empty.className = "meta";
+    empty.textContent = "No album matches found";
+    container.appendChild(empty);
+    header.insertAdjacentElement("afterend", container);
+    return;
+  }
+
+  normalized.forEach((candidate) => {
     const card = document.createElement("div");
-    card.className = "album-card";
+    card.className = "home-result-card album-card";
 
     const cover = document.createElement("img");
     cover.className = "album-cover";
@@ -1857,27 +1931,56 @@ function renderHomeAlbumCandidates(candidates) {
     cover.style.objectFit = "cover";
     cover.style.borderRadius = "8px";
     cover.style.display = "none";
+    cover.style.flexShrink = "0";
     card.appendChild(cover);
 
+    const body = document.createElement("div");
+    body.className = "stack";
+    body.style.flex = "1";
+
     const title = document.createElement("span");
-    title.className = "album-title";
+    title.className = "album-title home-candidate-title";
     title.textContent = candidate.title || "";
-    card.appendChild(title);
+    body.appendChild(title);
 
     const artist = document.createElement("span");
-    artist.className = "album-artist";
-    artist.textContent = candidate.artist || "";
-    card.appendChild(artist);
+    artist.className = "album-artist meta";
+    artist.textContent = candidate.artist_credit || "";
+    body.appendChild(artist);
 
     const date = document.createElement("span");
-    date.className = "album-date";
-    date.textContent = candidate.first_released || "";
-    card.appendChild(date);
+    date.className = "album-date meta";
+    date.textContent = candidate.first_release_date || "";
+    body.appendChild(date);
+
+    const badges = document.createElement("div");
+    badges.className = "row";
+    const primary = document.createElement("span");
+    primary.className = "chip idle";
+    primary.textContent = candidate.primary_type || "Album";
+    badges.appendChild(primary);
+    (candidate.secondary_types || []).forEach((type) => {
+      const secondary = document.createElement("span");
+      secondary.className = "chip idle";
+      secondary.textContent = String(type);
+      badges.appendChild(secondary);
+    });
+    if (candidate.score !== null) {
+      const score = document.createElement("span");
+      score.className = "meta";
+      score.textContent = `Score ${candidate.score}`;
+      badges.appendChild(score);
+    }
+    body.appendChild(badges);
+    card.appendChild(body);
 
     const button = document.createElement("button");
-    button.className = "btn small primary album-download-btn";
-    button.dataset.albumId = candidate.album_id || "";
-    button.textContent = "Download Full Album";
+    button.className = "button primary small album-download-btn";
+    button.dataset.releaseGroupId = candidate.release_group_id || "";
+    button.dataset.albumTitle = candidate.title || "";
+    const alreadyQueued = state.homeQueuedAlbumReleaseGroups.has(candidate.release_group_id || "");
+    button.textContent = alreadyQueued ? "Queued..." : "Download Album";
+    button.disabled = alreadyQueued;
     card.appendChild(button);
 
     container.appendChild(card);
@@ -1887,22 +1990,58 @@ function renderHomeAlbumCandidates(candidates) {
     if (!button) {
       return;
     }
-    const albumId = button.dataset.albumId;
-    if (!albumId) {
+    const releaseGroupId = button.dataset.releaseGroupId;
+    if (!releaseGroupId) {
       return;
     }
-    await fetch("/api/music/album/download", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ album_id: albumId }),
-    });
+    if (state.homeQueuedAlbumReleaseGroups.has(releaseGroupId)) {
+      button.disabled = true;
+      button.textContent = "Queued...";
+      return;
+    }
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    try {
+      const payload = {
+        release_group_id: releaseGroupId,
+        destination: $("#home-destination")?.value.trim() || null,
+        final_format: $("#home-format")?.value.trim() || null,
+        music_mode: true,
+      };
+      homeMusicDebugLog("[MUSIC UI] queue album", payload);
+      const result = await fetchJson("/api/music/album/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      state.homeQueuedAlbumReleaseGroups.add(releaseGroupId);
+      container.querySelectorAll(`.album-download-btn[data-release-group-id="${CSS.escape(releaseGroupId)}"]`)
+        .forEach((dupButton) => {
+          dupButton.disabled = true;
+          dupButton.textContent = "Queued...";
+        });
+      button.textContent = "Queued...";
+      const count = Number.isFinite(Number(result?.tracks_enqueued))
+        ? Number(result.tracks_enqueued)
+        : 0;
+      setNotice(
+        $("#home-search-message"),
+        `Queued album: ${button.dataset.albumTitle || "Album"} — ${count} tracks`,
+        false
+      );
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+      setNotice($("#home-search-message"), `Album queue failed: ${err.message}`, true);
+    }
   });
   header.insertAdjacentElement("afterend", container);
-  candidates.forEach((candidate, index) => {
-    if (!candidate?.album_id) {
+  const cards = Array.from(container.querySelectorAll(".album-card"));
+  normalized.forEach((candidate, index) => {
+    if (!candidate?.release_group_id) {
       return;
     }
-    const card = container.children[index];
+    const card = cards[index];
     if (!card) {
       return;
     }
@@ -1911,7 +2050,7 @@ function renderHomeAlbumCandidates(candidates) {
       return;
     }
     setTimeout(async () => {
-      const coverUrl = await fetchHomeAlbumCoverUrl(candidate.album_id);
+      const coverUrl = await fetchHomeAlbumCoverUrl(candidate.release_group_id);
       if (coverUrl) {
         cover.src = coverUrl;
         cover.style.display = "block";
@@ -1920,19 +2059,21 @@ function renderHomeAlbumCandidates(candidates) {
   });
 }
 
-async function loadAndRenderHomeAlbumCandidates(query) {
+async function loadAndRenderHomeAlbumCandidates(query, preloadedCandidates = null) {
   const normalized = (query || "").trim();
   if (!normalized) {
     clearHomeAlbumCandidates();
     return;
   }
-  const data = await fetchJson("/api/music/album/candidates", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query: normalized }),
-  });
-  const candidates = Array.isArray(data?.album_candidates) ? data.album_candidates : [];
-  renderHomeAlbumCandidates(candidates);
+  let candidates = normalizeMusicAlbumCandidates(preloadedCandidates);
+  if (!candidates.length) {
+    const data = await fetchJson(
+      `/api/music/albums/search?q=${encodeURIComponent(normalized)}&limit=10`
+    );
+    candidates = normalizeMusicAlbumCandidates(Array.isArray(data) ? data : data?.album_candidates);
+  }
+  homeMusicDebugLog("[MUSIC UI] album candidates", { query: normalized, count: candidates.length });
+  renderHomeAlbumCandidates(candidates, normalized);
 }
 
 async function fetchHomeAlbumCoverUrl(albumId) {
@@ -3058,6 +3199,7 @@ async function refreshHomeResults(requestId) {
   const container = $("#home-results-list");
   if (!container) return null;
   try {
+    const previousContext = state.homeRequestContext[requestId] || {};
     const data = await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}`);
     const requestStatus = data.request?.status || "queued";
     const requestMediaType = data.request?.media_type || "";
@@ -3065,6 +3207,8 @@ async function refreshHomeResults(requestId) {
     state.homeRequestContext[requestId] = {
       request: data.request || {},
       items,
+      musicMode: previousContext.musicMode || false,
+      musicCandidates: previousContext.musicCandidates || [],
     };
     updateHomeResultsStatusForRequest(requestId);
     const existingCards = new Map();
@@ -3092,7 +3236,9 @@ async function refreshHomeResults(requestId) {
         startHomeJobPolling(requestId);
         if (requestMediaType === "music" && state.homeAlbumCandidatesRequestId !== requestId) {
           state.homeAlbumCandidatesRequestId = requestId;
-          await loadAndRenderHomeAlbumCandidates($("#home-search-input")?.value || "");
+          const query = $("#home-search-input")?.value || "";
+          const preloaded = state.homeRequestContext[requestId]?.musicCandidates || [];
+          await loadAndRenderHomeAlbumCandidates(query, preloaded);
         } else if (requestMediaType !== "music") {
           clearHomeAlbumCandidates();
         }
@@ -3130,7 +3276,9 @@ async function refreshHomeResults(requestId) {
       startHomeJobPolling(requestId);
       if (requestMediaType === "music" && state.homeAlbumCandidatesRequestId !== requestId) {
         state.homeAlbumCandidatesRequestId = requestId;
-        await loadAndRenderHomeAlbumCandidates($("#home-search-input")?.value || "");
+        const query = $("#home-search-input")?.value || "";
+        const preloaded = state.homeRequestContext[requestId]?.musicCandidates || [];
+        await loadAndRenderHomeAlbumCandidates(query, preloaded);
       } else if (requestMediaType !== "music") {
         clearHomeAlbumCandidates();
       }
@@ -3291,6 +3439,15 @@ async function submitHomeSearch(autoEnqueue) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    const responseMusicMode = !!data?.music_mode;
+    const responseMusicCandidates = normalizeMusicAlbumCandidates(data?.music_candidates || []);
+    state.homeRequestContext.pending = {
+      musicMode: responseMusicMode,
+      musicCandidates: responseMusicCandidates,
+    };
+    if (state.homeMusicMode && inputValue) {
+      await loadAndRenderHomeAlbumCandidates(inputValue, responseMusicCandidates);
+    }
     if (data && data.detected_intent) {
       await runSpotifyIntentFlow(
         {
@@ -3302,6 +3459,12 @@ async function submitHomeSearch(autoEnqueue) {
       return;
     }
     state.homeRequestContext = {};
+    state.homeRequestContext[data.request_id] = {
+      request: {},
+      items: [],
+      musicMode: responseMusicMode,
+      musicCandidates: responseMusicCandidates,
+    };
     state.homeBestScores = {};
     state.homeCandidateCache = {};
     state.homeCandidatesLoading = {};
