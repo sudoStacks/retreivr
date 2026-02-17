@@ -437,14 +437,25 @@ class DownloadJobStore:
                 return None
             query = f"""
                 SELECT * FROM download_jobs
-                WHERE ({' OR '.join(clauses)}) AND status=?
+                WHERE ({' OR '.join(clauses)})
+                  AND status IN (?, ?, ?, ?, ?)
                 ORDER BY created_at DESC
                 LIMIT 1
             """
-            params.append(JOB_STATUS_COMPLETED)
+            params.extend(
+                [
+                    JOB_STATUS_COMPLETED,
+                    JOB_STATUS_QUEUED,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                ]
+            )
             cur.execute(query, tuple(params))
             row = cur.fetchone()
-            if not row or not self._row_has_valid_output(row):
+            if not row:
+                return None
+            if row["status"] == JOB_STATUS_COMPLETED and not self._row_has_valid_output(row):
                 return None
             return self._row_to_job(row)
         finally:

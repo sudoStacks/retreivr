@@ -24,6 +24,23 @@ def _connect(db_path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _normalize_snapshot_rows(items: list[dict[str, Any]]) -> list[tuple[str, int, Any]]:
+    rows: list[tuple[str, int, int, Any]] = []
+    for idx, item in enumerate(items or []):
+        if not isinstance(item, dict):
+            continue
+        track_id = str(item.get("spotify_track_id") or "").strip()
+        if not track_id:
+            continue
+        try:
+            position = int(item.get("position", idx))
+        except Exception:
+            position = int(idx)
+        rows.append((track_id, position, idx, item.get("added_at")))
+    rows.sort(key=lambda row: (row[1], row[2], row[0]))
+    return [(track_id, position, added_at) for track_id, position, _idx, added_at in rows]
+
+
 @dataclass(frozen=True)
 class SnapshotWriteResult:
     """Result payload for class-based snapshot writes."""
@@ -110,13 +127,10 @@ def store_snapshot(playlist_id: str, snapshot_id: str, items: list[dict[str, Any
         )
         snapshot_row_id = int(cur.lastrowid)
 
-        rows: list[tuple[Any, ...]] = []
-        for idx, item in enumerate(items):
-            track_id = item.get("spotify_track_id")
-            if not track_id:
-                continue
-            position = int(item.get("position", idx))
-            rows.append((snapshot_row_id, str(track_id), position, item.get("added_at")))
+        rows = [
+            (snapshot_row_id, track_id, position, added_at)
+            for track_id, position, added_at in _normalize_snapshot_rows(items)
+        ]
 
         if rows:
             cur.executemany(
@@ -236,13 +250,10 @@ class PlaylistSnapshotStore:
                 (pid, sid),
             )
             snapshot_row_id = int(cur.lastrowid)
-            rows: list[tuple[Any, ...]] = []
-            for idx, item in enumerate(items):
-                track_id = item.get("spotify_track_id")
-                if not track_id:
-                    continue
-                position = int(item.get("position", idx))
-                rows.append((snapshot_row_id, str(track_id), position, item.get("added_at")))
+            rows = [
+                (snapshot_row_id, track_id, position, added_at)
+                for track_id, position, added_at in _normalize_snapshot_rows(items)
+            ]
             if rows:
                 cur.executemany(
                     """

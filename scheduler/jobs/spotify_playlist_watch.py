@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import sqlite3
 from pathlib import Path
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -25,6 +27,22 @@ logger = logging.getLogger(__name__)
 SPOTIFY_LIKED_SONGS_PLAYLIST_ID = "__spotify_liked_songs__"
 SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID = "__spotify_saved_albums__"
 SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID = "__spotify_user_playlists__"
+
+
+@dataclass(frozen=True)
+class PlaylistRunSummary:
+    added: int = 0
+    skipped: int = 0
+    failed: int = 0
+    completed: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "added": int(self.added),
+            "skipped": int(self.skipped),
+            "failed": int(self.failed),
+            "completed": int(self.completed),
+        }
 
 
 def normalize_spotify_playlist_identifier(value: str) -> str:
@@ -271,16 +289,69 @@ def _best_effort_rebuild_playlist_m3u(
         logging.exception("Playlist M3U rebuild failed for playlist %s", playlist_id)
 
 
-def _enqueue_added_track(queue: Any, item: dict[str, Any]) -> None:
+def _enqueue_added_track(queue: Any, item: dict[str, Any]) -> Any:
     if callable(queue):
-        queue(item)
-        return
+        return queue(item)
     for method_name in ("enqueue", "put", "add", "enqueue_track"):
         method = getattr(queue, method_name, None)
         if callable(method):
-            method(item)
-            return
+            return method(item)
     raise TypeError("queue does not expose a supported enqueue method")
+
+
+def _safe_position(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(fallback)
+
+
+def _normalize_playlist_items(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    normalized_rows: list[tuple[int, int, dict[str, Any]]] = []
+    for idx, raw in enumerate(items or []):
+        if not isinstance(raw, dict):
+            continue
+        track_id = str(raw.get("spotify_track_id") or "").strip()
+        if not track_id:
+            continue
+        position = _safe_position(raw.get("position"), idx)
+        normalized_rows.append(
+            (
+                position,
+                idx,
+                {
+                    **raw,
+                    "spotify_track_id": track_id,
+                    "position": position,
+                    "added_at": raw.get("added_at"),
+                },
+            )
+        )
+    normalized_rows.sort(key=lambda entry: (entry[0], entry[1]))
+    return [entry[2] for entry in normalized_rows]
+
+
+def _playlist_snapshot_hash(items: list[dict[str, Any]]) -> str:
+    digest_source = "\n".join(
+        f"{idx}|{item.get('spotify_track_id')}|{item.get('position')}|{item.get('added_at') or ''}"
+        for idx, item in enumerate(items)
+    ).encode("utf-8")
+    return hashlib.sha256(digest_source).hexdigest()
+
+
+def _classify_enqueue_result(result: Any) -> tuple[int, int]:
+    if isinstance(result, tuple):
+        created = None
+        if len(result) >= 2:
+            created = result[1]
+        if created is False:
+            return 0, 1
+        return 1, 0
+    if isinstance(result, dict):
+        created = result.get("created")
+        if created is False:
+            return 0, 1
+    return 1, 0
 
 
 async def spotify_playlists_watch_job(
@@ -302,22 +373,33 @@ async def spotify_playlists_watch_job(
     downtime_start = str(downtime_cfg.get("start") or "").strip() or "?"
     downtime_end = str(downtime_cfg.get("end") or "").strip() or "?"
     downtime_active = _is_spotify_downtime_active(cfg)
+    aggregate_summary = PlaylistRunSummary()
     if downtime_active and not ignore_downtime:
         logger.info(
             f"Spotify sync waiting for downtime to end "
             f"(downtime {downtime_start} -> {downtime_end})"
         )
-        return {"status": "skipped", "reason": "downtime", "synced_playlists": 0}
+        return {
+            "status": "skipped",
+            "reason": "downtime",
+            "synced_playlists": 0,
+            "run_summary": aggregate_summary.to_dict(),
+        }
 
     playlist_ids = _configured_watch_playlist_ids(cfg)
     if not playlist_ids:
-        return {"status": "skipped", "reason": "no_playlists", "synced_playlists": 0}
+        return {
+            "status": "skipped",
+            "reason": "no_playlists",
+            "synced_playlists": 0,
+            "run_summary": aggregate_summary.to_dict(),
+        }
 
     synced = 0
     errors: list[str] = []
     for playlist_id in playlist_ids:
         try:
-            playlist_watch_job(
+            result = playlist_watch_job(
                 spotify_client=spotify_client,
                 db=db,
                 queue=queue,
@@ -325,10 +407,24 @@ async def spotify_playlists_watch_job(
                 playlist_name=playlist_id,
                 config=cfg,
             )
+            summary = result.get("run_summary") if isinstance(result, dict) else None
+            if isinstance(summary, dict):
+                aggregate_summary = PlaylistRunSummary(
+                    added=aggregate_summary.added + int(summary.get("added") or 0),
+                    skipped=aggregate_summary.skipped + int(summary.get("skipped") or 0),
+                    failed=aggregate_summary.failed + int(summary.get("failed") or 0),
+                    completed=aggregate_summary.completed + int(summary.get("completed") or 0),
+                )
             synced += 1
         except Exception as exc:
             errors.append(f"{playlist_id}: {exc}")
             logging.exception("Scheduled Spotify playlist sync failed for playlist %s", playlist_id)
+            aggregate_summary = PlaylistRunSummary(
+                added=aggregate_summary.added,
+                skipped=aggregate_summary.skipped,
+                failed=aggregate_summary.failed + 1,
+                completed=aggregate_summary.completed,
+            )
 
     logging.info(
         "Spotify playlist sync completed: %d/%d playlists processed",
@@ -341,6 +437,7 @@ async def spotify_playlists_watch_job(
         "status": "updated",
         "synced_playlists": synced,
         "errors": errors,
+        "run_summary": aggregate_summary.to_dict(),
     }
 
 
@@ -816,6 +913,7 @@ def playlist_watch_job(
     ignore_downtime: bool = False,
 ) -> dict[str, Any]:
     """Fetch playlist snapshot, diff with DB state, enqueue added tracks, and persist new snapshot."""
+    base_summary = PlaylistRunSummary()
     cfg = config if isinstance(config, dict) else {}
     downtime_cfg = ((cfg.get("watch_policy") or {}).get("downtime") or {}) if isinstance(cfg.get("watch_policy"), dict) else {}
     downtime_start = str(downtime_cfg.get("start") or "").strip() or "?"
@@ -826,7 +924,13 @@ def playlist_watch_job(
             f"Spotify sync waiting for downtime to end "
             f"(downtime {downtime_start} -> {downtime_end})"
         )
-        return {"status": "skipped", "reason": "downtime", "playlist_id": playlist_id, "enqueued": 0}
+        return {
+            "status": "skipped",
+            "reason": "downtime",
+            "playlist_id": playlist_id,
+            "enqueued": 0,
+            "run_summary": base_summary.to_dict(),
+        }
 
     pid = normalize_spotify_playlist_identifier(playlist_id)
     assert isinstance(pid, str) and len(pid) >= 8
@@ -844,45 +948,82 @@ def playlist_watch_job(
             current_snapshot_id, current_items = result
     except Exception as exc:
         logging.exception("Spotify fetch failed for playlist %s", pid)
-        return {"status": "error", "playlist_id": pid, "error": f"spotify_fetch_failed: {exc}"}
+        return {
+            "status": "error",
+            "playlist_id": pid,
+            "error": f"spotify_fetch_failed: {exc}",
+            "run_summary": PlaylistRunSummary(failed=1).to_dict(),
+        }
 
     try:
         previous_snapshot_id, previous_items = _load_previous_snapshot(db, pid)
     except Exception as exc:
         logging.exception("Snapshot load failed for playlist %s", pid)
-        return {"status": "error", "playlist_id": pid, "error": f"snapshot_read_failed: {exc}"}
+        return {
+            "status": "error",
+            "playlist_id": pid,
+            "error": f"snapshot_read_failed: {exc}",
+            "run_summary": PlaylistRunSummary(failed=1).to_dict(),
+        }
 
-    if previous_snapshot_id == current_snapshot_id:
+    normalized_previous_items = _normalize_playlist_items(previous_items)
+    normalized_current_items = _normalize_playlist_items(current_items)
+    previous_hash = _playlist_snapshot_hash(normalized_previous_items)
+    current_hash = _playlist_snapshot_hash(normalized_current_items)
+
+    if previous_snapshot_id == current_snapshot_id or previous_hash == current_hash:
         logger.info("Spotify playlist polling sync completed")
-        return {"status": "unchanged", "playlist_id": pid, "snapshot_id": current_snapshot_id, "enqueued": 0}
+        unchanged_summary = PlaylistRunSummary(
+            skipped=len(normalized_current_items),
+            completed=0,
+        )
+        return {
+            "status": "unchanged",
+            "playlist_id": pid,
+            "snapshot_id": current_snapshot_id,
+            "snapshot_hash": current_hash,
+            "enqueued": 0,
+            "run_summary": unchanged_summary.to_dict(),
+        }
 
-    diff = diff_playlist(previous_items, current_items)
+    diff = diff_playlist(normalized_previous_items, normalized_current_items)
     added_items = list(diff["added"])
     enqueued = 0
+    skipped = 0
     enqueue_errors: list[str] = []
     for item in added_items:
         try:
-            _enqueue_added_track(queue, item)
-            enqueued += 1
+            enqueue_result = _enqueue_added_track(queue, item)
+            completed_inc, skipped_inc = _classify_enqueue_result(enqueue_result)
+            enqueued += completed_inc
+            skipped += skipped_inc
         except Exception as exc:
             track_id = item.get("spotify_track_id")
             enqueue_errors.append(f"{track_id}: {exc}")
             logging.exception("Enqueue failed for added Spotify track %s", track_id)
 
     try:
-        db.store_snapshot(pid, str(current_snapshot_id), current_items)
+        db.store_snapshot(pid, str(current_snapshot_id), normalized_current_items)
     except Exception as exc:
         logging.exception("Snapshot store failed for playlist %s", pid)
+        summary = PlaylistRunSummary(
+            added=len(added_items),
+            skipped=skipped,
+            failed=len(enqueue_errors) + 1,
+            completed=enqueued,
+        )
         return {
             "status": "error",
             "playlist_id": pid,
             "snapshot_id": current_snapshot_id,
+            "snapshot_hash": current_hash,
             "error": f"snapshot_store_failed: {exc}",
             "enqueued": enqueued,
             "added_count": len(added_items),
             "removed_count": len(diff["removed"]),
             "moved_count": len(diff["moved"]),
             "enqueue_errors": enqueue_errors,
+            "run_summary": summary.to_dict(),
         }
 
     _best_effort_rebuild_playlist_m3u(
@@ -892,15 +1033,23 @@ def playlist_watch_job(
     )
 
     logger.info("Spotify playlist polling sync completed")
+    summary = PlaylistRunSummary(
+        added=len(added_items),
+        skipped=skipped,
+        failed=len(enqueue_errors),
+        completed=enqueued,
+    )
     return {
         "status": "updated",
         "playlist_id": pid,
         "snapshot_id": current_snapshot_id,
+        "snapshot_hash": current_hash,
         "enqueued": enqueued,
         "added_count": len(added_items),
         "removed_count": len(diff["removed"]),
         "moved_count": len(diff["moved"]),
         "enqueue_errors": enqueue_errors,
+        "run_summary": summary.to_dict(),
     }
 
 
