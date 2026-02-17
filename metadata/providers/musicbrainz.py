@@ -1,36 +1,15 @@
 import logging
 
-import musicbrainzngs
+from metadata.services.musicbrainz_service import get_musicbrainz_service
 
-_USER_AGENT_SET = False
-_RELEASE_CACHE = {}
-
-
-def _ensure_user_agent():
-    global _USER_AGENT_SET
-    if _USER_AGENT_SET:
-        return
-    logging.getLogger("musicbrainzngs").setLevel(logging.WARNING)
-    musicbrainzngs.set_useragent(
-        "retreivr",
-        "0.9.0",
-        "https://github.com/Retreivr/retreivr",
-    )
-    _USER_AGENT_SET = True
 
 
 def search_recordings(artist, title, album=None, limit=5):
     if not artist or not title:
         return []
-    _ensure_user_agent()
-    query = {
-        "artist": artist,
-        "recording": title,
-    }
-    if album:
-        query["release"] = album
+    service = get_musicbrainz_service()
     try:
-        result = musicbrainzngs.search_recordings(limit=limit, **query)
+        result = service.search_recordings(artist, title, album=album, limit=limit)
     except Exception:
         logging.exception("MusicBrainz search failed")
         return []
@@ -101,19 +80,12 @@ def _parse_duration(value):
 
 
 def _find_track_number(release_id, recording_id):
-    if release_id in _RELEASE_CACHE:
-        release_data = _RELEASE_CACHE[release_id]
-    else:
-        _ensure_user_agent()
-        try:
-            release_data = musicbrainzngs.get_release_by_id(
-                release_id,
-                includes=["recordings"],
-            )
-            _RELEASE_CACHE[release_id] = release_data
-        except Exception:
-            logging.debug("MusicBrainz release lookup failed for %s", release_id)
-            return None
+    service = get_musicbrainz_service()
+    try:
+        release_data = service.get_release(release_id, includes=["recordings"])
+    except Exception:
+        logging.debug("MusicBrainz release lookup failed for %s", release_id)
+        return None
     media = (release_data.get("release") or {}).get("medium-list") or []
     for medium in media:
         tracks = medium.get("track-list") or []

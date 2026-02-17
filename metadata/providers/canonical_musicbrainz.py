@@ -1,25 +1,8 @@
 import logging
 
-import musicbrainzngs
-
 from engine.search_scoring import token_overlap_score, tokenize
 from metadata.providers.base import CanonicalMetadataProvider
-
-
-_USER_AGENT_SET = False
-
-
-def _ensure_user_agent():
-    global _USER_AGENT_SET
-    if _USER_AGENT_SET:
-        return
-    logging.getLogger("musicbrainzngs").setLevel(logging.WARNING)
-    musicbrainzngs.set_useragent(
-        "retreivr",
-        "0.9.0",
-        "https://github.com/Retreivr/retreivr",
-    )
-    _USER_AGENT_SET = True
+from metadata.services.musicbrainz_service import get_musicbrainz_service
 
 
 def _release_year(value):
@@ -82,9 +65,7 @@ def _parse_duration(value):
 
 
 def _cover_art_url(release_id):
-    if not release_id:
-        return None
-    return f"https://coverartarchive.org/release/{release_id}/front"
+    return get_musicbrainz_service().cover_art_url(release_id)
 
 
 class MusicBrainzMetadataProvider(CanonicalMetadataProvider):
@@ -101,12 +82,9 @@ class MusicBrainzMetadataProvider(CanonicalMetadataProvider):
             cached = self.cache.get(cache_key)
             if cached:
                 return cached
-        _ensure_user_agent()
-        query = {"artist": artist, "recording": track}
-        if album:
-            query["release"] = album
+        service = get_musicbrainz_service()
         try:
-            result = musicbrainzngs.search_recordings(limit=8, **query)
+            result = service.search_recordings(artist, track, album=album, limit=8)
         except Exception:
             logging.exception("MusicBrainz search failed")
             return None
@@ -154,10 +132,9 @@ class MusicBrainzMetadataProvider(CanonicalMetadataProvider):
             cached = self.cache.get(cache_key)
             if cached:
                 return cached
-        _ensure_user_agent()
-        query = {"artist": artist, "release": album}
+        service = get_musicbrainz_service()
         try:
-            result = musicbrainzngs.search_releases(limit=5, **query)
+            result = service.search_releases(artist, album, limit=5)
         except Exception:
             logging.exception("MusicBrainz album search failed")
             return None
@@ -175,7 +152,7 @@ class MusicBrainzMetadataProvider(CanonicalMetadataProvider):
         tracks = []
         if release_id:
             try:
-                release_data = musicbrainzngs.get_release_by_id(release_id, includes=["recordings"])
+                release_data = service.get_release(release_id, includes=["recordings"])
                 media = (release_data.get("release") or {}).get("medium-list") or []
                 for medium in media:
                     for track_data in medium.get("track-list") or []:
