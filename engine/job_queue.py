@@ -23,6 +23,7 @@ from yt_dlp.utils import DownloadError, ExtractorError
 from engine.json_utils import json_sanity_check, safe_json_dumps
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
+from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
 
 logger = logging.getLogger(__name__)
@@ -252,13 +253,14 @@ def ensure_download_history_table(conn):
             file_size_bytes INTEGER,
             input_url TEXT,
             canonical_url TEXT,
-            external_id TEXT
+            external_id TEXT,
+            channel_id TEXT
         )
         """
     )
     cur.execute("PRAGMA table_info(download_history)")
     existing_columns = {row[1] for row in cur.fetchall()}
-    for column in ("input_url", "canonical_url", "external_id", "source"):
+    for column in ("input_url", "canonical_url", "external_id", "source", "channel_id"):
         if column not in existing_columns:
             cur.execute(f"ALTER TABLE download_history ADD COLUMN {column} TEXT")
     cur.execute(
@@ -1399,6 +1401,7 @@ class YouTubeAdapter:
                 embed_metadata(local_file, meta, video_id, paths.thumbs_dir)
 
             final_path = os.path.join(resolved_dir, cleaned_name)
+            final_path = resolve_collision_path(final_path)
             os.makedirs(os.path.dirname(final_path), exist_ok=True)
             atomic_move(local_file, final_path)
             logger.info(f"[MUSIC] finalized file: {final_path}")
@@ -2351,6 +2354,7 @@ def extract_meta(info, *, fallback_url=None):
         "video_id": info.get("id"),
         "title": info.get("title"),
         "channel": info.get("channel") or info.get("uploader"),
+        "channel_id": info.get("channel_id") or info.get("uploader_id"),
         "artist": info.get("artist") or info.get("uploader"),
         "album": info.get("album"),
         "album_artist": info.get("album_artist"),
@@ -2369,7 +2373,7 @@ def extract_meta(info, *, fallback_url=None):
 def sanitize_for_filesystem(name, maxlen=180):
     if not name:
         return ""
-    safe = re.sub(r"[\\/\\?%*:|\"<>]", "_", str(name)).strip()
+    safe = sanitize_component(str(name))
     safe = re.sub(r"\s+", " ", safe)
     return safe[:maxlen].strip()
 
@@ -2377,13 +2381,8 @@ def sanitize_for_filesystem(name, maxlen=180):
 def pretty_filename(title, channel, upload_date):
     safe_title = sanitize_for_filesystem(title or "")
     safe_channel = sanitize_for_filesystem(channel or "")
-    date = upload_date or ""
-    if safe_channel and date:
-        return f"{safe_title} - {safe_channel} - {date}".strip(" -")
     if safe_channel:
         return f"{safe_title} - {safe_channel}".strip(" -")
-    if date:
-        return f"{safe_title} - {date}".strip(" -")
     return safe_title or "media"
 
 
@@ -2430,15 +2429,13 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
     album = sanitize_for_filesystem(_clean_audio_title(meta.get("album") or ""))
     track = sanitize_for_filesystem(_clean_audio_title(meta.get("track") or meta.get("title") or ""))
     track_number = format_track_number(meta.get("track_number"))
-    fallback = (fallback_id or "media")[:8]
-
     fmt = {
         "artist": artist,
         "album": album,
         "track": track,
         "track_number": track_number,
         "ext": ext,
-        "id": fallback,
+        "id": "",
     }
 
     if template:
@@ -2458,7 +2455,7 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
         if track_number:
             return f"{artist}/{track_number} - {track}.{ext}"
         return f"{artist}/{track}.{ext}"
-    return f"{track or fallback}.{ext}"
+    return f"{track or 'media'}.{ext}"
 
 
 def build_output_filename(meta, fallback_id, ext, template, audio_mode):
@@ -2469,15 +2466,27 @@ def build_output_filename(meta, fallback_id, ext, template, audio_mode):
             rendered = template % {
                 "title": sanitize_for_filesystem(meta.get("title") or fallback_id),
                 "uploader": sanitize_for_filesystem(meta.get("channel") or ""),
-                "upload_date": meta.get("upload_date") or "",
+                "upload_date": "",
                 "ext": ext,
-                "id": fallback_id,
+                "id": "",
             }
             if rendered:
                 return rendered
         except Exception:
             pass
-    return f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}_{fallback_id[:8]}.{ext}"
+    return f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}.{ext}"
+
+
+def resolve_collision_path(path):
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    attempt = 2
+    while True:
+        candidate = f"{stem} ({attempt}){ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        attempt += 1
 
 
 def atomic_move(src, dst):
@@ -2504,6 +2513,7 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
 
     title = meta.get("title") or video_id
     channel = meta.get("channel") or ""
+    channel_id = meta.get("channel_id") or ""
     artist = meta.get("artist") or channel
     album = meta.get("album")
     album_artist = meta.get("album_artist")
@@ -2537,6 +2547,8 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
 
     keywords = ", ".join([str(t) for t in tags if t]) if tags else ""
     comment = f"YouTubeID={video_id} URL={url}"
+    if channel_id:
+        comment = f"{comment} ChannelID={channel_id}"
 
     # Truncate potentially huge fields to avoid container/tag limits
     def _truncate(s: str, limit: int) -> str:
@@ -2618,6 +2630,8 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
             cmd_list.extend(["-metadata", f"date={date_tag}"])
         if description:
             cmd_list.extend(["-metadata", f"description={description}"])
+        if channel_id:
+            cmd_list.extend(["-metadata", f"source_channel_id={channel_id}"])
         if keywords:
             cmd_list.extend(["-metadata", f"keywords={keywords}"])
         if comment:
@@ -2741,8 +2755,8 @@ def record_download_history(db_path, job, filepath, *, meta=None):
             INSERT INTO download_history (
                 video_id, title, filename, destination, source, status,
                 created_at, completed_at, file_size_bytes,
-                input_url, canonical_url, external_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                input_url, canonical_url, external_id, channel_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 video_id,
@@ -2757,6 +2771,7 @@ def record_download_history(db_path, job, filepath, *, meta=None):
                 input_url,
                 canonical_url,
                 external_id,
+                (meta or {}).get("channel_id") if isinstance(meta, dict) else None,
             ),
         )
         conn.commit()

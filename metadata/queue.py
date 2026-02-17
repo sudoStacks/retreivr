@@ -52,6 +52,8 @@ def enqueue_metadata(file_path, meta, config):
     with _LOCK:
         global _WORKER
         if _WORKER is None or not _WORKER.is_alive():
+            # TODO(metadata/queue.py::enqueue_metadata): migrate MetadataWorker lifecycle into the
+            # unified engine download/metadata execution path (engine.job_queue postprocessing hook).
             _WORKER = MetadataWorker(_QUEUE)
             _WORKER.start()
             logging.info("Music metadata worker started")

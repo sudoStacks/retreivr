@@ -356,6 +356,8 @@ async def enqueue_spotify_track(queue, spotify_track: dict, search_service, play
         logging.info("skip duplicate isrc=%s playlist=%s", track_isrc, playlist_id)
         return
 
+    # TODO(scheduler/jobs/spotify_playlist_watch.py::enqueue_spotify_track): replace spotify.resolve.resolve_spotify_track
+    # with the unified engine search resolution path (engine.search_engine SearchResolutionService adapters).
     resolved_media = await resolve_spotify_track(spotify_track, search_service)
     merged_metadata = merge_metadata(spotify_track or {}, {}, resolved_media.get("extra") or {})
     payload = {

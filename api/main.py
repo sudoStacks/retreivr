@@ -3946,6 +3946,8 @@ def download_full_album(data: dict):
 
     tracks = fetch_release_tracks(release_id or "")
     if not tracks and release_id:
+        # TODO(api/main.py::download_full_album): remove legacy fallback once all callers are migrated
+        # to app.musicbrainz.service.fetch_release_tracks.
         tracks = legacy_fetch_album_tracks(release_id)
     if not tracks:
         return {"error": "unable to fetch tracks"}

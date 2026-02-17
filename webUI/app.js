@@ -5215,6 +5215,8 @@ function bindEvents() {
     const input = $("#cfg-single-download-folder");
     openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input.value));
   });
+  // TODO(webUI/app.js::bindUIActions legacy-run listeners): remove #run-* bindings after
+  // migrating remaining run controls to Home/Advanced sections in webUI/index.html.
   $("#browse-run-destination").addEventListener("click", () => {
     const input = $("#run-destination");
     openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input.value));
