@@ -2,35 +2,72 @@
 
 All notable changes to this project will be documented here.
 
-## [v0.9.3] – YouTube Cookie Fallback (post-release)
+## [v0.9.3] – Canonical Authority & Scheduler Hardening
 
-Fixed:
-- Added an optional, fallback-only YouTube cookies.txt path that retries only access-gated failures once with cookies before marking video jobs as permanently failed; music mode and existing anonymous behavior continue to run unchanged.
+This release establishes Retreivr’s canonical authority model and locks in deterministic orchestration behavior. v0.9.3 is a stability milestone focused on correctness, idempotency, and clean archival output.
 
-Fixed:
-- Restored reliable Direct URL downloads for video and audio (mp3/m4a/etc).
-- Corrected yt-dlp invocation for audio formats (uses extract-audio instead of merge-output-format).
-- Fixed Direct URL runs appearing permanently queued in the Home UI.
-- Prevented empty or zero-byte output files from being recorded as completed.
-- Fixed scheduler playlist downloads producing incorrect formats or audio-only output.
-- Ensured scheduler and direct downloads can run concurrently without interference.
-- Fixed missing database schema initialization for search-related tables.
-- Normalized all filesystem paths via paths.py and environment variables (Docker-safe).
-- Fixed Advanced Search “Failed to load requests” error caused by search DB store calling service-only logic.
-- Fixed Home screen results remaining stuck in “Queued” by restoring reliable search request status hydration.
-- Unified search job database usage to a single canonical path to prevent schema and state mismatches.
+### Highlights
 
-Changed:
-- Direct URL playlist links are now explicitly rejected with a clear user-facing error message.
-- Direct URL runs bypass the job queue but still report progress and completion via run status.
-- Search-only results can now be downloaded individually via the Home results UI.
-- Default video downloads respect configured format preferences (e.g., webm/mp4).
-- Metadata enrichment failures no longer block or corrupt completed downloads.
+- MusicBrainz is now the canonical metadata authority.
+- Spotify downgraded to optional intent ingestion (OAuth + Premium required).
+- Spotify API usage (playlists, saved tracks, metadata hints) now strictly requires OAuth configuration and an active Premium subscription.
+- Deterministic playlist snapshot hashing and diffing.
+- Idempotent scheduler ticks (no duplicate enqueues).
+- MKV set as the default video container.
+- Integration tests added for full pipeline and snapshot behavior.
 
-Notes:
-- Playlist URLs must be added via Scheduler / Playlist configuration, not Direct URL mode.
-- Kill-download button is not guaranteed during active runs and remains experimental.
-- Watcher functionality is present but considered beta and may change in later releases.
+---
+
+### Added
+
+- Structured `PlaylistRunSummary` with:
+  - `added`
+  - `skipped`
+  - `completed`
+  - `failed`
+- Stable playlist snapshot hashing using normalized item sets.
+- Crash-safe restart behavior for scheduler runs.
+- Active-job duplicate detection (queued / claimed / downloading / postprocessing states).
+- Integration tests covering:
+  - Full music flow (search → resolve → download → embed → persist)
+  - Spotify intent conversion (MB-first enforcement)
+  - Playlist reorder behavior (no re-enqueue)
+  - Crash/restart idempotency
+- MKV default container policy for video downloads.
+
+---
+
+### Changed
+
+- Canonical metadata resolution is now MusicBrainz-first in all ingestion paths.
+- Spotify metadata is treated as hints only and never overrides MusicBrainz canonical results.
+- Legacy resolver paths removed.
+- Duplicate MusicBrainz client stacks consolidated into a single service layer.
+- Canonical naming enforced:
+  - No video IDs in filenames
+  - No upload dates in filenames
+  - Zero-padded music track numbers
+- Video metadata embedding now occurs after final container merge, ensuring metadata survives remux.
+- Scheduler diff logic hardened to ignore reorder-only changes.
+- Snapshot persistence made deterministic to prevent unnecessary DB churn.
+
+---
+
+### Fixed
+
+- Prevented duplicate active-job enqueue on scheduler restart.
+- Eliminated reorder-triggered playlist re-downloads.
+- Fixed snapshot instability caused by unordered playlist items.
+- Prevented metadata failures from corrupting or blocking completed downloads.
+
+---
+
+### Notes
+
+- This release prioritizes stability over new feature expansion.
+- v0.9.3 marks the transition to a canonical, deterministic ingestion engine.
+- MKV is now the default video container to preserve codec fidelity and improve metadata support.
+- Spotify integration depends on the official Spotify Web API and requires valid OAuth credentials plus Premium account validation; without these, Spotify playlist sync and metadata ingestion remain disabled.
 
 ## [v0.9.2] – Search Engine Dialed In // Home Page UI Update
 

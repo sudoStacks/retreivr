@@ -2,7 +2,7 @@ version: "3.9"
 
 services:
   retreivr:
-    image: ghcr.io/retreivr/retreivr:0.9.1
+    image: ghcr.io/retreivr/retreivr:0.9.3
     container_name: retreivr
     ports:
       - "8090:8000"
@@ -14,9 +14,12 @@ services:
       # Map /app/data to your media storage location.
 
       - ./data:/app/data
+      # Example (recommended):
+      # - /path/on/host/downloads:/app/downloads
 
     restart: unless-stopped
 
 # Notes:
 # - Playlist folder paths in config.json are relative to /downloads inside the container.
 # - For media libraries, map ./downloads to your actual storage path on the host.
+# - Default video container is MKV as of v0.9.3 (configurable in config.json).
