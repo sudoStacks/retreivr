@@ -20,6 +20,8 @@ from spotify.diff import diff_playlist
 from spotify.oauth_store import SpotifyOAuthStore
 from spotify.resolve import resolve_spotify_track
 
+logger = logging.getLogger(__name__)
+
 SPOTIFY_LIKED_SONGS_PLAYLIST_ID = "__spotify_liked_songs__"
 SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID = "__spotify_saved_albums__"
 SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID = "__spotify_user_playlists__"
@@ -301,8 +303,9 @@ async def spotify_playlists_watch_job(
     downtime_end = str(downtime_cfg.get("end") or "").strip() or "?"
     downtime_active = _is_spotify_downtime_active(cfg)
     if downtime_active and not ignore_downtime:
-        logging.info(
-            f"Spotify playlist sync waiting for downtime to end (downtime {downtime_start}->{downtime_end})"
+        logger.info(
+            f"Spotify sync waiting for downtime to end "
+            f"(downtime {downtime_start} -> {downtime_end})"
         )
         return {"status": "skipped", "reason": "downtime", "synced_playlists": 0}
 
@@ -332,6 +335,7 @@ async def spotify_playlists_watch_job(
         synced,
         len(playlist_ids),
     )
+    logger.info("Spotify playlist polling sync completed")
 
     return {
         "status": "updated",
@@ -363,8 +367,27 @@ async def enqueue_spotify_track(queue, spotify_track: dict, search_service, play
     queue.enqueue(payload)
 
 
-async def spotify_liked_songs_watch_job(config, db, queue, spotify_client, search_service):
+async def spotify_liked_songs_watch_job(
+    config,
+    db,
+    queue,
+    spotify_client,
+    search_service,
+    ignore_downtime: bool = False,
+):
     """Sync Spotify Liked Songs using OAuth-backed `/v1/me/tracks` snapshots."""
+    cfg = config if isinstance(config, dict) else {}
+    downtime_cfg = ((cfg.get("watch_policy") or {}).get("downtime") or {}) if isinstance(cfg.get("watch_policy"), dict) else {}
+    downtime_start = str(downtime_cfg.get("start") or "").strip() or "?"
+    downtime_end = str(downtime_cfg.get("end") or "").strip() or "?"
+    downtime_active = _is_spotify_downtime_active(cfg)
+    if downtime_active and not ignore_downtime:
+        logger.info(
+            f"Spotify sync waiting for downtime to end "
+            f"(downtime {downtime_start} -> {downtime_end})"
+        )
+        return {"status": "skipped", "reason": "downtime", "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID, "enqueued": 0}
+
     client_id, client_secret = _spotify_client_credentials_from_config(config if isinstance(config, dict) else None)
     if not client_id or not client_secret:
         logging.info("Liked Songs sync skipped: Spotify credentials not configured")
@@ -407,6 +430,7 @@ async def spotify_liked_songs_watch_job(config, db, queue, spotify_client, searc
         }
 
     if previous_snapshot_id == current_snapshot_id:
+        logger.info("Spotify liked songs sync completed")
         return {
             "status": "unchanged",
             "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
@@ -458,6 +482,7 @@ async def spotify_liked_songs_watch_job(config, db, queue, spotify_client, searc
         config=config if isinstance(config, dict) else None,
     )
 
+    logger.info("Spotify liked songs sync completed")
     return {
         "status": "updated",
         "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
@@ -470,8 +495,27 @@ async def spotify_liked_songs_watch_job(config, db, queue, spotify_client, searc
     }
 
 
-async def spotify_saved_albums_watch_job(config, db, queue, spotify_client, search_service):
+async def spotify_saved_albums_watch_job(
+    config,
+    db,
+    queue,
+    spotify_client,
+    search_service,
+    ignore_downtime: bool = False,
+):
     """Sync Spotify Saved Albums via OAuth and enqueue newly added albums."""
+    cfg = config if isinstance(config, dict) else {}
+    downtime_cfg = ((cfg.get("watch_policy") or {}).get("downtime") or {}) if isinstance(cfg.get("watch_policy"), dict) else {}
+    downtime_start = str(downtime_cfg.get("start") or "").strip() or "?"
+    downtime_end = str(downtime_cfg.get("end") or "").strip() or "?"
+    downtime_active = _is_spotify_downtime_active(cfg)
+    if downtime_active and not ignore_downtime:
+        logger.info(
+            f"Spotify sync waiting for downtime to end "
+            f"(downtime {downtime_start} -> {downtime_end})"
+        )
+        return {"status": "skipped", "reason": "downtime", "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID, "enqueued": 0}
+
     client_id, client_secret = _spotify_client_credentials_from_config(config if isinstance(config, dict) else None)
     if not client_id or not client_secret:
         logging.info("Saved Albums sync skipped: Spotify credentials not configured")
@@ -529,6 +573,7 @@ async def spotify_saved_albums_watch_job(config, db, queue, spotify_client, sear
         }
 
     if previous_snapshot_id == current_snapshot_id:
+        logger.info("Spotify saved albums sync completed")
         return {
             "status": "unchanged",
             "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID,
@@ -603,6 +648,7 @@ async def spotify_saved_albums_watch_job(config, db, queue, spotify_client, sear
     except Exception:
         logging.exception("Saved Albums M3U rebuild failed")
 
+    logger.info("Spotify saved albums sync completed")
     return {
         "status": "updated",
         "playlist_id": SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID,
@@ -615,8 +661,27 @@ async def spotify_saved_albums_watch_job(config, db, queue, spotify_client, sear
     }
 
 
-async def spotify_user_playlists_watch_job(config, db, queue, spotify_client, search_service):
+async def spotify_user_playlists_watch_job(
+    config,
+    db,
+    queue,
+    spotify_client,
+    search_service,
+    ignore_downtime: bool = False,
+):
     """Sync authenticated user's Spotify playlists and trigger sync for new playlists."""
+    cfg = config if isinstance(config, dict) else {}
+    downtime_cfg = ((cfg.get("watch_policy") or {}).get("downtime") or {}) if isinstance(cfg.get("watch_policy"), dict) else {}
+    downtime_start = str(downtime_cfg.get("start") or "").strip() or "?"
+    downtime_end = str(downtime_cfg.get("end") or "").strip() or "?"
+    downtime_active = _is_spotify_downtime_active(cfg)
+    if downtime_active and not ignore_downtime:
+        logger.info(
+            f"Spotify sync waiting for downtime to end "
+            f"(downtime {downtime_start} -> {downtime_end})"
+        )
+        return {"status": "skipped", "reason": "downtime", "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID, "enqueued": 0}
+
     client_id, client_secret = _spotify_client_credentials_from_config(config if isinstance(config, dict) else None)
     if not client_id or not client_secret:
         logging.info("User Playlists sync skipped: Spotify credentials not configured")
@@ -674,6 +739,7 @@ async def spotify_user_playlists_watch_job(config, db, queue, spotify_client, se
         }
 
     if previous_snapshot_id == current_snapshot_id:
+        logger.info("Spotify user playlists sync completed")
         return {
             "status": "unchanged",
             "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID,
@@ -724,6 +790,7 @@ async def spotify_user_playlists_watch_job(config, db, queue, spotify_client, se
             "enqueue_errors": sync_errors,
         }
 
+    logger.info("Spotify user playlists sync completed")
     return {
         "status": "updated",
         "playlist_id": SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID,
@@ -744,8 +811,21 @@ def playlist_watch_job(
     *,
     playlist_name: str | None = None,
     config: dict[str, Any] | None = None,
+    ignore_downtime: bool = False,
 ) -> dict[str, Any]:
     """Fetch playlist snapshot, diff with DB state, enqueue added tracks, and persist new snapshot."""
+    cfg = config if isinstance(config, dict) else {}
+    downtime_cfg = ((cfg.get("watch_policy") or {}).get("downtime") or {}) if isinstance(cfg.get("watch_policy"), dict) else {}
+    downtime_start = str(downtime_cfg.get("start") or "").strip() or "?"
+    downtime_end = str(downtime_cfg.get("end") or "").strip() or "?"
+    downtime_active = _is_spotify_downtime_active(cfg)
+    if downtime_active and not ignore_downtime:
+        logger.info(
+            f"Spotify sync waiting for downtime to end "
+            f"(downtime {downtime_start} -> {downtime_end})"
+        )
+        return {"status": "skipped", "reason": "downtime", "playlist_id": playlist_id, "enqueued": 0}
+
     pid = normalize_spotify_playlist_identifier(playlist_id)
     assert isinstance(pid, str) and len(pid) >= 8
     if not pid:
@@ -771,6 +851,7 @@ def playlist_watch_job(
         return {"status": "error", "playlist_id": pid, "error": f"snapshot_read_failed: {exc}"}
 
     if previous_snapshot_id == current_snapshot_id:
+        logger.info("Spotify playlist polling sync completed")
         return {"status": "unchanged", "playlist_id": pid, "snapshot_id": current_snapshot_id, "enqueued": 0}
 
     diff = diff_playlist(previous_items, current_items)
@@ -808,6 +889,7 @@ def playlist_watch_job(
         config=config,
     )
 
+    logger.info("Spotify playlist polling sync completed")
     return {
         "status": "updated",
         "playlist_id": pid,
