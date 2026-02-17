@@ -4830,7 +4830,7 @@ function setupTimers() {
     if (!logsAuto || !logsAuto.checked) {
       return;
     }
-    if (state.currentPage !== "logs") {
+    if (state.currentPage !== "status") {
       return;
     }
     withPollingGuard(refreshLogs);
