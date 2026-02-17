@@ -74,7 +74,7 @@ from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
 )
-from app.music.resolver import fetch_album_tracks, resolve_album
+from app.music.resolver import fetch_album_tracks, resolve_album, search_albums
 
 from engine.core import (
     EngineStatus,
@@ -142,6 +142,7 @@ USER_PLAYLISTS_JOB_ID = "spotify_user_playlists_watch"
 SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
+COVER_ART_CACHE_TTL_SECONDS = 3600
 DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
 DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES = 30
 DEFAULT_USER_PLAYLISTS_SYNC_INTERVAL_MINUTES = 30
@@ -683,6 +684,7 @@ async def startup():
         )
     app.state.spotify_playlist_importer = SpotifyPlaylistImporter()
     app.state.spotify_import_status = {}
+    app.state.music_cover_art_cache = {}
 
     app.state.worker_stop_event = threading.Event()
     app.state.worker_engine = DownloadWorkerEngine(
@@ -3955,6 +3957,56 @@ def download_full_album(data: dict):
         "status": "ok",
         "tracks_enqueued": enqueued
     }
+
+
+@app.post("/api/music/album/candidates")
+def music_album_candidates(payload: dict):
+    query = str((payload or {}).get("query") or "").strip()
+    candidates = search_albums(query) if query else []
+    return {
+        "status": "ok",
+        "album_candidates": candidates or [],
+    }
+
+
+@app.get("/api/music/album/art/{album_id}")
+def music_album_art(album_id: str):
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        raise HTTPException(status_code=400, detail="album_id is required")
+
+    cache = getattr(app.state, "music_cover_art_cache", None)
+    now = time.time()
+    if isinstance(cache, dict):
+        cached = cache.get(album_id)
+        if isinstance(cached, dict):
+            cached_at = float(cached.get("cached_at") or 0)
+            if now - cached_at < COVER_ART_CACHE_TTL_SECONDS:
+                return {"status": "ok", "cover_url": cached.get("cover_url")}
+
+    cover_url = None
+    try:
+        resp = requests.get(
+            f"https://coverartarchive.org/release-group/{album_id}",
+            timeout=8,
+            headers={"User-Agent": USER_AGENT},
+        )
+        if resp.status_code == 200:
+            payload = resp.json() if resp.content else {}
+            images = payload.get("images", []) if isinstance(payload, dict) else []
+            if images:
+                first = images[0] if isinstance(images[0], dict) else {}
+                thumbs = first.get("thumbnails", {}) if isinstance(first.get("thumbnails"), dict) else {}
+                cover_url = thumbs.get("small") or thumbs.get("250") or first.get("image")
+    except Exception:
+        cover_url = None
+
+    if isinstance(cache, dict):
+        cache[album_id] = {
+            "cover_url": cover_url,
+            "cached_at": now,
+        }
+    return {"status": "ok", "cover_url": cover_url}
 
 
 @app.post("/api/spotify/playlists/import")

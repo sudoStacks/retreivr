@@ -25,6 +25,8 @@ const state = {
   homeResultsTimer: null,
   homeSearchMode: "searchOnly",
   homeMusicMode: false,
+  homeAlbumCandidatesRequestId: null,
+  homeAlbumCoverCache: {},
   homeRequestContext: {},
   homeBestScores: {},
   homeCandidateCache: {},
@@ -1822,36 +1824,134 @@ function setHomeResultsDetail(text, isError = false) {
   detailEl.classList.remove("hidden");
 }
 
-function renderAlbumDownloadButton(resolution) {
-
-  const headerEl = document.querySelector("#home-results .results-header");
-
-  if (!headerEl) {
-    console.warn("Album button render failed: header missing");
-    return;
-  }
-
-  const existing = document.getElementById("home-download-album-btn");
+function clearHomeAlbumCandidates() {
+  const existing = document.getElementById("home-album-candidates");
   if (existing) {
     existing.remove();
   }
+}
 
-  console.debug("Rendering Download Full Album button", resolution);
+function renderHomeAlbumCandidates(candidates) {
+  clearHomeAlbumCandidates();
+  if (!Array.isArray(candidates) || !candidates.length) {
+    return;
+  }
+  const homeResults = document.getElementById("home-results");
+  const header = homeResults?.querySelector(".home-results-header");
+  if (!homeResults || !header) {
+    return;
+  }
+  const container = document.createElement("div");
+  container.id = "home-album-candidates";
+  container.className = "stack";
+  candidates.forEach((candidate) => {
+    const card = document.createElement("div");
+    card.className = "album-card";
 
-  const btn = document.createElement("button");
-  btn.id = "home-download-album-btn";
-  btn.className = "btn primary small";
-  btn.textContent = `Download Full Album (${resolution.track_count} tracks)`;
+    const cover = document.createElement("img");
+    cover.className = "album-cover";
+    cover.alt = candidate.title ? `${candidate.title} cover` : "Album cover";
+    cover.loading = "lazy";
+    cover.style.width = "64px";
+    cover.style.height = "64px";
+    cover.style.objectFit = "cover";
+    cover.style.borderRadius = "8px";
+    cover.style.display = "none";
+    card.appendChild(cover);
 
-  btn.onclick = async () => {
+    const title = document.createElement("span");
+    title.className = "album-title";
+    title.textContent = candidate.title || "";
+    card.appendChild(title);
+
+    const artist = document.createElement("span");
+    artist.className = "album-artist";
+    artist.textContent = candidate.artist || "";
+    card.appendChild(artist);
+
+    const date = document.createElement("span");
+    date.className = "album-date";
+    date.textContent = candidate.first_released || "";
+    card.appendChild(date);
+
+    const button = document.createElement("button");
+    button.className = "btn small primary album-download-btn";
+    button.dataset.albumId = candidate.album_id || "";
+    button.textContent = "Download Full Album";
+    card.appendChild(button);
+
+    container.appendChild(card);
+  });
+  container.addEventListener("click", async (event) => {
+    const button = event.target.closest(".album-download-btn");
+    if (!button) {
+      return;
+    }
+    const albumId = button.dataset.albumId;
+    if (!albumId) {
+      return;
+    }
     await fetch("/api/music/album/download", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ album_id: resolution.album_id })
+      body: JSON.stringify({ album_id: albumId }),
     });
-  };
+  });
+  header.insertAdjacentElement("afterend", container);
+  candidates.forEach((candidate, index) => {
+    if (!candidate?.album_id) {
+      return;
+    }
+    const card = container.children[index];
+    if (!card) {
+      return;
+    }
+    const cover = card.querySelector(".album-cover");
+    if (!cover) {
+      return;
+    }
+    setTimeout(async () => {
+      const coverUrl = await fetchHomeAlbumCoverUrl(candidate.album_id);
+      if (coverUrl) {
+        cover.src = coverUrl;
+        cover.style.display = "block";
+      }
+    }, index * 150);
+  });
+}
 
-  headerEl.appendChild(btn);
+async function loadAndRenderHomeAlbumCandidates(query) {
+  const normalized = (query || "").trim();
+  if (!normalized) {
+    clearHomeAlbumCandidates();
+    return;
+  }
+  const data = await fetchJson("/api/music/album/candidates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query: normalized }),
+  });
+  const candidates = Array.isArray(data?.album_candidates) ? data.album_candidates : [];
+  renderHomeAlbumCandidates(candidates);
+}
+
+async function fetchHomeAlbumCoverUrl(albumId) {
+  const key = String(albumId || "").trim();
+  if (!key) {
+    return null;
+  }
+  if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, key)) {
+    return state.homeAlbumCoverCache[key];
+  }
+  try {
+    const data = await fetchJson(`/api/music/album/art/${encodeURIComponent(key)}`);
+    const url = typeof data?.cover_url === "string" && data.cover_url ? data.cover_url : null;
+    state.homeAlbumCoverCache[key] = url;
+    return url;
+  } catch (_err) {
+    state.homeAlbumCoverCache[key] = null;
+    return null;
+  }
 }
 
 function buildHomeResultsStatusInfo(requestId) {
@@ -2960,6 +3060,7 @@ async function refreshHomeResults(requestId) {
   try {
     const data = await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}`);
     const requestStatus = data.request?.status || "queued";
+    const requestMediaType = data.request?.media_type || "";
     const items = data.items || [];
     state.homeRequestContext[requestId] = {
       request: data.request || {},
@@ -2989,6 +3090,12 @@ async function refreshHomeResults(requestId) {
         setHomeSearchActive(false);
         stopHomeResultPolling();
         startHomeJobPolling(requestId);
+        if (requestMediaType === "music" && state.homeAlbumCandidatesRequestId !== requestId) {
+          state.homeAlbumCandidatesRequestId = requestId;
+          await loadAndRenderHomeAlbumCandidates($("#home-search-input")?.value || "");
+        } else if (requestMediaType !== "music") {
+          clearHomeAlbumCandidates();
+        }
       }
       return requestStatus;
     }
@@ -3021,6 +3128,12 @@ async function refreshHomeResults(requestId) {
       setHomeSearchActive(false);
       stopHomeResultPolling();
       startHomeJobPolling(requestId);
+      if (requestMediaType === "music" && state.homeAlbumCandidatesRequestId !== requestId) {
+        state.homeAlbumCandidatesRequestId = requestId;
+        await loadAndRenderHomeAlbumCandidates($("#home-search-input")?.value || "");
+      } else if (requestMediaType !== "music") {
+        clearHomeAlbumCandidates();
+      }
     }
     Object.keys(state.homeCandidateCache).forEach((key) => {
       if (!currentIds.has(key)) {
@@ -3124,6 +3237,8 @@ async function submitHomeSearch(autoEnqueue) {
   state.homeDirectPreview = null;
   stopHomeJobPolling();
   state.homeCandidateData = {};
+  state.homeAlbumCandidatesRequestId = null;
+  clearHomeAlbumCandidates();
 
   const intent = detect_intent(inputValue);
   if (intent.type !== "search") {
@@ -3176,12 +3291,6 @@ async function submitHomeSearch(autoEnqueue) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (data.music_mode &&
-        data.music_resolution &&
-        data.music_resolution.type === "album") {
-
-      renderAlbumDownloadButton(data.music_resolution);
-    }
     if (data && data.detected_intent) {
       await runSpotifyIntentFlow(
         {

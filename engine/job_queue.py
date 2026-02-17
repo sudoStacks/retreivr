@@ -848,11 +848,19 @@ class DownloadWorkerEngine:
         if not artist or not track:
             logging.error("Music track search failed")
             raise RuntimeError("music_track_metadata_missing")
+        logger.info(f"[WORKER] processing music_track artist={artist} track={track}")
 
-        search_query = f"{artist} {track} audio".strip()
+        album_clause = f" album:{album}" if album else ""
+        search_query = f"{artist} {track}{album_clause} audio".strip()
         resolved = None
         if self.search_service and hasattr(self.search_service, "search_best_match"):
+            relaxed_threshold = 0.68
             try:
+                resolved = self.search_service.search_best_match(
+                    search_query,
+                    threshold=relaxed_threshold,
+                )
+            except TypeError:
                 resolved = self.search_service.search_best_match(search_query)
             except Exception:
                 logging.exception("Music track search service failed query=%s", search_query)
