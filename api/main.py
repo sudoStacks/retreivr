@@ -522,6 +522,7 @@ class SearchRequestPayload(BaseModel):
     duration_hint_sec: int | None = None
     quality_min_bitrate_kbps: int | None = None
     lossless_only: bool = False
+    music_mode: bool = False
     auto_enqueue: bool = True
     source_priority: list[str] | str | None = None
     max_candidates_per_source: int = 5
@@ -3708,6 +3709,11 @@ async def create_search_request(request: dict = Body(...)):
         normalized = normalize_search_payload(raw_payload, default_sources=enabled_sources)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logging.debug(
+        "Home search: music_mode=%s query=%s",
+        bool(normalized.get("music_mode")),
+        str(normalized.get("query") or ""),
+    )
     if normalized["delivery_mode"] == "client" and normalized["destination_path"]:
         raise HTTPException(status_code=400, detail="Client delivery does not use a server destination")
     if normalized["delivery_mode"] == "client" and not normalized["search_only"]:
@@ -3718,6 +3724,7 @@ async def create_search_request(request: dict = Body(...)):
         return {
             "detected_intent": intent.type.value,
             "identifier": intent.identifier,
+            "music_mode": bool(normalized["music_mode"]),
         }
 
     if "source_priority" not in raw_payload or not raw_payload.get("source_priority"):
@@ -3726,6 +3733,8 @@ async def create_search_request(request: dict = Body(...)):
         raw_payload["auto_enqueue"] = not normalized["search_only"]
     if "media_type" not in raw_payload:
         raw_payload["media_type"] = "music" if normalized["music_mode"] else "generic"
+    if "music_mode" not in raw_payload:
+        raw_payload["music_mode"] = normalized["music_mode"]
     if "destination_dir" not in raw_payload and normalized["destination"] is not None:
         raw_payload["destination_dir"] = normalized["destination"]
 
@@ -3743,6 +3752,7 @@ async def create_search_request(request: dict = Body(...)):
         "duration_hint_sec",
         "quality_min_bitrate_kbps",
         "lossless_only",
+        "music_mode",
         "auto_enqueue",
         "source_priority",
         "max_candidates_per_source",
@@ -3766,7 +3776,7 @@ async def create_search_request(request: dict = Body(...)):
             "destination_path": normalized["destination_path"],
         }
     logging.debug("Normalized search payload", extra={"payload": normalized, "request_id": request_id})
-    return {"request_id": request_id}
+    return {"request_id": request_id, "music_mode": bool(normalized["music_mode"])}
 
 
 @app.post("/api/intent/execute")

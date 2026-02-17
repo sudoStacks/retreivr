@@ -24,6 +24,7 @@ const state = {
   homeSearchRequestId: null,
   homeResultsTimer: null,
   homeSearchMode: "searchOnly",
+  homeMusicMode: false,
   homeRequestContext: {},
   homeBestScores: {},
   homeCandidateCache: {},
@@ -72,6 +73,7 @@ const GITHUB_RELEASE_PAGE = "https://github.com/Retreivr/retreivr/releases";
 const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at";
 const RELEASE_CACHE_KEY = "yt_archiver_release_cache";
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version";
+const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
 const HOME_SOURCE_PRIORITY_MAP = {
   auto: null,
   youtube: ["youtube"],
@@ -1630,6 +1632,44 @@ function parseHomeSearchQuery(value, preferAlbum) {
   };
 }
 
+function ensureHomeMusicModeBadge() {
+  let badge = $("#home-music-mode-badge");
+  if (badge) {
+    return badge;
+  }
+  const headerActions = document.querySelector(".home-results-header-actions");
+  if (!headerActions) {
+    return null;
+  }
+  badge = document.createElement("span");
+  badge.id = "home-music-mode-badge";
+  badge.className = "chip idle hidden";
+  badge.textContent = "Music Mode";
+  headerActions.appendChild(badge);
+  return badge;
+}
+
+function updateHomeMusicModeUI() {
+  const toggle = $("#home-music-mode");
+  if (toggle) {
+    toggle.checked = !!state.homeMusicMode;
+  }
+  const badge = ensureHomeMusicModeBadge();
+  if (badge) {
+    badge.classList.toggle("hidden", !state.homeMusicMode);
+  }
+}
+
+function loadHomeMusicModePreference() {
+  const raw = localStorage.getItem(HOME_MUSIC_MODE_KEY);
+  state.homeMusicMode = raw === "true";
+  updateHomeMusicModeUI();
+}
+
+function saveHomeMusicModePreference() {
+  localStorage.setItem(HOME_MUSIC_MODE_KEY, state.homeMusicMode ? "true" : "false");
+}
+
 function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
   const preferAlbum = $("#home-prefer-albums")?.checked;
   const parsed = parseHomeSearchQuery($("#home-search-input")?.value, preferAlbum);
@@ -1638,7 +1678,7 @@ function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
   }
   const minScoreRaw = parseFloat($("#home-min-score")?.value);
   const destination = $("#home-destination")?.value.trim();
-  const treatAsMusic = $("#home-music-mode")?.checked ?? $("#home-treat-music")?.checked ?? false;
+  const treatAsMusic = !!state.homeMusicMode;
   const formatOverride = $("#home-format")?.value.trim();
   const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const rawText = rawQuery || $("#home-search-input")?.value || "";
@@ -3137,7 +3177,7 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   if (!messageEl) return;
   setHomeSearchActive(true);
   const formatOverride = $("#home-format")?.value.trim();
-  const treatAsMusic = $("#home-music-mode")?.checked ?? $("#home-treat-music")?.checked ?? false;
+  const treatAsMusic = !!state.homeMusicMode;
   const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const playlistId = extractPlaylistIdFromUrl(url);
   if (playlistId) {
@@ -4679,6 +4719,20 @@ function bindEvents() {
   if (homeSearchOnly) {
     homeSearchOnly.addEventListener("click", () => submitHomeSearch(false));
   }
+  const homeMusicMode = $("#home-music-mode");
+  if (homeMusicMode) {
+    homeMusicMode.addEventListener("change", () => {
+      state.homeMusicMode = !!homeMusicMode.checked;
+      saveHomeMusicModePreference();
+      updateHomeMusicModeUI();
+      const hasQuery = ($("#home-search-input")?.value || "").trim().length > 0;
+      if (hasQuery) {
+        stopHomeResultPolling();
+        setHomeSearchControlsEnabled(true);
+        submitHomeSearch(false);
+      }
+    });
+  }
   const homeSourceToggle = $("#home-source-toggle");
   const homeSourcePanel = $("#home-source-panel");
   if (homeSourceToggle && homeSourcePanel) {
@@ -5032,6 +5086,7 @@ async function init() {
     );
   });
   applyTheme(resolveTheme());
+  loadHomeMusicModePreference();
   bindEvents();
   setupNavActions();
   await loadPaths();
