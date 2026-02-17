@@ -120,6 +120,7 @@ from scheduler.jobs.spotify_playlist_watch import (
     normalize_spotify_playlist_identifier,
     playlist_watch_job,
     spotify_liked_songs_watch_job,
+    spotify_playlists_watch_job,
     spotify_saved_albums_watch_job,
     spotify_user_playlists_watch_job,
 )
@@ -1931,6 +1932,26 @@ async def _start_run_with_config(
                             delivery_mode=delivery_mode or "server",
                         )
                 await anyio.to_thread.run_sync(run_callable)
+                if (
+                    run_source == "api"
+                    and not single_url
+                    and not playlist_id
+                    and bool((config.get("spotify") or {}).get("sync_user_playlists"))
+                ):
+                    logging.info("Manual run triggering Spotify playlist sync (override downtime)")
+                    try:
+                        await spotify_playlists_watch_job(
+                            config=config,
+                            db=PlaylistSnapshotStore(app.state.paths.db_path),
+                            queue=_IntentQueueAdapter(),
+                            spotify_client=_build_spotify_client_with_optional_oauth(config),
+                            search_service=app.state.search_service,
+                            ignore_downtime=True,
+                        )
+                        logging.info("Manual-run Spotify playlist sync completed")
+                        logging.info("Manual run completed (archive + Spotify playlist sync)")
+                    except Exception:
+                        logging.exception("Manual-run Spotify playlist sync failed")
                 # Ensure UI state finalization for direct URL runs
                 if single_url:
                     try:
@@ -2093,6 +2114,14 @@ def _spotify_playlists_schedule_tick():
     loop = app.state.loop
     if not loop or loop.is_closed():
         return
+    config = _read_config_for_scheduler()
+    downtime_active = False
+    if config:
+        downtime_active, _ = _check_downtime(config)
+    if downtime_active:
+        logging.info("Interval Spotify sync tick skipped due to downtime")
+        return
+    logging.info("Interval Spotify sync tick starting")
     asyncio.run_coroutine_threadsafe(_handle_spotify_playlists_scheduled_run(), loop)
 
 
@@ -2292,27 +2321,19 @@ async def _handle_spotify_playlists_scheduled_run() -> None:
     if not config:
         return
 
-    playlist_ids = _normalized_watch_playlists(config)
-    if not playlist_ids:
-        return
-
     spotify_client = _build_spotify_client_with_optional_oauth(config)
     snapshot_store = PlaylistSnapshotStore(app.state.paths.db_path)
     queue = _IntentQueueAdapter()
-    for playlist_id in playlist_ids:
-        try:
-            assert isinstance(playlist_id, str) and len(playlist_id) >= 8
-            logging.info(f"Scheduled Spotify playlist sync for {playlist_id}")
-            playlist_watch_job(
-                spotify_client=spotify_client,
-                db=snapshot_store,
-                queue=queue,
-                playlist_id=playlist_id,
-                playlist_name=playlist_id,
-                config=config,
-            )
-        except Exception:
-            logging.exception("Scheduled Spotify playlist sync failed for playlist %s", playlist_id)
+    try:
+        await spotify_playlists_watch_job(
+            config=config,
+            db=snapshot_store,
+            queue=queue,
+            spotify_client=spotify_client,
+            search_service=app.state.search_service,
+        )
+    except Exception:
+        logging.exception("Scheduled Spotify playlists sync failed")
 
 
 def _apply_liked_songs_schedule(config: dict | None) -> None:

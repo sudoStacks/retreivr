@@ -7,8 +7,10 @@ import logging
 import os
 import sqlite3
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Callable
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from db.downloaded_tracks import has_downloaded_isrc
 from metadata.merge import merge_metadata
@@ -185,6 +187,67 @@ def _resolve_db_path_from_runtime(db: Any) -> str:
     return _resolve_db_path()
 
 
+def _is_spotify_downtime_active(config: dict[str, Any] | None) -> bool:
+    """Return True when watch-policy downtime window is currently active."""
+    cfg = config or {}
+    policy = cfg.get("watch_policy") or {}
+    if not isinstance(policy, dict):
+        return False
+    downtime = policy.get("downtime") or {}
+    if not isinstance(downtime, dict) or not downtime.get("enabled"):
+        return False
+
+    start = str(downtime.get("start") or "").strip()
+    end = str(downtime.get("end") or "").strip()
+    if not start or not end:
+        return False
+
+    tz_name = str(downtime.get("timezone") or "").strip()
+    now = datetime.now()
+    if tz_name:
+        try:
+            now = datetime.now(ZoneInfo(tz_name))
+        except Exception:
+            now = datetime.now()
+
+    try:
+        start_hour, start_minute = [int(part) for part in start.split(":", 1)]
+        end_hour, end_minute = [int(part) for part in end.split(":", 1)]
+    except Exception:
+        return False
+
+    current_minutes = now.hour * 60 + now.minute
+    start_minutes = start_hour * 60 + start_minute
+    end_minutes = end_hour * 60 + end_minute
+
+    if start_minutes == end_minutes:
+        return True
+    if start_minutes < end_minutes:
+        return start_minutes <= current_minutes < end_minutes
+    return current_minutes >= start_minutes or current_minutes < end_minutes
+
+
+def _configured_watch_playlist_ids(config: dict[str, Any] | None) -> list[str]:
+    """Read configured Spotify watch playlists and return normalized unique IDs."""
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    raw_values = spotify_cfg.get("watch_playlists")
+    if raw_values is None:
+        raw_values = cfg.get("watch_playlists", []) if isinstance(cfg, dict) else []
+    if not isinstance(raw_values, list):
+        return []
+
+    playlist_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        pid = normalize_spotify_playlist_identifier(str(raw or ""))
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        playlist_ids.append(pid)
+    return playlist_ids
+
+
 def _best_effort_rebuild_playlist_m3u(
     *,
     playlist_id: str,
@@ -216,6 +279,65 @@ def _enqueue_added_track(queue: Any, item: dict[str, Any]) -> None:
             method(item)
             return
     raise TypeError("queue does not expose a supported enqueue method")
+
+
+async def spotify_playlists_watch_job(
+    config,
+    db,
+    queue,
+    spotify_client,
+    search_service,
+    ignore_downtime: bool = False,
+):
+    """Run configured Spotify playlist sync jobs.
+
+    If ignore_downtime is True, do not skip based on downtime.
+    """
+    del search_service  # currently unused for playlist snapshot syncing
+
+    cfg = config if isinstance(config, dict) else {}
+    downtime_cfg = ((cfg.get("watch_policy") or {}).get("downtime") or {}) if isinstance(cfg.get("watch_policy"), dict) else {}
+    downtime_start = str(downtime_cfg.get("start") or "").strip() or "?"
+    downtime_end = str(downtime_cfg.get("end") or "").strip() or "?"
+    downtime_active = _is_spotify_downtime_active(cfg)
+    if downtime_active and not ignore_downtime:
+        logging.info(
+            f"Spotify playlist sync waiting for downtime to end (downtime {downtime_start}->{downtime_end})"
+        )
+        return {"status": "skipped", "reason": "downtime", "synced_playlists": 0}
+
+    playlist_ids = _configured_watch_playlist_ids(cfg)
+    if not playlist_ids:
+        return {"status": "skipped", "reason": "no_playlists", "synced_playlists": 0}
+
+    synced = 0
+    errors: list[str] = []
+    for playlist_id in playlist_ids:
+        try:
+            playlist_watch_job(
+                spotify_client=spotify_client,
+                db=db,
+                queue=queue,
+                playlist_id=playlist_id,
+                playlist_name=playlist_id,
+                config=cfg,
+            )
+            synced += 1
+        except Exception as exc:
+            errors.append(f"{playlist_id}: {exc}")
+            logging.exception("Scheduled Spotify playlist sync failed for playlist %s", playlist_id)
+
+    logging.info(
+        "Spotify playlist sync completed: %d/%d playlists processed",
+        synced,
+        len(playlist_ids),
+    )
+
+    return {
+        "status": "updated",
+        "synced_playlists": synced,
+        "errors": errors,
+    }
 
 
 async def enqueue_spotify_track(queue, spotify_track: dict, search_service, playlist_id: str):
