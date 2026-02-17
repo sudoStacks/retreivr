@@ -8,6 +8,7 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from db.downloaded_tracks import has_downloaded_isrc
 from metadata.merge import merge_metadata
@@ -20,6 +21,34 @@ from spotify.resolve import resolve_spotify_track
 SPOTIFY_LIKED_SONGS_PLAYLIST_ID = "__spotify_liked_songs__"
 SPOTIFY_SAVED_ALBUMS_PLAYLIST_ID = "__spotify_saved_albums__"
 SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID = "__spotify_user_playlists__"
+
+
+def normalize_spotify_playlist_identifier(value: str) -> str:
+    """Normalize Spotify playlist input into a bare playlist ID.
+
+    Accepts any of:
+    - https://open.spotify.com/playlist/{id}
+    - spotify:playlist:{id}
+    - {id}
+    """
+    if not value:
+        return ""
+
+    raw = str(value).strip()
+    if not raw:
+        return ""
+
+    try:
+        parsed = urlparse(raw)
+        if "open.spotify.com" in parsed.netloc and "/playlist/" in parsed.path:
+            return parsed.path.split("/playlist/")[-1].split("?")[0]
+    except Exception:
+        pass
+
+    if raw.startswith("spotify:playlist:"):
+        return raw.split(":")[-1]
+
+    return raw
 
 
 def _load_previous_snapshot(db: Any, playlist_id: str) -> tuple[str | None, list[dict[str, Any]]]:
@@ -595,9 +624,11 @@ def playlist_watch_job(
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fetch playlist snapshot, diff with DB state, enqueue added tracks, and persist new snapshot."""
-    pid = (playlist_id or "").strip()
+    pid = normalize_spotify_playlist_identifier(playlist_id)
+    assert isinstance(pid, str) and len(pid) >= 8
     if not pid:
         return {"status": "error", "playlist_id": playlist_id, "error": "playlist_id is required"}
+    logging.info("Fetching Spotify playlist %s", pid)
 
     try:
         if hasattr(spotify_client, "get_playlist_items") and callable(spotify_client.get_playlist_items):
@@ -675,4 +706,5 @@ def run_spotify_playlist_watch_job(
     enqueue_track: Callable[[dict[str, Any]], None],
 ) -> dict[str, Any]:
     """Compatibility wrapper around `playlist_watch_job` for existing call sites."""
+    assert isinstance(playlist_id, str) and len(normalize_spotify_playlist_identifier(playlist_id)) >= 8
     return playlist_watch_job(spotify_client, snapshot_store, enqueue_track, playlist_id)

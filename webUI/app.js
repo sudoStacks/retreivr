@@ -2453,6 +2453,28 @@ function isSpotifyPreviewIntent(intentType) {
   return intentType === "spotify_album" || intentType === "spotify_playlist";
 }
 
+function normalize_spotify_playlist_identifier(value) {
+  if (!value) {
+    return "";
+  }
+  const raw = String(value).trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = new URL(raw);
+    if (parsed.hostname.includes("open.spotify.com") && parsed.pathname.includes("/playlist/")) {
+      return parsed.pathname.split("/playlist/").pop().split("?")[0];
+    }
+  } catch (err) {
+    // ignore and continue
+  }
+  if (raw.startsWith("spotify:playlist:")) {
+    return raw.split(":").pop();
+  }
+  return raw;
+}
+
 function detectSpotifyUrlIntent(raw) {
   const value = (raw || "").trim();
   if (!value) {
@@ -3843,6 +3865,14 @@ function applySpotifyConfigState(cfg, oauthStatus) {
     spotifyRedirectUri.value = explicitRedirectUri || defaultRedirectUri;
     spotifyRedirectUri.readOnly = true;
   }
+  const spotifyWatchPlaylists = $("#config-spotify-playlists");
+  if (spotifyWatchPlaylists) {
+    if (cfg.spotify && Array.isArray(cfg.spotify.watch_playlists)) {
+      spotifyWatchPlaylists.value = cfg.spotify.watch_playlists.join("\n");
+    } else {
+      spotifyWatchPlaylists.value = "";
+    }
+  }
 
   const statusEl = $("#spotify-connection-status");
   if (statusEl) {
@@ -4244,6 +4274,15 @@ function buildConfigFromForm() {
   } else {
     delete base.spotify.redirect_uri;
   }
+  const spotifyWatchPlaylistsInput = $("#config-spotify-playlists");
+  if (spotifyWatchPlaylistsInput) {
+    const rawPlaylists = spotifyWatchPlaylistsInput.value.trim();
+    const entries = rawPlaylists
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    base.spotify.watch_playlists = entries;
+  }
   base.spotify.sync_liked_songs = !!$("#spotify-sync-liked")?.checked;
   base.spotify.sync_saved_albums = !!$("#spotify-sync-saved")?.checked;
   base.spotify.sync_user_playlists = !!$("#spotify-sync-playlists")?.checked;
@@ -4346,6 +4385,21 @@ function buildConfigFromForm() {
 }
 
 async function saveConfig() {
+  const rawText = $("#config-spotify-playlists")?.value.trim() || "";
+  if (rawText) {
+    const entries = rawText.split(/\r?\n/).map((s) => s.trim());
+    for (const entry of entries) {
+      if (!entry) {
+        continue;
+      }
+      const id = normalize_spotify_playlist_identifier(entry);
+      if (!id.match(/^[A-Za-z0-9]+$/)) {
+        setConfigNotice(`Invalid playlist identifier: ${entry}`, true);
+        return;
+      }
+    }
+  }
+
   const result = buildConfigFromForm();
   if (result.errors.length) {
     setConfigNotice(result.errors.join("; "), true);
@@ -4358,7 +4412,7 @@ async function saveConfig() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(result.config),
     });
-    setConfigNotice("Config saved", false, true);
+    setConfigNotice("Spotify playlists updated", false, true);
     state.config = result.config;
     state.configDirty = false;
     updatePollingState();
