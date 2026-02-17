@@ -44,7 +44,19 @@ class _MockSnapshotStore:
         return type("WriteResult", (), {"snapshot_db_id": 42})()
 
 
-def test_watch_job_unchanged_snapshot_exits_without_enqueue() -> None:
+def _isolate_playlist_paths(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "scheduler.jobs.spotify_playlist_watch._resolve_playlist_dirs",
+        lambda _config: (tmp_path / "Playlists", tmp_path / "Music"),
+    )
+    monkeypatch.setattr(
+        "scheduler.jobs.spotify_playlist_watch._load_downloaded_track_paths",
+        lambda _playlist_id: [],
+    )
+
+
+def test_watch_job_unchanged_snapshot_exits_without_enqueue(monkeypatch, tmp_path) -> None:
+    _isolate_playlist_paths(monkeypatch, tmp_path)
     prev_items = [_item("a", 0)]
     store = _MockSnapshotStore({"snapshot_id": "snap-1", "items": prev_items})
     client = _MockSpotifyClient("snap-1", [_item("a", 0), _item("b", 1)])
@@ -63,7 +75,8 @@ def test_watch_job_unchanged_snapshot_exits_without_enqueue() -> None:
     assert store.store_calls == []
 
 
-def test_watch_job_enqueues_only_added_items_in_order() -> None:
+def test_watch_job_enqueues_only_added_items_in_order(monkeypatch, tmp_path) -> None:
+    _isolate_playlist_paths(monkeypatch, tmp_path)
     prev_items = [_item("a", 0), _item("b", 1)]
     curr_items = [_item("a", 0), _item("b", 1), _item("c", 2), _item("d", 3)]
     store = _MockSnapshotStore({"snapshot_id": "snap-1", "items": prev_items})
@@ -85,7 +98,8 @@ def test_watch_job_enqueues_only_added_items_in_order() -> None:
     assert store.store_calls[0][1] == "snap-2"
 
 
-def test_watch_job_moved_items_do_not_enqueue() -> None:
+def test_watch_job_moved_items_do_not_enqueue(monkeypatch, tmp_path) -> None:
+    _isolate_playlist_paths(monkeypatch, tmp_path)
     prev_items = [_item("a", 0), _item("b", 1), _item("c", 2)]
     curr_items = [_item("b", 0), _item("a", 1), _item("c", 2)]
     store = _MockSnapshotStore({"snapshot_id": "snap-1", "items": prev_items})
@@ -105,4 +119,3 @@ def test_watch_job_moved_items_do_not_enqueue() -> None:
     assert result["enqueued"] == 0
     assert enqueued == []
     assert len(store.store_calls) == 1
-

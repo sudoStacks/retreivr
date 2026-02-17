@@ -17,15 +17,14 @@ def search_recordings(artist, title, album=None, limit=5):
         return []
     recordings = result.get("recording-list") or []
     candidates = []
-    release_lookup_cache = {}
     for rec in recordings:
-        candidate = _recording_to_candidate(rec, release_lookup_cache=release_lookup_cache)
+        candidate = _recording_to_candidate(rec)
         if candidate:
             candidates.append(candidate)
     return candidates
 
 
-def _recording_to_candidate(rec, *, release_lookup_cache=None):
+def _recording_to_candidate(rec):
     recording_id = rec.get("id")
     title = rec.get("title")
     artist = _extract_artist(rec)
@@ -39,12 +38,8 @@ def _recording_to_candidate(rec, *, release_lookup_cache=None):
         release = release_list[0]
         release_id = release.get("id")
         release_date = release.get("date")
-    if release_id and recording_id:
-        track_number = _find_track_number(
-            release_id,
-            recording_id,
-            release_lookup_cache=release_lookup_cache,
-        )
+    # Avoid per-candidate release lookups here; defer to best-candidate resolution.
+    track_number = None
     year = release_date.split("-")[0] if release_date else None
     return {
         "recording_id": recording_id,
@@ -146,6 +141,13 @@ class MusicBrainzMetadataProvider(CanonicalMetadataProvider):
                 best_item = item
         if not best_item or best_score < self.min_confidence:
             return None
+        track_number = best_item.get("track_number")
+        if not track_number and best_item.get("release_id") and best_item.get("recording_id"):
+            track_number = _find_track_number(
+                best_item.get("release_id"),
+                best_item.get("recording_id"),
+                release_lookup_cache={},
+            )
         return {
             "kind": "track",
             "provider": "musicbrainz",
@@ -161,7 +163,7 @@ class MusicBrainzMetadataProvider(CanonicalMetadataProvider):
                 "musicbrainz_release_id": best_item.get("release_id"),
                 "isrc": None,
             },
-            "track_number": best_item.get("track_number"),
+            "track_number": track_number,
             "disc_number": None,
             "album_track_count": None,
         }

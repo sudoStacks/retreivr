@@ -216,6 +216,14 @@ def ensure_download_jobs_table(conn):
         "CREATE INDEX IF NOT EXISTS idx_download_jobs_source_status ON download_jobs (source, status)"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_download_jobs_created ON download_jobs (created_at)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_jobs_canonical_dest_status_created "
+        "ON download_jobs (canonical_id, resolved_destination, status, created_at DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_jobs_url_dest_status_created "
+        "ON download_jobs (url, resolved_destination, status, created_at DESC)"
+    )
     conn.commit()
 
 # --- ensure_downloads_table

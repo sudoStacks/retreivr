@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +40,14 @@ def _normalize_snapshot_rows(items: list[dict[str, Any]]) -> list[tuple[str, int
         rows.append((track_id, position, idx, item.get("added_at")))
     rows.sort(key=lambda row: (row[1], row[2], row[0]))
     return [(track_id, position, added_at) for track_id, position, _idx, added_at in rows]
+
+
+def _snapshot_hash_from_rows(rows: list[tuple[str, int, Any]]) -> str:
+    payload = "\n".join(
+        f"{idx}|{track_id}|{position}|{added_at or ''}"
+        for idx, (track_id, position, added_at) in enumerate(rows)
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,8 @@ def store_snapshot(playlist_id: str, snapshot_id: str, items: list[dict[str, Any
     conn = _connect()
     try:
         cur = conn.cursor()
+        normalized_rows = _normalize_snapshot_rows(items)
+        current_hash = _snapshot_hash_from_rows(normalized_rows)
         cur.execute("BEGIN IMMEDIATE")
         cur.execute(
             """
@@ -117,6 +128,27 @@ def store_snapshot(playlist_id: str, snapshot_id: str, items: list[dict[str, Any
         if latest and str(latest["snapshot_id"]) == sid:
             conn.commit()
             return
+        if latest:
+            cur.execute(
+                """
+                SELECT spotify_track_id, position, added_at
+                FROM playlist_snapshot_items
+                WHERE snapshot_id=?
+                ORDER BY position ASC, id ASC
+                """,
+                (int(latest["id"]),),
+            )
+            previous_rows = [
+                (
+                    str(item["spotify_track_id"]),
+                    int(item["position"]),
+                    item["added_at"],
+                )
+                for item in cur.fetchall()
+            ]
+            if _snapshot_hash_from_rows(previous_rows) == current_hash:
+                conn.commit()
+                return
 
         cur.execute(
             """
@@ -127,10 +159,7 @@ def store_snapshot(playlist_id: str, snapshot_id: str, items: list[dict[str, Any
         )
         snapshot_row_id = int(cur.lastrowid)
 
-        rows = [
-            (snapshot_row_id, track_id, position, added_at)
-            for track_id, position, added_at in _normalize_snapshot_rows(items)
-        ]
+        rows = [(snapshot_row_id, track_id, position, added_at) for track_id, position, added_at in normalized_rows]
 
         if rows:
             cur.executemany(
@@ -222,6 +251,8 @@ class PlaylistSnapshotStore:
         conn = self._connect()
         try:
             cur = conn.cursor()
+            normalized_rows = _normalize_snapshot_rows(items)
+            current_hash = _snapshot_hash_from_rows(normalized_rows)
             cur.execute("BEGIN IMMEDIATE")
             cur.execute(
                 """
@@ -241,6 +272,31 @@ class PlaylistSnapshotStore:
                     snapshot_db_id=int(latest["id"]),
                     reason="snapshot_unchanged",
                 )
+            if latest:
+                cur.execute(
+                    """
+                    SELECT spotify_track_id, position, added_at
+                    FROM playlist_snapshot_items
+                    WHERE snapshot_id=?
+                    ORDER BY position ASC, id ASC
+                    """,
+                    (int(latest["id"]),),
+                )
+                previous_rows = [
+                    (
+                        str(item["spotify_track_id"]),
+                        int(item["position"]),
+                        item["added_at"],
+                    )
+                    for item in cur.fetchall()
+                ]
+                if _snapshot_hash_from_rows(previous_rows) == current_hash:
+                    conn.commit()
+                    return SnapshotWriteResult(
+                        inserted=False,
+                        snapshot_db_id=int(latest["id"]),
+                        reason="snapshot_hash_unchanged",
+                    )
 
             cur.execute(
                 """
@@ -250,10 +306,7 @@ class PlaylistSnapshotStore:
                 (pid, sid),
             )
             snapshot_row_id = int(cur.lastrowid)
-            rows = [
-                (snapshot_row_id, track_id, position, added_at)
-                for track_id, position, added_at in _normalize_snapshot_rows(items)
-            ]
+            rows = [(snapshot_row_id, track_id, position, added_at) for track_id, position, added_at in normalized_rows]
             if rows:
                 cur.executemany(
                     """

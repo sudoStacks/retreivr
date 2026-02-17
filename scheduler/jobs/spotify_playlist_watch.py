@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
@@ -374,26 +375,41 @@ async def spotify_playlists_watch_job(
     downtime_end = str(downtime_cfg.get("end") or "").strip() or "?"
     downtime_active = _is_spotify_downtime_active(cfg)
     aggregate_summary = PlaylistRunSummary()
+    started_at = time.monotonic()
     if downtime_active and not ignore_downtime:
         logger.info(
             f"Spotify sync waiting for downtime to end "
             f"(downtime {downtime_start} -> {downtime_end})"
         )
-        return {
+        result = {
             "status": "skipped",
             "reason": "downtime",
             "synced_playlists": 0,
             "run_summary": aggregate_summary.to_dict(),
         }
+        logger.info(
+            "[SCHEDULER] spotify_playlists_watch_job duration_sec=%.3f status=%s synced=%s",
+            time.monotonic() - started_at,
+            result.get("status"),
+            result.get("synced_playlists"),
+        )
+        return result
 
     playlist_ids = _configured_watch_playlist_ids(cfg)
     if not playlist_ids:
-        return {
+        result = {
             "status": "skipped",
             "reason": "no_playlists",
             "synced_playlists": 0,
             "run_summary": aggregate_summary.to_dict(),
         }
+        logger.info(
+            "[SCHEDULER] spotify_playlists_watch_job duration_sec=%.3f status=%s synced=%s",
+            time.monotonic() - started_at,
+            result.get("status"),
+            result.get("synced_playlists"),
+        )
+        return result
 
     synced = 0
     errors: list[str] = []
@@ -433,12 +449,19 @@ async def spotify_playlists_watch_job(
     )
     logger.info("Spotify playlist polling sync completed")
 
-    return {
+    result = {
         "status": "updated",
         "synced_playlists": synced,
         "errors": errors,
         "run_summary": aggregate_summary.to_dict(),
     }
+    logger.info(
+        "[SCHEDULER] spotify_playlists_watch_job duration_sec=%.3f status=%s synced=%s",
+        time.monotonic() - started_at,
+        result.get("status"),
+        result.get("synced_playlists"),
+    )
+    return result
 
 
 async def enqueue_spotify_track(queue, spotify_track: dict, search_service, playlist_id: str):
@@ -914,6 +937,7 @@ def playlist_watch_job(
 ) -> dict[str, Any]:
     """Fetch playlist snapshot, diff with DB state, enqueue added tracks, and persist new snapshot."""
     base_summary = PlaylistRunSummary()
+    started_at = time.monotonic()
     cfg = config if isinstance(config, dict) else {}
     downtime_cfg = ((cfg.get("watch_policy") or {}).get("downtime") or {}) if isinstance(cfg.get("watch_policy"), dict) else {}
     downtime_start = str(downtime_cfg.get("start") or "").strip() or "?"
@@ -924,13 +948,20 @@ def playlist_watch_job(
             f"Spotify sync waiting for downtime to end "
             f"(downtime {downtime_start} -> {downtime_end})"
         )
-        return {
+        result = {
             "status": "skipped",
             "reason": "downtime",
             "playlist_id": playlist_id,
             "enqueued": 0,
             "run_summary": base_summary.to_dict(),
         }
+        logger.info(
+            "[SCHEDULER] playlist_watch_job duration_sec=%.3f status=%s playlist_id=%s",
+            time.monotonic() - started_at,
+            result.get("status"),
+            playlist_id,
+        )
+        return result
 
     pid = normalize_spotify_playlist_identifier(playlist_id)
     assert isinstance(pid, str) and len(pid) >= 8
@@ -948,23 +979,37 @@ def playlist_watch_job(
             current_snapshot_id, current_items = result
     except Exception as exc:
         logging.exception("Spotify fetch failed for playlist %s", pid)
-        return {
+        result = {
             "status": "error",
             "playlist_id": pid,
             "error": f"spotify_fetch_failed: {exc}",
             "run_summary": PlaylistRunSummary(failed=1).to_dict(),
         }
+        logger.info(
+            "[SCHEDULER] playlist_watch_job duration_sec=%.3f status=%s playlist_id=%s",
+            time.monotonic() - started_at,
+            result.get("status"),
+            pid,
+        )
+        return result
 
     try:
         previous_snapshot_id, previous_items = _load_previous_snapshot(db, pid)
     except Exception as exc:
         logging.exception("Snapshot load failed for playlist %s", pid)
-        return {
+        result = {
             "status": "error",
             "playlist_id": pid,
             "error": f"snapshot_read_failed: {exc}",
             "run_summary": PlaylistRunSummary(failed=1).to_dict(),
         }
+        logger.info(
+            "[SCHEDULER] playlist_watch_job duration_sec=%.3f status=%s playlist_id=%s",
+            time.monotonic() - started_at,
+            result.get("status"),
+            pid,
+        )
+        return result
 
     normalized_previous_items = _normalize_playlist_items(previous_items)
     normalized_current_items = _normalize_playlist_items(current_items)
@@ -977,7 +1022,7 @@ def playlist_watch_job(
             skipped=len(normalized_current_items),
             completed=0,
         )
-        return {
+        result = {
             "status": "unchanged",
             "playlist_id": pid,
             "snapshot_id": current_snapshot_id,
@@ -985,6 +1030,13 @@ def playlist_watch_job(
             "enqueued": 0,
             "run_summary": unchanged_summary.to_dict(),
         }
+        logger.info(
+            "[SCHEDULER] playlist_watch_job duration_sec=%.3f status=%s playlist_id=%s",
+            time.monotonic() - started_at,
+            result.get("status"),
+            pid,
+        )
+        return result
 
     diff = diff_playlist(normalized_previous_items, normalized_current_items)
     added_items = list(diff["added"])
@@ -1012,7 +1064,7 @@ def playlist_watch_job(
             failed=len(enqueue_errors) + 1,
             completed=enqueued,
         )
-        return {
+        result = {
             "status": "error",
             "playlist_id": pid,
             "snapshot_id": current_snapshot_id,
@@ -1025,6 +1077,13 @@ def playlist_watch_job(
             "enqueue_errors": enqueue_errors,
             "run_summary": summary.to_dict(),
         }
+        logger.info(
+            "[SCHEDULER] playlist_watch_job duration_sec=%.3f status=%s playlist_id=%s",
+            time.monotonic() - started_at,
+            result.get("status"),
+            pid,
+        )
+        return result
 
     _best_effort_rebuild_playlist_m3u(
         playlist_id=pid,
@@ -1039,7 +1098,7 @@ def playlist_watch_job(
         failed=len(enqueue_errors),
         completed=enqueued,
     )
-    return {
+    result = {
         "status": "updated",
         "playlist_id": pid,
         "snapshot_id": current_snapshot_id,
@@ -1051,6 +1110,13 @@ def playlist_watch_job(
         "enqueue_errors": enqueue_errors,
         "run_summary": summary.to_dict(),
     }
+    logger.info(
+        "[SCHEDULER] playlist_watch_job duration_sec=%.3f status=%s playlist_id=%s",
+        time.monotonic() - started_at,
+        result.get("status"),
+        pid,
+    )
+    return result
 
 
 def run_spotify_playlist_watch_job(
