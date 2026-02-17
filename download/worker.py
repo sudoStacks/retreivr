@@ -14,8 +14,8 @@ from media.ffprobe import get_media_duration
 from media.path_builder import build_music_path, ensure_parent_dir
 from media.validation import validate_duration
 from metadata.normalize import normalize_music_metadata
-from metadata.tagging import tag_file
-from metadata.types import MusicMetadata
+from metadata.tagging_service import tag_file
+from metadata.types import CanonicalMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -142,15 +142,15 @@ class DownloadWorker:
             payload["status"] = status
 
     @staticmethod
-    def _coerce_music_metadata(metadata: Any) -> MusicMetadata:
-        """Coerce payload metadata into ``MusicMetadata`` for normalization/tagging."""
-        if isinstance(metadata, MusicMetadata):
+    def _coerce_music_metadata(metadata: Any) -> CanonicalMetadata:
+        """Coerce payload metadata into ``CanonicalMetadata`` for normalization/tagging."""
+        if isinstance(metadata, CanonicalMetadata):
             return metadata
 
         payload = metadata if isinstance(metadata, dict) else {}
         track_num = safe_int(payload.get("track_num"))
         disc_num = safe_int(payload.get("disc_num"))
-        return MusicMetadata(
+        return CanonicalMetadata(
             title=str(payload.get("title") or "Unknown Title"),
             artist=str(payload.get("artist") or "Unknown Artist"),
             album=str(payload.get("album") or "Unknown Album"),

@@ -8,7 +8,7 @@ import unicodedata
 from datetime import date
 from typing import Any
 
-from metadata.types import MusicMetadata
+from metadata.types import CanonicalMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,8 @@ _FEAT_SPLIT_RE = re.compile(r"^(?P<main>.+?)\s+(?:feat\.|ft\.)\s+(?P<feat>.+)$",
 _TITLE_FEAT_RE = re.compile(r"\(\s*feat\.\s*([^)]+)\)", re.IGNORECASE)
 
 
-def normalize_music_metadata(metadata: MusicMetadata) -> MusicMetadata:
-    """Return a normalized copy of ``MusicMetadata`` without mutating the input.
+def normalize_music_metadata(metadata: CanonicalMetadata) -> CanonicalMetadata:
+    """Return a normalized copy of ``CanonicalMetadata`` without mutating the input.
 
     Responsibilities:
     - Normalize all string fields to Unicode NFC.
@@ -40,7 +40,7 @@ def normalize_music_metadata(metadata: MusicMetadata) -> MusicMetadata:
     - Normalize ``date`` to ``YYYY`` or ``YYYY-MM-DD`` when parseable.
     - Ensure ``album_artist`` is non-empty by falling back to ``artist``.
 
-    The returned value is always a newly constructed ``MusicMetadata`` instance.
+    The returned value is always a newly constructed ``CanonicalMetadata`` instance.
     """
     # NFC normalization is applied via _normalize_text for stable player grouping.
     title = clean_title(_normalize_text(metadata.title)) or "Unknown Title"
@@ -67,7 +67,7 @@ def normalize_music_metadata(metadata: MusicMetadata) -> MusicMetadata:
     track_num = _normalize_positive_int(metadata.track_num, default=1)
     disc_num = _normalize_positive_int(metadata.disc_num, default=1)
 
-    return MusicMetadata(
+    return CanonicalMetadata(
         title=title,
         artist=artist,
         album=album,

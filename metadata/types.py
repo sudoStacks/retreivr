@@ -95,3 +95,23 @@ class MusicMetadata:
             f"lyrics={self.lyrics!r})"
         )
 
+
+class CanonicalMetadata(MusicMetadata):
+    """Canonical structured metadata model used across runtime pipelines."""
+
+    def __repr__(self) -> str:
+        return (
+            "CanonicalMetadata("
+            f"title={self.title!r}, artist={self.artist!r}, album={self.album!r}, "
+            f"album_artist={self.album_artist!r}, track_num={self.track_num!r}, "
+            f"disc_num={self.disc_num!r}, date={self.date!r}, genre={self.genre!r}, "
+            f"isrc={self.isrc!r}, mbid={self.mbid!r}, "
+            f"artwork={'<bytes>' if self.artwork is not None else None}, "
+            f"lyrics={self.lyrics!r})"
+        )
+
+
+# Backward-compatible alias for existing imports.
+MusicMetadata = CanonicalMetadata
+
+__all__ = ["CanonicalMetadata", "MusicMetadata"]

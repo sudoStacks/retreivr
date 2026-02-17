@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from metadata.naming import build_album_directory, build_track_filename, sanitize_component
-from metadata.types import MusicMetadata
+from metadata.types import CanonicalMetadata
 
 
 def sanitize_for_filesystem(value: str) -> str:
@@ -13,7 +13,7 @@ def sanitize_for_filesystem(value: str) -> str:
     return sanitize_component(value)
 
 
-def build_music_path(root: Path, metadata: MusicMetadata, ext: str) -> Path:
+def build_music_path(root: Path, metadata: CanonicalMetadata, ext: str) -> Path:
     """Build and return a canonical music path without creating directories.
 
     Layout:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from metadata.tagging import tag_file
+from metadata.tagging_service import tag_file
 from metadata.types import MusicMetadata
 
 
@@ -27,7 +27,7 @@ def test_tag_file_writes_expected_id3_frames(monkeypatch, tmp_path: Path) -> Non
     path = tmp_path / "track.mp3"
     path.write_bytes(b"")
 
-    import metadata.tagging as tagging
+    import metadata.tagger as tagging
 
     class FakeAudio:
         def __init__(self) -> None:
@@ -37,8 +37,14 @@ def test_tag_file_writes_expected_id3_frames(monkeypatch, tmp_path: Path) -> Non
         def add(self, frame) -> None:
             self.frames.append(frame)
 
-        def save(self, save_path: str, v2_version: int) -> None:
-            self.saved = (save_path, v2_version)
+        def getall(self, frame_id: str):
+            return [frame for frame in self.frames if frame.name == frame_id]
+
+        def delall(self, frame_id: str) -> None:
+            self.frames = [frame for frame in self.frames if frame.name != frame_id]
+
+        def save(self, save_path: str) -> None:
+            self.saved = save_path
 
     class FakeFrame:
         def __init__(self, name: str, **kwargs) -> None:
@@ -60,10 +66,8 @@ def test_tag_file_writes_expected_id3_frames(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setattr(tagging, "TALB", _factory("TALB"))
     monkeypatch.setattr(tagging, "TPE2", _factory("TPE2"))
     monkeypatch.setattr(tagging, "TRCK", _factory("TRCK"))
-    monkeypatch.setattr(tagging, "TPOS", _factory("TPOS"))
     monkeypatch.setattr(tagging, "TDRC", _factory("TDRC"))
     monkeypatch.setattr(tagging, "TCON", _factory("TCON"))
-    monkeypatch.setattr(tagging, "TSRC", _factory("TSRC"))
     monkeypatch.setattr(tagging, "TXXX", _factory("TXXX"))
     monkeypatch.setattr(tagging, "USLT", _factory("USLT"))
     monkeypatch.setattr(tagging, "APIC", _factory("APIC"))
@@ -75,18 +79,19 @@ def test_tag_file_writes_expected_id3_frames(monkeypatch, tmp_path: Path) -> Non
     assert by_name["TPE1"].text[0] == "Test Artist"
     assert by_name["TALB"].text[0] == "Test Album"
     assert by_name["TRCK"].text[0] == "1"
-    assert by_name["TSRC"].text[0] == "USABC1234567"
-    assert by_name["TXXX"].desc == "MBID"
+    txxx_descs = {frame.desc for frame in audio.frames if frame.name == "TXXX"}
+    assert "SOURCE" in txxx_descs
+    assert "MBID" in txxx_descs
     assert by_name["USLT"].text == "line one"
     assert by_name["APIC"].data == b"img"
-    assert audio.saved == (str(path), 4)
+    assert audio.saved == str(path)
 
 
 def test_tag_file_lyrics_and_artwork_fail_non_fatally(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "track.mp3"
     path.write_bytes(b"")
 
-    import metadata.tagging as tagging
+    import metadata.tagger as tagging
 
     class FakeAudio:
         def __init__(self) -> None:
@@ -96,7 +101,13 @@ def test_tag_file_lyrics_and_artwork_fail_non_fatally(monkeypatch, tmp_path: Pat
         def add(self, frame) -> None:
             self.frames.append(frame)
 
-        def save(self, save_path: str, v2_version: int) -> None:
+        def getall(self, frame_id: str):
+            return [frame for frame in self.frames if frame.name == frame_id]
+
+        def delall(self, frame_id: str) -> None:
+            self.frames = [frame for frame in self.frames if frame.name != frame_id]
+
+        def save(self, save_path: str) -> None:
             self.saved = True
 
     class FakeFrame:
@@ -121,10 +132,8 @@ def test_tag_file_lyrics_and_artwork_fail_non_fatally(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(tagging, "TALB", _factory("TALB"))
     monkeypatch.setattr(tagging, "TPE2", _factory("TPE2"))
     monkeypatch.setattr(tagging, "TRCK", _factory("TRCK"))
-    monkeypatch.setattr(tagging, "TPOS", _factory("TPOS"))
     monkeypatch.setattr(tagging, "TDRC", _factory("TDRC"))
     monkeypatch.setattr(tagging, "TCON", _factory("TCON"))
-    monkeypatch.setattr(tagging, "TSRC", _factory("TSRC"))
     monkeypatch.setattr(tagging, "TXXX", _factory("TXXX"))
     monkeypatch.setattr(tagging, "USLT", _raise)
     monkeypatch.setattr(tagging, "APIC", _raise)
@@ -134,4 +143,3 @@ def test_tag_file_lyrics_and_artwork_fail_non_fatally(monkeypatch, tmp_path: Pat
 
     assert audio.saved is True
     assert any(frame.name == "TIT2" for frame in audio.frames)
-

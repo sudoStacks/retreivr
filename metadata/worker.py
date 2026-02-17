@@ -7,7 +7,7 @@ from . import matcher
 from .providers import acoustid as acoustid_provider
 from .providers import artwork as artwork_provider
 from .providers import musicbrainz as musicbrainz_provider
-from .tagger import apply_tags
+from .tagging_service import apply_tags
 from .lyric_enrichment import fetch_lyrics
 
 

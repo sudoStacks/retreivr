@@ -74,13 +74,7 @@ from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
 )
-from app.music.resolver import fetch_album_tracks as legacy_fetch_album_tracks
-from app.musicbrainz import (
-    MUSICBRAINZ_USER_AGENT,
-    fetch_release_tracks,
-    pick_best_release_with_reason,
-    search_release_groups,
-)
+from metadata.services.musicbrainz_service import get_musicbrainz_service
 
 from engine.core import (
     EngineStatus,
@@ -167,6 +161,17 @@ DIRECT_URL_PLAYLIST_ERROR = (
 )
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
+
+
+def _mb_service():
+    return get_musicbrainz_service()
+
+
+def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return []
+    return _mb_service().search_release_groups(normalized_query, limit=limit)
 
 def _is_http_url(value: str | None) -> bool:
     if not value or not isinstance(value, str):
@@ -559,12 +564,154 @@ class IntentExecutePayload(BaseModel):
 
 
 class _IntentQueueAdapter:
-    """Minimal queue adapter for intent-dispatched Spotify payloads."""
+    """Queue adapter that writes intent payloads into the unified download queue."""
 
     def enqueue(self, payload: dict) -> None:
-        if not hasattr(app.state, "intent_dispatch_queue"):
-            app.state.intent_dispatch_queue = []
-        app.state.intent_dispatch_queue.append(payload)
+        if not isinstance(payload, dict):
+            logging.warning("Intent enqueue skipped: payload is not a dict")
+            return
+        engine = getattr(app.state, "worker_engine", None)
+        store = getattr(engine, "store", None) if engine is not None else None
+        if store is None:
+            logging.warning("Intent enqueue skipped: worker engine store unavailable")
+            return
+
+        media_intent = str(payload.get("media_intent") or "").strip() or "track"
+        origin = "spotify_playlist" if payload.get("playlist_id") else "intent"
+        origin_id = str(payload.get("playlist_id") or payload.get("spotify_track_id") or "manual")
+        destination = str(payload.get("destination") or "").strip() or None
+        final_format = str(payload.get("final_format") or "").strip() or None
+
+        def _to_dict(value):
+            if isinstance(value, dict):
+                return dict(value)
+            if value is None:
+                return {}
+            out = {}
+            for key in (
+                "title",
+                "artist",
+                "album",
+                "album_artist",
+                "track_num",
+                "disc_num",
+                "date",
+                "genre",
+                "isrc",
+                "mbid",
+                "lyrics",
+            ):
+                if hasattr(value, key):
+                    out[key] = getattr(value, key)
+            return out
+
+        def _enqueue_music_query_job(artist: str, track: str, album: str | None = None) -> None:
+            normalized_artist = str(artist or "").strip()
+            normalized_track = str(track or "").strip()
+            normalized_album = str(album or "").strip() or None
+            if not normalized_artist or not normalized_track:
+                logging.warning("Intent enqueue skipped: music query missing artist/track")
+                return
+            query = quote(f"{normalized_artist} {normalized_track}".strip())
+            url = f"https://music.youtube.com/search?q={query}"
+            output_template = {
+                "audio_mode": True,
+                "artist": normalized_artist,
+                "track": normalized_track,
+                "album": normalized_album,
+                "track_number": payload.get("track_number"),
+                "disc_number": payload.get("disc_number"),
+                "release_date": payload.get("release_date"),
+                "duration_ms": payload.get("duration_ms"),
+                "artwork_url": payload.get("artwork_url"),
+                "canonical_metadata": {
+                    "artist": normalized_artist,
+                    "track": normalized_track,
+                    "album": normalized_album,
+                    "duration_ms": payload.get("duration_ms"),
+                },
+            }
+            if destination:
+                output_template["output_dir"] = destination
+            if final_format:
+                output_template["final_format"] = final_format
+            canonical_id = (
+                f"music_track:{normalized_artist.lower()}:{(normalized_album or '').lower()}:"
+                f"{str(payload.get('track_number') or '').strip()}:{normalized_track.lower()}"
+            )
+            store.enqueue_job(
+                origin=origin,
+                origin_id=origin_id,
+                media_type="music",
+                media_intent="music_track",
+                source="youtube_music",
+                url=url,
+                input_url=url,
+                output_template=output_template,
+                resolved_destination=destination,
+                canonical_id=canonical_id,
+            )
+            logging.info(
+                "Intent payload queued playlist_id=%s spotify_track_id=%s",
+                payload.get("playlist_id"),
+                payload.get("spotify_track_id"),
+            )
+
+        if media_intent == "music_track":
+            _enqueue_music_query_job(
+                str(payload.get("artist") or ""),
+                str(payload.get("track") or payload.get("title") or ""),
+                str(payload.get("album") or ""),
+            )
+            return
+
+        resolved_media = payload.get("resolved_media") if isinstance(payload.get("resolved_media"), dict) else {}
+        media_url = str(resolved_media.get("media_url") or payload.get("url") or "").strip()
+        if not media_url:
+            fallback_artist = str(payload.get("artist") or "").strip()
+            fallback_track = str(payload.get("track") or payload.get("title") or "").strip()
+            fallback_album = str(payload.get("album") or "").strip() or None
+            if fallback_artist and fallback_track:
+                _enqueue_music_query_job(fallback_artist, fallback_track, fallback_album)
+                return
+            logging.warning("Intent enqueue skipped: no media URL or searchable artist/title available")
+            return
+        source = str(resolved_media.get("source_id") or payload.get("source") or resolve_source(media_url)).strip() or "unknown"
+        music_metadata = _to_dict(payload.get("music_metadata"))
+        output_template = {
+            "audio_mode": True,
+            "canonical_metadata": music_metadata,
+            "artist": music_metadata.get("artist"),
+            "album": music_metadata.get("album"),
+            "track": music_metadata.get("title"),
+            "track_number": music_metadata.get("track_num"),
+            "disc_number": music_metadata.get("disc_num"),
+            "duration_ms": resolved_media.get("duration_ms"),
+        }
+        if destination:
+            output_template["output_dir"] = destination
+        if final_format:
+            output_template["final_format"] = final_format
+        external_ids = music_metadata.get("external_ids") if isinstance(music_metadata.get("external_ids"), dict) else {}
+        canonical_id = str(
+            music_metadata.get("isrc")
+            or music_metadata.get("mbid")
+            or external_ids.get("isrc")
+            or payload.get("spotify_track_id")
+            or ""
+        ).strip() or None
+        store.enqueue_job(
+            origin=origin,
+            origin_id=origin_id,
+            media_type="music",
+            media_intent=media_intent,
+            source=source,
+            url=media_url,
+            input_url=media_url,
+            output_template=output_template,
+            resolved_destination=destination,
+            canonical_id=canonical_id,
+        )
         logging.info(
             "Intent payload queued playlist_id=%s spotify_track_id=%s",
             payload.get("playlist_id"),
@@ -3722,7 +3869,7 @@ async def create_search_request(request: dict = Body(...)):
     music_candidates = []
     music_resolution = None
     if bool(normalized.get("music_mode")):
-        music_candidates = search_release_groups(str(normalized.get("query") or ""), limit=5)
+        music_candidates = _mb_service().search_release_groups(str(normalized.get("query") or ""), limit=5)
         logger.info(f"[MUSIC] mode=ON candidates={len(music_candidates)} resolution=null")
     logging.debug(
         "Home search: music_mode=%s query=%s",
@@ -3803,7 +3950,7 @@ async def create_search_request(request: dict = Body(...)):
 
 @app.post("/api/intent/execute")
 async def execute_intent(payload: dict = Body(...)):
-    """Accept intent execution requests (plumbing only; no ingestion side effects yet)."""
+    """Execute intent requests by routing to the active ingestion pipeline."""
     intent_raw = str((payload or {}).get("intent_type") or "").strip()
     identifier = str((payload or {}).get("identifier") or "").strip()
     if not intent_raw:
@@ -3937,18 +4084,14 @@ def download_full_album(data: dict):
             prefer_country = configured_country or None
         except Exception:
             prefer_country = None
-        selection = pick_best_release_with_reason(release_group_id, prefer_country=prefer_country)
+        selection = _mb_service().pick_best_release_with_reason(release_group_id, prefer_country=prefer_country)
         release_id = str(selection.get("release_id") or "").strip() or None
         selected_reason = str(selection.get("reason") or "release_group_selection")
         if not release_id:
             return {"error": "unable to select release from release_group"}
         logger.info(f"[MUSIC] selected_release={release_id} from release_group={release_group_id} reason={selected_reason}")
 
-    tracks = fetch_release_tracks(release_id or "")
-    if not tracks and release_id:
-        # TODO(api/main.py::download_full_album): remove legacy fallback once all callers are migrated
-        # to app.musicbrainz.service.fetch_release_tracks.
-        tracks = legacy_fetch_album_tracks(release_id)
+    tracks = _mb_service().fetch_release_tracks(release_id or "")
     if not tracks:
         return {"error": "unable to fetch tracks"}
     logger.info(f"[MUSIC] Album {release_group_id or release_id} fetched {len(tracks)} tracks")
@@ -4003,7 +4146,7 @@ def download_full_album(data: dict):
 @app.post("/api/music/album/candidates")
 def music_album_candidates(payload: dict):
     query = str((payload or {}).get("query") or "").strip()
-    raw_candidates = search_release_groups(query, limit=10) if query else []
+    raw_candidates = _search_music_album_candidates(query, limit=10)
     candidates = [
         {
             "album_id": item.get("release_group_id"),
@@ -4023,10 +4166,7 @@ def music_album_candidates(payload: dict):
 
 @app.get("/api/music/albums/search")
 def music_albums_search(q: str = Query("", alias="q"), limit: int = Query(10, ge=1, le=50)):
-    query = str(q or "").strip()
-    if not query:
-        return []
-    return search_release_groups(query, limit=limit)
+    return _search_music_album_candidates(str(q or ""), limit=int(limit))
 
 
 @app.get("/api/music/album/art/{album_id}")
@@ -4044,22 +4184,7 @@ def music_album_art(album_id: str):
             if now - cached_at < COVER_ART_CACHE_TTL_SECONDS:
                 return {"status": "ok", "cover_url": cached.get("cover_url")}
 
-    cover_url = None
-    try:
-        resp = requests.get(
-            f"https://coverartarchive.org/release-group/{album_id}",
-            timeout=8,
-            headers={"User-Agent": MUSICBRAINZ_USER_AGENT},
-        )
-        if resp.status_code == 200:
-            payload = resp.json() if resp.content else {}
-            images = payload.get("images", []) if isinstance(payload, dict) else []
-            if images:
-                first = images[0] if isinstance(images[0], dict) else {}
-                thumbs = first.get("thumbnails", {}) if isinstance(first.get("thumbnails"), dict) else {}
-                cover_url = thumbs.get("small") or thumbs.get("250") or first.get("image")
-    except Exception:
-        cover_url = None
+    cover_url = _mb_service().fetch_release_group_cover_art_url(album_id, timeout=8)
 
     if isinstance(cache, dict):
         cache[album_id] = {

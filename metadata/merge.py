@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Any
 
-from metadata.types import MusicMetadata
+from metadata.types import CanonicalMetadata
 
 _LOG = logging.getLogger(__name__)
 _WS_RE = re.compile(r"\s+")
@@ -14,7 +14,7 @@ _TITLE_SPLIT_RE = re.compile(r"([\s\-\(\)\[\]/:&])")
 _LOWER_WORDS = {"a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to", "vs"}
 
 
-def merge_metadata(spotify: dict, mb: dict, ytdlp: dict) -> MusicMetadata:
+def merge_metadata(spotify: dict, mb: dict, ytdlp: dict) -> CanonicalMetadata:
     """Merge metadata with precedence Spotify -> MusicBrainz -> yt-dlp and normalized outputs."""
     sp = spotify or {}
     mbd = mb or {}
@@ -45,7 +45,7 @@ def merge_metadata(spotify: dict, mb: dict, ytdlp: dict) -> MusicMetadata:
     artwork, _ = pick("artwork", lambda s: s.get("artwork"))
     lyrics, _ = pick("lyrics", lambda s: s.get("lyrics"))
 
-    return MusicMetadata(
+    return CanonicalMetadata(
         title=_normalize_title(title) or "Unknown Title",
         artist=_normalize_string(artist) or "Unknown Artist",
         album=_normalize_title(album) or "Unknown Album",
@@ -138,4 +138,3 @@ def _coerce_artwork_bytes(value: Any) -> bytes | None:
         data = bytes(value)
         return data or None
     return None
-

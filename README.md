@@ -133,7 +133,7 @@ Notes:
 - If `final_format` is a video format (webm/mp4/mkv), the download remains video even in music mode. Use an audio format (mp3/m4a/flac/opus) to force audio-only.
 
 ## Music metadata enrichment (optional)
-When `music_mode` is enabled and `music_metadata.enabled` is true, the app enqueues the finalized file for background enrichment using Spotify as the canonical metadata source, with MusicBrainz as an optional fallback. This runs asynchronously and does not block downloads. Files are never renamed, and existing rich tags are not overwritten.
+When `music_mode` is enabled and `music_metadata.enabled` is true, the app enqueues the finalized file for background enrichment using MusicBrainz as the canonical metadata authority first. Spotify is used only as a fallback when OAuth credentials are present and premium validation succeeds. This runs asynchronously and does not block downloads. Files are never renamed, and existing rich tags are not overwritten.
 
 Example config:
 ```json
@@ -191,6 +191,8 @@ Common endpoints:
 - POST /api/run  
 - GET /api/history  
 - GET /api/logs  
+- GET /api/music/albums/search (canonical album-candidate search)  
+- POST /api/music/album/candidates (compatibility wrapper over canonical search)  
 
 OpenAPI docs are available at `/docs`.
 

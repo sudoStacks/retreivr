@@ -1106,24 +1106,6 @@ async function refreshStatus() {
       $("#status-video-progress-meta").textContent = "-";
     }
 
-    const singleLink = $("#run-single-download");
-    if (singleLink) {
-      const clientDeliveryId = status.client_delivery_id;
-      const fileId = status.last_completed_file_id;
-      if (clientDeliveryId) {
-        singleLink.href = `/api/deliveries/${clientDeliveryId}/download`;
-        singleLink.textContent = "Download to device";
-        singleLink.setAttribute("aria-disabled", "false");
-      } else if (fileId) {
-        singleLink.href = downloadUrl(fileId);
-        singleLink.textContent = "Download last";
-        singleLink.setAttribute("aria-disabled", "false");
-      } else {
-        singleLink.href = "#";
-        singleLink.textContent = "Download last";
-        singleLink.setAttribute("aria-disabled", "true");
-      }
-    }
     const cancelBtn = $("#status-cancel");
     if (cancelBtn) {
       cancelBtn.disabled = !data.running;
@@ -1135,7 +1117,7 @@ async function refreshStatus() {
           await cancelJob(jobId);
           await refreshStatus();
         } catch (err) {
-          setNotice($("#run-message"), `Cancel failed: ${err.message}`, true);
+          setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
         }
       };
     }
@@ -1181,7 +1163,7 @@ async function refreshStatus() {
       // Best-effort status enrichment; ignore when endpoint is unavailable.
     }
   } catch (err) {
-    setNotice($("#run-message"), `Status error: ${err.message}`, true);
+    setNotice($("#home-search-message"), `Status error: ${err.message}`, true);
   }
 }
 
@@ -4781,101 +4763,22 @@ async function updateYtdlp() {
   }
 }
 
-async function startRun(payload) {
+async function startRun(payload, opts = {}) {
+  const messageEl = opts.messageEl || $("#home-search-message");
   try {
-    setNotice($("#run-message"), "Starting run...", false);
+    setNotice(messageEl, "Starting run...", false);
     const data = await fetchJson("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    setNotice($("#run-message"), "Run started", false);
+    setNotice(messageEl, "Run started", false);
     await refreshStatus();
     return data;
   } catch (err) {
-    setNotice($("#run-message"), `Run failed: ${err.message}`, true);
+    setNotice(messageEl, `Run failed: ${err.message}`, true);
     return null;
   }
-}
-
-function buildRunPayload() {
-  const payload = {};
-  const singleUrl = $("#run-single-url").value.trim();
-  const deliveryMode = getSingleDeliveryMode();
-  if (singleUrl) {
-    payload.single_url = singleUrl;
-    payload.delivery_mode = deliveryMode;
-  }
-  const destination = $("#run-destination").value.trim();
-  if (destination && deliveryMode !== "client") {
-    payload.destination = destination;
-  }
-  const finalFormat = $("#run-format").value.trim();
-  if (finalFormat) {
-    payload.final_format_override = finalFormat;
-  }
-  const jsRuntime = $("#run-js-runtime").value.trim();
-  if (jsRuntime) {
-    payload.js_runtime = jsRuntime;
-  }
-  const musicMode = $("#run-music-mode");
-  if (musicMode && musicMode.checked) {
-    payload.music_mode = true;
-  }
-  return payload;
-}
-
-function getSingleDeliveryMode() {
-  const selected = document.querySelector('input[name="run-delivery-mode"]:checked');
-  return selected ? selected.value : "server";
-}
-
-function applySingleDeliveryMode() {
-  const mode = getSingleDeliveryMode();
-  const destInput = $("#run-destination");
-  const destLabel = $("#run-destination-label");
-  const browseBtn = $("#browse-run-destination");
-  if (mode === "client") {
-    destInput.value = "";
-    destInput.disabled = true;
-    destInput.placeholder = "Download to this device";
-    browseBtn.disabled = true;
-    destLabel.textContent = "Download destination (client)";
-  } else {
-    destInput.disabled = false;
-    destInput.placeholder = "downloads";
-    browseBtn.disabled = false;
-    destLabel.textContent = "Destination (single runs)";
-  }
-}
-
-function buildPlaylistPayload() {
-  const payload = {};
-  const playlistValue = $("#run-playlist-id").value.trim();
-  if (playlistValue) {
-    payload.playlist_id = playlistValue;
-  }
-  const account = $("#run-playlist-account").value.trim();
-  if (account) {
-    payload.playlist_account = account;
-  }
-  const destination = $("#run-destination").value.trim();
-  if (destination) {
-    payload.destination = destination;
-  }
-  const finalFormat = $("#run-format").value.trim();
-  if (finalFormat) {
-    payload.final_format_override = finalFormat;
-  }
-  const jsRuntime = $("#run-js-runtime").value.trim();
-  if (jsRuntime) {
-    payload.js_runtime = jsRuntime;
-  }
-  const musicMode = $("#run-music-mode");
-  if (musicMode && musicMode.checked) {
-    payload.music_mode = true;
-  }
-  return payload;
 }
 
 async function handleCopy(event, noticeEl) {
@@ -5215,12 +5118,7 @@ function bindEvents() {
     const input = $("#cfg-single-download-folder");
     openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input.value));
   });
-  // TODO(webUI/app.js::bindUIActions legacy-run listeners): remove #run-* bindings after
-  // migrating remaining run controls to Home/Advanced sections in webUI/index.html.
-  $("#browse-run-destination").addEventListener("click", () => {
-    const input = $("#run-destination");
-    openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input.value));
-  });
+  // TODO(webUI/app.js::legacy-run): keep this marker while legacy-run removal rolls out across user docs.
   const homeBrowse = $("#home-destination-browse");
   if (homeBrowse) {
     homeBrowse.addEventListener("click", () => {
@@ -5315,11 +5213,6 @@ function bindEvents() {
   $("#add-account").addEventListener("click", () => addAccountRow("", {}));
   $("#add-playlist").addEventListener("click", () => addPlaylistRow({}));
 
-  $("#run-playlists").addEventListener("click", () => {
-    const jsRuntime = $("#run-js-runtime").value.trim();
-    const payload = jsRuntime ? { js_runtime: jsRuntime } : {};
-    startRun(payload);
-  });
   $("#status-cancel").addEventListener("click", async () => {
     const ok = confirm("Are you sure you want to kill downloads in progress?");
     if (!ok) {
@@ -5327,30 +5220,11 @@ function bindEvents() {
     }
     try {
       await fetchJson("/api/cancel", { method: "POST" });
-      setNotice($("#run-message"), "Cancel requested", false);
+      setNotice($("#home-search-message"), "Cancel requested", false);
       await refreshStatus();
     } catch (err) {
-      setNotice($("#run-message"), `Cancel failed: ${err.message}`, true);
+      setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
     }
-  });
-  $$('input[name="run-delivery-mode"]').forEach((input) => {
-    input.addEventListener("change", applySingleDeliveryMode);
-  });
-  $("#run-single").addEventListener("click", () => {
-    const payload = buildRunPayload();
-    if (!payload.single_url) {
-      setNotice($("#run-message"), "Single URL is required", true);
-      return;
-    }
-    startRun(payload);
-  });
-  $("#run-playlist-once").addEventListener("click", () => {
-    const payload = buildPlaylistPayload();
-    if (!payload.playlist_id) {
-      setNotice($("#run-message"), "Playlist URL or ID is required", true);
-      return;
-    }
-    startRun(payload);
   });
 
   $("#toggle-theme").addEventListener("click", () => {
@@ -5386,7 +5260,6 @@ function bindEvents() {
     });
   }
 
-  applySingleDeliveryMode();
 }
 
 async function init() {

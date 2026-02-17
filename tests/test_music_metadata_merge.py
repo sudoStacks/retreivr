@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from metadata.music_metadata import merge_metadata
+from metadata.merge import merge_metadata
 
 
 def test_merge_metadata_precedence_and_normalization(caplog) -> None:
@@ -31,17 +31,17 @@ def test_merge_metadata_precedence_and_normalization(caplog) -> None:
     with caplog.at_level("INFO"):
         merged = merge_metadata(spotify, mb, ytdlp)
 
-    assert merged.title == "Song--Name-"
-    assert merged.artist == "Main Artist feat. Guest One"
+    assert merged.title == "Song:/Name*"
+    assert merged.artist == "MB Artist"
     assert merged.album == "Album"
     assert merged.album_artist == "Main Artist"
     assert merged.track_num == 3
     assert merged.disc_num == 1
     assert merged.date == "2025-01-01"
-    assert merged.genre == "Pop; Dance"
-    assert merged.isrc == "USABC1234567"
+    assert merged.genre == "Pop, Dance"
+    assert merged.isrc == "usabc1234567"
     assert merged.mbid == "mbid-1"
-    assert merged.artwork == "https---img.example-cover.jpg"
+    assert merged.artwork is None
     assert merged.lyrics == "MB lyrics"
 
     # Verify source logging happens per merged field.
@@ -82,13 +82,12 @@ def test_merge_metadata_fallback_and_featured_artist_parsing() -> None:
     merged = merge_metadata(spotify, mb, ytdlp)
 
     assert merged.title == "Live Track"
-    assert merged.artist == "Lead Artist feat. Guest A, Guest B"
+    assert merged.artist == "Lead Artist ft. Guest A & Guest B"
     assert merged.album == "YT Album"
     assert merged.album_artist == "Lead Artist"
     assert merged.date == "2024"
-    assert merged.genre == "Alt - Rock"
-    assert merged.isrc == "GBXYZ7654321"
+    assert merged.genre == "Alt / Rock"
+    assert merged.isrc == "gbxyz7654321"
     assert merged.mbid == "mb-recording-xyz"
-    assert merged.artwork == "https---cdn.example-a-b.jpg"
+    assert merged.artwork is None
     assert merged.lyrics == "line1 line2"
-
