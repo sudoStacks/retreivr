@@ -11,7 +11,7 @@ import traceback
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import uuid4
@@ -22,6 +22,7 @@ from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json_dumps
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
+from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
 from metadata.queue import enqueue_metadata
 
 JOB_STATUS_QUEUED = "queued"
@@ -777,6 +778,7 @@ class DownloadWorkerEngine:
         *,
         retry_delay_seconds=30,
         adapters=None,
+        search_service=None,
     ):
         self.db_path = db_path
         self.config = config or {}
@@ -784,6 +786,7 @@ class DownloadWorkerEngine:
         self.retry_delay_seconds = retry_delay_seconds
         self.store = DownloadJobStore(db_path)
         self.adapters = adapters or default_adapters()
+        self.search_service = search_service
         # Ensure required DB tables exist (idempotent).
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         try:
@@ -795,6 +798,81 @@ class DownloadWorkerEngine:
         self._locks_lock = threading.Lock()
         self._cancel_flags = {}
         self._cancel_lock = threading.Lock()
+
+    def _extract_resolved_candidate(self, resolved):
+        if not resolved:
+            return None, None
+        if isinstance(resolved, dict):
+            return resolved.get("url"), resolved.get("source")
+        url = getattr(resolved, "url", None)
+        source = getattr(resolved, "source", None)
+        return url, source
+
+    def _resolve_music_track_with_adapters(self, artist, track, album=None):
+        expected = {
+            "artist": artist,
+            "track": track,
+            "album": album,
+            "duration_hint_sec": None,
+        }
+        scored = []
+        source_priority = list(self.adapters.keys())
+        for source, adapter in self.adapters.items():
+            try:
+                candidates = adapter.search_track(artist, track, album, 3)
+            except Exception:
+                logging.exception("Music track search adapter failed source=%s", source)
+                continue
+            for candidate in candidates or []:
+                url = candidate.get("url") if isinstance(candidate, dict) else None
+                if not _is_http_url(url):
+                    continue
+                candidate = dict(candidate)
+                candidate["source"] = candidate.get("source") or source
+                modifier = adapter.source_modifier(candidate)
+                candidate.update(score_candidate(expected, candidate, source_modifier=modifier))
+                scored.append(candidate)
+        if not scored:
+            return None
+        ranked = rank_candidates(scored, source_priority=source_priority)
+        return select_best_candidate(ranked, 0.0)
+
+    def _resolve_music_track_job(self, job):
+        payload = job.output_template if isinstance(job.output_template, dict) else {}
+        canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+        artist = str(payload.get("artist") or canonical.get("artist") or "").strip()
+        track = str(payload.get("track") or canonical.get("track") or canonical.get("title") or "").strip()
+        album = str(payload.get("album") or canonical.get("album") or "").strip() or None
+        if not artist or not track:
+            logging.error("Music track search failed")
+            raise RuntimeError("music_track_metadata_missing")
+
+        search_query = f"{artist} {track} audio".strip()
+        resolved = None
+        if self.search_service and hasattr(self.search_service, "search_best_match"):
+            try:
+                resolved = self.search_service.search_best_match(search_query)
+            except Exception:
+                logging.exception("Music track search service failed query=%s", search_query)
+        if not resolved:
+            resolved = self._resolve_music_track_with_adapters(artist, track, album)
+
+        resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
+        if not _is_http_url(resolved_url):
+            logging.error("Music track search failed")
+            raise RuntimeError("music_track_search_failed")
+
+        source = resolved_source or resolve_source(resolved_url)
+        external_id = extract_video_id(resolved_url) if source in {"youtube", "youtube_music"} else None
+        canonical_url = canonicalize_url(source, resolved_url, external_id)
+        return replace(
+            job,
+            source=source,
+            url=resolved_url,
+            input_url=resolved_url,
+            canonical_url=canonical_url,
+            external_id=external_id,
+        )
 
     def run_once(self, *, stop_event=None):
         sources = self.store.list_sources_with_queued_jobs()
@@ -915,6 +993,8 @@ class DownloadWorkerEngine:
                 media_intent=job.media_intent,
             )
             return
+        if job.media_intent == "music_track":
+            job = self._resolve_music_track_job(job)
         adapter = self.adapters.get(job.source)
         if not adapter:
             _log_event(
@@ -1339,6 +1419,13 @@ def canonicalize_url(source: str, url: str | None, external_id: str | None) -> s
 def is_youtube_music_url(url):
     parsed = urllib.parse.urlparse(url)
     return "music.youtube.com" in (parsed.netloc or "").lower()
+
+
+def _is_http_url(url):
+    if not url or not isinstance(url, str):
+        return False
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme in {"http", "https"}
 
 
 def build_ytdlp_opts(context):

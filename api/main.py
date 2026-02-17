@@ -74,6 +74,7 @@ from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
 )
+from app.music.resolver import fetch_album_tracks, resolve_album
 
 from engine.core import (
     EngineStatus,
@@ -688,6 +689,7 @@ async def startup():
         app.state.paths.db_path,
         config or {},
         app.state.paths,
+        search_service=app.state.search_service,
     )
 
     def _worker_runner():
@@ -3709,6 +3711,9 @@ async def create_search_request(request: dict = Body(...)):
         normalized = normalize_search_payload(raw_payload, default_sources=enabled_sources)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    music_resolution = None
+    if bool(normalized.get("music_mode")):
+        music_resolution = resolve_album(str(normalized.get("query") or ""))
     logging.debug(
         "Home search: music_mode=%s query=%s",
         bool(normalized.get("music_mode")),
@@ -3725,6 +3730,7 @@ async def create_search_request(request: dict = Body(...)):
             "detected_intent": intent.type.value,
             "identifier": intent.identifier,
             "music_mode": bool(normalized["music_mode"]),
+            "music_resolution": music_resolution,
         }
 
     if "source_priority" not in raw_payload or not raw_payload.get("source_priority"):
@@ -3776,7 +3782,11 @@ async def create_search_request(request: dict = Body(...)):
             "destination_path": normalized["destination_path"],
         }
     logging.debug("Normalized search payload", extra={"payload": normalized, "request_id": request_id})
-    return {"request_id": request_id, "music_mode": bool(normalized["music_mode"])}
+    return {
+        "request_id": request_id,
+        "music_mode": bool(normalized["music_mode"]),
+        "music_resolution": music_resolution,
+    }
 
 
 @app.post("/api/intent/execute")
@@ -3895,6 +3905,37 @@ async def run_search_resolution_once():
     service = app.state.search_service
     request_id = service.run_search_resolution_once()
     return {"request_id": request_id}
+
+
+@app.post("/api/music/album/download")
+def download_full_album(data: dict):
+
+    album_id = data.get("album_id")
+    if not album_id:
+        return {"error": "album_id required"}
+
+    tracks = fetch_album_tracks(album_id)
+    if not tracks:
+        return {"error": "unable to fetch tracks"}
+
+    queue = _IntentQueueAdapter()
+    enqueued = 0
+
+    for track in tracks:
+        queue.enqueue({
+            "media_intent": "music_track",
+            "artist": track.get("artist"),
+            "album": track.get("album"),
+            "track": track.get("title"),
+            "track_number": track.get("track_number"),
+            "release_date": track.get("release_date")
+        })
+        enqueued += 1
+
+    return {
+        "status": "ok",
+        "tracks_enqueued": enqueued
+    }
 
 
 @app.post("/api/spotify/playlists/import")

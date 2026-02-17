@@ -1822,6 +1822,34 @@ function setHomeResultsDetail(text, isError = false) {
   detailEl.classList.remove("hidden");
 }
 
+function renderAlbumDownloadButton(album) {
+
+  const container = document.getElementById("home-results-header")
+    || document.querySelector(".home-results-header");
+
+  if (!container) return;
+
+  const existing = document.getElementById("home-download-full-album");
+  if (existing) {
+    existing.remove();
+  }
+
+  const btn = document.createElement("button");
+  btn.id = "home-download-full-album";
+  btn.className = "btn-primary";
+  btn.textContent = `Download Full Album (${album.track_count} tracks)`;
+
+  btn.onclick = async () => {
+    await fetch("/api/music/album/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ album_id: album.album_id })
+    });
+  };
+
+  container.appendChild(btn);
+}
+
 function buildHomeResultsStatusInfo(requestId) {
   const context = state.homeRequestContext[requestId];
   if (!context) {
@@ -3144,6 +3172,12 @@ async function submitHomeSearch(autoEnqueue) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (data.music_mode &&
+        data.music_resolution &&
+        data.music_resolution.type === "album") {
+
+      renderAlbumDownloadButton(data.music_resolution);
+    }
     if (data && data.detected_intent) {
       await runSpotifyIntentFlow(
         {
