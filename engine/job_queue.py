@@ -22,7 +22,7 @@ from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json_dumps
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
-from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
+from engine.search_scoring import rank_candidates, score_candidate
 from metadata.queue import enqueue_metadata
 
 logger = logging.getLogger(__name__)
@@ -103,8 +103,16 @@ _YTDLP_DOWNLOAD_ALLOWLIST = {
 }
 
 _MUSIC_TRACK_SOURCE_PRIORITY = ("youtube_music", "youtube", "soundcloud", "bandcamp")
-_MUSIC_TRACK_THRESHOLD = 0.67
+_DEFAULT_MATCH_THRESHOLD = 0.92
+_MUSIC_TRACK_THRESHOLD = min(_DEFAULT_MATCH_THRESHOLD * 0.8, 0.70)
 _MUSIC_TRACK_PENALTY_TERMS = ("live", "cover", "karaoke", "remix")
+_MUSIC_TRACK_PENALIZE_TOKENS = ("live", "cover", "karaoke", "remix", "reaction", "ft.", "feat.", "instrumental")
+_MUSIC_SOURCE_PRIORITY_WEIGHTS = {
+    "youtube_music": 10,
+    "youtube": 7,
+    "soundcloud": 4,
+    "bandcamp": 2,
+}
 
 
 @dataclass(frozen=True)
@@ -822,14 +830,33 @@ class DownloadWorkerEngine:
         combined = " ".join([str(artist or ""), str(track or ""), str(album or "")]).lower()
         return " live " in f" {combined} "
 
+    def _normalize_score_100(self, candidate):
+        raw_score = candidate.get("adapter_score")
+        if raw_score is None:
+            raw_score = candidate.get("raw_score")
+        if raw_score is None:
+            raw_score = candidate.get("final_score")
+        max_score = candidate.get("adapter_max_possible")
+        if max_score is None:
+            max_score = candidate.get("max_score")
+        if max_score is None:
+            max_score = 1.0
+        try:
+            raw_value = float(raw_score or 0.0)
+            max_value = float(max_score or 0.0)
+            if max_value <= 0:
+                return 0.0
+            normalized = (raw_value / max_value) * 100.0
+            return max(0.0, min(100.0, normalized))
+        except Exception:
+            return 0.0
+
     def _build_music_track_query(self, artist, track, album=None, *, is_live=False):
-        parts = [f'"{artist}"', f'"{track}"']
+        search_terms = [f'"{artist}"', f'"{track}"']
         if album:
-            parts.append(f'"{album}"')
-        parts.extend(["topic", '"Provided to YouTube"', "audio", "lyrics"])
-        if not is_live:
-            parts.append("studio")
-        return " ".join(part for part in parts if part).strip()
+            search_terms.append(f'"{album}"')
+        search_terms.extend(["audio", "official", "topic"])
+        return " ".join(part for part in search_terms if part).strip()
 
     def _music_track_adjust_score(self, expected, candidate, *, allow_live=False):
         title = str(candidate.get("title") or "")
@@ -839,49 +866,80 @@ class DownloadWorkerEngine:
         uploader_tokens = set(self._music_tokens(uploader))
         track_tokens = set(self._music_tokens(expected.get("track")))
         artist_tokens = set(self._music_tokens(expected.get("artist")))
+        expected_track_tokens = self._music_tokens(expected.get("track"))
+        candidate_title_tokens = self._music_tokens(title)
 
         adjustment = 0.0
         reasons = []
 
         if track_tokens and track_tokens.issubset(set(title_tokens)):
-            adjustment += 0.12
+            adjustment += 12.0
             reasons.append("exact_track_tokens")
+        title_match_increment = 0.0
+        if expected_track_tokens and candidate_title_tokens:
+            if expected_track_tokens == candidate_title_tokens:
+                title_match_increment = 25.0
+            else:
+                shared_count = len(set(expected_track_tokens) & set(candidate_title_tokens))
+                title_match_increment = float(shared_count * 2)
+            adjustment += title_match_increment
+            reasons.append(f"title_match_{title_match_increment:.0f}")
+            logger.debug(
+                f"[MUSIC] title_match score_increase={title_match_increment:.0f} "
+                f"for candidate={candidate.get('url')}"
+            )
 
         if artist_tokens and uploader_tokens:
             overlap = len(artist_tokens & uploader_tokens) / max(len(artist_tokens), 1)
             if overlap >= 0.60:
-                adjustment += 0.10
+                adjustment += 10.0
                 reasons.append("artist_uploader_overlap_high")
             elif overlap >= 0.30:
-                adjustment += 0.05
+                adjustment += 5.0
                 reasons.append("artist_uploader_overlap")
 
         expected_duration = expected.get("duration_hint_sec")
         candidate_duration = candidate.get("duration_sec")
         try:
             if expected_duration is not None and candidate_duration is not None:
-                if abs(int(expected_duration) - int(candidate_duration)) <= 3:
-                    adjustment += 0.08
-                    reasons.append("duration_within_3s")
+                diff_ms = abs((int(candidate_duration) * 1000) - (int(expected_duration) * 1000))
+                duration_increment = 0.0
+                if diff_ms <= 3000:
+                    duration_increment = 20.0
+                elif diff_ms <= 8000:
+                    duration_increment = 10.0
+                elif diff_ms <= 15000:
+                    duration_increment = 5.0
+                if duration_increment > 0.0:
+                    adjustment += duration_increment
+                    reasons.append(f"duration_bonus_{duration_increment:.0f}")
+                logger.debug(
+                    f"[MUSIC] duration_bonus diff={diff_ms} score={duration_increment:.0f}"
+                )
         except Exception:
             pass
 
         title_lower = title.lower()
         if "provided to youtube" in title_lower:
-            adjustment += 0.08
+            adjustment += 8.0
             reasons.append("provided_to_youtube")
         if "topic" in uploader.lower() and source in {"youtube", "youtube_music"}:
-            adjustment += 0.08
+            adjustment += 8.0
             reasons.append("topic_channel")
         if "lyrics" in title_lower:
-            adjustment += 0.02
+            adjustment += 2.0
             reasons.append("lyrics_hint")
 
-        if not allow_live:
-            for token in _MUSIC_TRACK_PENALTY_TERMS:
-                if token in title_lower:
-                    adjustment -= 0.14
-                    reasons.append(f"penalty_{token}")
+        for token in _MUSIC_TRACK_PENALIZE_TOKENS:
+            if allow_live and token == "live":
+                continue
+            if token in title_lower:
+                adjustment -= 10.0
+                reasons.append(f"penalty_{token}")
+                logger.debug(
+                    f"[MUSIC] penalizing token={token} new_score={adjustment:.0f} "
+                    f"for {candidate.get('url')}"
+                )
         return adjustment, reasons
 
     def _resolve_music_track_with_adapters(self, artist, track, album=None, *, duration_hint_sec=None, allow_live=False):
@@ -915,30 +973,35 @@ class DownloadWorkerEngine:
                 candidate["source"] = candidate.get("source") or source
                 modifier = adapter.source_modifier(candidate)
                 candidate.update(score_candidate(expected, candidate, source_modifier=modifier))
-                base_score = float(candidate.get("final_score") or 0.0)
+                base_score = self._normalize_score_100(candidate)
+                source_weight = int(_MUSIC_SOURCE_PRIORITY_WEIGHTS.get(source, 0))
+                logger.debug(f"[MUSIC] source_priority={source} weight={source_weight}")
                 adjustment, reasons = self._music_track_adjust_score(expected, candidate, allow_live=allow_live)
+                if source_weight:
+                    adjustment += float(source_weight)
+                    reasons.append(f"source_priority_{source_weight}")
                 candidate["music_adjustment"] = adjustment
                 candidate["music_adjustment_reasons"] = ",".join(reasons)
                 candidate["base_score"] = base_score
-                candidate["final_score"] = max(0.0, min(1.0, base_score + adjustment))
+                candidate["final_score_100"] = max(0.0, min(100.0, base_score + adjustment))
+                candidate["final_score"] = candidate["final_score_100"] / 100.0
                 scored.append(candidate)
         if not scored:
             return None
         ranked = rank_candidates(scored, source_priority=source_priority)
-        chosen = select_best_candidate(ranked, _MUSIC_TRACK_THRESHOLD)
-        if chosen:
-            return chosen
-        logger.info(f"[MUSIC] threshold={_MUSIC_TRACK_THRESHOLD:.2f} selected_score=none candidate=none")
+        for candidate in ranked:
+            candidate_score = float(candidate.get("final_score") or 0.0)
+            logger.info(f"[MUSIC] threshold_used={_MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
+            if candidate_score >= _MUSIC_TRACK_THRESHOLD:
+                return candidate
+        logger.warning(f"[MUSIC] top 5 candidates for track={track} scores:")
         for candidate in ranked[:5]:
-            logger.debug(
-                "[MUSIC] top_candidate score=%.3f base=%.3f source=%s title=%s uploader=%s reasons=%s url=%s",
+            logger.warning(
+                "  score=%.3f source=%s url=%s title=%s",
                 float(candidate.get("final_score") or 0.0),
-                float(candidate.get("base_score") or 0.0),
                 candidate.get("source"),
-                candidate.get("title"),
-                candidate.get("uploader"),
-                candidate.get("music_adjustment_reasons") or "",
                 candidate.get("url"),
+                candidate.get("title"),
             )
         return None
 
@@ -966,6 +1029,7 @@ class DownloadWorkerEngine:
         logger.info(f"[WORKER] processing music_track artist={artist} track={track}")
 
         search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
+        logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
         resolved = None
         if self.search_service and hasattr(self.search_service, "search_best_match"):
             try:
