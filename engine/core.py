@@ -855,7 +855,7 @@ def run_direct_url_self_test(
     *,
     paths: EnginePaths,
     url="https://youtu.be/PmtGDk0c-JM",
-    final_format_override="webm",
+    final_format_override="mkv",
 ):
     logging.info("RETREIVR_DIAG: enqueueing direct URL self-test for %s", url)
     status = EngineStatus()

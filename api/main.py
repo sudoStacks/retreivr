@@ -833,7 +833,7 @@ async def startup():
             config or {},
             paths=app.state.paths,
             url=diag_url,
-            final_format_override="webm",
+            final_format_override="mkv",
         )
     app.state.spotify_playlist_importer = SpotifyPlaylistImporter()
     app.state.spotify_import_status = {}
@@ -1221,7 +1221,7 @@ def _run_immediate_download_to_client(
         if audio_mode:
             ext = final_format or "mp3"
         elif not ext:
-            ext = final_format or "webm"
+            ext = final_format or "mkv"
         template = audio_template if audio_mode else filename_template
         cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
         final_path = os.path.join(temp_dir, cleaned_name)
@@ -2011,7 +2011,7 @@ async def _start_run_with_config(
                 effective_final_format_override = (
                     config.get("default_video_format")
                     or config.get("final_format")
-                    or "webm"
+                    or "mkv"
                 )
             try:
                 logging.info(

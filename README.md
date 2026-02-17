@@ -110,7 +110,7 @@ python scripts/setup_oauth.py --account family_tv tokens/client_secret_family.js
 4) Edit `config/config.json`:  
 - `accounts` paths to client_secret and token JSONs (optional if you only use public playlists)  
 - `playlists` with `playlist_id`, `folder`, optional `account`, optional `final_format`, optional `music_mode`, optional `mode` (full/subscribe)  
-- `final_format` default (webm/mp4/mkv/mp3)  
+- `final_format` default (mkv/mp4/webm/mp3)  
 - `music_filename_template` optional music-safe naming (artist/album/track)  
 - `yt_dlp_cookies` optional Netscape cookies.txt for improved music metadata  
 - `js_runtime` to avoid extractor issues (node:/path or deno:/path)  

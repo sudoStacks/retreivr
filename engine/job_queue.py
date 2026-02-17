@@ -1408,7 +1408,7 @@ class YouTubeAdapter:
             if audio_mode:
                 ext = final_format or "mp3"
             elif not ext:
-                ext = final_format or "webm"
+                ext = final_format or "mkv"
             template = audio_template if audio_mode else filename_template
             cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
 

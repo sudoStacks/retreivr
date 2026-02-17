@@ -3974,9 +3974,9 @@ function addPlaylistRow(entry = {}) {
     <input class="playlist-account" type="text" placeholder="account" value="${entry.account || ""}">
     <select class="playlist-format">
       <option value="">(default)</option>
-      <option value="webm">webm</option>
-      <option value="mp4">mp4</option>
       <option value="mkv">mkv</option>
+      <option value="mp4">mp4</option>
+      <option value="webm">webm</option>
       <option value="mp3">mp3</option>
     </select>
     <label class="field inline">
