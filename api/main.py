@@ -3714,6 +3714,9 @@ async def create_search_request(request: dict = Body(...)):
     music_resolution = None
     if bool(normalized.get("music_mode")):
         music_resolution = resolve_album(str(normalized.get("query") or ""))
+    logger.info(
+        f"[MUSIC] resolution={music_resolution} query={str(normalized.get('query') or '')}"
+    )
     logging.debug(
         "Home search: music_mode=%s query=%s",
         bool(normalized.get("music_mode")),
@@ -3917,20 +3920,36 @@ def download_full_album(data: dict):
     tracks = fetch_album_tracks(album_id)
     if not tracks:
         return {"error": "unable to fetch tracks"}
+    logger.info(f"[MUSIC] Album {album_id} fetched {len(tracks)} tracks")
+    if len(tracks) == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Album resolved but no tracks returned from MusicBrainz"
+        )
 
     queue = _IntentQueueAdapter()
     enqueued = 0
 
     for track in tracks:
-        queue.enqueue({
+        artist = track.get("artist")
+        title = track.get("title")
+        track_number_raw = track.get("track_number")
+        try:
+            track_number = int(track_number_raw) if track_number_raw is not None else None
+        except (TypeError, ValueError):
+            track_number = None
+        logger.debug(f"[MUSIC] enqueue track {artist} - {title}")
+        payload = {
             "media_intent": "music_track",
-            "artist": track.get("artist"),
+            "artist": artist,
             "album": track.get("album"),
-            "track": track.get("title"),
-            "track_number": track.get("track_number"),
+            "track": title,
+            "track_number": track_number,
             "release_date": track.get("release_date")
-        })
+        }
+        queue.enqueue(payload)
         enqueued += 1
+    logger.info(f"[MUSIC] album enqueue complete count={len(tracks)}")
 
     return {
         "status": "ok",

@@ -1822,32 +1822,36 @@ function setHomeResultsDetail(text, isError = false) {
   detailEl.classList.remove("hidden");
 }
 
-function renderAlbumDownloadButton(album) {
+function renderAlbumDownloadButton(resolution) {
 
-  const container = document.getElementById("home-results-header")
-    || document.querySelector(".home-results-header");
+  const headerEl = document.querySelector("#home-results .results-header");
 
-  if (!container) return;
+  if (!headerEl) {
+    console.warn("Album button render failed: header missing");
+    return;
+  }
 
-  const existing = document.getElementById("home-download-full-album");
+  const existing = document.getElementById("home-download-album-btn");
   if (existing) {
     existing.remove();
   }
 
+  console.debug("Rendering Download Full Album button", resolution);
+
   const btn = document.createElement("button");
-  btn.id = "home-download-full-album";
-  btn.className = "btn-primary";
-  btn.textContent = `Download Full Album (${album.track_count} tracks)`;
+  btn.id = "home-download-album-btn";
+  btn.className = "btn primary small";
+  btn.textContent = `Download Full Album (${resolution.track_count} tracks)`;
 
   btn.onclick = async () => {
     await fetch("/api/music/album/download", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ album_id: album.album_id })
+      body: JSON.stringify({ album_id: resolution.album_id })
     });
   };
 
-  container.appendChild(btn);
+  headerEl.appendChild(btn);
 }
 
 function buildHomeResultsStatusInfo(requestId) {

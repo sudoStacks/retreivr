@@ -25,6 +25,8 @@ from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
 from metadata.queue import enqueue_metadata
 
+logger = logging.getLogger(__name__)
+
 JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_CLAIMED = "claimed"
 JOB_STATUS_DOWNLOADING = "downloading"
@@ -970,6 +972,14 @@ class DownloadWorkerEngine:
             lock.release()
 
     def _execute_job(self, job, *, stop_event=None):
+        if hasattr(job, "keys"):
+            job_keys = list(job.keys())
+        else:
+            try:
+                job_keys = list(vars(job).keys())
+            except Exception:
+                job_keys = []
+        logger.debug(f"[WORKER] received job payload keys={job_keys}")
         if job.status != JOB_STATUS_CLAIMED:
             _log_event(
                 logging.ERROR,
@@ -993,7 +1003,16 @@ class DownloadWorkerEngine:
                 media_intent=job.media_intent,
             )
             return
-        if job.media_intent == "music_track":
+        if hasattr(job, "get"):
+            intent = job.get("media_intent") or job.get("payload", {}).get("media_intent")
+        else:
+            payload = getattr(job, "payload", {}) or {}
+            if not isinstance(payload, dict):
+                payload = {}
+            intent = getattr(job, "media_intent", None) or payload.get("media_intent")
+
+        if intent == "music_track":
+            logger.info(f"[WORKER] processing music_track: {job}")
             job = self._resolve_music_track_job(job)
         adapter = self.adapters.get(job.source)
         if not adapter:
@@ -1183,6 +1202,7 @@ class YouTubeAdapter:
             final_path = os.path.join(resolved_dir, cleaned_name)
             os.makedirs(os.path.dirname(final_path), exist_ok=True)
             atomic_move(local_file, final_path)
+            logger.info(f"[MUSIC] finalized file: {final_path}")
             shutil.rmtree(temp_dir, ignore_errors=True)
 
             size = None
