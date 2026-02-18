@@ -1,5 +1,7 @@
 import logging
+import hashlib
 from urllib.parse import urlparse
+from typing import Protocol, runtime_checkable
 
 from yt_dlp import YoutubeDL
 
@@ -30,6 +32,14 @@ class SearchAdapter:
 
     def _candidate_thumbnail_url(self, entry):
         return None
+
+
+@runtime_checkable
+class MusicSearchAdapter(Protocol):
+    source: str
+
+    def search_music_track(self, query: str, limit: int) -> list[dict]:
+        ...
 
 
 class _YtDlpSearchMixin(SearchAdapter):
@@ -114,6 +124,57 @@ class _YtDlpSearchMixin(SearchAdapter):
     def search_album(self, artist, album, limit=5):
         query = f"{artist} {album}".strip()
         return self._search(query, limit)
+
+    def search_music_track(self, query, limit=5):
+        # Explicit music search interface for deterministic worker orchestration.
+        results = []
+        for candidate in self._search(query, limit) or []:
+            candidate = dict(candidate)
+            url = candidate.get("url")
+            candidate_id = candidate.get("candidate_id")
+            if not candidate_id:
+                stable_seed = str(url or candidate.get("title") or "")
+                candidate_id = hashlib.sha1(stable_seed.encode("utf-8")).hexdigest()[:16]
+            duration_sec = candidate.get("duration_sec")
+            duration_ms = None
+            try:
+                if duration_sec is not None:
+                    duration_ms = int(duration_sec) * 1000
+            except Exception:
+                duration_ms = None
+            normalized = {
+                "source": self.source,
+                "candidate_id": candidate_id,
+                "title": candidate.get("title"),
+                "artist": candidate.get("artist_detected") or candidate.get("uploader"),
+                "duration_ms": duration_ms,
+                "url": url,
+                "extra": {
+                    "uploader": candidate.get("uploader"),
+                    "album_detected": candidate.get("album_detected"),
+                    "track_detected": candidate.get("track_detected"),
+                    "artwork_url": candidate.get("artwork_url"),
+                    "raw_meta_json": candidate.get("raw_meta_json"),
+                    "official": candidate.get("official"),
+                    "isrc": candidate.get("isrc"),
+                    "track_count": candidate.get("track_count"),
+                    "thumbnail_url": candidate.get("thumbnail_url"),
+                },
+                # Preserve legacy scoring inputs.
+                "uploader": candidate.get("uploader"),
+                "artist_detected": candidate.get("artist_detected"),
+                "album_detected": candidate.get("album_detected"),
+                "track_detected": candidate.get("track_detected"),
+                "duration_sec": duration_sec,
+                "artwork_url": candidate.get("artwork_url"),
+                "raw_meta_json": candidate.get("raw_meta_json"),
+                "official": candidate.get("official"),
+                "isrc": candidate.get("isrc"),
+                "track_count": candidate.get("track_count"),
+                "thumbnail_url": candidate.get("thumbnail_url"),
+            }
+            results.append(normalized)
+        return results
 
 
 class YouTubeMusicAdapter(_YtDlpSearchMixin):

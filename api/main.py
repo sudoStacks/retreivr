@@ -605,10 +605,21 @@ class _IntentQueueAdapter:
                     out[key] = getattr(value, key)
             return out
 
-        def _enqueue_music_query_job(artist: str, track: str, album: str | None = None) -> None:
+        def _enqueue_music_query_job(
+            artist: str,
+            track: str,
+            album: str | None = None,
+            *,
+            recording_mbid: str | None = None,
+            mb_release_id: str | None = None,
+            mb_release_group_id: str | None = None,
+        ) -> None:
             normalized_artist = str(artist or "").strip()
             normalized_track = str(track or "").strip()
             normalized_album = str(album or "").strip() or None
+            normalized_recording_mbid = str(recording_mbid or "").strip() or None
+            normalized_release_mbid = str(mb_release_id or "").strip() or None
+            normalized_release_group_mbid = str(mb_release_group_id or "").strip() or None
             if not normalized_artist or not normalized_track:
                 logging.warning("Intent enqueue skipped: music query missing artist/track")
                 return
@@ -624,11 +635,19 @@ class _IntentQueueAdapter:
                 "release_date": payload.get("release_date"),
                 "duration_ms": payload.get("duration_ms"),
                 "artwork_url": payload.get("artwork_url"),
+                "recording_mbid": normalized_recording_mbid,
+                "mb_recording_id": normalized_recording_mbid,
+                "mb_release_id": normalized_release_mbid,
+                "mb_release_group_id": normalized_release_group_mbid,
                 "canonical_metadata": {
                     "artist": normalized_artist,
                     "track": normalized_track,
                     "album": normalized_album,
                     "duration_ms": payload.get("duration_ms"),
+                    "recording_mbid": normalized_recording_mbid,
+                    "mb_recording_id": normalized_recording_mbid,
+                    "mb_release_id": normalized_release_mbid,
+                    "mb_release_group_id": normalized_release_group_mbid,
                 },
             }
             if destination:
@@ -658,10 +677,21 @@ class _IntentQueueAdapter:
             )
 
         if media_intent == "music_track":
+            recording_mbid = str(
+                payload.get("recording_mbid")
+                or payload.get("mb_recording_id")
+                or ""
+            ).strip()
+            if not recording_mbid:
+                logging.error("[MUSIC] enqueue_rejected missing_recording_mbid")
+                raise HTTPException(status_code=400, detail="recording_mbid required for music_track enqueue")
             _enqueue_music_query_job(
                 str(payload.get("artist") or ""),
                 str(payload.get("track") or payload.get("title") or ""),
                 str(payload.get("album") or ""),
+                recording_mbid=recording_mbid,
+                mb_release_id=str(payload.get("mb_release_id") or payload.get("release_id") or ""),
+                mb_release_group_id=str(payload.get("mb_release_group_id") or payload.get("release_group_id") or ""),
             )
             return
 
@@ -4092,14 +4122,31 @@ def download_full_album(data: dict):
             prefer_country = configured_country or None
         except Exception:
             prefer_country = None
-        selection = _mb_service().pick_best_release_with_reason(release_group_id, prefer_country=prefer_country)
+        try:
+            selection = _mb_service().pick_best_release_with_reason(
+                release_group_id,
+                prefer_country=prefer_country,
+            )
+        except Exception:
+            logger.exception(
+                "[MUSIC] release selection failed release_group=%s album_id=%s release_id=%s",
+                release_group_id,
+                album_id,
+                release_id,
+            )
+            raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
         release_id = str(selection.get("release_id") or "").strip() or None
         selected_reason = str(selection.get("reason") or "release_group_selection")
         if not release_id:
             return {"error": "unable to select release from release_group"}
+        logger.info(f"[MUSIC] release_resolved release_group={release_group_id} release={release_id} reason={selected_reason}")
         logger.info(f"[MUSIC] selected_release={release_id} from release_group={release_group_id} reason={selected_reason}")
 
-    tracks = _mb_service().fetch_release_tracks(release_id or "")
+    try:
+        tracks = _mb_service().fetch_release_tracks(release_id or "")
+    except Exception:
+        logger.exception("[MUSIC] track expansion failed release_id=%s", release_id)
+        raise HTTPException(status_code=502, detail="musicbrainz_track_expansion_failed")
     if not tracks:
         return {"error": "unable to fetch tracks"}
     logger.info(f"[MUSIC] Album {release_group_id or release_id} fetched {len(tracks)} tracks")
@@ -4111,6 +4158,10 @@ def download_full_album(data: dict):
 
     queue = _IntentQueueAdapter()
     enqueued = 0
+    skipped_existing = 0
+    skipped_completed = 0
+    engine = getattr(app.state, "worker_engine", None)
+    store = getattr(engine, "store", None) if engine is not None else None
 
     for track in tracks:
         artist = track.get("artist")
@@ -4125,12 +4176,28 @@ def download_full_album(data: dict):
             disc_number = int(disc_number_raw) if disc_number_raw is not None else None
         except (TypeError, ValueError):
             disc_number = None
-        logger.debug(f"[MUSIC] enqueue track {artist} - {title}")
+        recording_mbid = str(track.get("recording_mbid") or track.get("mb_recording_id") or "").strip() or None
+        logger.info(f"[MUSIC] enqueue recording={recording_mbid} track={track_number}")
+        canonical_id = (
+            f"music_track:{str(artist or '').strip().lower()}:"
+            f"{str(track.get('album') or '').strip().lower()}:"
+            f"{str(track_number or '').strip()}:{str(title or '').strip().lower()}"
+        )
+        existing_job = store.get_job_by_canonical_id(canonical_id) if store is not None else None
+        if existing_job is not None:
+            if existing_job.status == "completed":
+                skipped_completed += 1
+                continue
+            if existing_job.status not in {"failed", "cancelled", "skipped_duplicate"}:
+                skipped_existing += 1
+                continue
         payload = {
             "media_intent": "music_track",
             "artist": artist,
             "album": track.get("album"),
             "track": title,
+            "recording_mbid": recording_mbid,
+            "mb_recording_id": recording_mbid,
             "track_number": track_number,
             "disc_number": disc_number,
             "release_date": track.get("release_date"),
@@ -4143,11 +4210,21 @@ def download_full_album(data: dict):
         }
         queue.enqueue(payload)
         enqueued += 1
-    logger.info(f"[MUSIC] album enqueue complete count={len(tracks)}")
+    logger.info(
+        "[MUSIC] album_enqueue_summary release_group=%s added=%s skipped_existing=%s skipped_completed=%s",
+        release_group_id,
+        enqueued,
+        skipped_existing,
+        skipped_completed,
+    )
 
     return {
-        "status": "ok",
-        "tracks_enqueued": enqueued
+        "release_group_id": release_group_id,
+        "release_id": release_id,
+        "total_tracks": len(tracks),
+        "added": enqueued,
+        "skipped_existing": skipped_existing,
+        "skipped_completed": skipped_completed,
     }
 
 

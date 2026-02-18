@@ -469,6 +469,29 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def get_job_by_canonical_id(self, canonical_id):
+        cid = str(canonical_id or "").strip()
+        if not cid:
+            return None
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM download_jobs
+                WHERE canonical_id=?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (cid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_job(row)
+        finally:
+            conn.close()
+
     def claim_job_by_id(self, job_id, *, now=None):
         now = now or utc_now()
         conn = self._connect()
@@ -979,10 +1002,7 @@ class DownloadWorkerEngine:
                 continue
             query = self._build_music_track_query(artist, track, album, is_live=allow_live)
             try:
-                if hasattr(adapter, "_search"):
-                    candidates = adapter._search(query, 6)
-                else:
-                    candidates = adapter.search_track(artist, track, album, 6)
+                candidates = adapter.search_music_track(query, 6)
             except Exception:
                 logging.exception("Music track search adapter failed source=%s", source)
                 continue
@@ -1032,6 +1052,27 @@ class DownloadWorkerEngine:
         artist = str(payload.get("artist") or canonical.get("artist") or "").strip()
         track = str(payload.get("track") or canonical.get("track") or canonical.get("title") or "").strip()
         album = str(payload.get("album") or canonical.get("album") or "").strip() or None
+        recording_mbid = str(
+            payload.get("recording_mbid")
+            or payload.get("mb_recording_id")
+            or canonical.get("recording_mbid")
+            or canonical.get("mb_recording_id")
+            or ""
+        ).strip() or None
+        release_mbid = str(
+            payload.get("mb_release_id")
+            or payload.get("release_id")
+            or canonical.get("mb_release_id")
+            or canonical.get("release_id")
+            or ""
+        ).strip() or None
+        release_group_mbid = str(
+            payload.get("mb_release_group_id")
+            or payload.get("release_group_id")
+            or canonical.get("mb_release_group_id")
+            or canonical.get("release_group_id")
+            or ""
+        ).strip() or None
         duration_ms_raw = payload.get("duration_ms")
         if duration_ms_raw is None:
             duration_ms_raw = canonical.get("duration_ms")
@@ -1046,43 +1087,72 @@ class DownloadWorkerEngine:
         allow_live = self._music_track_is_live(artist, track, album)
         if not artist or not track:
             logging.error("Music track search failed")
-            raise RuntimeError("music_track_metadata_missing")
+            self.store.record_failure(
+                job,
+                error_message="music_track_metadata_missing",
+                retryable=False,
+                retry_delay_seconds=self.retry_delay_seconds,
+            )
+            return None
         logger.info(f"[WORKER] processing music_track artist={artist} track={track}")
+        logger.info(
+            "[MUSIC] job_ids recording_mbid=%s release_mbid=%s release_group_mbid=%s",
+            recording_mbid,
+            release_mbid,
+            release_group_mbid,
+        )
 
         search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
         logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
         resolved = None
-        if self.search_service and hasattr(self.search_service, "search_best_match"):
+        # Music-track acquisition must go through SearchService for deterministic orchestration/logging.
+        if self.search_service:
             try:
-                resolved = self.search_service.search_best_match(
-                    search_query,
-                    threshold=_MUSIC_TRACK_THRESHOLD,
+                resolved = self.search_service.search_music_track_best_match(
+                    artist,
+                    track,
+                    album=album,
+                    duration_ms=(duration_hint_sec * 1000) if duration_hint_sec else None,
+                    limit=6,
                 )
-            except TypeError:
-                resolved = None
             except Exception:
                 logging.exception("Music track search service failed query=%s", search_query)
-        if not resolved:
-            resolved = self._resolve_music_track_with_adapters(
-                artist,
-                track,
-                album,
-                duration_hint_sec=duration_hint_sec,
-                allow_live=allow_live,
-            )
+                self.store.record_failure(
+                    job,
+                    error_message="music_track_adapter_search_exception",
+                    retryable=False,
+                    retry_delay_seconds=self.retry_delay_seconds,
+                )
+                return None
 
         resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
         if not _is_http_url(resolved_url):
             logging.error("Music track search failed")
-            raise RuntimeError("music_track_no_candidate_above_threshold")
+            self.store.record_failure(
+                job,
+                error_message="no_candidate_above_threshold",
+                retryable=False,
+                retry_delay_seconds=self.retry_delay_seconds,
+            )
+            return None
         selected_score = None
+        duration_delta_ms = None
         if isinstance(resolved, dict):
             selected_score = resolved.get("final_score")
+            try:
+                resolved_duration = resolved.get("duration_ms")
+                if resolved_duration is None and resolved.get("duration_sec") is not None:
+                    resolved_duration = int(resolved.get("duration_sec")) * 1000
+                if resolved_duration is not None and duration_hint_sec is not None:
+                    duration_delta_ms = abs(int(resolved_duration) - (int(duration_hint_sec) * 1000))
+            except Exception:
+                duration_delta_ms = None
         logger.info(
             f"[MUSIC] threshold={_MUSIC_TRACK_THRESHOLD:.2f} "
             f"selected_score={selected_score if selected_score is not None else 'n/a'} "
             f"candidate={resolved_url}"
         )
+        logger.info("[MUSIC] selected_duration_delta_ms=%s", duration_delta_ms)
 
         source = resolved_source or resolve_source(resolved_url)
         external_id = extract_video_id(resolved_url) if source in {"youtube", "youtube_music"} else None
@@ -1234,6 +1304,8 @@ class DownloadWorkerEngine:
         if intent == "music_track":
             logger.info(f"[WORKER] processing music_track: {job}")
             job = self._resolve_music_track_job(job)
+            if job is None:
+                return
         adapter = self.adapters.get(job.source)
         if not adapter:
             _log_event(
@@ -1403,6 +1475,39 @@ class YouTubeAdapter:
                 return None
 
             meta = extract_meta(info, fallback_url=job.url)
+            canonical = (
+                output_template.get("canonical_metadata")
+                if isinstance(output_template.get("canonical_metadata"), dict)
+                else {}
+            )
+            recording_mbid = str(
+                output_template.get("recording_mbid")
+                or output_template.get("mb_recording_id")
+                or canonical.get("recording_mbid")
+                or canonical.get("mb_recording_id")
+                or ""
+            ).strip()
+            if recording_mbid:
+                meta["recording_mbid"] = recording_mbid
+                meta["mb_recording_id"] = recording_mbid
+            release_mbid = str(
+                output_template.get("mb_release_id")
+                or output_template.get("release_id")
+                or canonical.get("mb_release_id")
+                or canonical.get("release_id")
+                or ""
+            ).strip()
+            if release_mbid:
+                meta["mb_release_id"] = release_mbid
+            release_group_mbid = str(
+                output_template.get("mb_release_group_id")
+                or output_template.get("release_group_id")
+                or canonical.get("mb_release_group_id")
+                or canonical.get("release_group_id")
+                or ""
+            ).strip()
+            if release_group_mbid:
+                meta["mb_release_group_id"] = release_group_mbid
             video_id = meta.get("video_id") or job.id
             ext = os.path.splitext(local_file)[1].lstrip(".")
             if audio_mode:

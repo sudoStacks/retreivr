@@ -5,7 +5,7 @@ services:
     # Docker Hub:
     image: retreivr/retreivr:0.9.3
     # Or GHCR:
-    # image: ghcr.io/retreivr/retreivr:0.9.3
+    # image: ghcr.io/sudoStacks/retreivr:0.9.3
 
     container_name: retreivr
     ports:
