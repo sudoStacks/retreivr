@@ -3465,6 +3465,47 @@ async function submitHomeSearch(autoEnqueue) {
   }
 }
 
+async function importHomePlaylistFile() {
+  const inputEl = $("#home-import-file");
+  const summaryEl = $("#home-import-summary");
+  const messageEl = $("#home-search-message");
+  const file = inputEl?.files?.[0];
+  if (!file) {
+    setNotice(messageEl, "Select a playlist file to import.", true);
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+
+  if (summaryEl) {
+    summaryEl.textContent = "";
+  }
+  setNotice(messageEl, "Importing playlist file...", false);
+  try {
+    const response = await fetch("/api/import/playlist", {
+      method: "POST",
+      body: formData,
+    });
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch (_err) {
+      payload = {};
+    }
+    if (!response.ok) {
+      const detail = payload && payload.detail ? payload.detail : `HTTP ${response.status}`;
+      throw new Error(String(detail));
+    }
+    if (summaryEl) {
+      summaryEl.textContent = `Total: ${payload.total_tracks || 0} | Resolved: ${payload.resolved || 0} | Enqueued: ${payload.enqueued || 0} | Unresolved: ${payload.unresolved || 0}`;
+    }
+    setNotice(messageEl, "Playlist import completed.", false);
+  } catch (err) {
+    setNotice(messageEl, `Import failed: ${err.message}`, true);
+  }
+}
+
 async function handleHomeDirectUrl(url, destination, messageEl) {
   if (!messageEl) return;
   setHomeSearchActive(true);
@@ -4931,6 +4972,10 @@ function bindEvents() {
   const homeSearchOnly = $("#home-search-only");
   if (homeSearchOnly) {
     homeSearchOnly.addEventListener("click", () => submitHomeSearch(false));
+  }
+  const homeImportButton = $("#home-import-button");
+  if (homeImportButton) {
+    homeImportButton.addEventListener("click", importHomePlaylistFile);
   }
   const homeMusicMode = $("#home-music-mode");
   if (homeMusicMode) {

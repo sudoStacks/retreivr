@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.5 — Music Mode Hardening + Playlist File Import
+
+### Added
+- Playlist file import parsing layer for:
+  - M3U/M3U8
+  - CSV
+  - Apple Music XML/plist-style exports
+  - Soundiiz JSON
+- Import resolution pipeline (`TrackIntent` → search resolution → queue enqueue).
+- `POST /api/import/playlist` backend endpoint (multipart upload, validation, structured summary).
+- CLI `--import-file` support to process playlist files without UI.
+- Home UI import controls (file input + import action + result summary).
+- Canonical M3U generation after import completion at `/Playlists/<import-name>.m3u`.
+
+### Changed
+- Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
+- Album enqueue observability now reports structured summary fields (`added`, `skipped_existing`, `skipped_completed`).
+- Worker/state hardening completed to reduce orphan-risk for CLAIMED/DOWNLOADING transitions.
+
+### Fixed
+- Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.
+- Deterministic search ranking tie-break behavior stabilized in general resolution paths.
+- Music path canonicalization enforced (disc folder presence, zero-padded tracks, NFC normalization).
+
 ## v0.9.4 — Filesystem Layout Stabilization
 
 ### Changed

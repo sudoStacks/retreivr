@@ -181,6 +181,16 @@ def _build_webui_test_app() -> FastAPI:
     def api_resolve_once() -> dict[str, Any]:
         return {"request_id": state["request_id"]}
 
+    @app.post("/api/import/playlist")
+    async def api_import_playlist() -> dict[str, Any]:
+        return {
+            "total_tracks": 4,
+            "resolved": 3,
+            "unresolved": 1,
+            "enqueued": 3,
+            "failed": 0,
+        }
+
     @app.get("/api/search/queue")
     def api_search_queue() -> dict[str, Any]:
         return {"jobs": []}
@@ -273,3 +283,36 @@ def test_webui_home_search_download_status_without_legacy_run_errors(webui_serve
     assert not page_errors, f"Page JS errors detected: {page_errors}"
     assert not console_errors, f"Console errors detected: {console_errors}"
     assert not any("legacy-run" in msg.lower() or "#run-" in msg.lower() for msg in console_errors)
+
+
+def test_webui_home_import_playlist_smoke(webui_server: str, page, tmp_path: Path) -> None:
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+
+    def on_console(msg) -> None:
+        if msg.type == "error":
+            console_errors.append(msg.text)
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda err: page_errors.append(str(err)))
+
+    import_file = tmp_path / "playlist.m3u"
+    import_file.write_text("#EXTM3U\n#EXTINF:123,Artist - Title\ntrack.mp3\n", encoding="utf-8")
+
+    page.goto(webui_server, wait_until="networkidle")
+    page.set_input_files("#home-import-file", str(import_file))
+    page.click("#home-import-button")
+    page.wait_for_function(
+        """() => {
+          const el = document.querySelector("#home-import-summary");
+          const text = (el && el.textContent) || "";
+          return text.includes("Total: 4")
+            && text.includes("Resolved: 3")
+            && text.includes("Enqueued: 3")
+            && text.includes("Unresolved: 1");
+        }""",
+        timeout=10000,
+    )
+
+    assert not page_errors, f"Page JS errors detected: {page_errors}"
+    assert not console_errors, f"Console errors detected: {console_errors}"

@@ -26,6 +26,25 @@ It takes user intent (URLs, search queries, or scheduled playlist syncs), resolv
 
 Retreivr is not a media server and does not stream or index content. It focuses exclusively on reliable acquisition, correct metadata application, and predictable filesystem structure.
 
+---
+
+## v0.9.5
+
+### Highlights
+- Music Mode hardening focused on deterministic behavior and MBID-based queue contracts.
+- Playlist file import pipeline added (M3U/M3U8, CSV, Apple XML, Soundiiz JSON).
+- Import is now available via:
+  - API: `POST /api/import/playlist`
+  - CLI: `--import-file`
+  - Web UI: Home import upload section
+- Import runs now generate canonical playlist output:
+  - `/Playlists/<import-name>.m3u`
+  - Includes resolved tracks only
+
+### Notes
+- Existing behavior for direct URL and scheduler flows remains unchanged.
+- This release extends ingestion paths without introducing new adapters or changing metadata authority rules.
+
 The system is designed to be:
 
 - Deterministic (no duplicate or unstable outputs)

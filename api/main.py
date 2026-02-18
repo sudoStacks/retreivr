@@ -38,7 +38,7 @@ from urllib.parse import quote, urlparse
 from typing import Optional
 
 import anyio
-from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -125,6 +125,9 @@ from scheduler.jobs.spotify_playlist_watch import (
     spotify_saved_albums_watch_job,
     spotify_user_playlists_watch_job,
 )
+from metadata.importers.dispatcher import import_playlist as import_playlist_file_bytes
+from engine.import_pipeline import process_imported_tracks
+from engine.import_m3u_builder import write_import_m3u
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 1
@@ -161,6 +164,8 @@ DIRECT_URL_PLAYLIST_ERROR = (
 )
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
+MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024
+SUPPORTED_IMPORT_EXTENSIONS = {".m3u", ".m3u8", ".csv", ".xml", ".plist", ".json"}
 
 
 def _mb_service():
@@ -4023,6 +4028,52 @@ async def create_search_request(request: dict = Body(...)):
         "music_mode": bool(normalized["music_mode"]),
         "music_candidates": music_candidates,
         "music_resolution": music_resolution,
+    }
+
+
+@app.post("/api/import/playlist")
+async def import_playlist(file: UploadFile = File(...)):
+    filename = str(getattr(file, "filename", "") or "").strip()
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED_IMPORT_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="unsupported_file_extension")
+
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="empty_file")
+    if len(payload) > MAX_IMPORT_FILE_BYTES:
+        raise HTTPException(status_code=400, detail="file_too_large")
+
+    try:
+        track_intents = import_playlist_file_bytes(payload, filename)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"parse_error: {exc}") from exc
+
+    if not track_intents:
+        raise HTTPException(status_code=400, detail="empty_import")
+
+    service = getattr(app.state, "search_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="search_service_unavailable")
+
+    try:
+        result = process_imported_tracks(track_intents, {"search_service": service})
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"import_processing_failed: {exc}") from exc
+    try:
+        write_import_m3u(
+            import_name=Path(filename).stem,
+            resolved_track_paths=getattr(result, "resolved_track_paths", ()) or (),
+        )
+    except Exception:
+        logging.exception("Import M3U generation failed for %s", filename)
+
+    return {
+        "total_tracks": int(getattr(result, "total_tracks", 0)),
+        "resolved": int(getattr(result, "resolved_count", 0)),
+        "unresolved": int(getattr(result, "unresolved_count", 0)),
+        "enqueued": int(getattr(result, "enqueued_count", 0)),
+        "failed": int(getattr(result, "failed_count", 0)),
     }
 
 
