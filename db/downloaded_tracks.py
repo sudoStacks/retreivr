@@ -2,20 +2,14 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 
 from db.migrations import ensure_downloaded_music_tracks_table
-
-_DEFAULT_DB_ENV_KEY = "RETREIVR_DB_PATH"
-
-
-def _resolve_db_path() -> str:
-    return os.environ.get(_DEFAULT_DB_ENV_KEY, os.path.join(os.getcwd(), "retreivr.sqlite3"))
+from engine.paths import DB_PATH
 
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path or _resolve_db_path(), check_same_thread=False, timeout=30)
+    conn = sqlite3.connect(db_path or str(DB_PATH), check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     ensure_downloaded_music_tracks_table(conn)
@@ -71,4 +65,3 @@ def record_downloaded_track(playlist_id: str, isrc: str, file_path: str) -> None
         conn.commit()
     finally:
         conn.close()
-

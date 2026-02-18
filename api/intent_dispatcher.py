@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import quote
 
+from engine.paths import DB_PATH
 from input.intent_router import IntentType
 from playlist.rebuild import rebuild_playlist_from_tracks
 from scheduler.jobs.spotify_playlist_watch import enqueue_spotify_track, playlist_watch_job
@@ -298,14 +298,10 @@ def _fetch_spotify_album_tracks_with_artist(
     return title, items, str(album_artist or "")
 
 
-def _resolve_db_path() -> str:
-    return os.environ.get("RETREIVR_DB_PATH", os.path.join(os.getcwd(), "retreivr.sqlite3"))
-
-
 def _load_downloaded_paths_for_playlist(playlist_id: str) -> list[str]:
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(_resolve_db_path(), check_same_thread=False, timeout=30)
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(

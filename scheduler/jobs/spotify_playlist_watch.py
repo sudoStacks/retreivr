@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 import sqlite3
 import time
 from pathlib import Path
@@ -22,6 +21,7 @@ from spotify.client import SpotifyPlaylistClient, get_playlist_items
 from spotify.diff import diff_playlist
 from spotify.oauth_store import SpotifyOAuthStore
 from spotify.resolve import resolve_spotify_track
+from engine.paths import DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -114,14 +114,10 @@ def _run_async(coro):
     return None
 
 
-def _resolve_db_path() -> str:
-    return os.environ.get("RETREIVR_DB_PATH", os.path.join(os.getcwd(), "retreivr.sqlite3"))
-
-
 def _load_downloaded_track_paths(playlist_id: str) -> list[str]:
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(_resolve_db_path(), check_same_thread=False, timeout=30)
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(

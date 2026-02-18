@@ -4,12 +4,40 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = Path(os.environ.get("RETREIVR_DATA_DIR", PROJECT_ROOT / "data")).resolve()
 
-CONFIG_DIR = Path(os.environ.get("RETREIVR_CONFIG_DIR", DATA_DIR / "config")).resolve()
-DOWNLOADS_DIR = Path(os.environ.get("RETREIVR_DOWNLOADS_DIR", DATA_DIR / "downloads")).resolve()
-LOG_DIR = Path(os.environ.get("RETREIVR_LOG_DIR", DATA_DIR / "logs")).resolve()
-TOKENS_DIR = Path(os.environ.get("RETREIVR_TOKENS_DIR", DATA_DIR / "tokens")).resolve()
+def _is_container_runtime():
+    if os.path.exists("/.dockerenv"):
+        return True
+    return os.path.isdir("/data")
+
+
+def _default_root_paths():
+    if _is_container_runtime():
+        return {
+            "data": Path("/data"),
+            "config": Path("/config"),
+            "downloads": Path("/downloads"),
+            "logs": Path("/logs"),
+            "tokens": Path("/tokens"),
+        }
+    base = PROJECT_ROOT / "data"
+    return {
+        "data": base,
+        "config": base / "config",
+        "downloads": base / "downloads",
+        "logs": base / "logs",
+        "tokens": base / "tokens",
+    }
+
+
+_DEFAULTS = _default_root_paths()
+
+DATA_DIR = Path(os.environ.get("RETREIVR_DATA_DIR", _DEFAULTS["data"])).resolve()
+CONFIG_DIR = Path(os.environ.get("RETREIVR_CONFIG_DIR", _DEFAULTS["config"])).resolve()
+DOWNLOADS_DIR = Path(os.environ.get("RETREIVR_DOWNLOADS_DIR", _DEFAULTS["downloads"])).resolve()
+LOG_DIR = Path(os.environ.get("RETREIVR_LOG_DIR", _DEFAULTS["logs"])).resolve()
+TOKENS_DIR = Path(os.environ.get("RETREIVR_TOKENS_DIR", _DEFAULTS["tokens"])).resolve()
+DB_PATH = Path(os.environ.get("RETREIVR_DB_PATH", DATA_DIR / "database" / "db.sqlite")).resolve()
 
 
 @dataclass(frozen=True)
@@ -60,7 +88,7 @@ def resolve_dir(path, base_dir):
 
 
 def build_engine_paths():
-    db_path = DATA_DIR / "database" / "db.sqlite"
+    db_path = DB_PATH
     temp_downloads_dir = DATA_DIR / "temp_downloads"
     lock_file = DATA_DIR / "tmp" / "retreivr.lock"
     ytdlp_temp_dir = DATA_DIR / "tmp" / "yt-dlp"

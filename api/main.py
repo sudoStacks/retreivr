@@ -790,6 +790,14 @@ async def startup():
     ensure_dir(LOG_DIR)
     ensure_dir(DOWNLOADS_DIR)
     ensure_dir(TOKENS_DIR)
+    logging.info(
+        "Resolved paths: downloads=%s data=%s config=%s logs=%s tokens=%s",
+        DOWNLOADS_DIR,
+        DATA_DIR,
+        CONFIG_DIR,
+        LOG_DIR,
+        TOKENS_DIR,
+    )
     app.state.browse_roots = _browse_root_map()
     _setup_logging(LOG_DIR)
     _init_schedule_db(app.state.paths.db_path)

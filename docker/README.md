@@ -9,12 +9,13 @@ Ports
 - Suggested host mapping: 8090
 
 Volumes + paths
-- `/app/config` → config JSON
-- `/app/downloads` → completed media
-- `/app/data` → SQLite + temp dirs
-- `/app/logs` → logs
-- `/app/tokens` → OAuth tokens + client secrets
-** /app must be included in the path names as of v0.9.1
+- `/config` → config JSON
+- `/downloads` → completed media
+- `/data` → SQLite + temp dirs
+- `/logs` → logs
+- `/tokens` → OAuth tokens + client secrets
+
+Legacy `/app/*` mounts are still supported via explicit `RETREIVR_*_DIR` overrides, but not recommended.
 
 Use relative paths inside `config.json` (e.g. `folder: "YouTube/Channel"`).
 

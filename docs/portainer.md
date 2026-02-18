@@ -34,10 +34,6 @@ services:
     ports:
       - "8090:8000"
     environment:
-      - RETREIVR_DOWNLOADS_DIR=/downloads
-      - RETREIVR_DATA_DIR=/data
-      - RETREIVR_LOG_DIR=/logs
-      - RETREIVR_TOKENS_DIR=/tokens
       - RETREIVR_HOST=0.0.0.0
       - RETREIVR_PORT=8000
     volumes:
@@ -60,10 +56,6 @@ services:
     ports:
       - "8090:8000"
     environment:
-      - RETREIVR_DOWNLOADS_DIR=/downloads
-      - RETREIVR_DATA_DIR=/data
-      - RETREIVR_LOG_DIR=/logs
-      - RETREIVR_TOKENS_DIR=/tokens
       - RETREIVR_HOST=0.0.0.0
       - RETREIVR_PORT=8000
     volumes:
@@ -90,5 +82,6 @@ Default URL:
 Notes
 	•	Portainer deployments should prefer absolute host paths. Avoid ./downloads style binds in Portainer stacks.
 	•	Playlist folder paths in config.json should be relative to /downloads inside the container.
+	•	Legacy /app/data deployments: see docs/paths.md migration SQL for rewriting stored absolute paths.
 
 ---
