@@ -441,53 +441,62 @@ class MusicBrainzService:
             self._inc_metric("cache_misses")
             self._debug_log("[MUSICBRAINZ] cache miss key=%s", cache_key)
             payload = self._call_with_retry(
-                lambda: musicbrainzngs.search_releases(
-                    releasegroup=rgid,
-                    limit=100,
+                lambda: musicbrainzngs.get_release_group_by_id(
+                    rgid,
+                    includes=["releases", "artist-credits"],
                 )
             )
-            releases = payload.get("release-list", []) if isinstance(payload, dict) else []
+            release_group_payload = payload.get("release-group", {}) if isinstance(payload, dict) else {}
+            releases = []
+            if isinstance(release_group_payload, dict):
+                releases = release_group_payload.get("release-list", []) or []
+            if not releases and isinstance(payload, dict):
+                releases = payload.get("release-list", []) or []
             self._cache.set(cache_key, releases, ttl_seconds=_RELEASE_GROUP_TTL_SECONDS)
         if not releases:
             return {"release_id": None, "reason": "no_releases"}
-        parsed_dates = [(self._parse_date(r.get("date")), r) for r in releases if isinstance(r, dict)]
-        date_values = [d for d, _ in parsed_dates if d is not None]
-        earliest = min(date_values) if date_values else None
+
         preferred_country = (prefer_country or "").strip().upper() or None
-        ranked = []
-        for release in releases:
-            if not isinstance(release, dict):
-                continue
-            score = 0.0
-            reasons = []
-            status = str(release.get("status") or "").strip().lower()
-            if status == "official":
-                score += 40
-                reasons.append("official")
-            elif status:
-                reasons.append(f"status:{status}")
-            release_date = self._parse_date(release.get("date"))
-            if release_date and earliest:
-                delta_days = max(0, (release_date - earliest).days)
-                score += max(0.0, 25.0 - (delta_days / 365.0))
-                if delta_days == 0:
-                    reasons.append("earliest")
-            country = str(release.get("country") or "").strip().upper()
-            if preferred_country and country == preferred_country:
-                score += 10
-                reasons.append(f"country:{country}")
-            track_count = self._safe_int(release.get("track-count"), default=0)
-            if track_count > 0:
-                score += 1
-            ranked.append((score, release, ",".join(reasons) or "fallback"))
-        if not ranked:
+        parsed_releases = [r for r in releases if isinstance(r, dict)]
+        if not parsed_releases:
             return {"release_id": None, "reason": "no_ranked_release"}
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        best_score, best_release, reason = ranked[0]
+
+        official_releases = [
+            r for r in parsed_releases
+            if str(r.get("status") or "").strip().lower() == "official"
+        ]
+        pool = official_releases or parsed_releases
+
+        matched_country = []
+        if preferred_country:
+            matched_country = [
+                r for r in pool
+                if str(r.get("country") or "").strip().upper() == preferred_country
+            ]
+            if matched_country:
+                pool = matched_country
+
+        def _release_sort_key(release):
+            release_date = self._parse_date(release.get("date"))
+            release_id = str(release.get("id") or "")
+            return (release_date is None, release_date, release_id)
+
+        pool = sorted(pool, key=_release_sort_key)
+        best_release = pool[0] if pool else None
+        if not best_release:
+            return {"release_id": None, "reason": "no_ranked_release"}
+
+        reasons = []
+        if best_release in official_releases:
+            reasons.append("official")
+        if preferred_country and best_release in matched_country:
+            reasons.append(f"country:{preferred_country}")
+        reasons.append("earliest")
+        reason = ",".join(reasons)
+
         return {
             "release_id": best_release.get("id"),
-            "reason": f"{reason},score={best_score:.2f}",
-            "release": best_release,
+            "reason": reason,
         }
 
     def pick_best_release(self, release_group_id):
