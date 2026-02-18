@@ -33,13 +33,17 @@ Retreivr is not a media server and does not stream or index content. It focuses 
 ### Highlights
 - Music Mode hardening focused on deterministic behavior and MBID-based queue contracts.
 - Playlist file import pipeline added (M3U/M3U8, CSV, Apple XML, Soundiiz JSON).
+- Import resolution is strict MusicBrainz-first (recording MBID required, no generic adapter search fallback).
 - Import is now available via:
   - API: `POST /api/import/playlist`
+  - API finalize: `POST /api/import/playlist/{batch_id}/finalize`
   - CLI: `--import-file`
+  - CLI finalize (optional): `--import-finalize-m3u`
   - Web UI: Home import upload section
-- Import runs now generate canonical playlist output:
+- Import batches return a stable `import_batch_id`, propagated to queued music jobs.
+- Canonical playlist output generation uses completed history rows only:
   - `/Playlists/<import-name>.m3u`
-  - Includes resolved tracks only
+  - Deterministic order by source index
 
 ### Notes
 - Existing behavior for direct URL and scheduler flows remains unchanged.

@@ -127,7 +127,7 @@ from scheduler.jobs.spotify_playlist_watch import (
 )
 from metadata.importers.dispatcher import import_playlist as import_playlist_file_bytes
 from engine.import_pipeline import process_imported_tracks
-from engine.import_m3u_builder import write_import_m3u
+from engine.import_m3u_builder import write_import_m3u_from_batch
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 1
@@ -4052,21 +4052,16 @@ async def import_playlist(file: UploadFile = File(...)):
     if not track_intents:
         raise HTTPException(status_code=400, detail="empty_import")
 
-    service = getattr(app.state, "search_service", None)
-    if service is None:
-        raise HTTPException(status_code=503, detail="search_service_unavailable")
+    engine = getattr(app.state, "worker_engine", None)
+    queue_store = getattr(engine, "store", None) if engine is not None else None
+    if queue_store is None:
+        raise HTTPException(status_code=503, detail="queue_store_unavailable")
 
     try:
-        result = process_imported_tracks(track_intents, {"search_service": service})
+        result = process_imported_tracks(track_intents, {"queue_store": queue_store})
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"import_processing_failed: {exc}") from exc
-    try:
-        write_import_m3u(
-            import_name=Path(filename).stem,
-            resolved_track_paths=getattr(result, "resolved_track_paths", ()) or (),
-        )
-    except Exception:
-        logging.exception("Import M3U generation failed for %s", filename)
+    import_batch_id = str(getattr(result, "import_batch_id", "") or "").strip()
 
     return {
         "total_tracks": int(getattr(result, "total_tracks", 0)),
@@ -4074,6 +4069,28 @@ async def import_playlist(file: UploadFile = File(...)):
         "unresolved": int(getattr(result, "unresolved_count", 0)),
         "enqueued": int(getattr(result, "enqueued_count", 0)),
         "failed": int(getattr(result, "failed_count", 0)),
+        "import_batch_id": import_batch_id,
+    }
+
+
+@app.post("/api/import/playlist/{batch_id}/finalize")
+async def finalize_import_playlist(batch_id: str, payload: dict = Body(default=None)):
+    import_batch_id = str(batch_id or "").strip()
+    if not import_batch_id:
+        raise HTTPException(status_code=400, detail="import_batch_id_required")
+    playlist_name = str((payload or {}).get("playlist_name") or import_batch_id).strip() or import_batch_id
+    try:
+        entries_written = write_import_m3u_from_batch(
+            import_batch_id=import_batch_id,
+            playlist_name=playlist_name,
+            db_path=app.state.paths.db_path,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"import_finalize_failed: {exc}") from exc
+    return {
+        "import_batch_id": import_batch_id,
+        "playlist_name": playlist_name,
+        "entries_written": int(entries_written),
     }
 
 

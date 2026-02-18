@@ -15,65 +15,146 @@ _SPEC.loader.exec_module(_MODULE)
 process_imported_tracks = _MODULE.process_imported_tracks
 
 
-class FakeSearchResolutionService:
-    def __init__(self, outcomes):
-        self._outcomes = list(outcomes)
-        self._requests = {}
-        self.request_payloads = []
-        self._next_id = 1
+class FakeMusicBrainzService:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
 
-    def create_search_request(self, payload):
-        request_id = f"req-{self._next_id}"
-        self._next_id += 1
-        self.request_payloads.append(payload)
-        self._requests[request_id] = {"items": [{"status": "queued"}]}
-        return request_id
-
-    def run_search_resolution_once(self, *, request_id=None, stop_event=None):
-        outcome = self._outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        self._requests[request_id] = {"items": [{"status": outcome}]}
-        return request_id
-
-    def get_search_request(self, request_id):
-        return self._requests.get(request_id)
+    def search_recordings(self, artist, title, *, album=None, limit=5):
+        self.calls.append(
+            {
+                "artist": artist,
+                "title": title,
+                "album": album,
+                "limit": limit,
+            }
+        )
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
-def test_import_pipeline_resolved_and_unresolved_counts() -> None:
-    service = FakeSearchResolutionService(["enqueued", "failed", "skipped"])
+class FakeQueueStore:
+    def __init__(self):
+        self.enqueued = []
+
+    def enqueue_job(self, **kwargs):
+        self.enqueued.append(kwargs)
+        return f"job-{len(self.enqueued)}", True, None
+
+
+def test_import_pipeline_resolves_musicbrainz_and_enqueues_music_track() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-1",
+                        "title": "Harder Better Faster Stronger",
+                        "ext:score": "95",
+                        "artist-credit": [{"name": "Daft Punk"}],
+                        "release-list": [{"id": "release-1"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
     intents = [
-        TrackIntent(artist="Daft Punk", title="Harder Better Faster Stronger", album=None, raw_line="", source_format="m3u"),
-        TrackIntent(artist="", title="", album=None, raw_line="Unknown Song", source_format="csv"),
-        TrackIntent(artist="Massive Attack", title="Teardrop", album=None, raw_line="", source_format="json"),
+        TrackIntent(
+            artist="Daft Punk",
+            title="Harder Better Faster Stronger",
+            album="Discovery",
+            raw_line="",
+            source_format="m3u",
+        )
     ]
 
-    result = process_imported_tracks(intents, {"search_service": service})
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+        },
+    )
 
-    assert result.total_tracks == 3
-    assert result.resolved_count == 2
-    assert result.unresolved_count == 1
+    assert result.total_tracks == 1
+    assert result.resolved_count == 1
+    assert result.unresolved_count == 0
     assert result.enqueued_count == 1
     assert result.failed_count == 0
+    assert result.resolved_mbids == ["mbid-1"]
+    assert result.import_batch_id
+    assert not hasattr(result, "resolved_track_paths")
 
-    # Query mapping check:
-    # artist+title path keeps structured fields, while raw_line fallback maps query into artist/track.
-    assert service.request_payloads[0]["artist"] == "Daft Punk"
-    assert service.request_payloads[0]["track"] == "Harder Better Faster Stronger"
-    assert service.request_payloads[1]["artist"] == "Unknown Song"
-    assert service.request_payloads[1]["track"] == "Unknown Song"
+    assert len(queue_store.enqueued) == 1
+    payload = queue_store.enqueued[0]
+    assert payload["media_intent"] == "music_track"
+    assert payload["media_type"] == "music"
+    assert payload["canonical_id"] == "music_track:mbid-1"
+    assert payload["url"] == "musicbrainz://recording/mbid-1"
+    output = payload["output_template"]
+    assert output["recording_mbid"] == "mbid-1"
+    assert output["mb_release_id"] == "release-1"
+    assert output["kind"] == "music_track"
 
 
-def test_import_pipeline_resolution_exception_counts_as_failed() -> None:
-    service = FakeSearchResolutionService([RuntimeError("resolver down")])
-    intents = [
-        TrackIntent(artist="Adele", title="Hello", album=None, raw_line="", source_format="m3u"),
-    ]
+def test_import_pipeline_unresolved_when_no_acceptable_musicbrainz_match() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {"id": "mbid-low", "title": "Hello", "ext:score": "65"},
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    intents = [TrackIntent(artist="Adele", title="Hello", album=None, raw_line="", source_format="csv")]
 
-    result = process_imported_tracks(intents, {"search_service": service})
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+        },
+    )
 
     assert result.total_tracks == 1
     assert result.resolved_count == 0
-    assert result.unresolved_count == 0
+    assert result.unresolved_count == 1
     assert result.enqueued_count == 0
-    assert result.failed_count == 1
+    assert result.failed_count == 0
+    assert result.resolved_mbids == []
+    assert len(queue_store.enqueued) == 0
+    assert not hasattr(result, "resolved_track_paths")
+
+
+def test_import_pipeline_uses_single_batch_id_for_all_enqueued_items() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {"recording-list": [{"id": "mbid-1", "title": "One", "ext:score": "96"}]},
+            {"recording-list": [{"id": "mbid-2", "title": "Two", "ext:score": "94"}]},
+        ]
+    )
+    queue_store = FakeQueueStore()
+    intents = [
+        TrackIntent(artist="Artist", title="One", album=None, raw_line="", source_format="m3u"),
+        TrackIntent(artist="Artist", title="Two", album=None, raw_line="", source_format="m3u"),
+    ]
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+        },
+    )
+
+    assert result.import_batch_id
+    assert len(queue_store.enqueued) == 2
+    first = queue_store.enqueued[0]["output_template"]["import_batch_id"]
+    second = queue_store.enqueued[1]["output_template"]["import_batch_id"]
+    assert first == result.import_batch_id
+    assert second == result.import_batch_id

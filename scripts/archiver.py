@@ -37,9 +37,9 @@ from engine.core import EngineStatus, load_config, run_archive
 from engine.paths import CONFIG_DIR, DATA_DIR, DOWNLOADS_DIR, LOG_DIR, TOKENS_DIR, build_engine_paths, ensure_dir, resolve_config_path
 from engine.json_utils import safe_json_dumps
 from engine.runtime import get_runtime_info
-from engine.search_engine import SearchResolutionService, resolve_search_db_path
+from engine.job_queue import DownloadJobStore
 from engine.import_pipeline import process_imported_tracks
-from engine.import_m3u_builder import write_import_m3u
+from engine.import_m3u_builder import write_import_m3u_from_batch
 from metadata.importers.dispatcher import import_playlist as import_playlist_file_bytes
 
 def _setup_logging(log_dir):
@@ -63,6 +63,11 @@ def main():
     parser.add_argument("--format", dest="final_format_override", help="Override final format/container (e.g., mp3, mp4, webm, mkv).")
     parser.add_argument("--js-runtime", help="Force JS runtime (e.g., node:/usr/bin/node or deno:/usr/bin/deno).")
     parser.add_argument("--import-file", help="Import a playlist file and enqueue resolved tracks.")
+    parser.add_argument(
+        "--import-finalize-m3u",
+        action="store_true",
+        help="After --import-file, generate M3U from completed rows for the returned import batch.",
+    )
     parser.add_argument("--version", action="store_true", help="Show version info and exit.")
     args = parser.parse_args()
 
@@ -110,17 +115,15 @@ def main():
             track_intents = import_playlist_file_bytes(file_bytes, os.path.basename(import_path))
             if not track_intents:
                 raise ValueError("no tracks parsed")
-            search_service = SearchResolutionService(
-                search_db_path=resolve_search_db_path(paths.db_path, config),
-                queue_db_path=paths.db_path,
-                config=config,
-                paths=paths,
-            )
-            result = process_imported_tracks(track_intents, {"search_service": search_service})
-            write_import_m3u(
-                import_name=os.path.splitext(os.path.basename(import_path))[0],
-                resolved_track_paths=getattr(result, "resolved_track_paths", ()) or (),
-            )
+            queue_store = DownloadJobStore(paths.db_path)
+            result = process_imported_tracks(track_intents, {"queue_store": queue_store})
+            import_batch_id = str(getattr(result, "import_batch_id", "") or "").strip()
+            if args.import_finalize_m3u and import_batch_id:
+                write_import_m3u_from_batch(
+                    import_batch_id=import_batch_id,
+                    playlist_name=os.path.splitext(os.path.basename(import_path))[0],
+                    db_path=paths.db_path,
+                )
             print(
                 safe_json_dumps(
                     {
@@ -129,6 +132,7 @@ def main():
                         "unresolved": int(result.unresolved_count),
                         "enqueued": int(result.enqueued_count),
                         "failed": int(result.failed_count),
+                        "import_batch_id": import_batch_id,
                     },
                     indent=2,
                 )

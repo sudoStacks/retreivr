@@ -10,16 +10,20 @@ All notable changes to this project will be documented here.
   - CSV
   - Apple Music XML/plist-style exports
   - Soundiiz JSON
-- Import resolution pipeline (`TrackIntent` → search resolution → queue enqueue).
+- MusicBrainz-first import resolution pipeline (`TrackIntent` → MB recording match → `music_track` enqueue).
 - `POST /api/import/playlist` backend endpoint (multipart upload, validation, structured summary).
+- `POST /api/import/playlist/{batch_id}/finalize` endpoint to generate M3U from completed rows only.
 - CLI `--import-file` support to process playlist files without UI.
+- CLI `--import-finalize-m3u` opt-in finalize flow (completed rows only).
 - Home UI import controls (file input + import action + result summary).
-- Canonical M3U generation after import completion at `/Playlists/<import-name>.m3u`.
+- Stable `import_batch_id` attached to import result and all import-enqueued jobs.
+- Canonical M3U generation from `download_history` completed entries only.
 
 ### Changed
 - Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
 - Album enqueue observability now reports structured summary fields (`added`, `skipped_existing`, `skipped_completed`).
 - Worker/state hardening completed to reduce orphan-risk for CLAIMED/DOWNLOADING transitions.
+- Import pipeline now has zero fallback to generic transport search (no SearchResolutionService, no adapter URL query fallback).
 
 ### Fixed
 - Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.

@@ -17,7 +17,7 @@ def _build_client(monkeypatch) -> TestClient:
     module = importlib.import_module("api.main")
     module.app.router.on_startup.clear()
     module.app.router.on_shutdown.clear()
-    module.app.state.search_service = object()
+    module.app.state.worker_engine = SimpleNamespace(store=object())
     return TestClient(module.app)
 
 
@@ -51,6 +51,7 @@ def test_import_api_valid_upload(monkeypatch) -> None:
         "unresolved": 0,
         "enqueued": 1,
         "failed": 0,
+        "import_batch_id": "",
     }
 
 
