@@ -1,15 +1,37 @@
-# Retreivr
-
 <p align="center">
-  <img src="webUI/app_icon.png" width="128" />
+  <img src="webUI/app_icon.png" width="160" alt="Retreivr Logo" />
 </p>
 
+<h1 align="center">Retreivr</h1>
+
+<p align="center">
+  Deterministic media acquisition for self‑hosted archives
+</p>
+
+<p align="center">
+  <img src="webUI/assets/sudostacks.png" width="110" alt="sudoStacks Logo" />
+</p>
+
+<p align="center">
+  <sub>A sudoStacks project</sub>
+</p>
+
+---
+
 ## Overview
-Retreivr is a self-hosted media ingestion and archival engine.
 
-It resolves user intent, downloads publicly available media, applies canonical metadata, and writes clean, deterministic files to disk. Retreivr does not stream, index, or play media — it focuses strictly on acquisition and archival correctness.
+Retreivr is a self‑hosted media acquisition engine built for deterministic archival.
 
-MusicBrainz is the canonical metadata authority. Spotify is optional and only used when OAuth credentials are configured and premium validation succeeds.
+It takes user intent (URLs, search queries, or scheduled playlist syncs), resolves them into concrete media targets, downloads the media, applies canonical structure and metadata rules, and writes clean, reproducible files to disk.
+
+Retreivr is not a media server and does not stream or index content. It focuses exclusively on reliable acquisition, correct metadata application, and predictable filesystem structure.
+
+The system is designed to be:
+
+- Deterministic (no duplicate or unstable outputs)
+- Idempotent (safe to re-run)
+- Canonical (consistent naming + metadata rules)
+- Local-first (runs entirely under your control)
 
 ---
 
