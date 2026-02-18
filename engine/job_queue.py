@@ -1201,14 +1201,27 @@ class DownloadWorkerEngine:
                     duration_delta_ms = abs(int(resolved_duration) - (int(duration_hint_sec) * 1000))
             except Exception:
                 duration_delta_ms = None
-        logger.info(
+        logger.debug(
             f"[MUSIC] threshold={_MUSIC_TRACK_THRESHOLD:.2f} "
             f"selected_score={selected_score if selected_score is not None else 'n/a'} "
             f"candidate={resolved_url}"
         )
-        logger.info("[MUSIC] selected_duration_delta_ms=%s", duration_delta_ms)
+        logger.debug("[MUSIC] selected_duration_delta_ms=%s", duration_delta_ms)
 
         source = resolved_source or resolve_source(resolved_url)
+        candidate_id = None
+        if isinstance(resolved, dict):
+            candidate_id = resolved.get("candidate_id")
+        logger.info(
+            '[MUSIC] acquisition recording_mbid=%s release_mbid=%s search_query="%s" source=%s candidate_id=%s duration_delta_ms=%s final_path=%s',
+            recording_mbid,
+            release_mbid,
+            search_query,
+            source,
+            candidate_id,
+            duration_delta_ms,
+            "<pending>",
+        )
         external_id = extract_video_id(resolved_url) if source in {"youtube", "youtube_music"} else None
         canonical_url = canonicalize_url(source, resolved_url, external_id)
         return replace(
