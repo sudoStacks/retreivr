@@ -520,9 +520,18 @@ class MusicBrainzService:
                 includes=["recordings", "artist-credits"],
             )
         )
+        def _canonical_artist_from_credit(artist_credit_list):
+            if not isinstance(artist_credit_list, list):
+                return ""
+            return "".join(
+                (ac.get("artist", {}).get("name", "") + ac.get("joinphrase", ""))
+                for ac in artist_credit_list
+                if isinstance(ac, dict)
+            ).strip()
+
         release_payload = payload.get("release", {}) if isinstance(payload, dict) else {}
         media = release_payload.get("medium-list", []) if isinstance(release_payload, dict) else []
-        artist_credit = self._artist_credit_text(release_payload.get("artist-credit"))
+        release_artist = _canonical_artist_from_credit(release_payload.get("artist-credit"))
         album_title = release_payload.get("title")
         release_date = release_payload.get("date")
         tracks = []
@@ -534,7 +543,10 @@ class MusicBrainzService:
                 if not isinstance(track, dict):
                     continue
                 recording = track.get("recording") or {}
-                track_artist = self._artist_credit_text(recording.get("artist-credit")) or artist_credit
+                track_artist = (
+                    _canonical_artist_from_credit(recording.get("artist-credit"))
+                    or release_artist
+                )
                 tracks.append(
                     {
                         "title": recording.get("title") or track.get("title"),

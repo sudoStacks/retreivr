@@ -979,10 +979,11 @@ class DownloadWorkerEngine:
                 continue
             query = self._build_music_track_query(artist, track, album, is_live=allow_live)
             try:
-                if hasattr(adapter, "_search"):
-                    candidates = adapter._search(query, 6)
-                else:
+                if hasattr(adapter, "search_track"):
                     candidates = adapter.search_track(artist, track, album, 6)
+                else:
+                    query = self._build_music_track_query(artist, track, album)
+                    candidates = adapter._search(query, 6)
             except Exception:
                 logging.exception("Music track search adapter failed source=%s", source)
                 continue
