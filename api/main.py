@@ -605,10 +605,21 @@ class _IntentQueueAdapter:
                     out[key] = getattr(value, key)
             return out
 
-        def _enqueue_music_query_job(artist: str, track: str, album: str | None = None) -> None:
+        def _enqueue_music_query_job(
+            artist: str,
+            track: str,
+            album: str | None = None,
+            *,
+            recording_mbid: str | None = None,
+            mb_release_id: str | None = None,
+            mb_release_group_id: str | None = None,
+        ) -> None:
             normalized_artist = str(artist or "").strip()
             normalized_track = str(track or "").strip()
             normalized_album = str(album or "").strip() or None
+            normalized_recording_mbid = str(recording_mbid or "").strip() or None
+            normalized_release_mbid = str(mb_release_id or "").strip() or None
+            normalized_release_group_mbid = str(mb_release_group_id or "").strip() or None
             if not normalized_artist or not normalized_track:
                 logging.warning("Intent enqueue skipped: music query missing artist/track")
                 return
@@ -624,11 +635,19 @@ class _IntentQueueAdapter:
                 "release_date": payload.get("release_date"),
                 "duration_ms": payload.get("duration_ms"),
                 "artwork_url": payload.get("artwork_url"),
+                "recording_mbid": normalized_recording_mbid,
+                "mb_recording_id": normalized_recording_mbid,
+                "mb_release_id": normalized_release_mbid,
+                "mb_release_group_id": normalized_release_group_mbid,
                 "canonical_metadata": {
                     "artist": normalized_artist,
                     "track": normalized_track,
                     "album": normalized_album,
                     "duration_ms": payload.get("duration_ms"),
+                    "recording_mbid": normalized_recording_mbid,
+                    "mb_recording_id": normalized_recording_mbid,
+                    "mb_release_id": normalized_release_mbid,
+                    "mb_release_group_id": normalized_release_group_mbid,
                 },
             }
             if destination:
@@ -658,10 +677,21 @@ class _IntentQueueAdapter:
             )
 
         if media_intent == "music_track":
+            recording_mbid = str(
+                payload.get("recording_mbid")
+                or payload.get("mb_recording_id")
+                or ""
+            ).strip()
+            if not recording_mbid:
+                logging.error("[MUSIC] enqueue_rejected missing_recording_mbid")
+                raise HTTPException(status_code=400, detail="recording_mbid required for music_track enqueue")
             _enqueue_music_query_job(
                 str(payload.get("artist") or ""),
                 str(payload.get("track") or payload.get("title") or ""),
                 str(payload.get("album") or ""),
+                recording_mbid=recording_mbid,
+                mb_release_id=str(payload.get("mb_release_id") or payload.get("release_id") or ""),
+                mb_release_group_id=str(payload.get("mb_release_group_id") or payload.get("release_group_id") or ""),
             )
             return
 
@@ -4097,6 +4127,7 @@ def download_full_album(data: dict):
         selected_reason = str(selection.get("reason") or "release_group_selection")
         if not release_id:
             return {"error": "unable to select release from release_group"}
+        logger.info(f"[MUSIC] release_resolved release_group={release_group_id} release={release_id} reason={selected_reason}")
         logger.info(f"[MUSIC] selected_release={release_id} from release_group={release_group_id} reason={selected_reason}")
 
     tracks = _mb_service().fetch_release_tracks(release_id or "")
@@ -4125,12 +4156,15 @@ def download_full_album(data: dict):
             disc_number = int(disc_number_raw) if disc_number_raw is not None else None
         except (TypeError, ValueError):
             disc_number = None
-        logger.debug(f"[MUSIC] enqueue track {artist} - {title}")
+        recording_mbid = str(track.get("recording_mbid") or track.get("mb_recording_id") or "").strip() or None
+        logger.info(f"[MUSIC] enqueue recording={recording_mbid} track={track_number}")
         payload = {
             "media_intent": "music_track",
             "artist": artist,
             "album": track.get("album"),
             "track": title,
+            "recording_mbid": recording_mbid,
+            "mb_recording_id": recording_mbid,
             "track_number": track_number,
             "disc_number": disc_number,
             "release_date": track.get("release_date"),

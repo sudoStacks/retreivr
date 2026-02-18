@@ -529,6 +529,7 @@ class MusicBrainzService:
                 tracks.append(
                     {
                         "title": recording.get("title") or track.get("title"),
+                        "recording_mbid": recording.get("id"),
                         "track_number": self._safe_int(track.get("position"), default=0) or None,
                         "disc_number": disc_number,
                         "artist": track_artist,

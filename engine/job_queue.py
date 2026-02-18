@@ -1032,6 +1032,27 @@ class DownloadWorkerEngine:
         artist = str(payload.get("artist") or canonical.get("artist") or "").strip()
         track = str(payload.get("track") or canonical.get("track") or canonical.get("title") or "").strip()
         album = str(payload.get("album") or canonical.get("album") or "").strip() or None
+        recording_mbid = str(
+            payload.get("recording_mbid")
+            or payload.get("mb_recording_id")
+            or canonical.get("recording_mbid")
+            or canonical.get("mb_recording_id")
+            or ""
+        ).strip() or None
+        release_mbid = str(
+            payload.get("mb_release_id")
+            or payload.get("release_id")
+            or canonical.get("mb_release_id")
+            or canonical.get("release_id")
+            or ""
+        ).strip() or None
+        release_group_mbid = str(
+            payload.get("mb_release_group_id")
+            or payload.get("release_group_id")
+            or canonical.get("mb_release_group_id")
+            or canonical.get("release_group_id")
+            or ""
+        ).strip() or None
         duration_ms_raw = payload.get("duration_ms")
         if duration_ms_raw is None:
             duration_ms_raw = canonical.get("duration_ms")
@@ -1048,6 +1069,12 @@ class DownloadWorkerEngine:
             logging.error("Music track search failed")
             raise RuntimeError("music_track_metadata_missing")
         logger.info(f"[WORKER] processing music_track artist={artist} track={track}")
+        logger.info(
+            "[MUSIC] job_ids recording_mbid=%s release_mbid=%s release_group_mbid=%s",
+            recording_mbid,
+            release_mbid,
+            release_group_mbid,
+        )
 
         search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
         logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
@@ -1403,6 +1430,39 @@ class YouTubeAdapter:
                 return None
 
             meta = extract_meta(info, fallback_url=job.url)
+            canonical = (
+                output_template.get("canonical_metadata")
+                if isinstance(output_template.get("canonical_metadata"), dict)
+                else {}
+            )
+            recording_mbid = str(
+                output_template.get("recording_mbid")
+                or output_template.get("mb_recording_id")
+                or canonical.get("recording_mbid")
+                or canonical.get("mb_recording_id")
+                or ""
+            ).strip()
+            if recording_mbid:
+                meta["recording_mbid"] = recording_mbid
+                meta["mb_recording_id"] = recording_mbid
+            release_mbid = str(
+                output_template.get("mb_release_id")
+                or output_template.get("release_id")
+                or canonical.get("mb_release_id")
+                or canonical.get("release_id")
+                or ""
+            ).strip()
+            if release_mbid:
+                meta["mb_release_id"] = release_mbid
+            release_group_mbid = str(
+                output_template.get("mb_release_group_id")
+                or output_template.get("release_group_id")
+                or canonical.get("mb_release_group_id")
+                or canonical.get("release_group_id")
+                or ""
+            ).strip()
+            if release_group_mbid:
+                meta["mb_release_group_id"] = release_group_mbid
             video_id = meta.get("video_id") or job.id
             ext = os.path.splitext(local_file)[1].lstrip(".")
             if audio_mode:
