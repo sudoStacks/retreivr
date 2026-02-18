@@ -79,9 +79,13 @@ def _process_item(item):
         "title": best.get("title"),
         "track_number": best.get("track_number"),
         "year": best.get("year"),
+        "date": meta.get("release_date") or meta.get("date") or best.get("date") or best.get("year"),
+        "disc_number": meta.get("disc_number") or meta.get("disc") or best.get("disc_number"),
         "genre": best.get("genre"),
         "album_artist": best.get("album_artist") or best.get("artist"),
         "recording_id": best.get("recording_id"),
+        "mb_recording_id": meta.get("mb_recording_id") or meta.get("recording_mbid") or best.get("recording_id"),
+        "mb_release_id": meta.get("mb_release_id") or best.get("release_id"),
     }
     release_id = best.get("release_id")
     artwork = None
@@ -119,6 +123,11 @@ def _process_item(item):
             logging.exception("Lyrics enrichment failed (non-fatal)")
 
     dry_run = bool(config.get("dry_run"))
+    logging.debug(
+        "Music metadata tag keys for %s: %s",
+        os.path.basename(file_path),
+        sorted([key for key, value in tags.items() if value not in (None, "")]),
+    )
     apply_tags(
         file_path,
         tags,

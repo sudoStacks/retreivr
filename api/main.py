@@ -592,6 +592,30 @@ class _IntentQueueAdapter:
         origin_id = str(payload.get("playlist_id") or payload.get("spotify_track_id") or "manual")
         destination = str(payload.get("destination") or "").strip() or None
         final_format = str(payload.get("final_format") or "").strip() or None
+        canonical_metadata = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+        # Heuristic for Music Mode-origin payloads:
+        # explicit music flags OR MusicBrainz identifiers already present in payload/canonical metadata.
+        is_music_mode_origin = bool(payload.get("music_mode")) or str(payload.get("media_type") or "").strip().lower() == "music" or any(
+            bool(str(payload.get(key) or "").strip())
+            for key in (
+                "recording_mbid",
+                "mb_recording_id",
+                "mb_release_id",
+                "mb_release_group_id",
+                "release_id",
+                "release_group_id",
+            )
+        ) or any(
+            bool(str(canonical_metadata.get(key) or "").strip())
+            for key in (
+                "recording_mbid",
+                "mb_recording_id",
+                "mb_release_id",
+                "mb_release_group_id",
+                "release_id",
+                "release_group_id",
+            )
+        )
 
         def _to_dict(value):
             if isinstance(value, dict):
@@ -711,6 +735,9 @@ class _IntentQueueAdapter:
         resolved_media = payload.get("resolved_media") if isinstance(payload.get("resolved_media"), dict) else {}
         media_url = str(resolved_media.get("media_url") or payload.get("url") or "").strip()
         if not media_url:
+            if is_music_mode_origin:
+                logging.warning("[MUSIC] enqueue_rejected music_mode_requires_mbid")
+                raise HTTPException(status_code=400, detail="music_mode_requires_mbid")
             fallback_artist = str(payload.get("artist") or "").strip()
             fallback_track = str(payload.get("track") or payload.get("title") or "").strip()
             fallback_album = str(payload.get("album") or "").strip() or None
@@ -4190,7 +4217,7 @@ def download_full_album(data: dict):
         except (TypeError, ValueError):
             disc_number = None
         recording_mbid = str(track.get("recording_mbid") or track.get("mb_recording_id") or "").strip() or None
-        logger.info(f"[MUSIC] enqueue recording={recording_mbid} track={track_number}")
+        logger.debug(f"[MUSIC] enqueue recording={recording_mbid} track={track_number}")
         canonical_id = _build_music_track_canonical_id(
             artist,
             track.get("album"),
@@ -4233,12 +4260,14 @@ def download_full_album(data: dict):
     )
 
     return {
-        "release_group_id": release_group_id,
-        "release_id": release_id,
-        "total_tracks": len(tracks),
-        "added": enqueued,
-        "skipped_existing": skipped_existing,
-        "skipped_completed": skipped_completed,
+        "run_summary": {
+            "release_group_id": release_group_id,
+            "release_id": release_id,
+            "total_tracks": len(tracks),
+            "enqueued": enqueued,
+            "skipped_existing": skipped_existing,
+            "skipped_completed": skipped_completed,
+        }
     }
 
 
@@ -4266,6 +4295,13 @@ def music_album_candidates(payload: dict):
 @app.get("/api/music/albums/search")
 def music_albums_search(q: str = Query("", alias="q"), limit: int = Query(10, ge=1, le=50)):
     return _search_music_album_candidates(str(q or ""), limit=int(limit))
+
+
+@app.get("/api/music/search")
+def music_search(q: str = Query("", alias="q"), limit: int = Query(10, ge=1, le=50)):
+    candidates = _search_music_album_candidates(str(q or ""), limit=int(limit))
+    logger.info("[MUSIC] mb_search q=%s limit=%s results=%s", str(q or ""), int(limit), len(candidates))
+    return candidates
 
 
 @app.get("/api/music/album/art/{album_id}")

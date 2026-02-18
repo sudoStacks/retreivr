@@ -941,7 +941,7 @@ class SearchResolutionService:
         )
         for candidate in ranked:
             candidate_score = float(candidate.get("final_score") or 0.0)
-            logging.info(f"[MUSIC] threshold_used={MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
+            logging.debug(f"[MUSIC] threshold_used={MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
             if candidate_score >= MUSIC_TRACK_THRESHOLD:
                 return candidate
         return None

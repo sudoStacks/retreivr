@@ -1086,7 +1086,7 @@ class DownloadWorkerEngine:
         ranked = rank_candidates(scored, source_priority=source_priority)
         for candidate in ranked:
             candidate_score = float(candidate.get("final_score") or 0.0)
-            logger.info(f"[MUSIC] threshold_used={_MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
+            logger.debug(f"[MUSIC] threshold_used={_MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
             if candidate_score >= _MUSIC_TRACK_THRESHOLD:
                 return candidate
         logger.warning(f"[MUSIC] top 5 candidates for track={track} scores:")
@@ -1299,8 +1299,30 @@ class DownloadWorkerEngine:
                 return
             # If a cancel request came in while this job was queued, honor it immediately.
             if self._is_job_cancelled(job.id, stop_event):
-                self.store.mark_canceled(job.id, reason="Cancelled by user")
-                _log_event(logging.INFO, "job_cancelled", job_id=job.id, trace_id=job.trace_id, source=job.source)
+                try:
+                    self.store.mark_canceled(job.id, reason="Cancelled by user")
+                    _log_event(logging.INFO, "job_cancelled", job_id=job.id, trace_id=job.trace_id, source=job.source)
+                except Exception as persist_exc:
+                    logging.error(
+                        "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                        job.id,
+                        JOB_STATUS_CANCELLED,
+                        persist_exc,
+                    )
+                    try:
+                        self.store.record_failure(
+                            job,
+                            error_message=f"cancel_persistence_failed:{persist_exc}",
+                            retryable=False,
+                            retry_delay_seconds=self.retry_delay_seconds,
+                        )
+                    except Exception as fallback_exc:
+                        logging.error(
+                            "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                            job.id,
+                            JOB_STATUS_FAILED,
+                            fallback_exc,
+                        )
                 return
             _log_event(
                 logging.INFO,
@@ -1335,18 +1357,6 @@ class DownloadWorkerEngine:
                 media_intent=job.media_intent,
             )
             return
-        if self._is_job_cancelled(job.id, stop_event):
-            self.store.mark_canceled(job.id, reason="Cancelled by user")
-            _log_event(
-                logging.INFO,
-                "job_cancelled",
-                job_id=job.id,
-                trace_id=job.trace_id,
-                source=job.source,
-                origin=job.origin,
-                media_intent=job.media_intent,
-            )
-            return
         if hasattr(job, "get"):
             intent = job.get("media_intent") or job.get("payload", {}).get("media_intent")
         else:
@@ -1356,6 +1366,18 @@ class DownloadWorkerEngine:
             intent = getattr(job, "media_intent", None) or payload.get("media_intent")
 
         try:
+            if self._is_job_cancelled(job.id, stop_event):
+                self.store.mark_canceled(job.id, reason="Cancelled by user")
+                _log_event(
+                    logging.INFO,
+                    "job_cancelled",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    origin=job.origin,
+                    media_intent=job.media_intent,
+                )
+                return
             if intent == "music_track":
                 logger.info(f"[WORKER] processing music_track: {job}")
                 job = self._resolve_music_track_job(job)
@@ -1434,16 +1456,38 @@ class DownloadWorkerEngine:
             )
         except Exception as exc:
             if isinstance(exc, CancelledError):
-                self.store.mark_canceled(job.id, reason=str(exc) or "Cancelled by user")
-                _log_event(
-                    logging.INFO,
-                    "job_cancelled",
-                    job_id=job.id,
-                    trace_id=job.trace_id,
-                    source=job.source,
-                    origin=job.origin,
-                    media_intent=job.media_intent,
-                )
+                try:
+                    self.store.mark_canceled(job.id, reason=str(exc) or "Cancelled by user")
+                    _log_event(
+                        logging.INFO,
+                        "job_cancelled",
+                        job_id=job.id,
+                        trace_id=job.trace_id,
+                        source=job.source,
+                        origin=job.origin,
+                        media_intent=job.media_intent,
+                    )
+                except Exception as persist_exc:
+                    logging.error(
+                        "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                        job.id,
+                        JOB_STATUS_CANCELLED,
+                        persist_exc,
+                    )
+                    try:
+                        self.store.record_failure(
+                            job,
+                            error_message=f"cancel_persistence_failed:{persist_exc}",
+                            retryable=False,
+                            retry_delay_seconds=self.retry_delay_seconds,
+                        )
+                    except Exception as fallback_exc:
+                        logging.error(
+                            "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                            job.id,
+                            JOB_STATUS_FAILED,
+                            fallback_exc,
+                        )
                 return
             if (
                 isinstance(exc, TypeError)
@@ -1460,12 +1504,21 @@ class DownloadWorkerEngine:
                 )
             error_message = f"{type(exc).__name__}: {exc}"
             retryable = is_retryable_error(exc)
-            new_status = self.store.record_failure(
-                job,
-                error_message=error_message,
-                retryable=retryable,
-                retry_delay_seconds=self.retry_delay_seconds,
-            )
+            try:
+                new_status = self.store.record_failure(
+                    job,
+                    error_message=error_message,
+                    retryable=retryable,
+                    retry_delay_seconds=self.retry_delay_seconds,
+                )
+            except Exception as persist_exc:
+                logging.error(
+                    "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                    job.id,
+                    JOB_STATUS_FAILED,
+                    persist_exc,
+                )
+                return
             _log_event(
                 logging.ERROR,
                 "job_failed",

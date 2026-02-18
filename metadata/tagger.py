@@ -6,9 +6,9 @@ try:
 except ImportError:  # pragma: no cover - optional dependency in tests
     MutagenFile = None
 try:
-    from mutagen.id3 import APIC, ID3, TCON, TDRC, TIT2, TPE1, TPE2, TALB, TRCK, TXXX, USLT
+    from mutagen.id3 import APIC, ID3, TCON, TDRC, TIT2, TPE1, TPE2, TALB, TRCK, TPOS, TXXX, USLT
 except ImportError:  # pragma: no cover - optional dependency in tests
-    APIC = ID3 = TCON = TDRC = TIT2 = TPE1 = TPE2 = TALB = TRCK = TXXX = USLT = None
+    APIC = ID3 = TCON = TDRC = TIT2 = TPE1 = TPE2 = TALB = TRCK = TPOS = TXXX = USLT = None
 try:
     from mutagen.mp4 import MP4, MP4Cover
 except ImportError:  # pragma: no cover - optional dependency in tests
@@ -42,13 +42,16 @@ def _apply_id3_tags(file_path, tags, artwork, source_title, allow_overwrite):
     changed |= _set_id3_text(audio, "TIT2", tags.get("title"), allow_overwrite)
     changed |= _set_id3_text(audio, "TPE2", tags.get("album_artist"), allow_overwrite)
     changed |= _set_id3_text(audio, "TRCK", tags.get("track_number"), allow_overwrite)
-    changed |= _set_id3_text(audio, "TDRC", tags.get("year"), allow_overwrite)
+    changed |= _set_id3_text(audio, "TPOS", tags.get("disc_number"), allow_overwrite)
+    changed |= _set_id3_text(audio, "TDRC", tags.get("date") or tags.get("year"), allow_overwrite)
     changed |= _set_id3_text(audio, "TCON", tags.get("genre"), allow_overwrite)
     changed |= _set_id3_txxx(audio, "SOURCE", "YouTube", allow_overwrite)
     if source_title:
         changed |= _set_id3_txxx(audio, "SOURCE_TITLE", source_title, allow_overwrite)
     if tags.get("recording_id"):
         changed |= _set_id3_txxx(audio, "MBID", tags.get("recording_id"), allow_overwrite)
+    if tags.get("mb_release_id"):
+        changed |= _set_id3_txxx(audio, "MUSICBRAINZ_RELEASEID", tags.get("mb_release_id"), allow_overwrite)
     lyrics = tags.get("lyrics")
     if lyrics:
         if allow_overwrite:
@@ -95,9 +98,13 @@ def _apply_mp4_tags(file_path, tags, artwork, source_title, allow_overwrite):
     if track_number and (allow_overwrite or "trkn" not in mp4_tags):
         mp4_tags["trkn"] = [(track_number, 0)]
         changed = True
-    year = tags.get("year")
-    if year and (allow_overwrite or "\xa9day" not in mp4_tags):
-        mp4_tags["\xa9day"] = [str(year)]
+    disc_number = _normalize_track(tags.get("disc_number"))
+    if disc_number and (allow_overwrite or "disk" not in mp4_tags):
+        mp4_tags["disk"] = [(disc_number, 0)]
+        changed = True
+    date_value = tags.get("date") or tags.get("year")
+    if date_value and (allow_overwrite or "\xa9day" not in mp4_tags):
+        mp4_tags["\xa9day"] = [str(date_value)]
         changed = True
     genre = tags.get("genre")
     if genre and (allow_overwrite or "\xa9gen" not in mp4_tags):
@@ -108,6 +115,8 @@ def _apply_mp4_tags(file_path, tags, artwork, source_title, allow_overwrite):
         changed |= _set_mp4_freeform(mp4_tags, "SOURCE_TITLE", source_title, allow_overwrite)
     if tags.get("recording_id"):
         changed |= _set_mp4_freeform(mp4_tags, "MBID", tags.get("recording_id"), allow_overwrite)
+    if tags.get("mb_release_id"):
+        changed |= _set_mp4_freeform(mp4_tags, "MUSICBRAINZ_RELEASEID", tags.get("mb_release_id"), allow_overwrite)
     if artwork and (allow_overwrite or "covr" not in mp4_tags):
         img_data = artwork.get("data")
         if img_data:
@@ -135,13 +144,16 @@ def _apply_generic_tags(file_path, tags, artwork, source_title, allow_overwrite)
     changed |= _set_generic(audio.tags, "lyrics", tags.get("lyrics"), allow_overwrite)
     changed |= _set_generic(audio.tags, "albumartist", tags.get("album_artist"), allow_overwrite)
     changed |= _set_generic(audio.tags, "tracknumber", tags.get("track_number"), allow_overwrite)
-    changed |= _set_generic(audio.tags, "date", tags.get("year"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "discnumber", tags.get("disc_number"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "date", tags.get("date") or tags.get("year"), allow_overwrite)
     changed |= _set_generic(audio.tags, "genre", tags.get("genre"), allow_overwrite)
     changed |= _set_generic(audio.tags, "source", "YouTube", allow_overwrite)
     if source_title:
         changed |= _set_generic(audio.tags, "source_title", source_title, allow_overwrite)
     if tags.get("recording_id"):
         changed |= _set_generic(audio.tags, "mbid", tags.get("recording_id"), allow_overwrite)
+    if tags.get("mb_release_id"):
+        changed |= _set_generic(audio.tags, "musicbrainz_releaseid", tags.get("mb_release_id"), allow_overwrite)
     if changed:
         audio.save()
 
@@ -160,6 +172,7 @@ def _set_id3_text(audio, frame_id, value, allow_overwrite):
         "TIT2": TIT2,
         "TPE2": TPE2,
         "TRCK": TRCK,
+        "TPOS": TPOS,
         "TDRC": TDRC,
         "TCON": TCON,
     }
