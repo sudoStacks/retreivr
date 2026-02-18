@@ -523,11 +523,17 @@ class MusicBrainzService:
         def _canonical_artist_from_credit(artist_credit_list):
             if not isinstance(artist_credit_list, list):
                 return ""
-            return "".join(
-                (ac.get("artist", {}).get("name", "") + ac.get("joinphrase", ""))
-                for ac in artist_credit_list
-                if isinstance(ac, dict)
-            ).strip()
+            parts = []
+            for ac in artist_credit_list:
+                if not isinstance(ac, dict):
+                    continue
+                name = ac.get("artist", {}).get("name") or ac.get("name") or ""
+                if name:
+                    parts.append(str(name))
+                joinphrase = ac.get("joinphrase")
+                if joinphrase:
+                    parts.append(str(joinphrase))
+            return "".join(parts).strip()
 
         release_payload = payload.get("release", {}) if isinstance(payload, dict) else {}
         media = release_payload.get("medium-list", []) if isinstance(release_payload, dict) else []

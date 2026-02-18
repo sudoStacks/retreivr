@@ -979,11 +979,7 @@ class DownloadWorkerEngine:
                 continue
             query = self._build_music_track_query(artist, track, album, is_live=allow_live)
             try:
-                if hasattr(adapter, "search_track"):
-                    candidates = adapter.search_track(artist, track, album, 6)
-                else:
-                    query = self._build_music_track_query(artist, track, album)
-                    candidates = adapter._search(query, 6)
+                candidates = adapter.search_music_track(query, 6)
             except Exception:
                 logging.exception("Music track search adapter failed source=%s", source)
                 continue
@@ -1080,37 +1076,41 @@ class DownloadWorkerEngine:
         search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
         logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
         resolved = None
-        if self.search_service and hasattr(self.search_service, "search_best_match"):
+        # Music-track acquisition must go through SearchService for deterministic orchestration/logging.
+        if self.search_service:
             try:
-                resolved = self.search_service.search_best_match(
-                    search_query,
-                    threshold=_MUSIC_TRACK_THRESHOLD,
+                resolved = self.search_service.search_music_track_best_match(
+                    artist,
+                    track,
+                    album=album,
+                    duration_ms=(duration_hint_sec * 1000) if duration_hint_sec else None,
+                    limit=6,
                 )
-            except TypeError:
-                resolved = None
             except Exception:
                 logging.exception("Music track search service failed query=%s", search_query)
-        if not resolved:
-            resolved = self._resolve_music_track_with_adapters(
-                artist,
-                track,
-                album,
-                duration_hint_sec=duration_hint_sec,
-                allow_live=allow_live,
-            )
 
         resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
         if not _is_http_url(resolved_url):
             logging.error("Music track search failed")
             raise RuntimeError("music_track_no_candidate_above_threshold")
         selected_score = None
+        duration_delta_ms = None
         if isinstance(resolved, dict):
             selected_score = resolved.get("final_score")
+            try:
+                resolved_duration = resolved.get("duration_ms")
+                if resolved_duration is None and resolved.get("duration_sec") is not None:
+                    resolved_duration = int(resolved.get("duration_sec")) * 1000
+                if resolved_duration is not None and duration_hint_sec is not None:
+                    duration_delta_ms = abs(int(resolved_duration) - (int(duration_hint_sec) * 1000))
+            except Exception:
+                duration_delta_ms = None
         logger.info(
             f"[MUSIC] threshold={_MUSIC_TRACK_THRESHOLD:.2f} "
             f"selected_score={selected_score if selected_score is not None else 'n/a'} "
             f"candidate={resolved_url}"
         )
+        logger.info("[MUSIC] selected_duration_delta_ms=%s", duration_delta_ms)
 
         source = resolved_source or resolve_source(resolved_url)
         external_id = extract_video_id(resolved_url) if source in {"youtube", "youtube_music"} else None
