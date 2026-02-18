@@ -1,9 +1,18 @@
 import logging
 import os
 
-from mutagen import File as MutagenFile
-from mutagen.id3 import APIC, ID3, TCON, TDRC, TIT2, TPE1, TPE2, TALB, TRCK, TXXX, USLT
-from mutagen.mp4 import MP4, MP4Cover
+try:
+    from mutagen import File as MutagenFile
+except ImportError:  # pragma: no cover - optional dependency in tests
+    MutagenFile = None
+try:
+    from mutagen.id3 import APIC, ID3, TCON, TDRC, TIT2, TPE1, TPE2, TALB, TRCK, TXXX, USLT
+except ImportError:  # pragma: no cover - optional dependency in tests
+    APIC = ID3 = TCON = TDRC = TIT2 = TPE1 = TPE2 = TALB = TRCK = TXXX = USLT = None
+try:
+    from mutagen.mp4 import MP4, MP4Cover
+except ImportError:  # pragma: no cover - optional dependency in tests
+    MP4 = MP4Cover = None
 
 
 def apply_tags(file_path, tags, artwork, *, source_title=None, allow_overwrite=False, dry_run=False):
@@ -21,6 +30,8 @@ def apply_tags(file_path, tags, artwork, *, source_title=None, allow_overwrite=F
 
 
 def _apply_id3_tags(file_path, tags, artwork, source_title, allow_overwrite):
+    if ID3 is None:
+        raise RuntimeError("mutagen id3 support is required for MP3 tagging")
     try:
         audio = ID3(file_path)
     except Exception:
@@ -43,27 +54,35 @@ def _apply_id3_tags(file_path, tags, artwork, source_title, allow_overwrite):
         if allow_overwrite:
             audio.delall("USLT")
         if allow_overwrite or not audio.getall("USLT"):
-            audio.add(USLT(encoding=3, lang="eng", desc="Lyrics", text=str(lyrics)))
-            changed = True
+            try:
+                audio.add(USLT(encoding=3, lang="eng", desc="Lyrics", text=str(lyrics)))
+                changed = True
+            except Exception:
+                logging.warning("Failed to write lyrics tag for %s", file_path, exc_info=True)
     if artwork and (allow_overwrite or not audio.getall("APIC")):
         if allow_overwrite:
             for frame in audio.getall("APIC"):
                 audio.delall("APIC")
-        changed = True
-        audio.add(
-            APIC(
-                encoding=3,
-                mime=artwork.get("mime") or "image/jpeg",
-                type=3,
-                desc="cover",
-                data=artwork.get("data"),
+        try:
+            audio.add(
+                APIC(
+                    encoding=3,
+                    mime=artwork.get("mime") or "image/jpeg",
+                    type=3,
+                    desc="cover",
+                    data=artwork.get("data"),
+                )
             )
-        )
+            changed = True
+        except Exception:
+            logging.warning("Failed to embed artwork for %s", file_path, exc_info=True)
     if changed:
         audio.save(file_path)
 
 
 def _apply_mp4_tags(file_path, tags, artwork, source_title, allow_overwrite):
+    if MP4 is None:
+        raise RuntimeError("mutagen mp4 support is required for MP4 tagging")
     audio = MP4(file_path)
     mp4_tags = audio.tags or {}
     changed = False
@@ -101,6 +120,8 @@ def _apply_mp4_tags(file_path, tags, artwork, source_title, allow_overwrite):
 
 
 def _apply_generic_tags(file_path, tags, artwork, source_title, allow_overwrite):
+    if MutagenFile is None:
+        raise RuntimeError("mutagen is required for generic tagging")
     audio = MutagenFile(file_path)
     if not audio:
         logging.warning("Music metadata tagging skipped: unsupported file %s", file_path)

@@ -47,6 +47,13 @@
           autocomplete="off"
         />
 
+        <div class="home-advanced-row">
+          <label class="home-advanced-field">
+            <span>Music Mode (Spotify metadata, album structure, validation)</span>
+            <input id="home-music-mode" type="checkbox">
+          </label>
+        </div>
+
         <div class="home-search-toggles">
           <div id="home-source-filters" class="home-source-filters">
             <button
@@ -80,18 +87,13 @@
         <div id="home-advanced-panel" class="home-advanced-panel hidden">
           <div class="home-advanced-row">
             <label class="home-advanced-field">
-              <span>Music mode</span>
-              <input id="home-music-mode" type="checkbox">
-            </label>
-
-            <label class="home-advanced-field">
               <span>Format</span>
               <select id="home-format">
                 <option value="">Default</option>
                 <option value="mp3">mp3</option>
                 <option value="mp4">mp4</option>
-                <option value="webm">webm</option>
                 <option value="mkv">mkv</option>
+                <option value="webm">webm</option>
               </select>
             </label>
 
@@ -126,89 +128,6 @@
         <div id="home-results-list"></div>
       </div>
     </section>
-    <section class="panel" id="run-panel" data-page="legacy-run">
-      <div class="panel-title">Run Controls</div>
-      <div class="stack">
-        <div class="group">
-          <div class="group-title">Playlists</div>
-          <div class="row">
-            <button id="run-playlists" class="button">Run Playlists</button>
-          </div>
-          
-        </div>
-
-        <div class="group">
-          <div class="group-title">Single URL</div>
-          <label class="field long">
-            <span>Video URL</span>
-            <input id="run-single-url" type="text" placeholder="https://www.youtube.com/watch?v=...">
-          </label>
-          <label class="field long gap-top">
-            <span>Delivery</span>
-            <div class="row delivery-options">
-              <label class="radio">
-                <input type="radio" name="run-delivery-mode" value="server" checked>
-                <span>Save to server library</span>
-              </label>
-              <label class="radio">
-                <input type="radio" name="run-delivery-mode" value="client">
-                <span>Download to this device</span>
-              </label>
-            </div>
-          </label>
-          <label class="field medium gap-top">
-            <span id="run-destination-label">Destination (single runs)</span>
-            <div class="row">
-              <input id="run-destination" type="text" placeholder="downloads">
-              <button id="browse-run-destination" class="button ghost small" type="button">Browse</button>
-            </div>
-          </label>
-        <div class="row">
-          <label class="field short">
-            <span>Format override</span>
-            <select id="run-format">
-              <option value="">(config default)</option>
-              <option value="webm">webm</option>
-              <option value="mp4">mp4</option>
-              <option value="mkv">mkv</option>
-              <option value="mp3">mp3</option>
-            </select>
-          </label>
-          <label class="field medium">
-            <span>JS runtime override</span>
-            <input id="run-js-runtime" type="text" placeholder="node:/usr/bin/node">
-          </label>
-          <label class="field inline short">
-            <span>Music mode</span>
-            <input id="run-music-mode" type="checkbox">
-          </label>
-          </div>
-        <div class="row">
-          <button id="run-single" class="button">Run Single URL</button>
-          <a id="run-single-download" class="button ghost small" href="#" aria-disabled="true">Download last</a>
-        </div>
-      </div>
-
-        <div class="group">
-          <div class="group-title">Single Playlist</div>
-          <label class="field long">
-            <span>Playlist URL or ID</span>
-            <input id="run-playlist-id" type="text" placeholder="https://www.youtube.com/playlist?list=...">
-          </label>
-          <label class="field short gap-top">
-            <span>Account (optional)</span>
-            <input id="run-playlist-account" type="text" placeholder="account name from config">
-          </label>
-          <div class="row">
-            <button id="run-playlist-once" class="button">Run Playlist Once</button>
-          </div>
-          <div class="notice">Uses the same destination and format overrides as single URL runs.</div>
-        </div>
-
-        <div id="run-message" class="notice" role="status"></div>
-      </div>
-    </section>
-
     <section class="panel" id="status-panel" data-page="status">
       <div class="panel-title">Status</div>
       <div class="stack">
@@ -276,6 +195,29 @@
             <div class="stat">
               <span class="label">Quiet window remaining</span>
               <span id="watcher-quiet-remaining">-</span>
+            </div>
+          </div>
+        </div>
+        <div class="group">
+          <div class="group-title">Spotify Sync Status</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">OAuth</span>
+              <span id="spotify-status-oauth">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Last Liked Songs Sync</span>
+              <span id="spotify-status-liked">-</span>
+            </div>
+          </div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">Last Saved Albums Sync</span>
+              <span id="spotify-status-saved">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Last Playlists Sync</span>
+              <span id="spotify-status-playlists">-</span>
             </div>
           </div>
         </div>
@@ -404,9 +346,9 @@
               <span>Final format</span>
               <select id="cfg-final-format">
                 <option value="">(not set)</option>
-                <option value="webm">webm (default)</option>
+                <option value="mkv">mkv (default)</option>
                 <option value="mp4">mp4</option>
-                <option value="mkv">mkv</option>
+                <option value="webm">webm</option>
                 <option value="mp3">mp3</option>
               </select>
             </label>
@@ -598,6 +540,62 @@
         <div class="group">
           <div class="group-title">Spotify Playlists</div>
           <div id="spotify-playlists-list" class="stack"></div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Spotify Integration</div>
+          <div class="grid two">
+            <label class="field full" for="spotify-client-id">
+              <span>Client ID</span>
+              <input id="spotify-client-id" type="text">
+            </label>
+            <label class="field full" for="spotify-client-secret">
+              <span>Client Secret</span>
+              <input id="spotify-client-secret" type="text">
+            </label>
+            <label class="field full" for="spotify-redirect-uri">
+              <span>Redirect URI</span>
+              <input id="spotify-redirect-uri" type="text" readonly>
+            </label>
+          </div>
+          <div class="row">
+            <span class="label">Connection Status</span>
+            <span id="spotify-connection-status">Not connected</span>
+          </div>
+          <div class="row">
+            <button id="spotify-connect-btn" class="button" type="button">Connect Spotify</button>
+            <button id="spotify-disconnect-btn" class="button ghost" type="button" style="display: none;">Disconnect</button>
+          </div>
+          <div class="grid two">
+            <label class="field inline short">
+              <span>Sync Liked Songs</span>
+              <input id="spotify-sync-liked" type="checkbox">
+            </label>
+            <label class="field short">
+              <span>Liked Songs interval (minutes)</span>
+              <input id="spotify-liked-interval" type="number" min="1" step="1">
+            </label>
+            <label class="field inline short">
+              <span>Sync Saved Albums</span>
+              <input id="spotify-sync-saved" type="checkbox">
+            </label>
+            <label class="field short">
+              <span>Saved Albums interval (minutes)</span>
+              <input id="spotify-saved-interval" type="number" min="1" step="1">
+            </label>
+            <label class="field inline short">
+              <span>Sync My Playlists</span>
+              <input id="spotify-sync-playlists" type="checkbox">
+            </label>
+            <label class="field short">
+              <span>Playlists interval (minutes)</span>
+              <input id="spotify-playlists-interval" type="number" min="1" step="1">
+            </label>
+          </div>
+          <label class="field full" for="config-spotify-playlists">
+            <span>Spotify Playlists (one per line)</span>
+            <textarea id="config-spotify-playlists" rows="4"></textarea>
+          </label>
         </div>
 
         <div class="group">

@@ -24,6 +24,10 @@ const state = {
   homeSearchRequestId: null,
   homeResultsTimer: null,
   homeSearchMode: "searchOnly",
+  homeMusicMode: false,
+  homeAlbumCandidatesRequestId: null,
+  homeQueuedAlbumReleaseGroups: new Set(),
+  homeAlbumCoverCache: {},
   homeRequestContext: {},
   homeBestScores: {},
   homeCandidateCache: {},
@@ -40,6 +44,8 @@ const state = {
   homeDirectJobTimer: null,
   homeJobTimer: null,
   homeJobSnapshot: null,
+  spotifyOauthConnected: false,
+  spotifyConnectedNoticeShown: false,
 };
 const browserState = {
   open: false,
@@ -70,6 +76,8 @@ const GITHUB_RELEASE_PAGE = "https://github.com/Retreivr/retreivr/releases";
 const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at";
 const RELEASE_CACHE_KEY = "yt_archiver_release_cache";
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version";
+const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
+const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
 const HOME_SOURCE_PRIORITY_MAP = {
   auto: null,
   youtube: ["youtube"],
@@ -118,13 +126,14 @@ function normalizePageName(page) {
   if (!page) {
     return "home";
   }
-  if (page === "search") {
+  const cleanPage = String(page).split("?")[0] || page;
+  if (cleanPage === "search") {
     return "advanced";
   }
-  if (["downloads", "history", "logs"].includes(page)) {
+  if (["downloads", "history", "logs"].includes(cleanPage)) {
     return "status";
   }
-  return page;
+  return cleanPage;
 }
 
 function setNotice(el, message, isError = false) {
@@ -210,7 +219,13 @@ function setPage(page) {
     refreshLogs();
   } else if (target === "config") {
     if (!state.config || !state.configDirty) {
-      loadConfig();
+      loadConfig().then(async () => {
+        await refreshSpotifyConfig();
+        if (consumeSpotifyConnectedHashFlag()) {
+          await refreshSpotifyConfig();
+          setConfigNotice("Spotify connected successfully.", false, true);
+        }
+      });
     }
     refreshSchedule();
   } else if (target === "advanced") {
@@ -236,6 +251,19 @@ function setPage(page) {
       .catch(() => {});
     refreshSearchQueue();
   }
+}
+
+function consumeSpotifyConnectedHashFlag() {
+  const hash = window.location.hash || "";
+  if (!hash.includes("spotify=connected")) {
+    return false;
+  }
+  if (state.spotifyConnectedNoticeShown) {
+    return false;
+  }
+  history.replaceState(null, "", window.location.pathname + window.location.search);
+  state.spotifyConnectedNoticeShown = true;
+  return true;
 }
 
 function isValidHttpUrl(value) {
@@ -1078,24 +1106,6 @@ async function refreshStatus() {
       $("#status-video-progress-meta").textContent = "-";
     }
 
-    const singleLink = $("#run-single-download");
-    if (singleLink) {
-      const clientDeliveryId = status.client_delivery_id;
-      const fileId = status.last_completed_file_id;
-      if (clientDeliveryId) {
-        singleLink.href = `/api/deliveries/${clientDeliveryId}/download`;
-        singleLink.textContent = "Download to device";
-        singleLink.setAttribute("aria-disabled", "false");
-      } else if (fileId) {
-        singleLink.href = downloadUrl(fileId);
-        singleLink.textContent = "Download last";
-        singleLink.setAttribute("aria-disabled", "false");
-      } else {
-        singleLink.href = "#";
-        singleLink.textContent = "Download last";
-        singleLink.setAttribute("aria-disabled", "true");
-      }
-    }
     const cancelBtn = $("#status-cancel");
     if (cancelBtn) {
       cancelBtn.disabled = !data.running;
@@ -1107,12 +1117,53 @@ async function refreshStatus() {
           await cancelJob(jobId);
           await refreshStatus();
         } catch (err) {
-          setNotice($("#run-message"), `Cancel failed: ${err.message}`, true);
+          setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
         }
       };
     }
+
+    try {
+      const spotifyStatus = await fetchJson("/api/spotify/status");
+      const oauthConnected = !!spotifyStatus.oauth_connected;
+      const oauthEl = $("#spotify-status-oauth");
+      if (oauthEl) {
+        oauthEl.textContent = oauthConnected ? "Connected" : "Not connected";
+      }
+      const likedEl = $("#spotify-status-liked");
+      if (likedEl) {
+        if (spotifyStatus.liked_sync_running) {
+          likedEl.textContent = "Running...";
+          likedEl.classList.add("running");
+        } else {
+          likedEl.classList.remove("running");
+          likedEl.textContent = formatTimestamp(spotifyStatus.last_liked_sync) || "-";
+        }
+      }
+      const savedEl = $("#spotify-status-saved");
+      if (savedEl) {
+        if (spotifyStatus.saved_sync_running) {
+          savedEl.textContent = "Running...";
+          savedEl.classList.add("running");
+        } else {
+          savedEl.classList.remove("running");
+          savedEl.textContent = formatTimestamp(spotifyStatus.last_saved_sync) || "-";
+        }
+      }
+      const playlistsEl = $("#spotify-status-playlists");
+      if (playlistsEl) {
+        if (spotifyStatus.playlists_sync_running) {
+          playlistsEl.textContent = "Running...";
+          playlistsEl.classList.add("running");
+        } else {
+          playlistsEl.classList.remove("running");
+          playlistsEl.textContent = formatTimestamp(spotifyStatus.last_playlists_sync) || "-";
+        }
+      }
+    } catch (err) {
+      // Best-effort status enrichment; ignore when endpoint is unavailable.
+    }
   } catch (err) {
-    setNotice($("#run-message"), `Status error: ${err.message}`, true);
+    setNotice($("#home-search-message"), `Status error: ${err.message}`, true);
   }
 }
 
@@ -1567,6 +1618,59 @@ function parseHomeSearchQuery(value, preferAlbum) {
   };
 }
 
+function homeMusicDebugEnabled() {
+  try {
+    return localStorage.getItem(HOME_MUSIC_DEBUG_KEY) === "1";
+  } catch (_err) {
+    return false;
+  }
+}
+
+function homeMusicDebugLog(...args) {
+  if (!homeMusicDebugEnabled()) {
+    return;
+  }
+  console.debug(...args);
+}
+
+function ensureHomeMusicModeBadge() {
+  let badge = $("#home-music-mode-badge");
+  if (badge) {
+    return badge;
+  }
+  const headerActions = document.querySelector(".home-results-header-actions");
+  if (!headerActions) {
+    return null;
+  }
+  badge = document.createElement("span");
+  badge.id = "home-music-mode-badge";
+  badge.className = "chip idle hidden";
+  badge.textContent = "Music Mode";
+  headerActions.appendChild(badge);
+  return badge;
+}
+
+function updateHomeMusicModeUI() {
+  const toggle = $("#home-music-mode");
+  if (toggle) {
+    toggle.checked = !!state.homeMusicMode;
+  }
+  const badge = ensureHomeMusicModeBadge();
+  if (badge) {
+    badge.classList.toggle("hidden", !state.homeMusicMode);
+  }
+}
+
+function loadHomeMusicModePreference() {
+  const raw = localStorage.getItem(HOME_MUSIC_MODE_KEY);
+  state.homeMusicMode = raw === "true";
+  updateHomeMusicModeUI();
+}
+
+function saveHomeMusicModePreference() {
+  localStorage.setItem(HOME_MUSIC_MODE_KEY, state.homeMusicMode ? "true" : "false");
+}
+
 function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
   const preferAlbum = $("#home-prefer-albums")?.checked;
   const parsed = parseHomeSearchQuery($("#home-search-input")?.value, preferAlbum);
@@ -1575,7 +1679,7 @@ function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
   }
   const minScoreRaw = parseFloat($("#home-min-score")?.value);
   const destination = $("#home-destination")?.value.trim();
-  const treatAsMusic = $("#home-music-mode")?.checked ?? $("#home-treat-music")?.checked ?? false;
+  const treatAsMusic = !!state.homeMusicMode;
   const formatOverride = $("#home-format")?.value.trim();
   const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const rawText = rawQuery || $("#home-search-input")?.value || "";
@@ -1717,6 +1821,260 @@ function setHomeResultsDetail(text, isError = false) {
   detailEl.textContent = text;
   detailEl.classList.toggle("home-results-error", isError);
   detailEl.classList.remove("hidden");
+}
+
+function clearHomeAlbumCandidates() {
+  const existing = document.getElementById("home-album-candidates");
+  if (existing) {
+    existing.remove();
+  }
+}
+
+function normalizeMusicAlbumCandidates(rawCandidates) {
+  if (!Array.isArray(rawCandidates)) {
+    return [];
+  }
+  return rawCandidates
+    .map((item) => {
+      const releaseGroupId = item?.release_group_id || item?.album_id || null;
+      if (!releaseGroupId) {
+        return null;
+      }
+      return {
+        release_group_id: releaseGroupId,
+        title: item?.title || "",
+        artist_credit: item?.artist_credit || item?.artist || "",
+        first_release_date: item?.first_release_date || item?.first_released || "",
+        primary_type: item?.primary_type || "Album",
+        secondary_types: Array.isArray(item?.secondary_types) ? item.secondary_types : [],
+        score: Number.isFinite(Number(item?.score)) ? Number(item.score) : null,
+        track_count: Number.isFinite(Number(item?.track_count)) ? Number(item.track_count) : null,
+      };
+    })
+    .filter(Boolean);
+}
+
+function uniqueMusicAlbumCandidates(candidates) {
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = String(candidate?.release_group_id || "").trim();
+    if (!key || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function renderHomeAlbumCandidates(candidates, query = "") {
+  clearHomeAlbumCandidates();
+  const homeResults = document.getElementById("home-results");
+  const header = homeResults?.querySelector(".home-results-header");
+  if (!homeResults || !header) {
+    return;
+  }
+
+  const showPanel = !!state.homeMusicMode && !!String(query || "").trim();
+  if (!showPanel) {
+    return;
+  }
+
+  const normalized = uniqueMusicAlbumCandidates(normalizeMusicAlbumCandidates(candidates));
+  const container = document.createElement("div");
+  container.id = "home-album-candidates";
+  container.className = "stack";
+  const panelHeader = document.createElement("div");
+  panelHeader.className = "row";
+  const panelTitle = document.createElement("div");
+  panelTitle.className = "group-title";
+  panelTitle.textContent = "Albums (MusicBrainz)";
+  panelHeader.appendChild(panelTitle);
+  container.appendChild(panelHeader);
+
+  if (!normalized.length) {
+    const empty = document.createElement("div");
+    empty.className = "meta";
+    empty.textContent = "No album matches found";
+    container.appendChild(empty);
+    header.insertAdjacentElement("afterend", container);
+    return;
+  }
+
+  normalized.forEach((candidate) => {
+    const card = document.createElement("div");
+    card.className = "home-result-card album-card";
+
+    const cover = document.createElement("img");
+    cover.className = "album-cover";
+    cover.alt = candidate.title ? `${candidate.title} cover` : "Album cover";
+    cover.loading = "lazy";
+    cover.style.width = "64px";
+    cover.style.height = "64px";
+    cover.style.objectFit = "cover";
+    cover.style.borderRadius = "8px";
+    cover.style.display = "none";
+    cover.style.flexShrink = "0";
+    card.appendChild(cover);
+
+    const body = document.createElement("div");
+    body.className = "stack";
+    body.style.flex = "1";
+
+    const title = document.createElement("span");
+    title.className = "album-title home-candidate-title";
+    title.textContent = candidate.title || "";
+    body.appendChild(title);
+
+    const artist = document.createElement("span");
+    artist.className = "album-artist meta";
+    artist.textContent = candidate.artist_credit || "";
+    body.appendChild(artist);
+
+    const date = document.createElement("span");
+    date.className = "album-date meta";
+    date.textContent = candidate.first_release_date || "";
+    body.appendChild(date);
+
+    const badges = document.createElement("div");
+    badges.className = "row";
+    const primary = document.createElement("span");
+    primary.className = "chip idle";
+    primary.textContent = candidate.primary_type || "Album";
+    badges.appendChild(primary);
+    (candidate.secondary_types || []).forEach((type) => {
+      const secondary = document.createElement("span");
+      secondary.className = "chip idle";
+      secondary.textContent = String(type);
+      badges.appendChild(secondary);
+    });
+    if (candidate.score !== null) {
+      const score = document.createElement("span");
+      score.className = "meta";
+      score.textContent = `Score ${candidate.score}`;
+      badges.appendChild(score);
+    }
+    body.appendChild(badges);
+    card.appendChild(body);
+
+    const button = document.createElement("button");
+    button.className = "button primary small album-download-btn";
+    button.dataset.releaseGroupId = candidate.release_group_id || "";
+    button.dataset.albumTitle = candidate.title || "";
+    const alreadyQueued = state.homeQueuedAlbumReleaseGroups.has(candidate.release_group_id || "");
+    button.textContent = alreadyQueued ? "Queued..." : "Download Album";
+    button.disabled = alreadyQueued;
+    card.appendChild(button);
+
+    container.appendChild(card);
+  });
+  container.addEventListener("click", async (event) => {
+    const button = event.target.closest(".album-download-btn");
+    if (!button) {
+      return;
+    }
+    const releaseGroupId = button.dataset.releaseGroupId;
+    if (!releaseGroupId) {
+      return;
+    }
+    if (state.homeQueuedAlbumReleaseGroups.has(releaseGroupId)) {
+      button.disabled = true;
+      button.textContent = "Queued...";
+      return;
+    }
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    try {
+      const payload = {
+        release_group_id: releaseGroupId,
+        destination: $("#home-destination")?.value.trim() || null,
+        final_format: $("#home-format")?.value.trim() || null,
+        music_mode: true,
+      };
+      homeMusicDebugLog("[MUSIC UI] queue album", payload);
+      const result = await fetchJson("/api/music/album/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      state.homeQueuedAlbumReleaseGroups.add(releaseGroupId);
+      container.querySelectorAll(`.album-download-btn[data-release-group-id="${CSS.escape(releaseGroupId)}"]`)
+        .forEach((dupButton) => {
+          dupButton.disabled = true;
+          dupButton.textContent = "Queued...";
+        });
+      button.textContent = "Queued...";
+      const count = Number.isFinite(Number(result?.tracks_enqueued))
+        ? Number(result.tracks_enqueued)
+        : 0;
+      setNotice(
+        $("#home-search-message"),
+        `Queued album: ${button.dataset.albumTitle || "Album"} — ${count} tracks`,
+        false
+      );
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+      setNotice($("#home-search-message"), `Album queue failed: ${err.message}`, true);
+    }
+  });
+  header.insertAdjacentElement("afterend", container);
+  const cards = Array.from(container.querySelectorAll(".album-card"));
+  normalized.forEach((candidate, index) => {
+    if (!candidate?.release_group_id) {
+      return;
+    }
+    const card = cards[index];
+    if (!card) {
+      return;
+    }
+    const cover = card.querySelector(".album-cover");
+    if (!cover) {
+      return;
+    }
+    setTimeout(async () => {
+      const coverUrl = await fetchHomeAlbumCoverUrl(candidate.release_group_id);
+      if (coverUrl) {
+        cover.src = coverUrl;
+        cover.style.display = "block";
+      }
+    }, index * 150);
+  });
+}
+
+async function loadAndRenderHomeAlbumCandidates(query, preloadedCandidates = null) {
+  const normalized = (query || "").trim();
+  if (!normalized) {
+    clearHomeAlbumCandidates();
+    return;
+  }
+  let candidates = normalizeMusicAlbumCandidates(preloadedCandidates);
+  if (!candidates.length) {
+    const data = await fetchJson(
+      `/api/music/albums/search?q=${encodeURIComponent(normalized)}&limit=10`
+    );
+    candidates = normalizeMusicAlbumCandidates(Array.isArray(data) ? data : data?.album_candidates);
+  }
+  homeMusicDebugLog("[MUSIC UI] album candidates", { query: normalized, count: candidates.length });
+  renderHomeAlbumCandidates(candidates, normalized);
+}
+
+async function fetchHomeAlbumCoverUrl(albumId) {
+  const key = String(albumId || "").trim();
+  if (!key) {
+    return null;
+  }
+  if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, key)) {
+    return state.homeAlbumCoverCache[key];
+  }
+  try {
+    const data = await fetchJson(`/api/music/album/art/${encodeURIComponent(key)}`);
+    const url = typeof data?.cover_url === "string" && data.cover_url ? data.cover_url : null;
+    state.homeAlbumCoverCache[key] = url;
+    return url;
+  } catch (_err) {
+    state.homeAlbumCoverCache[key] = null;
+    return null;
+  }
 }
 
 function buildHomeResultsStatusInfo(requestId) {
@@ -2028,6 +2386,12 @@ function renderHomeResultItem(item) {
   title.innerHTML = `<strong>${summary}</strong>`;
   header.appendChild(title);
   header.appendChild(renderHomeStatusBadge(item.status));
+  if (item.media_type === "music") {
+    const sourceTag = document.createElement("span");
+    sourceTag.className = "home-candidate-source-tag";
+    sourceTag.textContent = "Spotify Metadata";
+    header.appendChild(sourceTag);
+  }
   card.appendChild(header);
   // Remove destination line for Home page result cards (visual polish)
   // No destination line
@@ -2369,6 +2733,281 @@ function renderHomeDirectUrlCard(preview, status) {
   return card;
 }
 
+function formatDetectedIntentLabel(intentType) {
+  const mapping = {
+    spotify_album: "Album",
+    spotify_playlist: "Playlist",
+    spotify_track: "Track",
+    spotify_artist: "Artist",
+    youtube_playlist: "Playlist",
+  };
+  return mapping[intentType] || intentType || "Unknown";
+}
+
+function isSpotifyPreviewIntent(intentType) {
+  return intentType === "spotify_album" || intentType === "spotify_playlist";
+}
+
+function normalize_spotify_playlist_identifier(value) {
+  if (!value) {
+    return "";
+  }
+  const raw = String(value).trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = new URL(raw);
+    if (parsed.hostname.includes("open.spotify.com") && parsed.pathname.includes("/playlist/")) {
+      return parsed.pathname.split("/playlist/").pop().split("?")[0];
+    }
+  } catch (err) {
+    // ignore and continue
+  }
+  if (raw.startsWith("spotify:playlist:")) {
+    return raw.split(":").pop();
+  }
+  return raw;
+}
+
+function detectSpotifyUrlIntent(raw) {
+  const value = (raw || "").trim();
+  if (!value) {
+    return null;
+  }
+  try {
+    const parsed = new URL(value);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (host !== "open.spotify.com" && host !== "spotify.com" && host !== "www.spotify.com") {
+      return null;
+    }
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (segments.length < 2) {
+      return null;
+    }
+    const kind = String(segments[0] || "").toLowerCase();
+    const identifier = String(segments[1] || "").trim();
+    if (!identifier) {
+      return null;
+    }
+    const mapping = {
+      album: "spotify_album",
+      playlist: "spotify_playlist",
+      track: "spotify_track",
+      artist: "spotify_artist",
+    };
+    const intentType = mapping[kind] || null;
+    if (!intentType) {
+      return null;
+    }
+    return { intentType, identifier };
+  } catch (err) {
+    return null;
+  }
+}
+
+function detect_intent(rawInput) {
+  const spotifyIntent = detectSpotifyUrlIntent(rawInput);
+  if (spotifyIntent) {
+    return {
+      type: spotifyIntent.intentType,
+      identifier: spotifyIntent.identifier,
+    };
+  }
+  return {
+    type: "search",
+    identifier: (rawInput || "").trim(),
+  };
+}
+
+async function fetchIntentPreview(intentType, identifier) {
+  return fetchJson("/api/intent/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      intent_type: intentType,
+      identifier,
+    }),
+  });
+}
+
+async function runSpotifyIntentFlow(spotifyIntent, messageEl) {
+  const intentType = spotifyIntent?.intentType || "";
+  const identifier = spotifyIntent?.identifier || "";
+  if (!intentType || !identifier) {
+    return;
+  }
+
+  state.homeSearchRequestId = null;
+  updateHomeViewAdvancedLink();
+  stopHomeResultPolling();
+  setHomeSearchActive(false);
+  setHomeSearchControlsEnabled(true);
+  showHomeResults(true);
+  setHomeResultsState({ hasResults: true, terminal: true });
+  setHomeResultsStatus("Intent detected");
+  setHomeResultsDetail("Preparing intent preview...", false);
+
+  const list = $("#home-results-list");
+  if (!list) {
+    return;
+  }
+  list.textContent = "";
+
+  const needsPreview = isSpotifyPreviewIntent(intentType);
+  list.appendChild(
+    renderHomeIntentCard(intentType, identifier, {
+      loading: needsPreview,
+      canConfirm: !needsPreview,
+    })
+  );
+
+  if (needsPreview) {
+    try {
+      const preview = await fetchIntentPreview(intentType, identifier);
+      list.textContent = "";
+      list.appendChild(
+        renderHomeIntentCard(intentType, identifier, {
+          preview,
+          canConfirm: true,
+        })
+      );
+      setHomeResultsStatus("Intent preview ready");
+      setHomeResultsDetail("Review metadata and confirm to continue.", false);
+      setNotice(messageEl, "Intent metadata loaded.", false);
+    } catch (previewErr) {
+      list.textContent = "";
+      list.appendChild(
+        renderHomeIntentCard(intentType, identifier, {
+          error: previewErr.message || "Failed to fetch metadata",
+          canConfirm: false,
+        })
+      );
+      setHomeResultsStatus("Intent preview failed");
+      setHomeResultsDetail("Could not fetch Spotify metadata. Please retry.", true);
+      setNotice(messageEl, `Intent preview failed: ${previewErr.message}`, true);
+      setHomeSearchControlsEnabled(true);
+    }
+  } else {
+    setHomeResultsDetail("Confirm to proceed or cancel to return to search.", false);
+    setNotice(messageEl, "Intent detected. Confirm to continue.", false);
+  }
+}
+
+function renderHomeIntentCard(intentType, identifier, options = {}) {
+  const {
+    loading = false,
+    error = "",
+    preview = null,
+    canConfirm = false,
+  } = options;
+  const card = document.createElement("article");
+  card.className = "home-result-card";
+  card.dataset.intentType = intentType || "";
+  card.dataset.intentIdentifier = identifier || "";
+
+  const header = document.createElement("div");
+  header.className = "home-result-header";
+  const title = document.createElement("div");
+  const strong = document.createElement("strong");
+  strong.textContent = `Detected: ${formatDetectedIntentLabel(intentType)}`;
+  title.appendChild(strong);
+  header.appendChild(title);
+  header.appendChild(renderHomeStatusBadge("candidate_found"));
+  card.appendChild(header);
+
+  if (loading) {
+    const loadingEl = document.createElement("div");
+    loadingEl.className = "home-candidate-title";
+    loadingEl.textContent = "Fetching Spotify metadata…";
+    card.appendChild(loadingEl);
+  } else if (error) {
+    const errorEl = document.createElement("div");
+    errorEl.className = "home-candidate-title";
+    errorEl.textContent = `Preview failed: ${error}`;
+    card.appendChild(errorEl);
+  } else if (preview) {
+    const titleEl = document.createElement("div");
+    titleEl.className = "home-candidate-title";
+    titleEl.textContent = `Title: ${preview.title || "-"}`;
+    card.appendChild(titleEl);
+
+    const artistEl = document.createElement("div");
+    artistEl.className = "home-candidate-meta";
+    artistEl.textContent = `Artist: ${preview.artist || "-"}`;
+    card.appendChild(artistEl);
+
+    const countEl = document.createElement("div");
+    countEl.className = "home-candidate-meta";
+    countEl.textContent = `Track count: ${Number.isFinite(preview.track_count) ? preview.track_count : "-"}`;
+    card.appendChild(countEl);
+  } else {
+    const detail = document.createElement("div");
+    detail.className = "home-candidate-title";
+    detail.textContent = `Identifier: ${identifier || "-"}`;
+    card.appendChild(detail);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "row";
+  if (canConfirm) {
+    const confirmButton = document.createElement("button");
+    confirmButton.className = "button";
+    confirmButton.dataset.action = "home-intent-confirm";
+    confirmButton.dataset.intentType = intentType || "";
+    confirmButton.dataset.identifier = identifier || "";
+    if (intentType === "spotify_album") {
+      confirmButton.textContent = "Download Album";
+    } else if (intentType === "spotify_playlist") {
+      confirmButton.textContent = "Download Playlist";
+    } else if (intentType === "spotify_track") {
+      confirmButton.textContent = "Download Track";
+    } else {
+      confirmButton.textContent = "Confirm Download";
+    }
+    actions.appendChild(confirmButton);
+  }
+
+  const cancelButton = document.createElement("button");
+  cancelButton.className = "button ghost";
+  cancelButton.dataset.action = "home-intent-cancel";
+  cancelButton.textContent = "Cancel";
+  actions.appendChild(cancelButton);
+  card.appendChild(actions);
+  return card;
+}
+
+function resetHomeIntentConfirmation() {
+  state.homeSearchRequestId = null;
+  updateHomeViewAdvancedLink();
+  stopHomeResultPolling();
+  stopHomeJobPolling();
+  setHomeSearchControlsEnabled(true);
+  setHomeSearchActive(false);
+  setHomeResultsState({ hasResults: false, terminal: false });
+  showHomeResults(false);
+  const list = $("#home-results-list");
+  if (list) {
+    list.textContent = "";
+  }
+  setHomeResultsStatus("Ready to discover media");
+  setHomeResultsDetail(
+    "Search Only is the default discovery action; use Search & Download to enqueue jobs.",
+    false
+  );
+}
+
+async function executeDetectedIntent(intentType, identifier) {
+  return fetchJson("/api/intent/execute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      intent_type: intentType,
+      identifier,
+    }),
+  });
+}
+
 function showHomeDirectUrlError(url, message, messageEl) {
   const text = message || DIRECT_URL_PLAYLIST_ERROR;
   if (messageEl) {
@@ -2403,6 +3042,7 @@ function showHomeDirectUrlError(url, message, messageEl) {
     container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "failed"));
   }
   setHomeResultsState({ hasResults: true, terminal: true });
+  setHomeSearchControlsEnabled(true);
 }
 
 function showHomeDirectUrlPreview(preview) {
@@ -2541,12 +3181,16 @@ async function refreshHomeResults(requestId) {
   const container = $("#home-results-list");
   if (!container) return null;
   try {
+    const previousContext = state.homeRequestContext[requestId] || {};
     const data = await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}`);
     const requestStatus = data.request?.status || "queued";
+    const requestMediaType = data.request?.media_type || "";
     const items = data.items || [];
     state.homeRequestContext[requestId] = {
       request: data.request || {},
       items,
+      musicMode: previousContext.musicMode || false,
+      musicCandidates: previousContext.musicCandidates || [],
     };
     updateHomeResultsStatusForRequest(requestId);
     const existingCards = new Map();
@@ -2572,6 +3216,14 @@ async function refreshHomeResults(requestId) {
         setHomeSearchActive(false);
         stopHomeResultPolling();
         startHomeJobPolling(requestId);
+        if (requestMediaType === "music" && state.homeAlbumCandidatesRequestId !== requestId) {
+          state.homeAlbumCandidatesRequestId = requestId;
+          const query = $("#home-search-input")?.value || "";
+          const preloaded = state.homeRequestContext[requestId]?.musicCandidates || [];
+          await loadAndRenderHomeAlbumCandidates(query, preloaded);
+        } else if (requestMediaType !== "music") {
+          clearHomeAlbumCandidates();
+        }
       }
       return requestStatus;
     }
@@ -2604,6 +3256,14 @@ async function refreshHomeResults(requestId) {
       setHomeSearchActive(false);
       stopHomeResultPolling();
       startHomeJobPolling(requestId);
+      if (requestMediaType === "music" && state.homeAlbumCandidatesRequestId !== requestId) {
+        state.homeAlbumCandidatesRequestId = requestId;
+        const query = $("#home-search-input")?.value || "";
+        const preloaded = state.homeRequestContext[requestId]?.musicCandidates || [];
+        await loadAndRenderHomeAlbumCandidates(query, preloaded);
+      } else if (requestMediaType !== "music") {
+        clearHomeAlbumCandidates();
+      }
     }
     Object.keys(state.homeCandidateCache).forEach((key) => {
       if (!currentIds.has(key)) {
@@ -2707,6 +3367,26 @@ async function submitHomeSearch(autoEnqueue) {
   state.homeDirectPreview = null;
   stopHomeJobPolling();
   state.homeCandidateData = {};
+  state.homeAlbumCandidatesRequestId = null;
+  clearHomeAlbumCandidates();
+
+  const intent = detect_intent(inputValue);
+  if (intent.type !== "search") {
+    try {
+      await runSpotifyIntentFlow(
+        {
+          intentType: intent.type,
+          identifier: intent.identifier,
+        },
+        messageEl
+      );
+    } catch (spotifyIntentErr) {
+      setNotice(messageEl, `Intent preview failed: ${spotifyIntentErr.message}`, true);
+      setHomeSearchControlsEnabled(true);
+    }
+    return;
+  }
+
   if (deliveryMode === "client" && destinationValue) {
     setNotice(messageEl, "Client delivery does not use a server destination.", true);
     setHomeSearchControlsEnabled(true);
@@ -2741,7 +3421,32 @@ async function submitHomeSearch(autoEnqueue) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    const responseMusicMode = !!data?.music_mode;
+    const responseMusicCandidates = normalizeMusicAlbumCandidates(data?.music_candidates || []);
+    state.homeRequestContext.pending = {
+      musicMode: responseMusicMode,
+      musicCandidates: responseMusicCandidates,
+    };
+    if (state.homeMusicMode && inputValue) {
+      await loadAndRenderHomeAlbumCandidates(inputValue, responseMusicCandidates);
+    }
+    if (data && data.detected_intent) {
+      await runSpotifyIntentFlow(
+        {
+          intentType: data.detected_intent,
+          identifier: data.identifier || "",
+        },
+        messageEl
+      );
+      return;
+    }
     state.homeRequestContext = {};
+    state.homeRequestContext[data.request_id] = {
+      request: {},
+      items: [],
+      musicMode: responseMusicMode,
+      musicCandidates: responseMusicCandidates,
+    };
     state.homeBestScores = {};
     state.homeCandidateCache = {};
     state.homeCandidatesLoading = {};
@@ -2764,7 +3469,7 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   if (!messageEl) return;
   setHomeSearchActive(true);
   const formatOverride = $("#home-format")?.value.trim();
-  const treatAsMusic = $("#home-music-mode")?.checked ?? $("#home-treat-music")?.checked ?? false;
+  const treatAsMusic = !!state.homeMusicMode;
   const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const playlistId = extractPlaylistIdFromUrl(url);
   if (playlistId) {
@@ -3269,9 +3974,9 @@ function addPlaylistRow(entry = {}) {
     <input class="playlist-account" type="text" placeholder="account" value="${entry.account || ""}">
     <select class="playlist-format">
       <option value="">(default)</option>
-      <option value="webm">webm</option>
-      <option value="mp4">mp4</option>
       <option value="mkv">mkv</option>
+      <option value="mp4">mp4</option>
+      <option value="webm">webm</option>
       <option value="mp3">mp3</option>
     </select>
     <label class="field inline">
@@ -3470,6 +4175,153 @@ async function refreshSpotifyPlaylistStatus() {
     updateSpotifyPlaylistStatusDisplay();
   } catch (err) {
     // ignore
+  }
+}
+
+function applySpotifyConfigState(cfg, oauthStatus) {
+  const spotifyCfg = (cfg && cfg.spotify) || {};
+  const connected = !!(oauthStatus && oauthStatus.connected);
+
+  const spotifyClientId = $("#spotify-client-id");
+  if (spotifyClientId) {
+    spotifyClientId.value = spotifyCfg.client_id ?? "";
+  }
+  const spotifyClientSecret = $("#spotify-client-secret");
+  if (spotifyClientSecret) {
+    spotifyClientSecret.value = spotifyCfg.client_secret ?? "";
+  }
+  const spotifyRedirectUri = $("#spotify-redirect-uri");
+  if (spotifyRedirectUri) {
+    const explicitRedirectUri = String(spotifyCfg.redirect_uri || "").trim();
+    const defaultRedirectUri = `${window.location.protocol}//${window.location.host}/api/spotify/oauth/callback`;
+    spotifyRedirectUri.value = explicitRedirectUri || defaultRedirectUri;
+    spotifyRedirectUri.readOnly = true;
+  }
+  const spotifyWatchPlaylists = $("#config-spotify-playlists");
+  if (spotifyWatchPlaylists) {
+    if (cfg.spotify && Array.isArray(cfg.spotify.watch_playlists)) {
+      spotifyWatchPlaylists.value = cfg.spotify.watch_playlists.join("\n");
+    } else {
+      spotifyWatchPlaylists.value = "";
+    }
+  }
+
+  const statusEl = $("#spotify-connection-status");
+  if (statusEl) {
+    statusEl.textContent = connected ? "Connected" : "Not connected";
+    statusEl.classList.toggle("running", connected);
+  }
+
+  const connectBtn = $("#spotify-connect-btn");
+  if (connectBtn) {
+    connectBtn.style.display = connected ? "none" : "";
+  }
+  const disconnectBtn = $("#spotify-disconnect-btn");
+  if (disconnectBtn) {
+    disconnectBtn.style.display = connected ? "" : "none";
+  }
+
+  const syncLiked = $("#spotify-sync-liked");
+  if (syncLiked) {
+    syncLiked.checked = !!spotifyCfg.sync_liked_songs;
+  }
+  const syncSaved = $("#spotify-sync-saved");
+  if (syncSaved) {
+    syncSaved.checked = !!spotifyCfg.sync_saved_albums;
+  }
+  const syncPlaylists = $("#spotify-sync-playlists");
+  if (syncPlaylists) {
+    syncPlaylists.checked = !!spotifyCfg.sync_user_playlists;
+  }
+
+  const likedInterval = $("#spotify-liked-interval");
+  if (likedInterval) {
+    likedInterval.value = spotifyCfg.liked_songs_sync_interval_minutes ?? 15;
+  }
+  const savedInterval = $("#spotify-saved-interval");
+  if (savedInterval) {
+    savedInterval.value = spotifyCfg.saved_albums_sync_interval_minutes ?? 30;
+  }
+  const playlistsInterval = $("#spotify-playlists-interval");
+  if (playlistsInterval) {
+    playlistsInterval.value = spotifyCfg.user_playlists_sync_interval_minutes ?? 30;
+  }
+
+  const syncControls = [
+    $("#spotify-sync-liked"),
+    $("#spotify-sync-saved"),
+    $("#spotify-sync-playlists"),
+    $("#spotify-liked-interval"),
+    $("#spotify-saved-interval"),
+    $("#spotify-playlists-interval"),
+  ];
+  syncControls.forEach((el) => {
+    if (!el) return;
+    el.disabled = !connected;
+    el.setAttribute("aria-disabled", (!connected).toString());
+  });
+
+  if (statusEl) {
+    let helperEl = $("#spotify-connection-helper");
+    if (!connected) {
+      if (!helperEl) {
+        helperEl = document.createElement("div");
+        helperEl.id = "spotify-connection-helper";
+        helperEl.className = "meta";
+        statusEl.insertAdjacentElement("afterend", helperEl);
+      }
+      helperEl.textContent = "Connect Spotify to enable sync options.";
+    } else if (helperEl) {
+      helperEl.remove();
+    }
+  }
+}
+
+async function refreshSpotifyConfig() {
+  try {
+    const cfg = await fetchJson("/api/config");
+    state.config = cfg;
+    let oauthStatus = { connected: false };
+    try {
+      oauthStatus = await fetchJson("/api/spotify/oauth/status");
+    } catch (err) {
+      oauthStatus = { connected: false };
+    }
+    applySpotifyConfigState(cfg, oauthStatus);
+    const connected = !!oauthStatus.connected;
+    if (connected && !state.spotifyOauthConnected) {
+      window.dispatchEvent(new CustomEvent("spotify-oauth-complete"));
+    }
+    state.spotifyOauthConnected = connected;
+  } catch (err) {
+    setConfigNotice(`Spotify config refresh failed: ${err.message}`, true);
+  }
+}
+
+async function connectSpotify() {
+  try {
+    const data = await fetchJson("/api/spotify/oauth/connect");
+    if (data && data.auth_url) {
+      window.open(data.auth_url, "_blank", "noopener");
+    }
+    setConfigNotice("Complete Spotify authorization in the opened window.", false);
+    await refreshSpotifyConfig();
+  } catch (err) {
+    setConfigNotice(`Spotify connect failed: ${err.message}`, true);
+  }
+}
+
+async function disconnectSpotify() {
+  try {
+    await fetchJson("/api/spotify/oauth/disconnect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    await refreshSpotifyConfig();
+    setConfigNotice("Spotify disconnected.", false);
+  } catch (err) {
+    setConfigNotice(`Spotify disconnect failed: ${err.message}`, true);
   }
 }
 
@@ -3735,6 +4587,58 @@ function buildConfigFromForm() {
     delete base.telegram;
   }
 
+  base.spotify = base.spotify || {};
+  const spotifyClientId = $("#spotify-client-id")?.value.trim() || "";
+  const spotifyClientSecret = $("#spotify-client-secret")?.value.trim() || "";
+  const spotifyRedirectUri = $("#spotify-redirect-uri")?.value.trim() || "";
+  if (spotifyClientId) {
+    base.spotify.client_id = spotifyClientId;
+  } else {
+    delete base.spotify.client_id;
+  }
+  if (spotifyClientSecret) {
+    base.spotify.client_secret = spotifyClientSecret;
+  } else {
+    delete base.spotify.client_secret;
+  }
+  if (spotifyRedirectUri) {
+    base.spotify.redirect_uri = spotifyRedirectUri;
+  } else {
+    delete base.spotify.redirect_uri;
+  }
+  const spotifyWatchPlaylistsInput = $("#config-spotify-playlists");
+  if (spotifyWatchPlaylistsInput) {
+    const rawPlaylists = spotifyWatchPlaylistsInput.value.trim();
+    const entries = rawPlaylists
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    base.spotify.watch_playlists = entries;
+  }
+  base.spotify.sync_liked_songs = !!$("#spotify-sync-liked")?.checked;
+  base.spotify.sync_saved_albums = !!$("#spotify-sync-saved")?.checked;
+  base.spotify.sync_user_playlists = !!$("#spotify-sync-playlists")?.checked;
+
+  const clampSpotifyInterval = (rawValue) => {
+    const parsed = parseInt(rawValue, 10);
+    if (!Number.isFinite(parsed)) {
+      return 30;
+    }
+    if (parsed < 1) {
+      return 1;
+    }
+    return parsed;
+  };
+
+  const likedInterval = clampSpotifyInterval($("#spotify-liked-interval")?.value);
+  base.spotify.liked_songs_sync_interval_minutes = likedInterval;
+
+  const savedInterval = clampSpotifyInterval($("#spotify-saved-interval")?.value);
+  base.spotify.saved_albums_sync_interval_minutes = savedInterval;
+
+  const playlistsInterval = clampSpotifyInterval($("#spotify-playlists-interval")?.value);
+  base.spotify.user_playlists_sync_interval_minutes = playlistsInterval;
+
   const accounts = {};
   $$(".account-row").forEach((row) => {
     const name = row.querySelector(".account-name").value.trim();
@@ -3813,6 +4717,21 @@ function buildConfigFromForm() {
 }
 
 async function saveConfig() {
+  const rawText = $("#config-spotify-playlists")?.value.trim() || "";
+  if (rawText) {
+    const entries = rawText.split(/\r?\n/).map((s) => s.trim());
+    for (const entry of entries) {
+      if (!entry) {
+        continue;
+      }
+      const id = normalize_spotify_playlist_identifier(entry);
+      if (!id.match(/^[A-Za-z0-9]+$/)) {
+        setConfigNotice(`Invalid playlist identifier: ${entry}`, true);
+        return;
+      }
+    }
+  }
+
   const result = buildConfigFromForm();
   if (result.errors.length) {
     setConfigNotice(result.errors.join("; "), true);
@@ -3825,7 +4744,7 @@ async function saveConfig() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(result.config),
     });
-    setConfigNotice("Config saved", false, true);
+    setConfigNotice("Spotify playlists updated", false, true);
     state.config = result.config;
     state.configDirty = false;
     updatePollingState();
@@ -3844,101 +4763,22 @@ async function updateYtdlp() {
   }
 }
 
-async function startRun(payload) {
+async function startRun(payload, opts = {}) {
+  const messageEl = opts.messageEl || $("#home-search-message");
   try {
-    setNotice($("#run-message"), "Starting run...", false);
+    setNotice(messageEl, "Starting run...", false);
     const data = await fetchJson("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    setNotice($("#run-message"), "Run started", false);
+    setNotice(messageEl, "Run started", false);
     await refreshStatus();
     return data;
   } catch (err) {
-    setNotice($("#run-message"), `Run failed: ${err.message}`, true);
+    setNotice(messageEl, `Run failed: ${err.message}`, true);
     return null;
   }
-}
-
-function buildRunPayload() {
-  const payload = {};
-  const singleUrl = $("#run-single-url").value.trim();
-  const deliveryMode = getSingleDeliveryMode();
-  if (singleUrl) {
-    payload.single_url = singleUrl;
-    payload.delivery_mode = deliveryMode;
-  }
-  const destination = $("#run-destination").value.trim();
-  if (destination && deliveryMode !== "client") {
-    payload.destination = destination;
-  }
-  const finalFormat = $("#run-format").value.trim();
-  if (finalFormat) {
-    payload.final_format_override = finalFormat;
-  }
-  const jsRuntime = $("#run-js-runtime").value.trim();
-  if (jsRuntime) {
-    payload.js_runtime = jsRuntime;
-  }
-  const musicMode = $("#run-music-mode");
-  if (musicMode && musicMode.checked) {
-    payload.music_mode = true;
-  }
-  return payload;
-}
-
-function getSingleDeliveryMode() {
-  const selected = document.querySelector('input[name="run-delivery-mode"]:checked');
-  return selected ? selected.value : "server";
-}
-
-function applySingleDeliveryMode() {
-  const mode = getSingleDeliveryMode();
-  const destInput = $("#run-destination");
-  const destLabel = $("#run-destination-label");
-  const browseBtn = $("#browse-run-destination");
-  if (mode === "client") {
-    destInput.value = "";
-    destInput.disabled = true;
-    destInput.placeholder = "Download to this device";
-    browseBtn.disabled = true;
-    destLabel.textContent = "Download destination (client)";
-  } else {
-    destInput.disabled = false;
-    destInput.placeholder = "downloads";
-    browseBtn.disabled = false;
-    destLabel.textContent = "Destination (single runs)";
-  }
-}
-
-function buildPlaylistPayload() {
-  const payload = {};
-  const playlistValue = $("#run-playlist-id").value.trim();
-  if (playlistValue) {
-    payload.playlist_id = playlistValue;
-  }
-  const account = $("#run-playlist-account").value.trim();
-  if (account) {
-    payload.playlist_account = account;
-  }
-  const destination = $("#run-destination").value.trim();
-  if (destination) {
-    payload.destination = destination;
-  }
-  const finalFormat = $("#run-format").value.trim();
-  if (finalFormat) {
-    payload.final_format_override = finalFormat;
-  }
-  const jsRuntime = $("#run-js-runtime").value.trim();
-  if (jsRuntime) {
-    payload.js_runtime = jsRuntime;
-  }
-  const musicMode = $("#run-music-mode");
-  if (musicMode && musicMode.checked) {
-    payload.music_mode = true;
-  }
-  return payload;
 }
 
 async function handleCopy(event, noticeEl) {
@@ -3990,7 +4830,7 @@ function setupTimers() {
     if (!logsAuto || !logsAuto.checked) {
       return;
     }
-    if (state.currentPage !== "logs") {
+    if (state.currentPage !== "status") {
       return;
     }
     withPollingGuard(refreshLogs);
@@ -4092,6 +4932,20 @@ function bindEvents() {
   if (homeSearchOnly) {
     homeSearchOnly.addEventListener("click", () => submitHomeSearch(false));
   }
+  const homeMusicMode = $("#home-music-mode");
+  if (homeMusicMode) {
+    homeMusicMode.addEventListener("change", () => {
+      state.homeMusicMode = !!homeMusicMode.checked;
+      saveHomeMusicModePreference();
+      updateHomeMusicModeUI();
+      const hasQuery = ($("#home-search-input")?.value || "").trim().length > 0;
+      if (hasQuery) {
+        stopHomeResultPolling();
+        setHomeSearchControlsEnabled(true);
+        submitHomeSearch(false);
+      }
+    });
+  }
   const homeSourceToggle = $("#home-source-toggle");
   const homeSourcePanel = $("#home-source-panel");
   if (homeSourceToggle && homeSourcePanel) {
@@ -4144,6 +4998,36 @@ function bindEvents() {
   const homeResultsList = $("#home-results-list");
   if (homeResultsList) {
     homeResultsList.addEventListener("click", async (event) => {
+      const cancelIntentButton = event.target.closest('button[data-action="home-intent-cancel"]');
+      if (cancelIntentButton) {
+        resetHomeIntentConfirmation();
+        setNotice($("#home-search-message"), "Intent confirmation cancelled.", false);
+        return;
+      }
+      const confirmIntentButton = event.target.closest('button[data-action="home-intent-confirm"]');
+      if (confirmIntentButton) {
+        const messageEl = $("#home-search-message");
+        const intentType = confirmIntentButton.dataset.intentType || "";
+        const identifier = confirmIntentButton.dataset.identifier || "";
+        if (!intentType || !identifier) {
+          setNotice(messageEl, "Intent payload is incomplete.", true);
+          return;
+        }
+        confirmIntentButton.disabled = true;
+        setNotice(messageEl, "Submitting intent...", false);
+        try {
+          await executeDetectedIntent(intentType, identifier);
+          setNotice(messageEl, "Intent submitted.", false);
+          setHomeResultsStatus("Intent submitted");
+          setHomeResultsDetail("Download flow will continue once backend execution is implemented.", false);
+        } catch (err) {
+          setNotice(messageEl, `Intent submit failed: ${err.message}`, true);
+          setHomeResultsDetail(`Intent submit failed: ${err.message}`, true);
+        } finally {
+          confirmIntentButton.disabled = false;
+        }
+        return;
+      }
       const directButton = event.target.closest('button[data-action="home-direct-download"]');
       if (directButton) {
         if (directButton.disabled) return;
@@ -4234,10 +5118,7 @@ function bindEvents() {
     const input = $("#cfg-single-download-folder");
     openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input.value));
   });
-  $("#browse-run-destination").addEventListener("click", () => {
-    const input = $("#run-destination");
-    openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input.value));
-  });
+  // TODO(webUI/app.js::legacy-run): keep this marker while legacy-run removal rolls out across user docs.
   const homeBrowse = $("#home-destination-browse");
   if (homeBrowse) {
     homeBrowse.addEventListener("click", () => {
@@ -4320,15 +5201,18 @@ function bindEvents() {
     }
   });
   $("#oauth-complete").addEventListener("click", completeOauth);
+  const spotifyConnectBtn = $("#spotify-connect-btn");
+  if (spotifyConnectBtn) {
+    spotifyConnectBtn.addEventListener("click", connectSpotify);
+  }
+  const spotifyDisconnectBtn = $("#spotify-disconnect-btn");
+  if (spotifyDisconnectBtn) {
+    spotifyDisconnectBtn.addEventListener("click", disconnectSpotify);
+  }
 
   $("#add-account").addEventListener("click", () => addAccountRow("", {}));
   $("#add-playlist").addEventListener("click", () => addPlaylistRow({}));
 
-  $("#run-playlists").addEventListener("click", () => {
-    const jsRuntime = $("#run-js-runtime").value.trim();
-    const payload = jsRuntime ? { js_runtime: jsRuntime } : {};
-    startRun(payload);
-  });
   $("#status-cancel").addEventListener("click", async () => {
     const ok = confirm("Are you sure you want to kill downloads in progress?");
     if (!ok) {
@@ -4336,30 +5220,11 @@ function bindEvents() {
     }
     try {
       await fetchJson("/api/cancel", { method: "POST" });
-      setNotice($("#run-message"), "Cancel requested", false);
+      setNotice($("#home-search-message"), "Cancel requested", false);
       await refreshStatus();
     } catch (err) {
-      setNotice($("#run-message"), `Cancel failed: ${err.message}`, true);
+      setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
     }
-  });
-  $$('input[name="run-delivery-mode"]').forEach((input) => {
-    input.addEventListener("change", applySingleDeliveryMode);
-  });
-  $("#run-single").addEventListener("click", () => {
-    const payload = buildRunPayload();
-    if (!payload.single_url) {
-      setNotice($("#run-message"), "Single URL is required", true);
-      return;
-    }
-    startRun(payload);
-  });
-  $("#run-playlist-once").addEventListener("click", () => {
-    const payload = buildPlaylistPayload();
-    if (!payload.playlist_id) {
-      setNotice($("#run-message"), "Playlist URL or ID is required", true);
-      return;
-    }
-    startRun(payload);
   });
 
   $("#toggle-theme").addEventListener("click", () => {
@@ -4395,11 +5260,18 @@ function bindEvents() {
     });
   }
 
-  applySingleDeliveryMode();
 }
 
 async function init() {
+  window.addEventListener("spotify-oauth-complete", () => {
+    setNotice(
+      $("#home-results-detail"),
+      "Spotify connected successfully. Initial sync has started.",
+      false
+    );
+  });
   applyTheme(resolveTheme());
+  loadHomeMusicModePreference();
   bindEvents();
   setupNavActions();
   await loadPaths();

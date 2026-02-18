@@ -42,18 +42,21 @@ def _score_album_match(artist, album, candidate):
 
 
 class SpotifyMetadataProvider(CanonicalMetadataProvider):
-    def __init__(self, *, client_id, client_secret, cache=None, min_confidence=0.92):
+    def __init__(self, *, client_id, client_secret, access_token=None, cache=None, min_confidence=0.92):
         self.client_id = client_id
         self.client_secret = client_secret
+        self.access_token = (access_token or "").strip() or None
         self.cache = cache
         self.min_confidence = float(min_confidence or 0.92)
         self._token = None
         self._token_expires_at = 0
 
     def _has_credentials(self):
-        return bool(self.client_id and self.client_secret)
+        return bool(self.access_token or (self.client_id and self.client_secret))
 
     def _get_token(self):
+        if self.access_token:
+            return self.access_token
         if not self._has_credentials():
             return None
         now = time.time()

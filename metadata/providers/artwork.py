@@ -1,23 +1,23 @@
 import io
 import logging
 
-import requests
 from PIL import Image
+from metadata.services.musicbrainz_service import get_musicbrainz_service
 
 
 def fetch_artwork(release_id, max_size_px=1500):
     if not release_id:
         return None
-    url = f"https://coverartarchive.org/release/{release_id}/front"
+    service = get_musicbrainz_service()
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
+        payload = service.fetch_cover_art(release_id, timeout=10)
+        if not payload:
             return None
     except Exception:
         logging.debug("Artwork download failed for release %s", release_id)
         return None
-    content_type = response.headers.get("Content-Type", "image/jpeg")
-    data = response.content
+    content_type = payload.get("mime", "image/jpeg")
+    data = payload.get("data")
     try:
         image = Image.open(io.BytesIO(data))
         if max_size_px:

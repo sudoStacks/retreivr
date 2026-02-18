@@ -1,0 +1,206 @@
+"""Download worker behavior for resolved Spotify media jobs."""
+
+from __future__ import annotations
+
+import logging
+import re
+import shutil
+from pathlib import Path
+from typing import Any, Optional, Protocol
+
+from config.settings import ENABLE_DURATION_VALIDATION, SPOTIFY_DURATION_TOLERANCE_SECONDS
+from db.downloaded_tracks import record_downloaded_track
+from media.ffprobe import get_media_duration
+from media.path_builder import build_music_path, ensure_parent_dir
+from media.validation import validate_duration
+from metadata.normalize import normalize_music_metadata
+from metadata.tagging_service import tag_file
+from metadata.types import CanonicalMetadata
+
+logger = logging.getLogger(__name__)
+
+JOB_STATUS_COMPLETED = "completed"
+JOB_STATUS_FAILED = "failed"
+JOB_STATUS_CANCELLED = "cancelled"
+JOB_STATUS_VALIDATION_FAILED = "validation_failed"
+JOB_ALLOWED_STATUSES = {
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_VALIDATION_FAILED,
+}
+
+
+class _Downloader(Protocol):
+    def download(self, media_url: str) -> str:
+        """Download a media URL and return the local file path."""
+
+
+class DownloadWorker:
+    """Worker that downloads media and applies optional music metadata tagging."""
+
+    def __init__(self, downloader: _Downloader) -> None:
+        self._downloader = downloader
+
+    def process_job(self, job: Any) -> dict[str, str | None]:
+        """Process one job and return a structured status/file-path result.
+
+        Returns:
+            A dict with keys:
+            - ``status``: one of ``completed``, ``failed``, ``validation_failed``.
+            - ``file_path``: output path when completed, otherwise ``None``.
+        """
+        payload = getattr(job, "payload", None) or {}
+
+        if payload.get("music_metadata"):
+            # Music metadata payloads are expected to include a resolved media URL.
+            resolved_media = payload.get("resolved_media") or {}
+            media_url = resolved_media.get("media_url")
+            metadata = payload.get("music_metadata")
+            if media_url:
+                try:
+                    # Download from the resolved media URL, then tag with attached metadata.
+                    file_path = self._downloader.download(media_url)
+                    # Optionally enforce duration validation before any file tagging/write side effects.
+                    if ENABLE_DURATION_VALIDATION:
+                        expected_ms = None
+                        if isinstance(metadata, dict):
+                            expected_ms = metadata.get("expected_ms")
+                        else:
+                            expected_ms = getattr(metadata, "expected_ms", None)
+
+                        if expected_ms is not None:
+                            if not validate_duration(
+                                file_path,
+                                int(expected_ms),
+                                SPOTIFY_DURATION_TOLERANCE_SECONDS,
+                            ):
+                                expected_seconds = int(expected_ms) / 1000.0
+                                actual_seconds = float("nan")
+                                try:
+                                    actual_seconds = get_media_duration(file_path)
+                                except Exception:
+                                    logger.exception("failed to retrieve actual duration for validation log")
+                                logger.warning(
+                                    "validation_failed actual=%.2fs expected=%.2fs tolerance=%.2f",
+                                    actual_seconds,
+                                    expected_seconds,
+                                    SPOTIFY_DURATION_TOLERANCE_SECONDS,
+                                )
+                                self._set_job_status(job, payload, JOB_STATUS_VALIDATION_FAILED)
+                                return {"status": JOB_STATUS_VALIDATION_FAILED, "file_path": None}
+
+                    metadata_obj = self._coerce_music_metadata(metadata)
+                    normalized_metadata = normalize_music_metadata(metadata_obj)
+                    # === Canonical Path Enforcement Starts Here ===
+                    temp_path = Path(file_path)
+                    ext = temp_path.suffix.lstrip(".")
+                    root_path = self._resolve_music_root(payload)
+                    canonical_path = build_music_path(root_path, normalized_metadata, ext)
+                    ensure_parent_dir(canonical_path)
+                    try:
+                        shutil.move(str(temp_path), str(canonical_path))
+                    except Exception:
+                        logger.exception("failed to move file to canonical path path=%s", canonical_path)
+                        self._set_job_status(job, payload, JOB_STATUS_FAILED)
+                        return {"status": JOB_STATUS_FAILED, "file_path": None}
+                    try:
+                        tag_file(str(canonical_path), normalized_metadata)
+                    except Exception:
+                        logger.exception("failed to tag canonical file path=%s", canonical_path)
+                        self._set_job_status(job, payload, JOB_STATUS_FAILED)
+                        return {"status": JOB_STATUS_FAILED, "file_path": None}
+                    # Record idempotency state only after download and tagging both succeed.
+                    playlist_id = payload.get("playlist_id")
+                    isrc = getattr(metadata, "isrc", None)
+                    if not isrc and isinstance(metadata, dict):
+                        isrc = metadata.get("isrc")
+                    if playlist_id and isrc:
+                        record_downloaded_track(str(playlist_id), str(isrc), str(canonical_path))
+                    self._set_job_status(job, payload, JOB_STATUS_COMPLETED)
+                    return {"status": JOB_STATUS_COMPLETED, "file_path": str(canonical_path)}
+                except Exception:
+                    logger.exception("music job processing failed")
+                    self._set_job_status(job, payload, JOB_STATUS_FAILED)
+                    return {"status": JOB_STATUS_FAILED, "file_path": None}
+
+        # Non-music or incomplete payloads use the existing default worker behavior.
+        file_path = self.default_download_and_tag(job)
+        return {"status": JOB_STATUS_COMPLETED, "file_path": file_path}
+
+    def default_download_and_tag(self, job: Any) -> str:
+        """Fallback behavior implemented by existing worker flows."""
+        raise NotImplementedError
+
+    @staticmethod
+    def _set_job_status(job: Any, payload: Any, status: str) -> None:
+        """Set worker job status using the supported terminal status values."""
+        if status not in JOB_ALLOWED_STATUSES:
+            raise ValueError(f"unsupported job status: {status}")
+        setattr(job, "status", status)
+        if isinstance(payload, dict):
+            payload["status"] = status
+
+    @staticmethod
+    def _coerce_music_metadata(metadata: Any) -> CanonicalMetadata:
+        """Coerce payload metadata into ``CanonicalMetadata`` for normalization/tagging."""
+        if isinstance(metadata, CanonicalMetadata):
+            return metadata
+
+        payload = metadata if isinstance(metadata, dict) else {}
+        track_num = safe_int(payload.get("track_num"))
+        disc_num = safe_int(payload.get("disc_num"))
+        return CanonicalMetadata(
+            title=str(payload.get("title") or "Unknown Title"),
+            artist=str(payload.get("artist") or "Unknown Artist"),
+            album=str(payload.get("album") or "Unknown Album"),
+            album_artist=str(payload.get("album_artist") or payload.get("artist") or "Unknown Artist"),
+            track_num=track_num if track_num is not None and track_num > 0 else 1,
+            disc_num=disc_num if disc_num is not None and disc_num > 0 else 1,
+            date=str(payload.get("date") or "Unknown"),
+            genre=str(payload.get("genre") or "Unknown"),
+            isrc=(str(payload.get("isrc")).strip() if payload.get("isrc") else None),
+            mbid=(str(payload.get("mbid")).strip() if payload.get("mbid") else None),
+            artwork=payload.get("artwork"),
+            lyrics=(str(payload.get("lyrics")).strip() if payload.get("lyrics") else None),
+        )
+
+    @staticmethod
+    def _resolve_music_root(payload: dict[str, Any]) -> Path:
+        """Resolve music root path from existing payload/config fields."""
+        config = payload.get("config") if isinstance(payload, dict) else None
+        root_value = (
+            payload.get("music_root")
+            or payload.get("destination")
+            or payload.get("destination_dir")
+            or payload.get("output_dir")
+            or (config.get("music_download_folder") if isinstance(config, dict) else None)
+            or "."
+        )
+        root = Path(str(root_value))
+        # build_music_path already inserts the "Music/" segment.
+        if root.name.lower() == "music":
+            return root.parent if str(root.parent) != "" else Path(".")
+        return root
+
+
+def safe_int(value: Any) -> Optional[int]:
+    """Parse an integer from mixed input, returning ``None`` when unavailable.
+
+    The parser extracts the first numeric portion from string inputs, e.g.
+    ``"01/12" -> 1`` and ``"Disc 1" -> 1``. ``None`` and non-numeric values
+    return ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    match = re.search(r"\d+", str(value))
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except (TypeError, ValueError):
+        return None

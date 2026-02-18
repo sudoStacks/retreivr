@@ -46,6 +46,13 @@
   ],
   "yt_dlp_cookies": "",
   "yt_dlp_opts": {},
+  "youtube": {
+    "cookies": {
+      "enabled": false,
+      "path": "tokens/youtube_cookies.txt",
+      "fallback_only": true
+    }
+  },
   "filename_template": "%(title)s - %(uploader)s - %(upload_date)s.%(ext)s",
   "music_filename_template": "%(artist)s/%(album)s/%(track_number)s - %(track)s.%(ext)s",
   "music_metadata": {

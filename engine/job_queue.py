@@ -11,7 +11,7 @@ import traceback
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import uuid4
@@ -22,7 +22,11 @@ from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json_dumps
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
+from engine.search_scoring import rank_candidates, score_candidate
+from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
+
+logger = logging.getLogger(__name__)
 
 JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_CLAIMED = "claimed"
@@ -47,6 +51,10 @@ class CancelledError(Exception):
 class PostprocessingError(Exception):
     pass
 
+
+class CookieFallbackError(RuntimeError):
+    """Raised when the optional YouTube cookie fallback fails."""
+
 _FORMAT_VIDEO = (
     "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
     "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
@@ -69,6 +77,7 @@ _AUDIO_TITLE_TRAIL_RE = re.compile(
     re.IGNORECASE,
 )
 _AUDIO_ARTIST_VEVO_RE = re.compile(r"(vevo)$", re.IGNORECASE)
+_WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _YTDLP_DOWNLOAD_UNSAFE_KEYS = {"download", "skip_download", "simulate", "extract_flat"}
 
@@ -92,6 +101,18 @@ _YTDLP_DOWNLOAD_ALLOWLIST = {
     "source_address",
     "throttledratelimit",
     "user_agent",
+}
+
+_MUSIC_TRACK_SOURCE_PRIORITY = ("youtube_music", "youtube", "soundcloud", "bandcamp")
+_DEFAULT_MATCH_THRESHOLD = 0.92
+_MUSIC_TRACK_THRESHOLD = min(_DEFAULT_MATCH_THRESHOLD * 0.8, 0.70)
+_MUSIC_TRACK_PENALTY_TERMS = ("live", "cover", "karaoke", "remix")
+_MUSIC_TRACK_PENALIZE_TOKENS = ("live", "cover", "karaoke", "remix", "reaction", "ft.", "feat.", "instrumental")
+_MUSIC_SOURCE_PRIORITY_WEIGHTS = {
+    "youtube_music": 10,
+    "youtube": 7,
+    "soundcloud": 4,
+    "bandcamp": 2,
 }
 
 
@@ -195,6 +216,14 @@ def ensure_download_jobs_table(conn):
         "CREATE INDEX IF NOT EXISTS idx_download_jobs_source_status ON download_jobs (source, status)"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_download_jobs_created ON download_jobs (created_at)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_jobs_canonical_dest_status_created "
+        "ON download_jobs (canonical_id, resolved_destination, status, created_at DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_jobs_url_dest_status_created "
+        "ON download_jobs (url, resolved_destination, status, created_at DESC)"
+    )
     conn.commit()
 
 # --- ensure_downloads_table
@@ -232,13 +261,14 @@ def ensure_download_history_table(conn):
             file_size_bytes INTEGER,
             input_url TEXT,
             canonical_url TEXT,
-            external_id TEXT
+            external_id TEXT,
+            channel_id TEXT
         )
         """
     )
     cur.execute("PRAGMA table_info(download_history)")
     existing_columns = {row[1] for row in cur.fetchall()}
-    for column in ("input_url", "canonical_url", "external_id", "source"):
+    for column in ("input_url", "canonical_url", "external_id", "source", "channel_id"):
         if column not in existing_columns:
             cur.execute(f"ALTER TABLE download_history ADD COLUMN {column} TEXT")
     cur.execute(
@@ -415,14 +445,25 @@ class DownloadJobStore:
                 return None
             query = f"""
                 SELECT * FROM download_jobs
-                WHERE ({' OR '.join(clauses)}) AND status=?
+                WHERE ({' OR '.join(clauses)})
+                  AND status IN (?, ?, ?, ?, ?)
                 ORDER BY created_at DESC
                 LIMIT 1
             """
-            params.append(JOB_STATUS_COMPLETED)
+            params.extend(
+                [
+                    JOB_STATUS_COMPLETED,
+                    JOB_STATUS_QUEUED,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                ]
+            )
             cur.execute(query, tuple(params))
             row = cur.fetchone()
-            if not row or not self._row_has_valid_output(row):
+            if not row:
+                return None
+            if row["status"] == JOB_STATUS_COMPLETED and not self._row_has_valid_output(row):
                 return None
             return self._row_to_job(row)
         finally:
@@ -773,6 +814,7 @@ class DownloadWorkerEngine:
         *,
         retry_delay_seconds=30,
         adapters=None,
+        search_service=None,
     ):
         self.db_path = db_path
         self.config = config or {}
@@ -780,6 +822,7 @@ class DownloadWorkerEngine:
         self.retry_delay_seconds = retry_delay_seconds
         self.store = DownloadJobStore(db_path)
         self.adapters = adapters or default_adapters()
+        self.search_service = search_service
         # Ensure required DB tables exist (idempotent).
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         try:
@@ -791,6 +834,267 @@ class DownloadWorkerEngine:
         self._locks_lock = threading.Lock()
         self._cancel_flags = {}
         self._cancel_lock = threading.Lock()
+
+    def _extract_resolved_candidate(self, resolved):
+        if not resolved:
+            return None, None
+        if isinstance(resolved, dict):
+            return resolved.get("url"), resolved.get("source")
+        url = getattr(resolved, "url", None)
+        source = getattr(resolved, "source", None)
+        return url, source
+
+    def _music_tokens(self, value):
+        return _WORD_TOKEN_RE.findall(str(value or "").lower())
+
+    def _music_track_is_live(self, artist, track, album):
+        combined = " ".join([str(artist or ""), str(track or ""), str(album or "")]).lower()
+        return " live " in f" {combined} "
+
+    def _normalize_score_100(self, candidate):
+        raw_score = candidate.get("adapter_score")
+        if raw_score is None:
+            raw_score = candidate.get("raw_score")
+        if raw_score is None:
+            raw_score = candidate.get("final_score")
+        max_score = candidate.get("adapter_max_possible")
+        if max_score is None:
+            max_score = candidate.get("max_score")
+        if max_score is None:
+            max_score = 1.0
+        try:
+            raw_value = float(raw_score or 0.0)
+            max_value = float(max_score or 0.0)
+            if max_value <= 0:
+                return 0.0
+            normalized = (raw_value / max_value) * 100.0
+            return max(0.0, min(100.0, normalized))
+        except Exception:
+            return 0.0
+
+    def _build_music_track_query(self, artist, track, album=None, *, is_live=False):
+        search_terms = [f'"{artist}"', f'"{track}"']
+        if album:
+            search_terms.append(f'"{album}"')
+        search_terms.extend(["audio", "official", "topic"])
+        return " ".join(part for part in search_terms if part).strip()
+
+    def _music_track_adjust_score(self, expected, candidate, *, allow_live=False):
+        title = str(candidate.get("title") or "")
+        uploader = str(candidate.get("uploader") or candidate.get("artist_detected") or "")
+        source = str(candidate.get("source") or "")
+        title_tokens = self._music_tokens(title)
+        uploader_tokens = set(self._music_tokens(uploader))
+        track_tokens = set(self._music_tokens(expected.get("track")))
+        artist_tokens = set(self._music_tokens(expected.get("artist")))
+        expected_track_tokens = self._music_tokens(expected.get("track"))
+        candidate_title_tokens = self._music_tokens(title)
+
+        adjustment = 0.0
+        reasons = []
+
+        if track_tokens and track_tokens.issubset(set(title_tokens)):
+            adjustment += 12.0
+            reasons.append("exact_track_tokens")
+        title_match_increment = 0.0
+        if expected_track_tokens and candidate_title_tokens:
+            if expected_track_tokens == candidate_title_tokens:
+                title_match_increment = 25.0
+            else:
+                shared_count = len(set(expected_track_tokens) & set(candidate_title_tokens))
+                title_match_increment = float(shared_count * 2)
+            adjustment += title_match_increment
+            reasons.append(f"title_match_{title_match_increment:.0f}")
+            logger.debug(
+                f"[MUSIC] title_match score_increase={title_match_increment:.0f} "
+                f"for candidate={candidate.get('url')}"
+            )
+
+        if artist_tokens and uploader_tokens:
+            overlap = len(artist_tokens & uploader_tokens) / max(len(artist_tokens), 1)
+            if overlap >= 0.60:
+                adjustment += 10.0
+                reasons.append("artist_uploader_overlap_high")
+            elif overlap >= 0.30:
+                adjustment += 5.0
+                reasons.append("artist_uploader_overlap")
+
+        expected_duration = expected.get("duration_hint_sec")
+        candidate_duration = candidate.get("duration_sec")
+        try:
+            if expected_duration is not None and candidate_duration is not None:
+                diff_ms = abs((int(candidate_duration) * 1000) - (int(expected_duration) * 1000))
+                duration_increment = 0.0
+                if diff_ms <= 3000:
+                    duration_increment = 20.0
+                elif diff_ms <= 8000:
+                    duration_increment = 10.0
+                elif diff_ms <= 15000:
+                    duration_increment = 5.0
+                if duration_increment > 0.0:
+                    adjustment += duration_increment
+                    reasons.append(f"duration_bonus_{duration_increment:.0f}")
+                logger.debug(
+                    f"[MUSIC] duration_bonus diff={diff_ms} score={duration_increment:.0f}"
+                )
+        except Exception:
+            pass
+
+        title_lower = title.lower()
+        if "provided to youtube" in title_lower:
+            adjustment += 8.0
+            reasons.append("provided_to_youtube")
+        if "topic" in uploader.lower() and source in {"youtube", "youtube_music"}:
+            adjustment += 8.0
+            reasons.append("topic_channel")
+        if "lyrics" in title_lower:
+            adjustment += 2.0
+            reasons.append("lyrics_hint")
+
+        for token in _MUSIC_TRACK_PENALIZE_TOKENS:
+            if allow_live and token == "live":
+                continue
+            if token in title_lower:
+                adjustment -= 10.0
+                reasons.append(f"penalty_{token}")
+                logger.debug(
+                    f"[MUSIC] penalizing token={token} new_score={adjustment:.0f} "
+                    f"for {candidate.get('url')}"
+                )
+        return adjustment, reasons
+
+    def _resolve_music_track_with_adapters(self, artist, track, album=None, *, duration_hint_sec=None, allow_live=False):
+        expected = {
+            "artist": artist,
+            "track": track,
+            "album": album,
+            "duration_hint_sec": duration_hint_sec,
+        }
+        scored = []
+        source_priority = [name for name in _MUSIC_TRACK_SOURCE_PRIORITY if name in self.adapters]
+        source_priority.extend([name for name in self.adapters.keys() if name not in source_priority])
+        for source in source_priority:
+            adapter = self.adapters.get(source)
+            if not adapter:
+                continue
+            query = self._build_music_track_query(artist, track, album, is_live=allow_live)
+            try:
+                if hasattr(adapter, "_search"):
+                    candidates = adapter._search(query, 6)
+                else:
+                    candidates = adapter.search_track(artist, track, album, 6)
+            except Exception:
+                logging.exception("Music track search adapter failed source=%s", source)
+                continue
+            for candidate in candidates or []:
+                url = candidate.get("url") if isinstance(candidate, dict) else None
+                if not _is_http_url(url):
+                    continue
+                candidate = dict(candidate)
+                candidate["source"] = candidate.get("source") or source
+                modifier = adapter.source_modifier(candidate)
+                candidate.update(score_candidate(expected, candidate, source_modifier=modifier))
+                base_score = self._normalize_score_100(candidate)
+                source_weight = int(_MUSIC_SOURCE_PRIORITY_WEIGHTS.get(source, 0))
+                logger.debug(f"[MUSIC] source_priority={source} weight={source_weight}")
+                adjustment, reasons = self._music_track_adjust_score(expected, candidate, allow_live=allow_live)
+                if source_weight:
+                    adjustment += float(source_weight)
+                    reasons.append(f"source_priority_{source_weight}")
+                candidate["music_adjustment"] = adjustment
+                candidate["music_adjustment_reasons"] = ",".join(reasons)
+                candidate["base_score"] = base_score
+                candidate["final_score_100"] = max(0.0, min(100.0, base_score + adjustment))
+                candidate["final_score"] = candidate["final_score_100"] / 100.0
+                scored.append(candidate)
+        if not scored:
+            return None
+        ranked = rank_candidates(scored, source_priority=source_priority)
+        for candidate in ranked:
+            candidate_score = float(candidate.get("final_score") or 0.0)
+            logger.info(f"[MUSIC] threshold_used={_MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
+            if candidate_score >= _MUSIC_TRACK_THRESHOLD:
+                return candidate
+        logger.warning(f"[MUSIC] top 5 candidates for track={track} scores:")
+        for candidate in ranked[:5]:
+            logger.warning(
+                "  score=%.3f source=%s url=%s title=%s",
+                float(candidate.get("final_score") or 0.0),
+                candidate.get("source"),
+                candidate.get("url"),
+                candidate.get("title"),
+            )
+        return None
+
+    def _resolve_music_track_job(self, job):
+        payload = job.output_template if isinstance(job.output_template, dict) else {}
+        canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+        artist = str(payload.get("artist") or canonical.get("artist") or "").strip()
+        track = str(payload.get("track") or canonical.get("track") or canonical.get("title") or "").strip()
+        album = str(payload.get("album") or canonical.get("album") or "").strip() or None
+        duration_ms_raw = payload.get("duration_ms")
+        if duration_ms_raw is None:
+            duration_ms_raw = canonical.get("duration_ms")
+        if duration_ms_raw is None:
+            duration_ms_raw = canonical.get("duration")
+        duration_hint_sec = None
+        try:
+            if duration_ms_raw is not None:
+                duration_hint_sec = max(int(duration_ms_raw) // 1000, 1)
+        except Exception:
+            duration_hint_sec = None
+        allow_live = self._music_track_is_live(artist, track, album)
+        if not artist or not track:
+            logging.error("Music track search failed")
+            raise RuntimeError("music_track_metadata_missing")
+        logger.info(f"[WORKER] processing music_track artist={artist} track={track}")
+
+        search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
+        logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
+        resolved = None
+        if self.search_service and hasattr(self.search_service, "search_best_match"):
+            try:
+                resolved = self.search_service.search_best_match(
+                    search_query,
+                    threshold=_MUSIC_TRACK_THRESHOLD,
+                )
+            except TypeError:
+                resolved = None
+            except Exception:
+                logging.exception("Music track search service failed query=%s", search_query)
+        if not resolved:
+            resolved = self._resolve_music_track_with_adapters(
+                artist,
+                track,
+                album,
+                duration_hint_sec=duration_hint_sec,
+                allow_live=allow_live,
+            )
+
+        resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
+        if not _is_http_url(resolved_url):
+            logging.error("Music track search failed")
+            raise RuntimeError("music_track_no_candidate_above_threshold")
+        selected_score = None
+        if isinstance(resolved, dict):
+            selected_score = resolved.get("final_score")
+        logger.info(
+            f"[MUSIC] threshold={_MUSIC_TRACK_THRESHOLD:.2f} "
+            f"selected_score={selected_score if selected_score is not None else 'n/a'} "
+            f"candidate={resolved_url}"
+        )
+
+        source = resolved_source or resolve_source(resolved_url)
+        external_id = extract_video_id(resolved_url) if source in {"youtube", "youtube_music"} else None
+        canonical_url = canonicalize_url(source, resolved_url, external_id)
+        return replace(
+            job,
+            source=source,
+            url=resolved_url,
+            input_url=resolved_url,
+            canonical_url=canonical_url,
+            external_id=external_id,
+        )
 
     def run_once(self, *, stop_event=None):
         sources = self.store.list_sources_with_queued_jobs()
@@ -888,6 +1192,14 @@ class DownloadWorkerEngine:
             lock.release()
 
     def _execute_job(self, job, *, stop_event=None):
+        if hasattr(job, "keys"):
+            job_keys = list(job.keys())
+        else:
+            try:
+                job_keys = list(vars(job).keys())
+            except Exception:
+                job_keys = []
+        logger.debug(f"[WORKER] received job payload keys={job_keys}")
         if job.status != JOB_STATUS_CLAIMED:
             _log_event(
                 logging.ERROR,
@@ -911,6 +1223,17 @@ class DownloadWorkerEngine:
                 media_intent=job.media_intent,
             )
             return
+        if hasattr(job, "get"):
+            intent = job.get("media_intent") or job.get("payload", {}).get("media_intent")
+        else:
+            payload = getattr(job, "payload", {}) or {}
+            if not isinstance(payload, dict):
+                payload = {}
+            intent = getattr(job, "media_intent", None) or payload.get("media_intent")
+
+        if intent == "music_track":
+            logger.info(f"[WORKER] processing music_track: {job}")
+            job = self._resolve_music_track_job(job)
         adapter = self.adapters.get(job.source)
         if not adapter:
             _log_event(
@@ -1085,7 +1408,7 @@ class YouTubeAdapter:
             if audio_mode:
                 ext = final_format or "mp3"
             elif not ext:
-                ext = final_format or "webm"
+                ext = final_format or "mkv"
             template = audio_template if audio_mode else filename_template
             cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
 
@@ -1097,8 +1420,10 @@ class YouTubeAdapter:
                 embed_metadata(local_file, meta, video_id, paths.thumbs_dir)
 
             final_path = os.path.join(resolved_dir, cleaned_name)
+            final_path = resolve_collision_path(final_path)
             os.makedirs(os.path.dirname(final_path), exist_ok=True)
             atomic_move(local_file, final_path)
+            logger.info(f"[MUSIC] finalized file: {final_path}")
             shutil.rmtree(temp_dir, ignore_errors=True)
 
             size = None
@@ -1153,6 +1478,69 @@ def resolve_cookie_file(config):
         return None
     return resolved
 
+
+def resolve_youtube_cookie_fallback_file(config):
+    youtube_cfg = (config or {}).get("youtube")
+    if not isinstance(youtube_cfg, dict):
+        return None
+    cookies_cfg = youtube_cfg.get("cookies")
+    if not isinstance(cookies_cfg, dict):
+        return None
+    if not cookies_cfg.get("enabled"):
+        return None
+    if not cookies_cfg.get("fallback_only"):
+        return None
+    path = cookies_cfg.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    try:
+        resolved = resolve_dir(path, TOKENS_DIR)
+    except ValueError as exc:
+        logging.error("Invalid youtube cookies path: %s", exc)
+        return None
+    if not os.path.exists(resolved):
+        logging.warning("youtube cookies file not found: %s", resolved)
+        return None
+    return resolved
+
+
+def _is_youtube_access_gate(message: str | None) -> bool:
+    if not message:
+        return False
+    lower_msg = message.lower()
+    triggers = [
+        "this video is not available",
+        "sign in to confirm your age",
+        "login required",
+        "access denied",
+        "age restricted",
+        "age-restricted",
+        "age restriction",
+    ]
+    blockers = [
+        "timed out",
+        "timeout",
+        "connection reset",
+        "temporary failure",
+        "network error",
+        "couldn't download webpage",
+        "unable to download webpage",
+        "http error 403",
+        "http error 404",
+        "geo-restricted",
+        "geoblocked",
+        "geo blocked",
+        "country",
+        "region",
+        "format not available",
+        "private",
+        "removed",
+    ]
+    if not any(trigger in lower_msg for trigger in triggers):
+        return False
+    if any(blocker in lower_msg for blocker in blockers):
+        return False
+    return True
 
 def resolve_media_type(config, *, playlist_entry=None, url=None):
     media_type = None
@@ -1272,6 +1660,13 @@ def canonicalize_url(source: str, url: str | None, external_id: str | None) -> s
 def is_youtube_music_url(url):
     parsed = urllib.parse.urlparse(url)
     return "music.youtube.com" in (parsed.netloc or "").lower()
+
+
+def _is_http_url(url):
+    if not url or not isinstance(url, str):
+        return False
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme in {"http", "https"}
 
 
 def build_ytdlp_opts(context):
@@ -1548,6 +1943,28 @@ def _format_summary(info):
     }
 
 
+def _select_youtube_cookie_fallback(
+    config,
+    url,
+    stderr_text,
+    opts,
+    media_type,
+):
+    fallback_cookie = resolve_youtube_cookie_fallback_file(config)
+    if not fallback_cookie:
+        return None
+    if opts.get("cookiefile"):
+        return None
+    if is_music_media_type(media_type):
+        return None
+    source = resolve_source(url)
+    if source not in {"youtube", "youtube_music"}:
+        return None
+    if not _is_youtube_access_gate(stderr_text):
+        return None
+    return fallback_cookie
+
+
 def download_with_ytdlp(
     url,
     temp_dir,
@@ -1684,7 +2101,13 @@ def download_with_ytdlp(
     cmd_log = _argv_to_redacted_cli(cmd_argv)
 
     try:
-        subprocess.run(cmd_argv, check=True, stdout=DEVNULL, stderr=DEVNULL)
+        subprocess.run(
+            cmd_argv,
+            check=True,
+            stdout=DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         # Log AFTER the command has been executed, per requirement.
         _log_event(
             logging.INFO,
@@ -1694,7 +2117,71 @@ def download_with_ytdlp(
             cli=cmd_log,
         )
     except CalledProcessError as exc:
-        # If a cookiefile is present and yt-dlp produced no completed file in temp_dir, retry once WITHOUT cookies.
+        stderr_output = (exc.stderr or "").strip()
+        fallback_cookie = _select_youtube_cookie_fallback(
+            config=config,
+            url=url,
+            stderr_text=stderr_output,
+            opts=opts_for_run,
+            media_type=media_type,
+        )
+        if fallback_cookie:
+            _log_event(
+                logging.INFO,
+                "YTDLP_YOUTUBE_COOKIE_FALLBACK_ATTEMPT",
+                job_id=job_id,
+                url=url,
+                origin=origin,
+                media_type=media_type,
+                media_intent=media_intent,
+                error=stderr_output,
+            )
+            retry_opts = dict(opts_for_run)
+            retry_opts["cookiefile"] = fallback_cookie
+            cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
+            cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
+            try:
+                subprocess.run(
+                    cmd_retry_argv,
+                    check=True,
+                    stdout=DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                _log_event(
+                    logging.INFO,
+                    "YTDLP_YOUTUBE_COOKIE_FALLBACK_SUCCEEDED",
+                    job_id=job_id,
+                    url=url,
+                    origin=origin,
+                    media_type=media_type,
+                    media_intent=media_intent,
+                )
+                _log_event(
+                    logging.INFO,
+                    "YTDLP_CLI_EQUIVALENT",
+                    job_id=job_id,
+                    url=url,
+                    cli=cmd_retry_log,
+                )
+                if (stop_event and stop_event.is_set()) or (
+                    callable(cancel_check) and cancel_check()
+                ):
+                    raise CancelledError(cancel_reason or "Cancelled by user")
+                return info, _select_download_output(temp_dir, info, audio_mode)
+            except CalledProcessError as fallback_exc:
+                fallback_message = (fallback_exc.stderr or "").strip()
+                _log_event(
+                    logging.ERROR,
+                    "YTDLP_YOUTUBE_COOKIE_FALLBACK_FAILED",
+                    job_id=job_id,
+                    url=url,
+                    origin=origin,
+                    media_type=media_type,
+                    media_intent=media_intent,
+                    error=fallback_message,
+                )
+                raise CookieFallbackError(f"yt_dlp_cookie_fallback_failed: {fallback_exc}")
         if opts.get("cookiefile"):
             found = False
             for entry in os.listdir(temp_dir):
@@ -1789,7 +2276,10 @@ def download_with_ytdlp(
 
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
         raise CancelledError(cancel_reason or "Cancelled by user")
+    return info, _select_download_output(temp_dir, info, audio_mode)
 
+
+def _select_download_output(temp_dir, info, audio_mode):
     local_path = None
     if isinstance(info, dict):
         local_path = info.get("_filename")
@@ -1799,15 +2289,12 @@ def download_with_ytdlp(
                 if local_path:
                     break
 
-    # If yt-dlp reported a concrete output file, use it
     if local_path and os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-        return info, local_path
+        return local_path
 
-    # Otherwise, scan temp_dir for completed artifacts
     candidates = []
     audio_candidates = []
     for entry in os.listdir(temp_dir):
-        # Ignore yt-dlp temporary/partial artifacts
         if entry.endswith((".part", ".ytdl", ".temp")):
             continue
         candidate = os.path.join(temp_dir, entry)
@@ -1820,22 +2307,27 @@ def download_with_ytdlp(
         if size <= 0:
             continue
         candidates.append((size, candidate))
-        if os.path.splitext(candidate)[1].lower() in {".m4a", ".webm", ".opus", ".aac", ".mp3", ".flac"}:
+        if os.path.splitext(candidate)[1].lower() in {
+            ".m4a",
+            ".webm",
+            ".opus",
+            ".aac",
+            ".mp3",
+            ".flac",
+        }:
             audio_candidates.append((size, candidate))
 
-    # In audio_mode, we MUST have an audio-capable artifact
     if audio_mode:
         if not audio_candidates:
             raise PostprocessingError(
                 "No audio stream resolved (video-only format selected)"
             )
         audio_candidates.sort(reverse=True)
-        return info, audio_candidates[0][1]
+        return audio_candidates[0][1]
 
-    # Video mode fallback: pick the largest completed artifact
     if candidates:
         candidates.sort(reverse=True)
-        return info, candidates[0][1]
+        return candidates[0][1]
 
     raise RuntimeError("yt_dlp_no_output")
 
@@ -1881,6 +2373,7 @@ def extract_meta(info, *, fallback_url=None):
         "video_id": info.get("id"),
         "title": info.get("title"),
         "channel": info.get("channel") or info.get("uploader"),
+        "channel_id": info.get("channel_id") or info.get("uploader_id"),
         "artist": info.get("artist") or info.get("uploader"),
         "album": info.get("album"),
         "album_artist": info.get("album_artist"),
@@ -1899,7 +2392,7 @@ def extract_meta(info, *, fallback_url=None):
 def sanitize_for_filesystem(name, maxlen=180):
     if not name:
         return ""
-    safe = re.sub(r"[\\/\\?%*:|\"<>]", "_", str(name)).strip()
+    safe = sanitize_component(str(name))
     safe = re.sub(r"\s+", " ", safe)
     return safe[:maxlen].strip()
 
@@ -1907,13 +2400,8 @@ def sanitize_for_filesystem(name, maxlen=180):
 def pretty_filename(title, channel, upload_date):
     safe_title = sanitize_for_filesystem(title or "")
     safe_channel = sanitize_for_filesystem(channel or "")
-    date = upload_date or ""
-    if safe_channel and date:
-        return f"{safe_title} - {safe_channel} - {date}".strip(" -")
     if safe_channel:
         return f"{safe_title} - {safe_channel}".strip(" -")
-    if date:
-        return f"{safe_title} - {date}".strip(" -")
     return safe_title or "media"
 
 
@@ -1960,15 +2448,13 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
     album = sanitize_for_filesystem(_clean_audio_title(meta.get("album") or ""))
     track = sanitize_for_filesystem(_clean_audio_title(meta.get("track") or meta.get("title") or ""))
     track_number = format_track_number(meta.get("track_number"))
-    fallback = (fallback_id or "media")[:8]
-
     fmt = {
         "artist": artist,
         "album": album,
         "track": track,
         "track_number": track_number,
         "ext": ext,
-        "id": fallback,
+        "id": "",
     }
 
     if template:
@@ -1988,7 +2474,7 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
         if track_number:
             return f"{artist}/{track_number} - {track}.{ext}"
         return f"{artist}/{track}.{ext}"
-    return f"{track or fallback}.{ext}"
+    return f"{track or 'media'}.{ext}"
 
 
 def build_output_filename(meta, fallback_id, ext, template, audio_mode):
@@ -1999,15 +2485,27 @@ def build_output_filename(meta, fallback_id, ext, template, audio_mode):
             rendered = template % {
                 "title": sanitize_for_filesystem(meta.get("title") or fallback_id),
                 "uploader": sanitize_for_filesystem(meta.get("channel") or ""),
-                "upload_date": meta.get("upload_date") or "",
+                "upload_date": "",
                 "ext": ext,
-                "id": fallback_id,
+                "id": "",
             }
             if rendered:
                 return rendered
         except Exception:
             pass
-    return f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}_{fallback_id[:8]}.{ext}"
+    return f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}.{ext}"
+
+
+def resolve_collision_path(path):
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    attempt = 2
+    while True:
+        candidate = f"{stem} ({attempt}){ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        attempt += 1
 
 
 def atomic_move(src, dst):
@@ -2034,6 +2532,7 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
 
     title = meta.get("title") or video_id
     channel = meta.get("channel") or ""
+    channel_id = meta.get("channel_id") or ""
     artist = meta.get("artist") or channel
     album = meta.get("album")
     album_artist = meta.get("album_artist")
@@ -2067,6 +2566,8 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
 
     keywords = ", ".join([str(t) for t in tags if t]) if tags else ""
     comment = f"YouTubeID={video_id} URL={url}"
+    if channel_id:
+        comment = f"{comment} ChannelID={channel_id}"
 
     # Truncate potentially huge fields to avoid container/tag limits
     def _truncate(s: str, limit: int) -> str:
@@ -2148,6 +2649,8 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
             cmd_list.extend(["-metadata", f"date={date_tag}"])
         if description:
             cmd_list.extend(["-metadata", f"description={description}"])
+        if channel_id:
+            cmd_list.extend(["-metadata", f"source_channel_id={channel_id}"])
         if keywords:
             cmd_list.extend(["-metadata", f"keywords={keywords}"])
         if comment:
@@ -2271,8 +2774,8 @@ def record_download_history(db_path, job, filepath, *, meta=None):
             INSERT INTO download_history (
                 video_id, title, filename, destination, source, status,
                 created_at, completed_at, file_size_bytes,
-                input_url, canonical_url, external_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                input_url, canonical_url, external_id, channel_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 video_id,
@@ -2287,6 +2790,7 @@ def record_download_history(db_path, job, filepath, *, meta=None):
                 input_url,
                 canonical_url,
                 external_id,
+                (meta or {}).get("channel_id") if isinstance(meta, dict) else None,
             ),
         )
         conn.commit()
@@ -2312,6 +2816,8 @@ def is_retryable_error(error):
     if isinstance(error, TypeError):
         return False
     if isinstance(error, PostprocessingError):
+        return False
+    if isinstance(error, CookieFallbackError):
         return False
     if isinstance(error, (DownloadError, ExtractorError)):
         message = str(error).lower()

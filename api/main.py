@@ -22,21 +22,24 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import sqlite3
 import subprocess
 import shutil
 import tempfile
 import threading
 import time
+import requests
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from typing import Optional
 
 import anyio
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.errors import HttpError
@@ -71,6 +74,7 @@ from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
 )
+from metadata.services.musicbrainz_service import get_musicbrainz_service
 
 from engine.core import (
     EngineStatus,
@@ -107,6 +111,20 @@ from engine.paths import (
     resolve_dir,
 )
 from engine.runtime import get_runtime_info
+from input.intent_router import IntentType, detect_intent
+from api.intent_dispatcher import execute_intent as dispatch_intent
+from spotify.oauth_client import SPOTIFY_TOKEN_URL, build_auth_url
+from spotify.client import SpotifyPlaylistClient
+from spotify.oauth_store import SpotifyOAuthStore, SpotifyOAuthToken
+from db.playlist_snapshots import PlaylistSnapshotStore
+from scheduler.jobs.spotify_playlist_watch import (
+    normalize_spotify_playlist_identifier,
+    playlist_watch_job,
+    spotify_liked_songs_watch_job,
+    spotify_playlists_watch_job,
+    spotify_saved_albums_watch_job,
+    spotify_user_playlists_watch_job,
+)
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 1
@@ -118,8 +136,18 @@ _BASIC_AUTH_ENABLED = bool(_BASIC_AUTH_USER and _BASIC_AUTH_PASS)
 _TRUST_PROXY = os.environ.get("YT_ARCHIVER_TRUST_PROXY", "").strip().lower() in {"1", "true", "yes", "on"}
 SCHEDULE_JOB_ID = "archive_schedule"
 WATCHER_JOB_ID = "playlist_watcher"
+LIKED_SONGS_JOB_ID = "spotify_liked_songs_watch"
+SAVED_ALBUMS_JOB_ID = "spotify_saved_albums_watch"
+USER_PLAYLISTS_JOB_ID = "spotify_user_playlists_watch"
+SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
+COVER_ART_CACHE_TTL_SECONDS = 3600
+DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
+DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES = 30
+DEFAULT_USER_PLAYLISTS_SYNC_INTERVAL_MINUTES = 30
+DEFAULT_SPOTIFY_PLAYLISTS_SYNC_INTERVAL_MINUTES = 15
+logger = logging.getLogger(__name__)
 OAUTH_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 OAUTH_SESSION_TTL = timedelta(minutes=15)
 _OAUTH_SESSIONS = {}
@@ -133,6 +161,17 @@ DIRECT_URL_PLAYLIST_ERROR = (
 )
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
+
+
+def _mb_service():
+    return get_musicbrainz_service()
+
+
+def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return []
+    return _mb_service().search_release_groups(normalized_query, limit=limit)
 
 def _is_http_url(value: str | None) -> bool:
     if not value or not isinstance(value, str):
@@ -155,6 +194,40 @@ def _sanitize_non_http_urls(obj):
     if isinstance(obj, list):
         return [_sanitize_non_http_urls(v) for v in obj]
     return obj
+
+def notify_run_summary(config, *, run_type: str, status, started_at, finished_at):
+    if run_type not in {"scheduled", "watcher"}:
+        return
+
+    successes = int(getattr(status, "run_successes", 0) or 0)
+    failures = int(getattr(status, "run_failures", 0) or 0)
+    attempted = successes + failures
+
+    if attempted <= 0:
+        return
+
+    duration_label = "unknown"
+    if started_at and finished_at:
+        start_dt = _parse_iso(started_at)
+        finish_dt = _parse_iso(finished_at)
+        if start_dt is not None and finish_dt is not None:
+            duration_sec = int((finish_dt - start_dt).total_seconds())
+            m, s = divmod(max(0, duration_sec), 60)
+            duration_label = f"{m}m {s}s" if m else f"{s}s"
+
+    msg = (
+        "Retreivr Run Summary\n"
+        f"Run type: {run_type}\n"
+        f"Attempted: {attempted}\n"
+        f"Succeeded: {successes}\n"
+        f"Failed: {failures}\n"
+        f"Duration: {duration_label}"
+    )
+
+    try:
+        telegram_notify(config, msg)
+    except Exception:
+        logging.exception("Telegram notify failed (run_type=%s)", run_type)
 
 
 def normalize_search_payload(payload: dict | None, *, default_sources: list[str]) -> dict:
@@ -462,6 +535,7 @@ class SearchRequestPayload(BaseModel):
     duration_hint_sec: int | None = None
     quality_min_bitrate_kbps: int | None = None
     lossless_only: bool = False
+    music_mode: bool = False
     auto_enqueue: bool = True
     source_priority: list[str] | str | None = None
     max_candidates_per_source: int = 5
@@ -482,6 +556,167 @@ class EnqueueCandidatePayload(BaseModel):
 
 class SpotifyPlaylistImportPayload(BaseModel):
     playlist_url: str
+
+
+class IntentExecutePayload(BaseModel):
+    intent_type: IntentType
+    identifier: str
+
+
+class _IntentQueueAdapter:
+    """Queue adapter that writes intent payloads into the unified download queue."""
+
+    def enqueue(self, payload: dict) -> None:
+        if not isinstance(payload, dict):
+            logging.warning("Intent enqueue skipped: payload is not a dict")
+            return
+        engine = getattr(app.state, "worker_engine", None)
+        store = getattr(engine, "store", None) if engine is not None else None
+        if store is None:
+            logging.warning("Intent enqueue skipped: worker engine store unavailable")
+            return
+
+        media_intent = str(payload.get("media_intent") or "").strip() or "track"
+        origin = "spotify_playlist" if payload.get("playlist_id") else "intent"
+        origin_id = str(payload.get("playlist_id") or payload.get("spotify_track_id") or "manual")
+        destination = str(payload.get("destination") or "").strip() or None
+        final_format = str(payload.get("final_format") or "").strip() or None
+
+        def _to_dict(value):
+            if isinstance(value, dict):
+                return dict(value)
+            if value is None:
+                return {}
+            out = {}
+            for key in (
+                "title",
+                "artist",
+                "album",
+                "album_artist",
+                "track_num",
+                "disc_num",
+                "date",
+                "genre",
+                "isrc",
+                "mbid",
+                "lyrics",
+            ):
+                if hasattr(value, key):
+                    out[key] = getattr(value, key)
+            return out
+
+        def _enqueue_music_query_job(artist: str, track: str, album: str | None = None) -> None:
+            normalized_artist = str(artist or "").strip()
+            normalized_track = str(track or "").strip()
+            normalized_album = str(album or "").strip() or None
+            if not normalized_artist or not normalized_track:
+                logging.warning("Intent enqueue skipped: music query missing artist/track")
+                return
+            query = quote(f"{normalized_artist} {normalized_track}".strip())
+            url = f"https://music.youtube.com/search?q={query}"
+            output_template = {
+                "audio_mode": True,
+                "artist": normalized_artist,
+                "track": normalized_track,
+                "album": normalized_album,
+                "track_number": payload.get("track_number"),
+                "disc_number": payload.get("disc_number"),
+                "release_date": payload.get("release_date"),
+                "duration_ms": payload.get("duration_ms"),
+                "artwork_url": payload.get("artwork_url"),
+                "canonical_metadata": {
+                    "artist": normalized_artist,
+                    "track": normalized_track,
+                    "album": normalized_album,
+                    "duration_ms": payload.get("duration_ms"),
+                },
+            }
+            if destination:
+                output_template["output_dir"] = destination
+            if final_format:
+                output_template["final_format"] = final_format
+            canonical_id = (
+                f"music_track:{normalized_artist.lower()}:{(normalized_album or '').lower()}:"
+                f"{str(payload.get('track_number') or '').strip()}:{normalized_track.lower()}"
+            )
+            store.enqueue_job(
+                origin=origin,
+                origin_id=origin_id,
+                media_type="music",
+                media_intent="music_track",
+                source="youtube_music",
+                url=url,
+                input_url=url,
+                output_template=output_template,
+                resolved_destination=destination,
+                canonical_id=canonical_id,
+            )
+            logging.info(
+                "Intent payload queued playlist_id=%s spotify_track_id=%s",
+                payload.get("playlist_id"),
+                payload.get("spotify_track_id"),
+            )
+
+        if media_intent == "music_track":
+            _enqueue_music_query_job(
+                str(payload.get("artist") or ""),
+                str(payload.get("track") or payload.get("title") or ""),
+                str(payload.get("album") or ""),
+            )
+            return
+
+        resolved_media = payload.get("resolved_media") if isinstance(payload.get("resolved_media"), dict) else {}
+        media_url = str(resolved_media.get("media_url") or payload.get("url") or "").strip()
+        if not media_url:
+            fallback_artist = str(payload.get("artist") or "").strip()
+            fallback_track = str(payload.get("track") or payload.get("title") or "").strip()
+            fallback_album = str(payload.get("album") or "").strip() or None
+            if fallback_artist and fallback_track:
+                _enqueue_music_query_job(fallback_artist, fallback_track, fallback_album)
+                return
+            logging.warning("Intent enqueue skipped: no media URL or searchable artist/title available")
+            return
+        source = str(resolved_media.get("source_id") or payload.get("source") or resolve_source(media_url)).strip() or "unknown"
+        music_metadata = _to_dict(payload.get("music_metadata"))
+        output_template = {
+            "audio_mode": True,
+            "canonical_metadata": music_metadata,
+            "artist": music_metadata.get("artist"),
+            "album": music_metadata.get("album"),
+            "track": music_metadata.get("title"),
+            "track_number": music_metadata.get("track_num"),
+            "disc_number": music_metadata.get("disc_num"),
+            "duration_ms": resolved_media.get("duration_ms"),
+        }
+        if destination:
+            output_template["output_dir"] = destination
+        if final_format:
+            output_template["final_format"] = final_format
+        external_ids = music_metadata.get("external_ids") if isinstance(music_metadata.get("external_ids"), dict) else {}
+        canonical_id = str(
+            music_metadata.get("isrc")
+            or music_metadata.get("mbid")
+            or external_ids.get("isrc")
+            or payload.get("spotify_track_id")
+            or ""
+        ).strip() or None
+        store.enqueue_job(
+            origin=origin,
+            origin_id=origin_id,
+            media_type="music",
+            media_intent=media_intent,
+            source=source,
+            url=media_url,
+            input_url=media_url,
+            output_template=output_template,
+            resolved_destination=destination,
+            canonical_id=canonical_id,
+        )
+        logging.info(
+            "Intent payload queued playlist_id=%s spotify_track_id=%s",
+            payload.get("playlist_id"),
+            payload.get("spotify_track_id"),
+        )
 
 
 class SafeJSONResponse(JSONResponse):
@@ -568,6 +803,7 @@ async def startup():
     app.state.schedule_config = schedule_config
     app.state.scheduler.start()
     _apply_schedule_config(schedule_config)
+    _apply_spotify_schedule(config or {})
     if schedule_config.get("enabled") and schedule_config.get("run_on_startup"):
         asyncio.create_task(_handle_scheduled_run())
     if schedule_config.get("enabled"):
@@ -597,16 +833,18 @@ async def startup():
             config or {},
             paths=app.state.paths,
             url=diag_url,
-            final_format_override="webm",
+            final_format_override="mkv",
         )
     app.state.spotify_playlist_importer = SpotifyPlaylistImporter()
     app.state.spotify_import_status = {}
+    app.state.music_cover_art_cache = {}
 
     app.state.worker_stop_event = threading.Event()
     app.state.worker_engine = DownloadWorkerEngine(
         app.state.paths.db_path,
         config or {},
         app.state.paths,
+        search_service=app.state.search_service,
     )
 
     def _worker_runner():
@@ -983,7 +1221,7 @@ def _run_immediate_download_to_client(
         if audio_mode:
             ext = final_format or "mp3"
         elif not ext:
-            ext = final_format or "webm"
+            ext = final_format or "mkv"
         template = audio_template if audio_mode else filename_template
         cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
         final_path = os.path.join(temp_dir, cleaned_name)
@@ -1650,6 +1888,40 @@ def _read_config_or_404():
     return safe_json(_strip_deprecated_fields(config))
 
 
+def _spotify_client_credentials(config: dict | None) -> tuple[str, str]:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    client_id = str(spotify_cfg.get("client_id") or cfg.get("SPOTIFY_CLIENT_ID") or "").strip()
+    client_secret = str(spotify_cfg.get("client_secret") or cfg.get("SPOTIFY_CLIENT_SECRET") or "").strip()
+    return client_id, client_secret
+
+
+def _build_spotify_client_with_optional_oauth(config: dict | None) -> SpotifyPlaylistClient:
+    """Build a Spotify client using OAuth access token when valid, else public mode."""
+    client_id, client_secret = _spotify_client_credentials(config)
+    if not client_id or not client_secret:
+        return SpotifyPlaylistClient()
+
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    existing = store.load()
+    try:
+        token = store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    except Exception as exc:
+        logging.warning("Spotify OAuth token validation failed; using public mode: %s", exc)
+        token = None
+
+    if token is not None:
+        return SpotifyPlaylistClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=token.access_token,
+        )
+
+    if existing is not None:
+        logging.warning("Spotify OAuth token expired/invalid and was cleared; using public mode")
+    return SpotifyPlaylistClient(client_id=client_id, client_secret=client_secret)
+
+
 def _read_config_for_scheduler():
     config_path = app.state.config_path
     if not os.path.exists(config_path):
@@ -1739,7 +2011,7 @@ async def _start_run_with_config(
                 effective_final_format_override = (
                     config.get("default_video_format")
                     or config.get("final_format")
-                    or "webm"
+                    or "mkv"
                 )
             try:
                 logging.info(
@@ -1816,6 +2088,27 @@ async def _start_run_with_config(
                             delivery_mode=delivery_mode or "server",
                         )
                 await anyio.to_thread.run_sync(run_callable)
+                if (
+                    run_source == "api"
+                    and not single_url
+                    and not playlist_id
+                    and bool((config.get("spotify") or {}).get("sync_user_playlists"))
+                ):
+                    logging.info("Manual run triggering Spotify playlist sync (override downtime)")
+                    try:
+                        await _spotify_playlists_schedule_tick(
+                            config=config,
+                            db=PlaylistSnapshotStore(app.state.paths.db_path),
+                            queue=_IntentQueueAdapter(),
+                            spotify_client=_build_spotify_client_with_optional_oauth(config),
+                            search_service=app.state.search_service,
+                            ignore_downtime=True,
+                        )
+                        logging.info("Manual-run Spotify playlist sync completed")
+                    except Exception:
+                        logging.exception("Manual-run Spotify playlist sync failed")
+                if run_source == "api" and not single_url and not playlist_id:
+                    logging.info("Manual run completed (archive + Spotify sync)")
                 # Ensure UI state finalization for direct URL runs
                 if single_url:
                     try:
@@ -1862,6 +2155,14 @@ async def _start_run_with_config(
                     logging.info("State reset to idle")
                 elif app.state.state in {"running", "completed"}:
                     app.state.state = "idle"
+                
+                notify_run_summary(
+                    config,
+                    run_type=run_source,
+                    status=status,
+                    started_at=app.state.started_at,
+                    finished_at=app.state.finished_at,
+                )
 
         app.state.run_task = asyncio.create_task(_runner())
 
@@ -1945,6 +2246,59 @@ def _schedule_tick():
     asyncio.run_coroutine_threadsafe(_handle_scheduled_run(), loop)
 
 
+def _liked_songs_schedule_tick():
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return
+    asyncio.run_coroutine_threadsafe(_handle_liked_songs_scheduled_run(), loop)
+
+
+def _saved_albums_schedule_tick():
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return
+    asyncio.run_coroutine_threadsafe(_handle_saved_albums_scheduled_run(), loop)
+
+
+def _user_playlists_schedule_tick():
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return
+    asyncio.run_coroutine_threadsafe(_handle_user_playlists_scheduled_run(), loop)
+
+
+def _spotify_playlists_schedule_tick(
+    config=None,
+    db=None,
+    queue=None,
+    spotify_client=None,
+    search_service=None,
+    ignore_downtime: bool = False,
+):
+    if config is not None:
+        return spotify_playlists_watch_job(
+            config=config,
+            db=db,
+            queue=queue,
+            spotify_client=spotify_client,
+            search_service=search_service,
+            ignore_downtime=ignore_downtime,
+        )
+
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return
+    config = _read_config_for_scheduler()
+    downtime_active = False
+    if config:
+        downtime_active, _ = _check_downtime(config)
+    if downtime_active:
+        logging.info("Interval Spotify sync tick skipped due to downtime")
+        return
+    logging.info("Interval Spotify sync tick starting")
+    asyncio.run_coroutine_threadsafe(_handle_spotify_playlists_scheduled_run(), loop)
+
+
 async def _handle_scheduled_run():
     if app.state.running:
         logging.info("Scheduled run skipped; run already active")
@@ -1963,6 +2317,275 @@ async def _handle_scheduled_run():
         _set_schedule_state(next_run=_format_iso(next_allowed))
     else:
         _set_schedule_state(next_run=_get_next_run_iso())
+
+
+def _resolve_liked_songs_interval_minutes(config: dict | None) -> int:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    raw_value = spotify_cfg.get("liked_songs_sync_interval_minutes")
+    if raw_value is None:
+        raw_value = cfg.get("liked_songs_sync_interval_minutes")
+    try:
+        interval = int(raw_value)
+    except (TypeError, ValueError):
+        interval = DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES
+    return max(1, interval)
+
+
+def _resolve_saved_albums_interval_minutes(config: dict | None) -> int:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    raw_value = spotify_cfg.get("saved_albums_sync_interval_minutes")
+    if raw_value is None:
+        raw_value = cfg.get("saved_albums_sync_interval_minutes")
+    try:
+        interval = int(raw_value)
+    except (TypeError, ValueError):
+        interval = DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES
+    return max(1, interval)
+
+
+def _resolve_user_playlists_interval_minutes(config: dict | None) -> int:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    raw_value = spotify_cfg.get("user_playlists_sync_interval_minutes")
+    if raw_value is None:
+        raw_value = cfg.get("user_playlists_sync_interval_minutes")
+    try:
+        interval = int(raw_value)
+    except (TypeError, ValueError):
+        interval = DEFAULT_USER_PLAYLISTS_SYNC_INTERVAL_MINUTES
+    return max(1, interval)
+
+
+def _resolve_spotify_playlists_interval_minutes(config: dict | None) -> int:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    raw_value = spotify_cfg.get("watch_playlists_interval_minutes")
+    if raw_value is None:
+        raw_value = cfg.get("watch_playlists_interval_minutes")
+    try:
+        interval = int(raw_value)
+    except (TypeError, ValueError):
+        interval = DEFAULT_SPOTIFY_PLAYLISTS_SYNC_INTERVAL_MINUTES
+    return max(1, interval)
+
+
+def _normalized_watch_playlists(config: dict | None) -> list[str]:
+    cfg = config or {}
+    spotify_cfg = (cfg.get("spotify") or {}) if isinstance(cfg, dict) else {}
+    raw_values = spotify_cfg.get("watch_playlists")
+    if raw_values is None:
+        raw_values = cfg.get("watch_playlists", []) if isinstance(cfg, dict) else []
+    if not isinstance(raw_values, list):
+        return []
+    playlist_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        playlist_id = normalize_spotify_playlist_identifier(str(raw_value or ""))
+        if not playlist_id or not re.match(r"^[A-Za-z0-9]+$", playlist_id):
+            logging.warning("Skipping invalid Spotify playlist identifier: %s", raw_value)
+            continue
+        if playlist_id in seen:
+            continue
+        seen.add(playlist_id)
+        playlist_ids.append(playlist_id)
+    return playlist_ids
+
+
+def _has_connected_spotify_oauth_token(db_path: str) -> bool:
+    try:
+        return SpotifyOAuthStore(Path(db_path)).load() is not None
+    except Exception:
+        return False
+
+
+async def _handle_liked_songs_scheduled_run() -> None:
+    config = _read_config_for_scheduler()
+    if not config:
+        return
+
+    client_id, client_secret = _spotify_client_credentials(config)
+    if not client_id or not client_secret:
+        return
+
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    token = store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    if token is None:
+        return
+
+    try:
+        await spotify_liked_songs_watch_job(
+            config=config,
+            db=PlaylistSnapshotStore(app.state.paths.db_path),
+            queue=_IntentQueueAdapter(),
+            spotify_client=SpotifyPlaylistClient(
+                client_id=client_id,
+                client_secret=client_secret,
+                access_token=token.access_token,
+            ),
+            search_service=app.state.search_service,
+        )
+    except Exception:
+        logging.exception("Scheduled Spotify Liked Songs sync failed")
+
+
+async def _handle_saved_albums_scheduled_run() -> None:
+    config = _read_config_for_scheduler()
+    if not config:
+        return
+
+    client_id, client_secret = _spotify_client_credentials(config)
+    if not client_id or not client_secret:
+        return
+
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    token = store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    if token is None:
+        return
+
+    try:
+        await spotify_saved_albums_watch_job(
+            config=config,
+            db=PlaylistSnapshotStore(app.state.paths.db_path),
+            queue=_IntentQueueAdapter(),
+            spotify_client=SpotifyPlaylistClient(
+                client_id=client_id,
+                client_secret=client_secret,
+                access_token=token.access_token,
+            ),
+            search_service=app.state.search_service,
+        )
+    except Exception:
+        logging.exception("Scheduled Spotify Saved Albums sync failed")
+
+
+async def _handle_user_playlists_scheduled_run() -> None:
+    config = _read_config_for_scheduler()
+    if not config:
+        return
+
+    client_id, client_secret = _spotify_client_credentials(config)
+    if not client_id or not client_secret:
+        return
+
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    token = store.get_valid_token(client_id, client_secret, config=config if isinstance(config, dict) else None)
+    if token is None:
+        return
+
+    try:
+        await spotify_user_playlists_watch_job(
+            config=config,
+            db=PlaylistSnapshotStore(app.state.paths.db_path),
+            queue=_IntentQueueAdapter(),
+            spotify_client=SpotifyPlaylistClient(
+                client_id=client_id,
+                client_secret=client_secret,
+                access_token=token.access_token,
+            ),
+            search_service=app.state.search_service,
+        )
+    except Exception:
+        logging.exception("Scheduled Spotify User Playlists sync failed")
+
+
+async def _handle_spotify_playlists_scheduled_run() -> None:
+    config = _read_config_for_scheduler()
+    if not config:
+        return
+
+    spotify_client = _build_spotify_client_with_optional_oauth(config)
+    snapshot_store = PlaylistSnapshotStore(app.state.paths.db_path)
+    queue = _IntentQueueAdapter()
+    try:
+        await spotify_playlists_watch_job(
+            config=config,
+            db=snapshot_store,
+            queue=queue,
+            spotify_client=spotify_client,
+            search_service=app.state.search_service,
+        )
+    except Exception:
+        logging.exception("Scheduled Spotify playlists sync failed")
+
+
+def _apply_spotify_schedule(config: dict):
+    logger.info("Applying Spotify scheduler configuration")
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return
+
+    # Remove existing Spotify jobs
+    for job_id in [
+        "spotify_liked_songs_watch",
+        "spotify_saved_albums_watch",
+        "spotify_user_playlists_watch",
+        "spotify_playlists_watch",
+    ]:
+        try:
+            scheduler.remove_job(job_id)
+            logger.info(f"Removed job {job_id}")
+        except Exception:
+            pass
+
+    spotify_cfg = config.get("spotify", {})
+
+    # Liked Songs
+    if spotify_cfg.get("sync_liked_songs"):
+        interval = int(spotify_cfg.get("liked_songs_sync_interval_minutes", 15))
+        scheduler.add_job(
+            _liked_songs_schedule_tick,
+            "interval",
+            minutes=interval,
+            id="spotify_liked_songs_watch",
+            replace_existing=True,
+        )
+        logger.info(f"Spotify liked songs sync enabled (interval={interval} min)")
+    else:
+        logger.info("Spotify liked songs sync disabled by config")
+
+    # Saved Albums
+    if spotify_cfg.get("sync_saved_albums"):
+        interval = int(spotify_cfg.get("saved_albums_sync_interval_minutes", 30))
+        scheduler.add_job(
+            _saved_albums_schedule_tick,
+            "interval",
+            minutes=interval,
+            id="spotify_saved_albums_watch",
+            replace_existing=True,
+        )
+        logger.info(f"Spotify saved albums sync enabled (interval={interval} min)")
+    else:
+        logger.info("Spotify saved albums sync disabled by config")
+
+    # User Playlists (OAuth-based)
+    if spotify_cfg.get("sync_user_playlists"):
+        interval = int(spotify_cfg.get("user_playlists_sync_interval_minutes", 30))
+        scheduler.add_job(
+            _user_playlists_schedule_tick,
+            "interval",
+            minutes=interval,
+            id="spotify_user_playlists_watch",
+            replace_existing=True,
+        )
+        logger.info(f"Spotify user playlists sync enabled (interval={interval} min)")
+    else:
+        logger.info("Spotify user playlists sync disabled by config")
+
+    # Manual playlist polling (watch_playlists)
+    if spotify_cfg.get("sync_user_playlists") and spotify_cfg.get("watch_playlists"):
+        interval = int(spotify_cfg.get("user_playlists_sync_interval_minutes", 30))
+        scheduler.add_job(
+            _spotify_playlists_schedule_tick,
+            "interval",
+            minutes=interval,
+            id="spotify_playlists_watch",
+            replace_existing=True,
+        )
+        logger.info("Spotify manual playlist watch enabled")
+    else:
+        logger.info("Spotify manual playlist watch disabled")
 
 
 def _apply_schedule_config(schedule):
@@ -3001,6 +3624,7 @@ async def api_update_schedule(payload: ScheduleRequest):
 
     app.state.schedule_config = current
     _apply_schedule_config(current)
+    _apply_spotify_schedule(config or {})
     return _schedule_response()
 
 
@@ -3242,10 +3866,30 @@ async def create_search_request(request: dict = Body(...)):
         normalized = normalize_search_payload(raw_payload, default_sources=enabled_sources)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    music_candidates = []
+    music_resolution = None
+    if bool(normalized.get("music_mode")):
+        music_candidates = _mb_service().search_release_groups(str(normalized.get("query") or ""), limit=5)
+        logger.info(f"[MUSIC] mode=ON candidates={len(music_candidates)} resolution=null")
+    logging.debug(
+        "Home search: music_mode=%s query=%s",
+        bool(normalized.get("music_mode")),
+        str(normalized.get("query") or ""),
+    )
     if normalized["delivery_mode"] == "client" and normalized["destination_path"]:
         raise HTTPException(status_code=400, detail="Client delivery does not use a server destination")
     if normalized["delivery_mode"] == "client" and not normalized["search_only"]:
         raise HTTPException(status_code=400, detail="Search & Download is not available for client delivery")
+
+    intent = detect_intent(str(normalized.get("query") or ""))
+    if intent.type != IntentType.SEARCH:
+        return {
+            "detected_intent": intent.type.value,
+            "identifier": intent.identifier,
+            "music_mode": bool(normalized["music_mode"]),
+            "music_candidates": music_candidates,
+            "music_resolution": music_resolution,
+        }
 
     if "source_priority" not in raw_payload or not raw_payload.get("source_priority"):
         raw_payload["source_priority"] = normalized["sources"]
@@ -3253,6 +3897,8 @@ async def create_search_request(request: dict = Body(...)):
         raw_payload["auto_enqueue"] = not normalized["search_only"]
     if "media_type" not in raw_payload:
         raw_payload["media_type"] = "music" if normalized["music_mode"] else "generic"
+    if "music_mode" not in raw_payload:
+        raw_payload["music_mode"] = normalized["music_mode"]
     if "destination_dir" not in raw_payload and normalized["destination"] is not None:
         raw_payload["destination_dir"] = normalized["destination"]
 
@@ -3270,6 +3916,7 @@ async def create_search_request(request: dict = Body(...)):
         "duration_hint_sec",
         "quality_min_bitrate_kbps",
         "lossless_only",
+        "music_mode",
         "auto_enqueue",
         "source_priority",
         "max_candidates_per_source",
@@ -3293,7 +3940,96 @@ async def create_search_request(request: dict = Body(...)):
             "destination_path": normalized["destination_path"],
         }
     logging.debug("Normalized search payload", extra={"payload": normalized, "request_id": request_id})
-    return {"request_id": request_id}
+    return {
+        "request_id": request_id,
+        "music_mode": bool(normalized["music_mode"]),
+        "music_candidates": music_candidates,
+        "music_resolution": music_resolution,
+    }
+
+
+@app.post("/api/intent/execute")
+async def execute_intent(payload: dict = Body(...)):
+    """Execute intent requests by routing to the active ingestion pipeline."""
+    intent_raw = str((payload or {}).get("intent_type") or "").strip()
+    identifier = str((payload or {}).get("identifier") or "").strip()
+    if not intent_raw:
+        raise HTTPException(status_code=400, detail="intent_type is required")
+    if not identifier:
+        raise HTTPException(status_code=400, detail="identifier is required")
+    try:
+        intent_type = IntentType(intent_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid intent_type") from exc
+    config = _read_config_or_404()
+    dispatcher_config = dict(config)
+    dispatcher_config["search_service"] = app.state.search_service
+    db = PlaylistSnapshotStore(app.state.paths.db_path)
+    queue = _IntentQueueAdapter()
+    spotify_client = _build_spotify_client_with_optional_oauth(config)
+    return await dispatch_intent(
+        intent_type=intent_type.value,
+        identifier=identifier,
+        config=dispatcher_config,
+        db=db,
+        queue=queue,
+        spotify_client=spotify_client,
+    )
+
+
+@app.post("/api/intent/preview")
+async def preview_intent(payload: dict = Body(...)):
+    """Fetch metadata preview for supported intents (plumbing only)."""
+    intent_raw = str((payload or {}).get("intent_type") or "").strip()
+    identifier = str((payload or {}).get("identifier") or "").strip()
+    if not intent_raw:
+        raise HTTPException(status_code=400, detail="intent_type is required")
+    if not identifier:
+        raise HTTPException(status_code=400, detail="identifier is required")
+    try:
+        intent_type = IntentType(intent_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid intent_type") from exc
+
+    if intent_type not in {IntentType.SPOTIFY_ALBUM, IntentType.SPOTIFY_PLAYLIST}:
+        raise HTTPException(status_code=400, detail="intent preview not supported for this intent_type")
+
+    config = _read_config_or_404()
+    client = _build_spotify_client_with_optional_oauth(config)
+    encoded = quote(identifier, safe="")
+    try:
+        if intent_type == IntentType.SPOTIFY_ALBUM:
+            data = client._request_json(
+                f"https://api.spotify.com/v1/albums/{encoded}",
+                params={"fields": "name,artists(name),total_tracks"},
+            )
+            artists = data.get("artists") or []
+            artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else ""
+            track_count = int(data.get("total_tracks") or 0)
+            return {
+                "intent_type": intent_type.value,
+                "identifier": identifier,
+                "title": str(data.get("name") or ""),
+                "artist": str(artist or ""),
+                "track_count": track_count,
+            }
+
+        data = client._request_json(
+            f"https://api.spotify.com/v1/playlists/{encoded}",
+            params={"fields": "name,owner(display_name),tracks(total)"},
+        )
+        owner = (data.get("owner") or {}).get("display_name")
+        track_count = int(((data.get("tracks") or {}).get("total")) or 0)
+        return {
+            "intent_type": intent_type.value,
+            "identifier": identifier,
+            "title": str(data.get("name") or ""),
+            "artist": str(owner or ""),
+            "track_count": track_count,
+        }
+    except Exception as exc:
+        logging.exception("Intent preview failed for intent=%s identifier=%s", intent_type.value, identifier)
+        raise HTTPException(status_code=502, detail=f"intent preview failed: {exc}") from exc
 
 
 @app.get("/api/search/requests")
@@ -3328,6 +4064,134 @@ async def run_search_resolution_once():
     service = app.state.search_service
     request_id = service.run_search_resolution_once()
     return {"request_id": request_id}
+
+
+@app.post("/api/music/album/download")
+def download_full_album(data: dict):
+    release_group_id = str((data or {}).get("release_group_id") or "").strip() or None
+    album_id = str((data or {}).get("album_id") or "").strip() or None
+    release_id = str((data or {}).get("release_id") or album_id or "").strip() or None
+    if not release_group_id and not album_id:
+        return {"error": "release_group_id or album_id required"}
+    logger.info(f"[MUSIC] explicit album download request release_group={release_group_id}")
+
+    selected_reason = "explicit_release_id"
+    if release_group_id:
+        prefer_country = None
+        try:
+            cfg = _read_config_or_404()
+            configured_country = str((cfg or {}).get("locale_country") or (cfg or {}).get("country") or "").strip().upper()
+            prefer_country = configured_country or None
+        except Exception:
+            prefer_country = None
+        selection = _mb_service().pick_best_release_with_reason(release_group_id, prefer_country=prefer_country)
+        release_id = str(selection.get("release_id") or "").strip() or None
+        selected_reason = str(selection.get("reason") or "release_group_selection")
+        if not release_id:
+            return {"error": "unable to select release from release_group"}
+        logger.info(f"[MUSIC] selected_release={release_id} from release_group={release_group_id} reason={selected_reason}")
+
+    tracks = _mb_service().fetch_release_tracks(release_id or "")
+    if not tracks:
+        return {"error": "unable to fetch tracks"}
+    logger.info(f"[MUSIC] Album {release_group_id or release_id} fetched {len(tracks)} tracks")
+    if len(tracks) == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Album resolved but no tracks returned from MusicBrainz"
+        )
+
+    queue = _IntentQueueAdapter()
+    enqueued = 0
+
+    for track in tracks:
+        artist = track.get("artist")
+        title = track.get("title")
+        track_number_raw = track.get("track_number")
+        disc_number_raw = track.get("disc_number")
+        try:
+            track_number = int(track_number_raw) if track_number_raw is not None else None
+        except (TypeError, ValueError):
+            track_number = None
+        try:
+            disc_number = int(disc_number_raw) if disc_number_raw is not None else None
+        except (TypeError, ValueError):
+            disc_number = None
+        logger.debug(f"[MUSIC] enqueue track {artist} - {title}")
+        payload = {
+            "media_intent": "music_track",
+            "artist": artist,
+            "album": track.get("album"),
+            "track": title,
+            "track_number": track_number,
+            "disc_number": disc_number,
+            "release_date": track.get("release_date"),
+            "mb_release_id": release_id,
+            "mb_release_group_id": release_group_id,
+            "release_id": release_id,
+            "release_group_id": release_group_id,
+            "duration_ms": track.get("duration_ms"),
+            "artwork_url": track.get("artwork_url"),
+        }
+        queue.enqueue(payload)
+        enqueued += 1
+    logger.info(f"[MUSIC] album enqueue complete count={len(tracks)}")
+
+    return {
+        "status": "ok",
+        "tracks_enqueued": enqueued
+    }
+
+
+@app.post("/api/music/album/candidates")
+def music_album_candidates(payload: dict):
+    query = str((payload or {}).get("query") or "").strip()
+    raw_candidates = _search_music_album_candidates(query, limit=10)
+    candidates = [
+        {
+            "album_id": item.get("release_group_id"),
+            "title": item.get("title"),
+            "artist": item.get("artist_credit"),
+            "first_released": item.get("first_release_date"),
+            "track_count": item.get("track_count"),
+            "score": item.get("score"),
+        }
+        for item in raw_candidates
+    ]
+    return {
+        "status": "ok",
+        "album_candidates": candidates or [],
+    }
+
+
+@app.get("/api/music/albums/search")
+def music_albums_search(q: str = Query("", alias="q"), limit: int = Query(10, ge=1, le=50)):
+    return _search_music_album_candidates(str(q or ""), limit=int(limit))
+
+
+@app.get("/api/music/album/art/{album_id}")
+def music_album_art(album_id: str):
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        raise HTTPException(status_code=400, detail="album_id is required")
+
+    cache = getattr(app.state, "music_cover_art_cache", None)
+    now = time.time()
+    if isinstance(cache, dict):
+        cached = cache.get(album_id)
+        if isinstance(cached, dict):
+            cached_at = float(cached.get("cached_at") or 0)
+            if now - cached_at < COVER_ART_CACHE_TTL_SECONDS:
+                return {"status": "ok", "cover_url": cached.get("cover_url")}
+
+    cover_url = _mb_service().fetch_release_group_cover_art_url(album_id, timeout=8)
+
+    if isinstance(cache, dict):
+        cache[album_id] = {
+            "cover_url": cover_url,
+            "cached_at": now,
+        }
+    return {"status": "ok", "cover_url": cover_url}
 
 
 @app.post("/api/spotify/playlists/import")
@@ -3395,6 +4259,184 @@ async def import_spotify_playlist(payload: SpotifyPlaylistImportPayload):
 @app.get("/api/spotify/playlists/status")
 async def spotify_playlist_status():
     return {"statuses": app.state.spotify_import_status}
+
+
+@app.get("/api/spotify/oauth/connect")
+async def spotify_oauth_connect():
+    """Build Spotify OAuth connect URL and store anti-CSRF state in memory."""
+    config = _read_config_or_404()
+    spotify_cfg = (config.get("spotify") or {}) if isinstance(config, dict) else {}
+    client_id = (
+        str(spotify_cfg.get("client_id") or config.get("SPOTIFY_CLIENT_ID") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    redirect_uri = (
+        str(spotify_cfg.get("redirect_uri") or config.get("SPOTIFY_REDIRECT_URI") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    if not client_id:
+        raise HTTPException(status_code=400, detail="SPOTIFY_CLIENT_ID is required in config")
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="SPOTIFY_REDIRECT_URI is required in config")
+
+    app.state.spotify_oauth_state = None
+    state = str(uuid4())
+    app.state.spotify_oauth_state = state
+    scope = "user-library-read playlist-read-private playlist-read-collaborative"
+    auth_url = build_auth_url(
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        state=state,
+    )
+    return {"auth_url": auth_url}
+
+
+@app.get("/api/spotify/oauth/status")
+async def spotify_oauth_status():
+    """Return Spotify OAuth connection status without exposing sensitive tokens."""
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    token = store.load()
+    if token is None:
+        return {"connected": False}
+
+    scopes = [part for part in str(token.scope or "").split() if part]
+    payload: dict[str, object] = {"connected": True}
+    if scopes:
+        payload["scopes"] = scopes
+    payload["expires_at"] = int(token.expires_at)
+    return payload
+
+
+@app.get("/api/spotify/oauth/callback")
+async def spotify_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    """Handle Spotify OAuth callback and persist tokens."""
+    if error:
+        raise HTTPException(status_code=400, detail=f"spotify_oauth_error: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="missing code")
+    if not state:
+        raise HTTPException(status_code=400, detail="missing state")
+
+    expected_state = str(getattr(app.state, "spotify_oauth_state", "") or "")
+    if not expected_state or state != expected_state:
+        raise HTTPException(status_code=400, detail="invalid oauth state")
+
+    config = _read_config_or_404()
+    spotify_cfg = (config.get("spotify") or {}) if isinstance(config, dict) else {}
+    client_id = (
+        str(spotify_cfg.get("client_id") or config.get("SPOTIFY_CLIENT_ID") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    client_secret = (
+        str(spotify_cfg.get("client_secret") or config.get("SPOTIFY_CLIENT_SECRET") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    redirect_uri = (
+        str(spotify_cfg.get("redirect_uri") or config.get("SPOTIFY_REDIRECT_URI") or "").strip()
+        if isinstance(config, dict)
+        else ""
+    )
+    if not client_id:
+        raise HTTPException(status_code=400, detail="SPOTIFY_CLIENT_ID is required in config")
+    if not client_secret:
+        raise HTTPException(status_code=400, detail="SPOTIFY_CLIENT_SECRET is required in config")
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="SPOTIFY_REDIRECT_URI is required in config")
+
+    try:
+        token_response = requests.post(
+            SPOTIFY_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout=20,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"token exchange failed: {exc}") from exc
+
+    if token_response.status_code != 200:
+        detail = (token_response.text or "").strip() or f"status={token_response.status_code}"
+        raise HTTPException(status_code=400, detail=f"token exchange failed: {detail}")
+
+    payload = token_response.json()
+    access_token = str(payload.get("access_token") or "").strip()
+    refresh_token = str(payload.get("refresh_token") or "").strip()
+    expires_in = payload.get("expires_in")
+    scope = str(payload.get("scope") or "").strip()
+    if not access_token:
+        raise HTTPException(status_code=400, detail="token exchange failed: missing access_token")
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="token exchange failed: missing refresh_token")
+    if expires_in is None:
+        raise HTTPException(status_code=400, detail="token exchange failed: missing expires_in")
+    if not scope:
+        raise HTTPException(status_code=400, detail="token exchange failed: missing scope")
+
+    try:
+        expires_at = int(time.time()) + int(expires_in)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="token exchange failed: invalid expires_in") from exc
+
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    store.save(
+        SpotifyOAuthToken(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            scope=scope,
+        )
+    )
+    try:
+        sync_db = PlaylistSnapshotStore(app.state.paths.db_path)
+        sync_queue = _IntentQueueAdapter()
+        sync_client = SpotifyPlaylistClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=access_token,
+        )
+        await spotify_liked_songs_watch_job(
+            config=config,
+            db=sync_db,
+            queue=sync_queue,
+            spotify_client=sync_client,
+            search_service=app.state.search_service,
+        )
+        await spotify_saved_albums_watch_job(
+            config=config,
+            db=sync_db,
+            queue=sync_queue,
+            spotify_client=sync_client,
+            search_service=app.state.search_service,
+        )
+        await spotify_user_playlists_watch_job(
+            config=config,
+            db=sync_db,
+            queue=sync_queue,
+            spotify_client=sync_client,
+            search_service=app.state.search_service,
+        )
+    except Exception:
+        logging.exception("Post-OAuth immediate Spotify sync failed")
+    _apply_spotify_schedule(config or {})
+    app.state.spotify_oauth_state = None
+    return RedirectResponse(url="/#config?spotify=connected", status_code=302)
+
+
+@app.post("/api/spotify/oauth/disconnect")
+async def spotify_oauth_disconnect():
+    """Clear stored Spotify OAuth token state."""
+    store = SpotifyOAuthStore(Path(app.state.paths.db_path))
+    store.clear()
+    return {"status": "disconnected"}
 
 
 @app.get("/api/search/items/{item_id}/candidates")
@@ -3756,6 +4798,20 @@ async def api_get_config():
 async def api_put_config(payload: dict = Body(...)):
     payload = _strip_deprecated_fields(payload)
     errors = validate_config(payload)
+    # Saving config should not require Spotify OAuth client credentials.
+    # Those are validated only when the Spotify connect flow is invoked.
+    errors = [
+        err for err in errors
+        if not any(
+            marker in str(err)
+            for marker in (
+                "SPOTIFY_CLIENT_ID",
+                "SPOTIFY_CLIENT_SECRET",
+                "spotify.client_id",
+                "spotify.client_secret",
+            )
+        )
+    ]
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
@@ -3785,6 +4841,7 @@ async def api_put_config(payload: dict = Body(...)):
         schedule = _merge_schedule_config(payload.get("schedule"))
         app.state.schedule_config = schedule
         _apply_schedule_config(schedule)
+    _apply_spotify_schedule(payload or {})
     policy = normalize_watch_policy(payload)
     if getattr(normalize_watch_policy, "valid", True):
         app.state.watch_policy = policy
