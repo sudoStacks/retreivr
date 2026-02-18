@@ -133,6 +133,14 @@ cp .env.example .env
 docker compose -f docker/docker-compose.yml up -d
 ```
 
+Canonical Docker mount layout:
+
+- `/downloads` media output
+- `/data` runtime DB/temp data
+- `/config` config.json
+- `/logs` logs
+- `/tokens` auth/cookies
+
 Open the Web UI at:
 
 ```
@@ -158,7 +166,8 @@ Optional local/source:
 Primary config file:
 
 ```
-config/config.json
+/config/config.json   (Docker)
+data/config/config.json   (local/source default)
 ```
 
 Key areas:
