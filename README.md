@@ -122,7 +122,7 @@ MKV provides strong metadata support while preserving original codec fidelity.
 Pull the image:
 
 ```bash
-docker pull ghcr.io/retreivr/retreivr:latest
+docker pull ghcr.io/sudoStacks/retreivr:latest
 ```
 
 Copy templates and start:

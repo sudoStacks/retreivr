@@ -54,7 +54,7 @@ fn install_retreivr(app: AppHandle) -> Result<(), String> {
         let content = r#"
 services:
   retreivr:
-    image: ghcr.io/retreivr/retreivr:latest
+    image: ghcr.io/sudoStacks/retreivr:latest
     container_name: retreivr
     restart: unless-stopped
     ports:

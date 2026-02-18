@@ -51,7 +51,7 @@ version: "3.9"
 
 services:
   retreivr:
-    image: ghcr.io/retreivr/retreivr:0.9.1
+    image: ghcr.io/sudoStacks/retreivr:0.9.1
     container_name: retreivr
     ports:
       - "8090:8000"

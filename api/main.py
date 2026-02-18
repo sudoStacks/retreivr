@@ -4158,6 +4158,10 @@ def download_full_album(data: dict):
 
     queue = _IntentQueueAdapter()
     enqueued = 0
+    skipped_existing = 0
+    skipped_completed = 0
+    engine = getattr(app.state, "worker_engine", None)
+    store = getattr(engine, "store", None) if engine is not None else None
 
     for track in tracks:
         artist = track.get("artist")
@@ -4174,6 +4178,19 @@ def download_full_album(data: dict):
             disc_number = None
         recording_mbid = str(track.get("recording_mbid") or track.get("mb_recording_id") or "").strip() or None
         logger.info(f"[MUSIC] enqueue recording={recording_mbid} track={track_number}")
+        canonical_id = (
+            f"music_track:{str(artist or '').strip().lower()}:"
+            f"{str(track.get('album') or '').strip().lower()}:"
+            f"{str(track_number or '').strip()}:{str(title or '').strip().lower()}"
+        )
+        existing_job = store.get_job_by_canonical_id(canonical_id) if store is not None else None
+        if existing_job is not None:
+            if existing_job.status == "completed":
+                skipped_completed += 1
+                continue
+            if existing_job.status not in {"failed", "cancelled", "skipped_duplicate"}:
+                skipped_existing += 1
+                continue
         payload = {
             "media_intent": "music_track",
             "artist": artist,
@@ -4193,11 +4210,21 @@ def download_full_album(data: dict):
         }
         queue.enqueue(payload)
         enqueued += 1
-    logger.info(f"[MUSIC] album enqueue complete count={len(tracks)}")
+    logger.info(
+        "[MUSIC] album_enqueue_summary release_group=%s added=%s skipped_existing=%s skipped_completed=%s",
+        release_group_id,
+        enqueued,
+        skipped_existing,
+        skipped_completed,
+    )
 
     return {
-        "status": "ok",
-        "tracks_enqueued": enqueued
+        "release_group_id": release_group_id,
+        "release_id": release_id,
+        "total_tracks": len(tracks),
+        "added": enqueued,
+        "skipped_existing": skipped_existing,
+        "skipped_completed": skipped_completed,
     }
 
 

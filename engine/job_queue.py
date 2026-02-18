@@ -469,6 +469,29 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def get_job_by_canonical_id(self, canonical_id):
+        cid = str(canonical_id or "").strip()
+        if not cid:
+            return None
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM download_jobs
+                WHERE canonical_id=?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (cid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_job(row)
+        finally:
+            conn.close()
+
     def claim_job_by_id(self, job_id, *, now=None):
         now = now or utc_now()
         conn = self._connect()
@@ -1064,7 +1087,13 @@ class DownloadWorkerEngine:
         allow_live = self._music_track_is_live(artist, track, album)
         if not artist or not track:
             logging.error("Music track search failed")
-            raise RuntimeError("music_track_metadata_missing")
+            self.store.record_failure(
+                job,
+                error_message="music_track_metadata_missing",
+                retryable=False,
+                retry_delay_seconds=self.retry_delay_seconds,
+            )
+            return None
         logger.info(f"[WORKER] processing music_track artist={artist} track={track}")
         logger.info(
             "[MUSIC] job_ids recording_mbid=%s release_mbid=%s release_group_mbid=%s",
@@ -1088,11 +1117,24 @@ class DownloadWorkerEngine:
                 )
             except Exception:
                 logging.exception("Music track search service failed query=%s", search_query)
+                self.store.record_failure(
+                    job,
+                    error_message="music_track_adapter_search_exception",
+                    retryable=False,
+                    retry_delay_seconds=self.retry_delay_seconds,
+                )
+                return None
 
         resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
         if not _is_http_url(resolved_url):
             logging.error("Music track search failed")
-            raise RuntimeError("music_track_no_candidate_above_threshold")
+            self.store.record_failure(
+                job,
+                error_message="no_candidate_above_threshold",
+                retryable=False,
+                retry_delay_seconds=self.retry_delay_seconds,
+            )
+            return None
         selected_score = None
         duration_delta_ms = None
         if isinstance(resolved, dict):
@@ -1262,6 +1304,8 @@ class DownloadWorkerEngine:
         if intent == "music_track":
             logger.info(f"[WORKER] processing music_track: {job}")
             job = self._resolve_music_track_job(job)
+            if job is None:
+                return
         adapter = self.adapters.get(job.source)
         if not adapter:
             _log_event(

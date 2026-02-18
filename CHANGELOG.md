@@ -205,17 +205,17 @@ Added:
 
 Notes:
 - Docker pulls remain available via GHCR:
-- `docker pull ghcr.io/retreivr/retreivr:latest`
-- `image: ghcr.io/retreivr/retreivr:latest`
+- `docker pull ghcr.io/sudoStacks/retreivr:latest`
+- `image: ghcr.io/sudoStacks/retreivr:latest`
 
 1.1.2 - Publish Docker to GHCR Latest
 No changes from v1.1.1 - just creating new tag to automatically publish to GHCR repo to make docker pulls directly from there.
 
 Docker Pull Command:
-docker pull ghcr.io/retreivr/retreivr:latest
+docker pull ghcr.io/sudoStacks/retreivr:latest
 
 Docker Compose Line:
-image: ghcr.io/retreivr/retreivr:latest
+image: ghcr.io/sudoStacks/retreivr:latest
 
 1.1.1 - Minor Patch
 Added:
