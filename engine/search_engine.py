@@ -1148,6 +1148,12 @@ class SearchResolutionService:
                             )
                             continue
                         cand["source"] = source
+                        cand["candidate_id"] = str(
+                            cand.get("candidate_id")
+                            or cand.get("external_id")
+                            or cand.get("url")
+                            or ""
+                        )
                         modifier = self.adapters[source].source_modifier(cand)
                         scores = score_candidate(item, cand, source_modifier=modifier)
                         cand.update(scores)

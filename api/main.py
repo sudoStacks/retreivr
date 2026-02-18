@@ -563,6 +563,17 @@ class IntentExecutePayload(BaseModel):
     identifier: str
 
 
+def _build_music_track_canonical_id(artist, album, track_number, track):
+    normalized_artist = str(artist or "").strip().lower()
+    normalized_album = str(album or "").strip().lower()
+    normalized_track_number = str(track_number or "").strip()
+    normalized_track = str(track or "").strip().lower()
+    return (
+        f"music_track:{normalized_artist}:{normalized_album}:"
+        f"{normalized_track_number}:{normalized_track}"
+    )
+
+
 class _IntentQueueAdapter:
     """Queue adapter that writes intent payloads into the unified download queue."""
 
@@ -654,9 +665,11 @@ class _IntentQueueAdapter:
                 output_template["output_dir"] = destination
             if final_format:
                 output_template["final_format"] = final_format
-            canonical_id = (
-                f"music_track:{normalized_artist.lower()}:{(normalized_album or '').lower()}:"
-                f"{str(payload.get('track_number') or '').strip()}:{normalized_track.lower()}"
+            canonical_id = _build_music_track_canonical_id(
+                normalized_artist,
+                normalized_album,
+                payload.get("track_number"),
+                normalized_track,
             )
             store.enqueue_job(
                 origin=origin,
@@ -4178,10 +4191,11 @@ def download_full_album(data: dict):
             disc_number = None
         recording_mbid = str(track.get("recording_mbid") or track.get("mb_recording_id") or "").strip() or None
         logger.info(f"[MUSIC] enqueue recording={recording_mbid} track={track_number}")
-        canonical_id = (
-            f"music_track:{str(artist or '').strip().lower()}:"
-            f"{str(track.get('album') or '').strip().lower()}:"
-            f"{str(track_number or '').strip()}:{str(title or '').strip().lower()}"
+        canonical_id = _build_music_track_canonical_id(
+            artist,
+            track.get("album"),
+            track_number,
+            title,
         )
         existing_job = store.get_job_by_canonical_id(canonical_id) if store is not None else None
         if existing_job is not None:

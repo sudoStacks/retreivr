@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="webUI/app_icon.png" width="160" alt="Retreivr Logo" />
+  <img src="webUI/app_icon.png" width="240" alt="Retreivr Logo" />
 </p>
 
 <h1 align="center">Retreivr</h1>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="webUI/assets/sudostacks.png" width="110" alt="sudoStacks Logo" />
+  <img src="webUI/assets/sudostacks.png" width="220" alt="sudoStacks Logo" />
 </p>
 
 <p align="center">

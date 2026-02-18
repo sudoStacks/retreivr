@@ -11,6 +11,7 @@ import traceback
 import threading
 import time
 import urllib.parse
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -223,6 +224,36 @@ def ensure_download_jobs_table(conn):
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_download_jobs_url_dest_status_created "
         "ON download_jobs (url, resolved_destination, status, created_at DESC)"
+    )
+    # Migration: de-duplicate canonical IDs before adding uniqueness enforcement.
+    # Keep the newest row by created_at; break ties by rowid (latest inserted wins).
+    cur.execute(
+        """
+        DELETE FROM download_jobs
+        WHERE canonical_id IS NOT NULL
+          AND canonical_id != ''
+          AND rowid IN (
+              SELECT older.rowid
+              FROM download_jobs AS older
+              JOIN download_jobs AS newer
+                ON older.canonical_id = newer.canonical_id
+               AND (
+                    COALESCE(newer.created_at, '') > COALESCE(older.created_at, '')
+                    OR (
+                        COALESCE(newer.created_at, '') = COALESCE(older.created_at, '')
+                        AND newer.rowid > older.rowid
+                    )
+               )
+             WHERE older.canonical_id IS NOT NULL
+               AND older.canonical_id != ''
+          )
+        """
+    )
+    # Additive uniqueness constraint for canonical_id (null/empty values are excluded).
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_download_jobs_canonical_id "
+        "ON download_jobs (canonical_id) "
+        "WHERE canonical_id IS NOT NULL AND canonical_id != ''"
     )
     conn.commit()
 
@@ -632,6 +663,29 @@ class DownloadJobStore:
                     )
                     conn.commit()
                     return job_id, True, None
+                except sqlite3.IntegrityError as exc:
+                    conn.rollback()
+                    err = str(exc).lower()
+                    if canonical_id and "canonical_id" in err:
+                        duplicate_job = self.get_job_by_canonical_id(canonical_id)
+                        if duplicate_job:
+                            if log_duplicate_event:
+                                _log_event(
+                                    logging.INFO,
+                                    "job_skipped_duplicate",
+                                    job_id=duplicate_job.id,
+                                    trace_id=duplicate_job.trace_id,
+                                    origin=origin,
+                                    origin_id=origin_id,
+                                    source=source,
+                                    url=url,
+                                    destination=destination,
+                                    canonical_id=canonical_id,
+                                    status=duplicate_job.status,
+                                )
+                            return duplicate_job.id, False, "duplicate"
+                        return job_id, False, "duplicate"
+                    raise
                 except sqlite3.OperationalError as exc:
                     msg = str(exc).lower()
                     if "locked" in msg or "busy" in msg:
@@ -1301,38 +1355,38 @@ class DownloadWorkerEngine:
                 payload = {}
             intent = getattr(job, "media_intent", None) or payload.get("media_intent")
 
-        if intent == "music_track":
-            logger.info(f"[WORKER] processing music_track: {job}")
-            job = self._resolve_music_track_job(job)
-            if job is None:
+        try:
+            if intent == "music_track":
+                logger.info(f"[WORKER] processing music_track: {job}")
+                job = self._resolve_music_track_job(job)
+                if job is None:
+                    return
+            adapter = self.adapters.get(job.source)
+            if not adapter:
+                _log_event(
+                    logging.ERROR,
+                    "adapter_missing",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                )
+                self.store.record_failure(
+                    job,
+                    error_message=f"adapter_missing:{job.source}",
+                    retryable=False,
+                    retry_delay_seconds=self.retry_delay_seconds,
+                )
                 return
-        adapter = self.adapters.get(job.source)
-        if not adapter:
+            self.store.mark_downloading(job.id)
             _log_event(
-                logging.ERROR,
-                "adapter_missing",
+                logging.INFO,
+                "job_started",
                 job_id=job.id,
                 trace_id=job.trace_id,
                 source=job.source,
+                origin=job.origin,
+                media_intent=job.media_intent,
             )
-            self.store.record_failure(
-                job,
-                error_message=f"adapter_missing:{job.source}",
-                retryable=False,
-                retry_delay_seconds=self.retry_delay_seconds,
-            )
-            return
-        self.store.mark_downloading(job.id)
-        _log_event(
-            logging.INFO,
-            "job_started",
-            job_id=job.id,
-            trace_id=job.trace_id,
-            source=job.source,
-            origin=job.origin,
-            media_intent=job.media_intent,
-        )
-        try:
             result = adapter.execute(
                 job,
                 self.config,
@@ -2548,38 +2602,35 @@ def format_track_number(value):
     return f"{normalized:02d}"
 
 
+def _normalize_nfc(value):
+    return unicodedata.normalize("NFC", str(value or ""))
+
+
+def _extract_release_year(value):
+    text = str(value or "").strip()
+    if len(text) >= 4 and text[:4].isdigit():
+        return text[:4]
+    return ""
+
+
 def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
-    artist = sanitize_for_filesystem(_clean_audio_artist(meta.get("artist") or ""))
-    album = sanitize_for_filesystem(_clean_audio_title(meta.get("album") or ""))
-    track = sanitize_for_filesystem(_clean_audio_title(meta.get("track") or meta.get("title") or ""))
-    track_number = format_track_number(meta.get("track_number"))
-    fmt = {
-        "artist": artist,
-        "album": album,
-        "track": track,
-        "track_number": track_number,
-        "ext": ext,
-        "id": "",
-    }
+    album_artist = sanitize_for_filesystem(
+        _normalize_nfc(_clean_audio_artist(meta.get("album_artist") or meta.get("artist") or ""))
+    ) or "Unknown Artist"
+    album_title = sanitize_for_filesystem(_normalize_nfc(_clean_audio_title(meta.get("album") or ""))) or "Unknown Album"
+    track = sanitize_for_filesystem(_normalize_nfc(_clean_audio_title(meta.get("track") or meta.get("title") or "")))
+    track_number = format_track_number(meta.get("track_number")) or "00"
+    disc_number = normalize_track_number(meta.get("disc") or meta.get("disc_number"))
+    disc_folder = sanitize_for_filesystem(_normalize_nfc(f"Disc {disc_number or 1}"))
+    release_year = _extract_release_year(meta.get("release_date") or meta.get("date"))
+    album_folder = f"{album_title} ({release_year})" if release_year else album_title
+    # Audio paths are canonical and intentionally ignore custom templates.
+    # This avoids structural drift and duplicate Disc folder segments.
+    _ = template
+    _ = fallback_id
 
-    if template:
-        try:
-            rendered = template % fmt
-            rendered = rendered.strip("/\t ")
-            if rendered:
-                return rendered
-        except Exception:
-            pass
-
-    if artist and album:
-        if track_number:
-            return f"{artist}/{album}/{track_number} - {track}.{ext}"
-        return f"{artist}/{album}/{track}.{ext}"
-    if artist:
-        if track_number:
-            return f"{artist}/{track_number} - {track}.{ext}"
-        return f"{artist}/{track}.{ext}"
-    return f"{track or 'media'}.{ext}"
+    track_label = f"{track_number} - {track or 'media'}.{ext}"
+    return f"Music/{album_artist}/{album_folder}/{disc_folder}/{track_label}"
 
 
 def build_output_filename(meta, fallback_id, ext, template, audio_mode):

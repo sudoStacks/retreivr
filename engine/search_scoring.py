@@ -184,18 +184,18 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
 
 
 def rank_candidates(scored_candidates, *, source_priority=None):
-    priority_map = {}
-    if source_priority:
-        for idx, name in enumerate(source_priority):
-            priority_map[name] = idx
-    ranked = []
-    for idx, item in enumerate(scored_candidates):
-        source = item.get("source") or ""
-        priority = priority_map.get(source, len(priority_map))
-        ranked.append((item.get("final_score", 0.0), -priority, -idx, item))
-    ranked.sort(reverse=True)
+    # Deterministic ordering for equal scores:
+    # (-score, source, candidate_id)
+    ranked = sorted(
+        scored_candidates,
+        key=lambda item: (
+            -float(item.get("final_score", 0.0)),
+            str(item.get("source") or ""),
+            str(item.get("candidate_id") or ""),
+        ),
+    )
     results = []
-    for rank, (_, _, _, item) in enumerate(ranked, start=1):
+    for rank, item in enumerate(ranked, start=1):
         item["rank"] = rank
         results.append(item)
     return results
