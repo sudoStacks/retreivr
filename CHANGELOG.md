@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.4 — Filesystem Layout Stabilization
+
+### Changed
+- Docker runtime now defaults to canonical root-level directories:
+  /downloads, /data, /config, /logs, /tokens
+- No RETREIVR_*_DIR overrides required in container deployments
+- Unified database path resolution (removed legacy RETREIVR_DB_PATH fallbacks)
+
+### Migration Notes
+- Legacy /app/data deployments must remap volumes
+- Optional SQL path rewrite may be required if absolute paths were stored
+
+
 ## [v0.9.3] – Canonical Authority & Scheduler Hardening
 
 This release establishes Retreivr’s canonical authority model and locks in deterministic orchestration behavior. v0.9.3 is a stability milestone focused on correctness, idempotency, and clean archival output.
