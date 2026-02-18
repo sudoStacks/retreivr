@@ -4122,7 +4122,19 @@ def download_full_album(data: dict):
             prefer_country = configured_country or None
         except Exception:
             prefer_country = None
-        selection = _mb_service().pick_best_release_with_reason(release_group_id, prefer_country=prefer_country)
+        try:
+            selection = _mb_service().pick_best_release_with_reason(
+                release_group_id,
+                prefer_country=prefer_country,
+            )
+        except Exception:
+            logger.exception(
+                "[MUSIC] release selection failed release_group=%s album_id=%s release_id=%s",
+                release_group_id,
+                album_id,
+                release_id,
+            )
+            raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
         release_id = str(selection.get("release_id") or "").strip() or None
         selected_reason = str(selection.get("reason") or "release_group_selection")
         if not release_id:
@@ -4130,7 +4142,11 @@ def download_full_album(data: dict):
         logger.info(f"[MUSIC] release_resolved release_group={release_group_id} release={release_id} reason={selected_reason}")
         logger.info(f"[MUSIC] selected_release={release_id} from release_group={release_group_id} reason={selected_reason}")
 
-    tracks = _mb_service().fetch_release_tracks(release_id or "")
+    try:
+        tracks = _mb_service().fetch_release_tracks(release_id or "")
+    except Exception:
+        logger.exception("[MUSIC] track expansion failed release_id=%s", release_id)
+        raise HTTPException(status_code=502, detail="musicbrainz_track_expansion_failed")
     if not tracks:
         return {"error": "unable to fetch tracks"}
     logger.info(f"[MUSIC] Album {release_group_id or release_id} fetched {len(tracks)} tracks")
