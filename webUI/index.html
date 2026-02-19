@@ -39,6 +39,13 @@
   <main class="layout">
     <section class="panel full page-full" id="home-panel" data-page="home">
       <div class="home-search-shell">
+        <div class="music-mode-toggle-row">
+          <label class="music-mode-switch" for="music-mode-toggle">
+            <input id="music-mode-toggle" type="checkbox">
+            <span class="music-mode-slider" aria-hidden="true"></span>
+            <span class="music-mode-label">Music Mode</span>
+          </label>
+        </div>
         <div id="standard-search-container">
           <input
             id="home-search-input"
@@ -47,13 +54,6 @@
             placeholder="Search YouTube, music, podcasts, archives…"
             autocomplete="off"
           />
-
-          <div class="home-advanced-row">
-            <label class="home-advanced-field">
-              <span>Music Mode (Spotify metadata, album structure, validation)</span>
-              <input id="music-mode-toggle" type="checkbox">
-            </label>
-          </div>
 
           <div class="home-search-toggles">
             <div id="home-source-filters" class="home-source-filters">

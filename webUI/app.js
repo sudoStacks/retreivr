@@ -2145,6 +2145,19 @@ function clearLegacyHomeSearchState() {
   updateHomeViewAdvancedLink();
 }
 
+function buildMusicConsoleQuery() {
+  const artist = String($("#search-artist")?.value || "").trim();
+  const album = String($("#search-album")?.value || "").trim();
+  const track = String($("#search-track")?.value || "").trim();
+  if (artist && track) {
+    return `${artist} - ${track}`;
+  }
+  if (artist && album) {
+    return `${artist} ${album}`;
+  }
+  return artist || track || album || "";
+}
+
 async function handleHomeMusicModeSearch(inputValue, messageEl) {
   setNotice(messageEl, "Music Mode: loading metadata results...", false);
   clearLegacyHomeSearchState();
@@ -5337,8 +5350,36 @@ function bindEvents() {
   $("#downloads-body").addEventListener("click", async (event) => {
     await handleCopy(event, $("#downloads-message"));
   });
-  // Legacy Media Search Console submit handlers intentionally disabled.
-  // Music Mode searches must flow through submitHomeSearch only.
+  const musicSearchDownload = $("#search-create-download");
+  if (musicSearchDownload) {
+    musicSearchDownload.addEventListener("click", async () => {
+      const query = buildMusicConsoleQuery();
+      if (!query) {
+        setNotice($("#home-search-message"), "Enter artist, album, or track for Music Search.", true);
+        return;
+      }
+      const homeInput = $("#home-search-input");
+      if (homeInput) {
+        homeInput.value = query;
+      }
+      await submitHomeSearch(true);
+    });
+  }
+  const musicSearchOnly = $("#search-create-only");
+  if (musicSearchOnly) {
+    musicSearchOnly.addEventListener("click", async () => {
+      const query = buildMusicConsoleQuery();
+      if (!query) {
+        setNotice($("#home-search-message"), "Enter artist, album, or track for Music Search.", true);
+        return;
+      }
+      const homeInput = $("#home-search-input");
+      if (homeInput) {
+        homeInput.value = query;
+      }
+      await submitHomeSearch(false);
+    });
+  }
   $("#search-requests-refresh").addEventListener("click", refreshSearchRequests);
   $("#search-requests-sort").addEventListener("click", () => {
     state.searchRequestsSort = state.searchRequestsSort === "asc" ? "desc" : "asc";
