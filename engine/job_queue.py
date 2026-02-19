@@ -1859,10 +1859,10 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
         raise RuntimeError("no_valid_release_for_recording")
 
     service = get_musicbrainz_service()
-    # recording?inc=releases+release-groups+media
+    # recording entity valid includes: releases/artists/isrcs
     recording_payload = service.get_recording(
         recording_mbid,
-        includes=["releases", "release-groups", "media"],
+        includes=["releases", "artists", "isrcs"],
     )
     recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
     release_list = recording_data.get("release-list", []) if isinstance(recording_data, dict) else []
@@ -2312,7 +2312,7 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
             try:
                 recording_payload = get_musicbrainz_service().get_recording(
                     recording_mbid,
-                    includes=["releases", "release-groups", "media"],
+                    includes=["releases", "artists", "isrcs"],
                 )
                 recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
                 canonical["duration_ms"] = _coalesce_pos_int(

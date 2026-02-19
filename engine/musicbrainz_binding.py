@@ -162,10 +162,20 @@ def resolve_best_mb_pair(
         recording_artist = _artist_credit_string(recording.get("artist-credit"))
         recording_duration_ms = _safe_int(recording.get("length"))
 
-        recording_payload = mb_service.get_recording(
-            recording_mbid,
-            includes=["releases", "release-groups", "media", "artist-credits"],
-        )
+        try:
+            recording_payload = mb_service.get_recording(
+                recording_mbid,
+                includes=["releases", "artists", "isrcs"],
+            )
+        except Exception as e:
+            logger.error(
+                {
+                    "message": "mb_recording_fetch_failed",
+                    "recording_mbid": recording_mbid,
+                    "error": str(e),
+                }
+            )
+            raise
         recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
         release_items = recording_data.get("release-list", []) if isinstance(recording_data, dict) else []
         release_items = [entry for entry in release_items if isinstance(entry, dict) and str(entry.get("id") or "").strip()]
@@ -179,7 +189,7 @@ def resolve_best_mb_pair(
                 continue
             release_payload = mb_service.get_release(
                 release_id,
-                includes=["recordings", "release-groups", "artist-credits", "media", "labels", "isrcs"],
+                includes=["release-groups", "media", "recordings", "artists"],
             )
             release = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
             if not isinstance(release, dict):

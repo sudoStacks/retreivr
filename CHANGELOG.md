@@ -98,6 +98,9 @@ All notable changes to this project will be documented here.
 - Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.
 - Deterministic search ranking tie-break behavior stabilized in general resolution paths.
 - Music path canonicalization enforced (disc folder presence, zero-padded tracks, NFC normalization).
+- Fixed MusicBrainz recording include contract to prevent `InvalidIncludeError`:
+  - recording fetch now uses only valid recording includes (`releases`, `artists`, `isrcs`)
+  - release-group/media/recordings includes are fetched from release entity lookups only
 
 ## v0.9.4 — Filesystem Layout Stabilization
 
