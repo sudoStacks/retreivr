@@ -310,13 +310,16 @@ def search_music_metadata(query, mode, offset=0, limit=20):
             track_title = str(recording.get("title") or "").strip()
             artist_name = _artist_credit_text(recording.get("artist-credit")) or None
             duration_ms = _safe_int(recording.get("length"))
-            resolved = resolve_best_mb_pair(
-                mb_service,
-                artist=artist_name,
-                track=track_title,
-                album=None,
-                duration_ms=duration_ms,
-            )
+            try:
+                resolved = resolve_best_mb_pair(
+                    mb_service,
+                    artist=artist_name,
+                    track=track_title,
+                    album=None,
+                    duration_ms=duration_ms,
+                )
+            except Exception:
+                continue
             if not resolved:
                 continue
             response["tracks"].append(
