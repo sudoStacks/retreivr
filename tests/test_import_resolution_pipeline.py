@@ -19,6 +19,7 @@ class FakeMusicBrainzService:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = []
+        self._recording_release_ids = {}
 
     def search_recordings(self, artist, title, *, album=None, limit=5):
         self.calls.append(
@@ -32,7 +33,64 @@ class FakeMusicBrainzService:
         response = self._responses.pop(0)
         if isinstance(response, Exception):
             raise response
+        if isinstance(response, dict):
+            for rec in response.get("recording-list", []) or []:
+                if not isinstance(rec, dict):
+                    continue
+                rid = str(rec.get("id") or "").strip()
+                release_list = rec.get("release-list") if isinstance(rec.get("release-list"), list) else []
+                release_ids = [
+                    str(item.get("id") or "").strip()
+                    for item in release_list
+                    if isinstance(item, dict) and str(item.get("id") or "").strip()
+                ]
+                if rid and release_ids:
+                    self._recording_release_ids[rid] = release_ids
         return response
+
+    def get_recording(self, recording_id, *, includes=None):
+        _ = includes
+        rid = str(recording_id or "").strip()
+        release_ids = self._recording_release_ids.get(rid, [])
+        return {
+            "recording": {
+                "id": rid,
+                "release-list": [{"id": release_id, "date": "2011-01-01"} for release_id in release_ids],
+            }
+        }
+
+    def get_release(self, release_id, *, includes=None):
+        _ = includes
+        release_id = str(release_id or "").strip()
+        matched_recording = None
+        for rec_id, release_ids in self._recording_release_ids.items():
+            if release_id in release_ids:
+                matched_recording = rec_id
+                break
+        return {
+            "release": {
+                "id": release_id,
+                "title": "Album",
+                "date": "2011-01-01",
+                "status": "Official",
+                "country": "US",
+                "release-group": {
+                    "id": f"rg-{release_id}",
+                    "primary-type": "Album",
+                },
+                "medium-list": [
+                    {
+                        "position": "1",
+                        "track-list": [
+                            {
+                                "position": "1",
+                                "recording": {"id": matched_recording or "unknown-recording"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
 
 
 class FakeQueueStore:
@@ -122,6 +180,10 @@ def test_import_pipeline_resolves_musicbrainz_and_enqueues_music_track() -> None
     output = payload["output_template"]
     assert output["recording_mbid"] == "mbid-1"
     assert output["mb_release_id"] == "release-1"
+    assert output["mb_release_group_id"] == "rg-release-1"
+    assert output["disc_number"] == 1
+    assert output["track_number"] == 1
+    assert output["release_date"] == "2011"
     assert output["kind"] == "music_track"
 
 
@@ -161,8 +223,8 @@ def test_import_pipeline_unresolved_when_no_acceptable_musicbrainz_match() -> No
 def test_import_pipeline_uses_single_batch_id_for_all_enqueued_items() -> None:
     mb = FakeMusicBrainzService(
         [
-            {"recording-list": [{"id": "mbid-1", "title": "One", "ext:score": "96"}]},
-            {"recording-list": [{"id": "mbid-2", "title": "Two", "ext:score": "94"}]},
+            {"recording-list": [{"id": "mbid-1", "title": "One", "ext:score": "96", "release-list": [{"id": "release-1"}]}]},
+            {"recording-list": [{"id": "mbid-2", "title": "Two", "ext:score": "94", "release-list": [{"id": "release-2"}]}]},
         ]
     )
     queue_store = FakeQueueStore()

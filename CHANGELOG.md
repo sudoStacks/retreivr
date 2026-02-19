@@ -37,6 +37,17 @@ All notable changes to this project will be documented here.
   - invalid/no-official-album release cases fail fast before folder creation
   - missing release-group metadata is completed during enrichment
   - no fallback to `Unknown Album` for music-track path generation
+- MB bound-pair regression coverage:
+  - deterministic recording→release→release-group binding validation
+  - US-release preference and album-hint preference checks
+  - deterministic tie-break by release identifier when candidates are otherwise equal
+- End-to-end MB-binding acceptance suite across all music acquisition paths:
+  - import path MB-bound before enqueue
+  - manual search enqueue MB-bound before enqueue
+  - direct URL music enqueue MB-bound before enqueue
+  - deterministic same-input MB pair selection checks
+  - fail-fast validation when no acceptable MB pair exists
+  - log-order checks proving `mb_pair_selected` occurs before `job_enqueued`
 
 ### Changed
 - Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
@@ -69,6 +80,19 @@ All notable changes to this project will be documented here.
   - applies stable ordering (release date asc, release id lexicographic)
   - extracts disc/track from matched recording in release media
   - raises explicit enrichment errors when no valid release or recording-track mapping is found
+- Music-track canonical metadata now carries explicit bound-release keys (`recording_mbid`, `mb_release_id`, `mb_release_group_id`, `album`, `release_date`, `track_number`, `disc_number`) end-to-end before path build.
+- Added structured MB-pair observability in import resolution:
+  - `mb_pair_selected` with selected recording/release/release-group + track/disc/year/album
+  - `mb_pair_selection_failed` with explicit reason list (`no_official_album`, `no_us_release`, `track_not_found_in_release`, etc.)
+- MB binding now converges through a single shared scorer (`engine/musicbrainz_binding.py`) to avoid per-path drift.
+- Best MB match selection now scores recording+release pairs with:
+  - correctness-first weighting (artist/title/duration/variant rejection)
+  - completeness-secondary weighting (release-group/date/track+disc/album + metadata bonuses)
+  - deterministic tie-break ordering for stable repeatable selection
+- Pre-enqueue MB binding is now enforced for all music acquisition paths (import, manual search enqueue, direct URL music enqueue).
+- Worker music-track execution now enforces binding invariants (`recording_mbid` + `mb_release_id`) before adapter resolution.
+- Manual/direct enqueue paths now prioritize canonical metadata fields for expected artist/track/album/duration inputs used by music scoring.
+- Music client-delivery fast-lane bypass is now blocked for music jobs so MB binding is never skipped.
 
 ### Fixed
 - Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.

@@ -25,6 +25,7 @@ from engine.job_queue import (
     build_download_job_payload,
     build_output_template,
     ensure_download_jobs_table,
+    preview_direct_url,
     resolve_media_intent,
     resolve_media_type,
     resolve_source,
@@ -820,6 +821,34 @@ def run_single_download(
         media_type = resolve_media_type(effective_config, url=video_url)
         media_intent = resolve_media_intent(origin, media_type)
         source = resolve_source(video_url)
+        resolved_metadata = None
+        if media_type == "music" and media_intent == "track":
+            try:
+                preview = preview_direct_url(video_url, config or {})
+            except Exception:
+                preview = {}
+            preview_title = str((preview or {}).get("title") or "").strip()
+            preview_uploader = str((preview or {}).get("uploader") or "").strip()
+            preview_track = preview_title
+            preview_artist = preview_uploader or None
+            if " - " in preview_title:
+                left, right = preview_title.split(" - ", 1)
+                left = left.strip()
+                right = right.strip()
+                if left and right:
+                    preview_artist = preview_artist or left
+                    preview_track = right
+            duration_sec = (preview or {}).get("duration_sec")
+            try:
+                duration_ms = int(duration_sec) * 1000 if duration_sec is not None else None
+            except (TypeError, ValueError):
+                duration_ms = None
+            resolved_metadata = {
+                "artist": preview_artist,
+                "track": preview_track,
+                "album": None,
+                "duration_ms": duration_ms,
+            }
 
         try:
             enqueue_payload = build_download_job_payload(
@@ -833,6 +862,7 @@ def run_single_download(
                 destination=destination,
                 base_dir=paths.single_downloads_dir,
                 final_format_override=final_format_override,
+                resolved_metadata=resolved_metadata,
             )
         except ValueError as exc:
             _status_set(status, "last_error_message", f"Invalid destination path: {exc}")
@@ -842,6 +872,15 @@ def run_single_download(
             log_duplicate_event=False,
             **enqueue_payload,
         )
+        if created:
+            logging.info(
+                "job_enqueued origin=%s source=%s media_type=%s media_intent=%s job_id=%s",
+                origin,
+                source,
+                media_type,
+                media_intent,
+                job_id,
+            )
         if created:
             _status_append(status, "run_successes", job_id)
         status.single_download_ok = job_id is not None

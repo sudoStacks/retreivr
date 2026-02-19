@@ -1281,10 +1281,26 @@ class SearchResolutionService:
                     canonical_for_job = json.loads(chosen.get("canonical_json"))
                 except json.JSONDecodeError:
                     canonical_for_job = None
+            expected_music_metadata = dict(canonical_for_job) if isinstance(canonical_for_job, dict) else {}
 
             canonical_id = _extract_canonical_id(canonical_for_job or chosen)
             trace_id = uuid4().hex
             media_intent = "album" if item["item_type"] == "album" else "track"
+            target_media_type = ("music" if _is_audio_final_format(final_format_override) else item["media_type"])
+            if target_media_type == "music" and media_intent == "track":
+                if not expected_music_metadata.get("artist"):
+                    expected_music_metadata["artist"] = item.get("artist")
+                if not expected_music_metadata.get("track"):
+                    expected_music_metadata["track"] = item.get("track")
+                if not expected_music_metadata.get("album"):
+                    expected_music_metadata["album"] = item.get("album")
+                if not expected_music_metadata.get("duration_ms"):
+                    try:
+                        hint_sec = int(request_row.get("duration_hint_sec")) if request_row.get("duration_hint_sec") is not None else None
+                    except (TypeError, ValueError):
+                        hint_sec = None
+                    if hint_sec:
+                        expected_music_metadata["duration_ms"] = hint_sec * 1000
             external_id = chosen.get("external_id") if isinstance(chosen, dict) else None
             canonical_url = canonicalize_url(chosen.get("source"), chosen.get("url"), external_id)
             try:
@@ -1292,7 +1308,7 @@ class SearchResolutionService:
                     config=self.config,
                     origin=job_origin,
                     origin_id=request_id,
-                    media_type=("music" if _is_audio_final_format(final_format_override) else item["media_type"]),
+                    media_type=target_media_type,
                     media_intent=media_intent,
                     source=chosen["source"],
                     url=chosen["url"],
@@ -1300,7 +1316,7 @@ class SearchResolutionService:
                     destination=destination_dir,
                     base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
                     final_format_override=final_format_override,
-                    resolved_metadata=canonical_for_job,
+                    resolved_metadata=(expected_music_metadata if expected_music_metadata else canonical_for_job),
                     trace_id=trace_id,
                     canonical_id=canonical_id,
                     canonical_url=canonical_url,
@@ -1432,10 +1448,26 @@ class SearchResolutionService:
                 canonical_payload = json.loads(canonical_raw)
             except json.JSONDecodeError:
                 canonical_payload = None
+        expected_music_metadata = dict(canonical_payload) if isinstance(canonical_payload, dict) else {}
 
         canonical_id = _extract_canonical_id(canonical_payload or candidate)
         trace_id = uuid4().hex
         media_intent = "album" if item.get("item_type") == "album" else "track"
+        target_media_type = ("music" if _is_audio_final_format(final_format_override) else (item.get("media_type") or "generic"))
+        if target_media_type == "music" and media_intent == "track":
+            if not expected_music_metadata.get("artist"):
+                expected_music_metadata["artist"] = item.get("artist")
+            if not expected_music_metadata.get("track"):
+                expected_music_metadata["track"] = item.get("track")
+            if not expected_music_metadata.get("album"):
+                expected_music_metadata["album"] = item.get("album")
+            if not expected_music_metadata.get("duration_ms"):
+                try:
+                    hint_sec = int(request.get("duration_hint_sec")) if request.get("duration_hint_sec") is not None else None
+                except (TypeError, ValueError):
+                    hint_sec = None
+                if hint_sec:
+                    expected_music_metadata["duration_ms"] = hint_sec * 1000
         external_id = candidate.get("external_id") if isinstance(candidate, dict) else None
         canonical_url = canonicalize_url(candidate.get("source"), candidate_url, external_id)
         try:
@@ -1443,7 +1475,7 @@ class SearchResolutionService:
                 config=self.config,
                 origin="search",
                 origin_id=request["id"],
-                media_type=("music" if _is_audio_final_format(final_format_override) else (item.get("media_type") or "generic")),
+                media_type=target_media_type,
                 media_intent=media_intent,
                 source=candidate.get("source"),
                 url=candidate_url,
@@ -1451,7 +1483,7 @@ class SearchResolutionService:
                 destination=destination_dir,
                 base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
                 final_format_override=final_format_override,
-                resolved_metadata=canonical_payload,
+                resolved_metadata=(expected_music_metadata if expected_music_metadata else canonical_payload),
                 trace_id=trace_id,
                 canonical_id=canonical_id,
                 canonical_url=canonical_url,

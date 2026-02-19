@@ -28,6 +28,16 @@ from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 
+try:
+    from engine.musicbrainz_binding import resolve_best_mb_pair
+except Exception:
+    _BINDING_PATH = os.path.join(os.path.dirname(__file__), "musicbrainz_binding.py")
+    _BINDING_SPEC = importlib.util.spec_from_file_location("engine_musicbrainz_binding_job_queue", _BINDING_PATH)
+    _BINDING_MODULE = importlib.util.module_from_spec(_BINDING_SPEC)
+    assert _BINDING_SPEC and _BINDING_SPEC.loader
+    _BINDING_SPEC.loader.exec_module(_BINDING_MODULE)
+    resolve_best_mb_pair = _BINDING_MODULE.resolve_best_mb_pair
+
 logger = logging.getLogger(__name__)
 
 JOB_STATUS_QUEUED = "queued"
@@ -335,6 +345,26 @@ def _normalize_format(value: str | None) -> str | None:
     if not value:
         return None
     return str(value).strip().lower()
+
+
+def _extract_music_binding_ids(job: DownloadJob) -> tuple[str | None, str | None]:
+    payload = job.output_template if isinstance(job.output_template, dict) else {}
+    canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+    recording_mbid = str(
+        payload.get("recording_mbid")
+        or payload.get("mb_recording_id")
+        or canonical.get("recording_mbid")
+        or canonical.get("mb_recording_id")
+        or ""
+    ).strip() or None
+    release_mbid = str(
+        payload.get("mb_release_id")
+        or payload.get("release_id")
+        or canonical.get("mb_release_id")
+        or canonical.get("release_id")
+        or ""
+    ).strip() or None
+    return recording_mbid, release_mbid
 
 class DownloadJobStore:
     def __init__(self, db_path):
@@ -1106,23 +1136,11 @@ class DownloadWorkerEngine:
     def _resolve_music_track_job(self, job):
         payload = job.output_template if isinstance(job.output_template, dict) else {}
         canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
-        artist = str(payload.get("artist") or canonical.get("artist") or "").strip()
-        track = str(payload.get("track") or canonical.get("track") or canonical.get("title") or "").strip()
-        album = str(payload.get("album") or canonical.get("album") or "").strip() or None
-        recording_mbid = str(
-            payload.get("recording_mbid")
-            or payload.get("mb_recording_id")
-            or canonical.get("recording_mbid")
-            or canonical.get("mb_recording_id")
-            or ""
-        ).strip() or None
-        release_mbid = str(
-            payload.get("mb_release_id")
-            or payload.get("release_id")
-            or canonical.get("mb_release_id")
-            or canonical.get("release_id")
-            or ""
-        ).strip() or None
+        # Prefer bound MB canonical metadata for scoring expectations.
+        artist = str(canonical.get("artist") or payload.get("artist") or "").strip()
+        track = str(canonical.get("track") or canonical.get("title") or payload.get("track") or "").strip()
+        album = str(canonical.get("album") or payload.get("album") or "").strip() or None
+        recording_mbid, release_mbid = _extract_music_binding_ids(job)
         release_group_mbid = str(
             payload.get("mb_release_group_id")
             or payload.get("release_group_id")
@@ -1130,9 +1148,9 @@ class DownloadWorkerEngine:
             or canonical.get("release_group_id")
             or ""
         ).strip() or None
-        duration_ms_raw = payload.get("duration_ms")
+        duration_ms_raw = canonical.get("duration_ms")
         if duration_ms_raw is None:
-            duration_ms_raw = canonical.get("duration_ms")
+            duration_ms_raw = payload.get("duration_ms")
         if duration_ms_raw is None:
             duration_ms_raw = canonical.get("duration")
         duration_hint_sec = None
@@ -1141,6 +1159,14 @@ class DownloadWorkerEngine:
                 duration_hint_sec = max(int(duration_ms_raw) // 1000, 1)
         except Exception:
             duration_hint_sec = None
+        if not recording_mbid or not release_mbid:
+            self.store.record_failure(
+                job,
+                error_message="music_track_binding_missing",
+                retryable=False,
+                retry_delay_seconds=self.retry_delay_seconds,
+            )
+            return None
         allow_live = self._music_track_is_live(artist, track, album)
         if not artist or not track:
             logging.error("Music track search failed")
@@ -1396,6 +1422,15 @@ class DownloadWorkerEngine:
                 return
             if intent == "music_track":
                 logger.info(f"[WORKER] processing music_track: {job}")
+                recording_mbid, release_mbid = _extract_music_binding_ids(job)
+                if not recording_mbid or not release_mbid:
+                    self.store.record_failure(
+                        job,
+                        error_message="music_track_binding_missing",
+                        retryable=False,
+                        retry_delay_seconds=self.retry_delay_seconds,
+                    )
+                    return
                 job = self._resolve_music_track_job(job)
                 if job is None:
                     return
@@ -1672,6 +1707,14 @@ class YouTubeAdapter:
                 meta["mb_release_group_id"] = release_group_mbid
             effective_media_intent = media_intent or getattr(job, "media_intent", None)
             if is_music_media_type(effective_media_type) and str(effective_media_intent or "").strip().lower() == "music_track":
+                pre_fields = _release_fields_from_template(output_template, canonical)
+                if not _release_fields_complete(pre_fields):
+                    _log_event(
+                        logging.WARNING,
+                        "missing_bound_release_metadata",
+                        job_id=getattr(job, "id", None),
+                        recording_mbid=recording_mbid,
+                    )
                 _ensure_release_enriched(job)
                 refreshed_template = job.output_template if isinstance(job.output_template, dict) else {}
                 refreshed_canonical = (
@@ -1679,19 +1722,13 @@ class YouTubeAdapter:
                     if isinstance(refreshed_template.get("canonical_metadata"), dict)
                     else {}
                 )
-                for key in (
-                    "album",
-                    "release_date",
-                    "track_number",
-                    "disc_number",
-                    "mb_release_id",
-                    "mb_release_group_id",
-                ):
-                    value = refreshed_canonical.get(key)
-                    if value is None and isinstance(refreshed_template, dict):
-                        value = refreshed_template.get(key)
-                    if value is not None:
-                        meta[key] = value
+                # For music_track jobs, canonical path fields come from bound canonical metadata only.
+                meta["album"] = refreshed_canonical.get("album")
+                meta["release_date"] = refreshed_canonical.get("release_date")
+                meta["track_number"] = refreshed_canonical.get("track_number")
+                meta["disc_number"] = refreshed_canonical.get("disc_number")
+                meta["mb_release_id"] = refreshed_canonical.get("mb_release_id")
+                meta["mb_release_group_id"] = refreshed_canonical.get("mb_release_group_id")
             video_id = meta.get("video_id") or job.id
             ext = os.path.splitext(local_file)[1].lstrip(".")
             if audio_mode:
@@ -2155,6 +2192,170 @@ def build_output_template(config, *, playlist_entry=None, destination=None, base
     }
 
 
+def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference="US"):
+    if not isinstance(payload_or_intent, dict):
+        raise ValueError("music_track_requires_mapping_payload")
+
+    template = payload_or_intent.get("output_template")
+    if not isinstance(template, dict):
+        template = {}
+        payload_or_intent["output_template"] = template
+
+    canonical = template.get("canonical_metadata")
+    if not isinstance(canonical, dict):
+        canonical = {}
+        template["canonical_metadata"] = canonical
+
+    required_keys = (
+        "recording_mbid",
+        "mb_release_id",
+        "mb_release_group_id",
+        "album",
+        "release_date",
+        "track_number",
+        "disc_number",
+        "duration_ms",
+    )
+    for key in required_keys:
+        canonical.setdefault(key, None)
+
+    def _coalesce_str(*values):
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None
+
+    def _coalesce_pos_int(*values):
+        for value in values:
+            parsed = _normalize_positive_int(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _is_complete(meta):
+        for key in required_keys:
+            value = meta.get(key)
+            if key in {"track_number", "disc_number", "duration_ms"}:
+                if _normalize_positive_int(value) is None:
+                    return False
+            else:
+                if str(value or "").strip() == "":
+                    return False
+        return True
+
+    # Pull direct fields into canonical metadata for uniform validation.
+    canonical["recording_mbid"] = _coalesce_str(
+        canonical.get("recording_mbid"),
+        canonical.get("mb_recording_id"),
+        template.get("recording_mbid"),
+        template.get("mb_recording_id"),
+        payload_or_intent.get("recording_mbid"),
+        payload_or_intent.get("mb_recording_id"),
+    )
+    canonical["mb_release_id"] = _coalesce_str(
+        canonical.get("mb_release_id"),
+        canonical.get("release_id"),
+        template.get("mb_release_id"),
+        payload_or_intent.get("mb_release_id"),
+        payload_or_intent.get("release_id"),
+    )
+    canonical["mb_release_group_id"] = _coalesce_str(
+        canonical.get("mb_release_group_id"),
+        canonical.get("release_group_id"),
+        template.get("mb_release_group_id"),
+        payload_or_intent.get("mb_release_group_id"),
+        payload_or_intent.get("release_group_id"),
+    )
+    canonical["album"] = _coalesce_str(
+        canonical.get("album"),
+        template.get("album"),
+        payload_or_intent.get("album"),
+    )
+    canonical["release_date"] = _coalesce_str(
+        canonical.get("release_date"),
+        canonical.get("date"),
+        template.get("release_date"),
+        payload_or_intent.get("release_date"),
+    )
+    canonical["track_number"] = _coalesce_pos_int(
+        canonical.get("track_number"),
+        canonical.get("track_num"),
+        template.get("track_number"),
+        payload_or_intent.get("track_number"),
+    )
+    canonical["disc_number"] = _coalesce_pos_int(
+        canonical.get("disc_number"),
+        canonical.get("disc_num"),
+        template.get("disc_number"),
+        payload_or_intent.get("disc_number"),
+        1,
+    )
+    canonical["duration_ms"] = _coalesce_pos_int(
+        canonical.get("duration_ms"),
+        template.get("duration_ms"),
+        payload_or_intent.get("duration_ms"),
+    )
+
+    if not _is_complete(canonical):
+        recording_mbid = _coalesce_str(canonical.get("recording_mbid"))
+        release_hint = _coalesce_str(canonical.get("mb_release_id"))
+        if recording_mbid:
+            enriched = _fetch_release_enrichment(
+                recording_mbid,
+                release_hint,
+            )
+            for key in ("album", "release_date", "track_number", "disc_number", "mb_release_id", "mb_release_group_id"):
+                value = enriched.get(key) if isinstance(enriched, dict) else None
+                if value not in (None, ""):
+                    canonical[key] = value
+            try:
+                recording_payload = get_musicbrainz_service().get_recording(
+                    recording_mbid,
+                    includes=["releases", "release-groups", "media"],
+                )
+                recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
+                canonical["duration_ms"] = _coalesce_pos_int(
+                    canonical.get("duration_ms"),
+                    recording_data.get("length"),
+                )
+            except Exception:
+                pass
+        else:
+            artist = _coalesce_str(canonical.get("artist"), template.get("artist"), payload_or_intent.get("artist"))
+            track = _coalesce_str(canonical.get("track"), canonical.get("title"), template.get("track"), payload_or_intent.get("track"))
+            album_hint = _coalesce_str(canonical.get("album"), template.get("album"), payload_or_intent.get("album"))
+            if artist and track:
+                service = get_musicbrainz_service()
+                pair = resolve_best_mb_pair(
+                    service,
+                    artist=artist,
+                    track=track,
+                    album=album_hint,
+                    duration_ms=_coalesce_pos_int(canonical.get("duration_ms"), template.get("duration_ms"), payload_or_intent.get("duration_ms")),
+                    country_preference=country_preference,
+                    allow_non_album_fallback=bool((config or {}).get("allow_non_album_fallback")),
+                    debug=bool((config or {}).get("debug_music_scoring")),
+                    min_recording_score=float((config or {}).get("min_confidence") or 0.0),
+                )
+                if isinstance(pair, dict):
+                    canonical.update(pair)
+
+    canonical["release_date"] = _extract_release_year(canonical.get("release_date")) or _coalesce_str(canonical.get("release_date"))
+    canonical["track_number"] = _coalesce_pos_int(canonical.get("track_number"))
+    canonical["disc_number"] = _coalesce_pos_int(canonical.get("disc_number"), 1)
+    canonical["duration_ms"] = _coalesce_pos_int(canonical.get("duration_ms"))
+    if not _is_complete(canonical):
+        raise ValueError("music_track_requires_mb_bound_metadata")
+
+    # Keep top-level mirror fields in sync for legacy consumers.
+    for key in required_keys:
+        template[key] = canonical.get(key)
+    template["mb_recording_id"] = canonical.get("recording_mbid")
+
+    return canonical
+
+
 def build_download_job_payload(
     *,
     config,
@@ -2197,6 +2398,37 @@ def build_download_job_payload(
 
     if isinstance(output_template_overrides, dict):
         output_template.update(output_template_overrides)
+
+    # Canonical MB pair schema contract for music-track jobs.
+    # This is schema availability only (no enrichment behavior here).
+    normalized_intent = str(media_intent or "").strip().lower()
+    if normalized_intent == "music_track" or (is_music_media_type(media_type) and normalized_intent == "track"):
+        canonical = output_template.get("canonical_metadata")
+        if not isinstance(canonical, dict):
+            canonical = {}
+            output_template["canonical_metadata"] = canonical
+        for key in (
+            "recording_mbid",
+            "mb_release_id",
+            "mb_release_group_id",
+            "album",
+            "release_date",
+            "track_number",
+            "disc_number",
+        ):
+            canonical.setdefault(key, None)
+        ensure_mb_bound_music_track(
+            {
+                "media_type": media_type,
+                "media_intent": media_intent,
+                "output_template": output_template,
+                "artist": output_template.get("artist"),
+                "track": output_template.get("track"),
+                "album": output_template.get("album"),
+            },
+            config=config,
+            country_preference=str(config.get("country") or "US"),
+        )
 
     video_container = _resolve_target_video_container(
         {"final_format": final_format_override},

@@ -27,6 +27,14 @@ def _load_search_modules():
     _load_module("engine.paths", _ROOT / "engine" / "paths.py")
     _load_module("engine.search_scoring", _ROOT / "engine" / "search_scoring.py")
     _load_module("engine.search_adapters", _ROOT / "engine" / "search_adapters.py")
+    if "metadata.services" not in sys.modules:
+        metadata_services_pkg = types.ModuleType("metadata.services")
+        metadata_services_pkg.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["metadata.services"] = metadata_services_pkg
+    if "metadata.services.musicbrainz_service" not in sys.modules:
+        mb_module = types.ModuleType("metadata.services.musicbrainz_service")
+        mb_module.get_musicbrainz_service = lambda: None
+        sys.modules["metadata.services.musicbrainz_service"] = mb_module
     if "metadata.canonical" not in sys.modules:
         metadata_canonical = types.ModuleType("metadata.canonical")
         metadata_canonical.CanonicalMetadataResolver = lambda config=None: _StubCanonicalResolver()

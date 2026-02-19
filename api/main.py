@@ -2126,8 +2126,12 @@ async def _start_run_with_config(
                     if single_url:
                         resolved_media_type = resolve_media_type(config, url=single_url)
                         resolved_media_intent = resolve_media_intent("manual", resolved_media_type)
+                        effective_delivery_mode = delivery_mode or "server"
+                        if resolved_media_type == "music" and effective_delivery_mode == "client":
+                            # Music Mode must pass through queue MB binding; no client fast-lane bypass.
+                            effective_delivery_mode = "server"
                         run_callable = execute_download(
-                            delivery_mode=delivery_mode or "server",
+                            delivery_mode=effective_delivery_mode,
                             run_immediate=lambda: functools.partial(
                                 _run_immediate_download_to_client,
                                 url=single_url,
@@ -4839,6 +4843,14 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
         media_type = item.get("media_type") or "generic"
         if _normalize_audio_format(effective_final_format):
             media_type = "music"
+        if media_type == "music":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "Music downloads require queued MB binding; client delivery is not supported.",
+                    "code": "MUSIC_CLIENT_DELIVERY_UNSUPPORTED",
+                },
+            )
         media_intent = "album" if item.get("item_type") == "album" else "track"
         try:
             result = await anyio.to_thread.run_sync(
