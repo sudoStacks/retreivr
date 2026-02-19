@@ -5,6 +5,10 @@ import re
 import unicodedata
 from typing import Any
 
+import musicbrainzngs
+
+from metadata.services.musicbrainz_service import get_musicbrainz_service
+
 logger = logging.getLogger(__name__)
 
 CORRECTNESS_WEIGHT = 0.8
@@ -163,6 +167,182 @@ def _resolve_track_position(release_payload: dict[str, Any], recording_mbid: str
             track_number = _safe_int(track.get("position"))
             return track_number, disc_number
     return None, None
+
+
+def search_music_metadata(query, mode, offset=0, limit=20):
+    normalized_query = str(query or "").strip()
+    limit_value = max(1, int(limit or 20))
+    offset_value = max(0, int(offset or 0))
+    mode_value = str(mode or "auto").strip().lower() or "auto"
+    if mode_value not in {"auto", "artist", "album", "track"}:
+        mode_value = "auto"
+
+    resolved_mode = mode_value
+    if resolved_mode == "auto":
+        token_count = len([tok for tok in normalized_query.split() if tok.strip()])
+        if re.search(r"\S+\s*-\s*\S+", normalized_query):
+            resolved_mode = "track"
+        elif token_count <= 2:
+            resolved_mode = "artist"
+        elif re.search(r"\b\d{4}\b", normalized_query):
+            resolved_mode = "album"
+        else:
+            resolved_mode = "track"
+
+    response = {
+        "artists": [],
+        "albums": [],
+        "tracks": [],
+        "mode_used": resolved_mode,
+        "offset": offset_value,
+        "limit": limit_value,
+    }
+    if not normalized_query:
+        return response
+
+    mb_service = get_musicbrainz_service()
+
+    def _mb_call(func):
+        return mb_service._call_with_retry(func)  # noqa: SLF001
+
+    def _artist_credit_text(value: Any) -> str:
+        if not isinstance(value, list):
+            return ""
+        parts: list[str] = []
+        for entry in value:
+            if isinstance(entry, str):
+                parts.append(entry)
+                continue
+            if not isinstance(entry, dict):
+                continue
+            artist_obj = entry.get("artist") if isinstance(entry.get("artist"), dict) else {}
+            name = str(entry.get("name") or artist_obj.get("name") or "").strip()
+            joinphrase = str(entry.get("joinphrase") or "")
+            if name:
+                parts.append(name)
+            if joinphrase:
+                parts.append(joinphrase)
+        return "".join(parts).strip()
+
+    if resolved_mode == "artist":
+        payload = _mb_call(
+            lambda: musicbrainzngs.search_artists(
+                query=f"artist:{normalized_query}",
+                limit=limit_value,
+                offset=offset_value,
+            )
+        )
+        artist_list = payload.get("artist-list", []) if isinstance(payload, dict) else []
+        for artist in artist_list[:limit_value]:
+            if not isinstance(artist, dict):
+                continue
+            response["artists"].append(
+                {
+                    "artist_mbid": artist.get("id"),
+                    "name": artist.get("name"),
+                    "country": artist.get("country"),
+                    "disambiguation": artist.get("disambiguation"),
+                }
+            )
+        return response
+
+    if resolved_mode == "album":
+        payload = _mb_call(
+            lambda: musicbrainzngs.search_release_groups(
+                query=f"releasegroup:{normalized_query}",
+                type="album",
+                limit=limit_value,
+                offset=offset_value,
+            )
+        )
+        group_list = payload.get("release-group-list", []) if isinstance(payload, dict) else []
+        for group in group_list[:limit_value]:
+            if not isinstance(group, dict):
+                continue
+            release_group_id = str(group.get("id") or "").strip()
+            selected_release_id = None
+            if release_group_id:
+                rg_payload = _mb_call(
+                    lambda rgid=release_group_id: musicbrainzngs.get_release_group_by_id(
+                        rgid,
+                        includes=["releases"],
+                    )
+                )
+                release_group_payload = rg_payload.get("release-group", {}) if isinstance(rg_payload, dict) else {}
+                releases = release_group_payload.get("release-list", []) if isinstance(release_group_payload, dict) else []
+                release_dicts = [r for r in releases if isinstance(r, dict)]
+                official = [
+                    r for r in release_dicts
+                    if str(r.get("status") or "").strip().lower() == "official"
+                ]
+                pool = official or release_dicts
+                us_pool = [
+                    r for r in pool
+                    if str(r.get("country") or "").strip().upper() == "US"
+                ]
+                pool = us_pool or pool
+                if pool:
+                    selected_release_id = pool[0].get("id")
+            response["albums"].append(
+                {
+                    "release_group_mbid": group.get("id"),
+                    "release_mbid": selected_release_id,
+                    "title": group.get("title"),
+                    "artist": _artist_credit_text(group.get("artist-credit")),
+                    "release_year": _extract_release_year(group.get("first-release-date")),
+                }
+            )
+        return response
+
+    if resolved_mode == "track":
+        payload = _mb_call(
+            lambda: musicbrainzngs.search_recordings(
+                query=f"recording:{normalized_query}",
+                limit=limit_value,
+                offset=offset_value,
+            )
+        )
+        recording_list = payload.get("recording-list", []) if isinstance(payload, dict) else []
+        for recording in recording_list[:limit_value]:
+            if not isinstance(recording, dict):
+                continue
+            recording_mbid = str(recording.get("id") or "").strip()
+            track_title = str(recording.get("title") or "").strip()
+            artist_name = _artist_credit_text(recording.get("artist-credit")) or None
+            duration_ms = _safe_int(recording.get("length"))
+            resolved = resolve_best_mb_pair(
+                mb_service,
+                artist=artist_name,
+                track=track_title,
+                album=None,
+                duration_ms=duration_ms,
+            )
+            if not resolved:
+                continue
+            response["tracks"].append(
+                {
+                    "recording_mbid": resolved.get("recording_mbid") or recording_mbid,
+                    "release_mbid": resolved.get("mb_release_id"),
+                    "release_group_mbid": resolved.get("mb_release_group_id"),
+                    "artist": artist_name,
+                    "track": track_title,
+                    "album": resolved.get("album"),
+                    "release_year": _extract_release_year(resolved.get("release_date")),
+                    "track_number": resolved.get("track_number"),
+                    "disc_number": resolved.get("disc_number"),
+                    "duration_ms": resolved.get("duration_ms") or duration_ms,
+                }
+            )
+        return response
+
+    return {
+        "artists": response["artists"],
+        "albums": response["albums"],
+        "tracks": response["tracks"],
+        "mode_used": resolved_mode,
+        "offset": offset_value,
+        "limit": limit_value,
+    }
 
 
 def _collect_isrc(recording: dict[str, Any]) -> bool:

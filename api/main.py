@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 import requests
+import musicbrainzngs
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -71,7 +72,7 @@ from engine.job_queue import (
 )
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
-from engine.musicbrainz_binding import resolve_best_mb_pair
+from engine.musicbrainz_binding import resolve_best_mb_pair, search_music_metadata
 from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
@@ -4396,128 +4397,175 @@ async def run_search_resolution_once():
 
 @app.post("/api/music/album/download")
 def download_full_album(data: dict):
-    release_group_id = str((data or {}).get("release_group_id") or "").strip() or None
-    album_id = str((data or {}).get("album_id") or "").strip() or None
-    release_id = str((data or {}).get("release_id") or album_id or "").strip() or None
-    if not release_group_id and not album_id:
-        return {"error": "release_group_id or album_id required"}
-    logger.info(f"[MUSIC] explicit album download request release_group={release_group_id}")
+    release_group_mbid = str((data or {}).get("release_group_mbid") or "").strip()
+    if not release_group_mbid:
+        raise HTTPException(status_code=400, detail="release_group_mbid required")
 
-    selected_reason = "explicit_release_id"
-    if release_group_id:
-        prefer_country = None
-        try:
-            cfg = _read_config_or_404()
-            configured_country = str((cfg or {}).get("locale_country") or (cfg or {}).get("country") or "").strip().upper()
-            prefer_country = configured_country or None
-        except Exception:
-            prefer_country = None
-        try:
-            selection = _mb_service().pick_best_release_with_reason(
-                release_group_id,
-                prefer_country=prefer_country,
+    cfg = _read_config_or_404()
+    threshold_raw = (cfg or {}).get("music_mb_binding_threshold", 0.78)
+    try:
+        binding_threshold = float(threshold_raw)
+    except (TypeError, ValueError):
+        binding_threshold = 0.78
+    if binding_threshold > 1.0:
+        binding_threshold = binding_threshold / 100.0
+    binding_threshold = max(0.0, min(1.0, binding_threshold))
+
+    mb = _mb_service()
+    try:
+        release_group_payload = mb._call_with_retry(  # noqa: SLF001
+            lambda: musicbrainzngs.get_release_group_by_id(
+                release_group_mbid,
+                includes=["releases"],
             )
-        except Exception:
-            logger.exception(
-                "[MUSIC] release selection failed release_group=%s album_id=%s release_id=%s",
-                release_group_id,
-                album_id,
-                release_id,
-            )
-            raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
-        release_id = str(selection.get("release_id") or "").strip() or None
-        selected_reason = str(selection.get("reason") or "release_group_selection")
-        if not release_id:
-            return {"error": "unable to select release from release_group"}
-        logger.info(f"[MUSIC] release_resolved release_group={release_group_id} release={release_id} reason={selected_reason}")
-        logger.info(f"[MUSIC] selected_release={release_id} from release_group={release_group_id} reason={selected_reason}")
+        )
+    except Exception:
+        logger.exception("[MUSIC] release_group fetch failed release_group=%s", release_group_mbid)
+        raise HTTPException(status_code=502, detail="musicbrainz_release_group_fetch_failed")
+
+    release_group = release_group_payload.get("release-group", {}) if isinstance(release_group_payload, dict) else {}
+    releases = release_group.get("release-list", []) if isinstance(release_group, dict) else []
+    release_dicts = [rel for rel in releases if isinstance(rel, dict)]
+    if not release_dicts:
+        raise HTTPException(status_code=404, detail="musicbrainz_release_group_has_no_releases")
+
+    official = [rel for rel in release_dicts if str(rel.get("status") or "").strip().lower() == "official"]
+    us_official = [rel for rel in official if str(rel.get("country") or "").strip().upper() == "US"]
+    if us_official:
+        selected_release = us_official[0]
+    elif official:
+        selected_release = official[0]
+    else:
+        selected_release = release_dicts[0]
+    release_mbid = str(selected_release.get("id") or "").strip()
+    if not release_mbid:
+        raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
 
     try:
-        tracks = _mb_service().fetch_release_tracks(release_id or "")
-    except Exception:
-        logger.exception("[MUSIC] track expansion failed release_id=%s", release_id)
-        raise HTTPException(status_code=502, detail="musicbrainz_track_expansion_failed")
-    if not tracks:
-        return {"error": "unable to fetch tracks"}
-    logger.info(f"[MUSIC] Album {release_group_id or release_id} fetched {len(tracks)} tracks")
-    if len(tracks) == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="Album resolved but no tracks returned from MusicBrainz"
+        release_payload = mb._call_with_retry(  # noqa: SLF001
+            lambda: musicbrainzngs.get_release_by_id(
+                release_mbid,
+                includes=["recordings", "media", "artists"],
+            )
         )
+    except Exception:
+        logger.exception("[MUSIC] release fetch failed release=%s", release_mbid)
+        raise HTTPException(status_code=502, detail="musicbrainz_release_fetch_failed")
+
+    release_obj = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
+    release_title = str(release_obj.get("title") or "").strip() or None
+    release_date = str(release_obj.get("date") or "").strip() or None
+    release_artist_credit = release_obj.get("artist-credit", []) if isinstance(release_obj, dict) else []
+    media = release_obj.get("medium-list", []) if isinstance(release_obj, dict) else []
+    if not isinstance(media, list):
+        media = []
+
+    def _credit_name(artist_credit):
+        if not isinstance(artist_credit, list):
+            return ""
+        parts = []
+        for item in artist_credit:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            artist_obj = item.get("artist") if isinstance(item.get("artist"), dict) else {}
+            name = str(item.get("name") or artist_obj.get("name") or "").strip()
+            joinphrase = str(item.get("joinphrase") or "")
+            if name:
+                parts.append(name)
+            if joinphrase:
+                parts.append(joinphrase)
+        return "".join(parts).strip()
 
     queue = _IntentQueueAdapter()
-    enqueued = 0
-    skipped_existing = 0
-    skipped_completed = 0
     engine = getattr(app.state, "worker_engine", None)
     store = getattr(engine, "store", None) if engine is not None else None
+    tracks_enqueued = 0
+    job_ids = []
 
-    for track in tracks:
-        artist = track.get("artist")
-        title = track.get("title")
-        track_number_raw = track.get("track_number")
-        disc_number_raw = track.get("disc_number")
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        medium_pos = medium.get("position")
         try:
-            track_number = int(track_number_raw) if track_number_raw is not None else None
+            disc_number = int(medium_pos) if medium_pos is not None else 1
         except (TypeError, ValueError):
-            track_number = None
-        try:
-            disc_number = int(disc_number_raw) if disc_number_raw is not None else None
-        except (TypeError, ValueError):
-            disc_number = None
-        recording_mbid = str(track.get("recording_mbid") or track.get("mb_recording_id") or "").strip() or None
-        logger.debug(f"[MUSIC] enqueue recording={recording_mbid} track={track_number}")
-        canonical_id = _build_music_track_canonical_id(
-            artist,
-            track.get("album"),
-            track_number,
-            title,
-        )
-        existing_job = store.get_job_by_canonical_id(canonical_id) if store is not None else None
-        if existing_job is not None:
-            if existing_job.status == "completed":
-                skipped_completed += 1
+            disc_number = 1
+        tracks = medium.get("track-list", []) if isinstance(medium.get("track-list"), list) else []
+        for track in tracks:
+            if not isinstance(track, dict):
                 continue
-            if existing_job.status not in {"failed", "cancelled", "skipped_duplicate"}:
-                skipped_existing += 1
+            recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+            recording_mbid = str(recording.get("id") or "").strip()
+            title = str(track.get("title") or recording.get("title") or "").strip()
+            if not recording_mbid or not title:
                 continue
-        payload = {
-            "media_intent": "music_track",
-            "artist": artist,
-            "album": track.get("album"),
-            "track": title,
-            "recording_mbid": recording_mbid,
-            "mb_recording_id": recording_mbid,
-            "track_number": track_number,
-            "disc_number": disc_number,
-            "release_date": track.get("release_date"),
-            "mb_release_id": release_id,
-            "mb_release_group_id": release_group_id,
-            "release_id": release_id,
-            "release_group_id": release_group_id,
-            "duration_ms": track.get("duration_ms"),
-            "artwork_url": track.get("artwork_url"),
-        }
-        queue.enqueue(payload)
-        enqueued += 1
-    logger.info(
-        "[MUSIC] album_enqueue_summary release_group=%s added=%s skipped_existing=%s skipped_completed=%s",
-        release_group_id,
-        enqueued,
-        skipped_existing,
-        skipped_completed,
-    )
+            artist = _credit_name(recording.get("artist-credit")) or _credit_name(track.get("artist-credit")) or _credit_name(release_artist_credit)
+            duration_ms = recording.get("length") or track.get("length")
+            try:
+                duration_ms_int = int(duration_ms) if duration_ms is not None else None
+            except (TypeError, ValueError):
+                duration_ms_int = None
+            try:
+                track_number = int(track.get("position")) if track.get("position") is not None else None
+            except (TypeError, ValueError):
+                track_number = None
+
+            resolved = resolve_best_mb_pair(
+                mb,
+                artist=artist or None,
+                track=title,
+                album=release_title,
+                duration_ms=duration_ms_int,
+                threshold=binding_threshold,
+            )
+            if not resolved:
+                reasons = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
+                logger.info(
+                    "[MUSIC] album track skipped recording=%s track=%s reasons=%s",
+                    recording_mbid,
+                    title,
+                    reasons,
+                )
+                continue
+
+            payload = {
+                "media_intent": "music_track",
+                "artist": resolved.get("artist") or artist,
+                "album": resolved.get("album") or release_title,
+                "track": title,
+                "recording_mbid": resolved.get("recording_mbid") or recording_mbid,
+                "mb_recording_id": resolved.get("recording_mbid") or recording_mbid,
+                "track_number": resolved.get("track_number") or track_number,
+                "disc_number": resolved.get("disc_number") or disc_number,
+                "release_date": resolved.get("release_date") or release_date,
+                "mb_release_id": resolved.get("mb_release_id") or release_mbid,
+                "mb_release_group_id": resolved.get("mb_release_group_id") or release_group_mbid,
+                "release_id": resolved.get("mb_release_id") or release_mbid,
+                "release_group_id": resolved.get("mb_release_group_id") or release_group_mbid,
+                "duration_ms": resolved.get("duration_ms") or duration_ms_int,
+            }
+            canonical_id = _build_music_track_canonical_id(
+                payload.get("artist"),
+                payload.get("album"),
+                payload.get("track_number"),
+                payload.get("track"),
+            )
+            queue.enqueue(payload)
+            tracks_enqueued += 1
+            if store is not None:
+                existing = store.get_job_by_canonical_id(canonical_id)
+                if existing is not None and existing.id:
+                    job_ids.append(existing.id)
 
     return {
-        "run_summary": {
-            "release_group_id": release_group_id,
-            "release_id": release_id,
-            "total_tracks": len(tracks),
-            "enqueued": enqueued,
-            "skipped_existing": skipped_existing,
-            "skipped_completed": skipped_completed,
-        }
+        "status": "enqueued",
+        "release_group_mbid": release_group_mbid,
+        "release_mbid": release_mbid,
+        "tracks_enqueued": tracks_enqueued,
+        "job_ids": job_ids,
     }
 
 
@@ -4548,15 +4596,16 @@ def music_albums_search(q: str = Query("", alias="q"), limit: int = Query(10, ge
 
 
 @app.get("/api/music/search")
-def music_search(q: str = Query("", alias="q"), limit: int = Query(10, ge=1, le=50)):
+def music_search(
+    q: str = Query("", alias="q"),
+    mode: str = Query("auto"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+):
     query = str(q or "").strip()
-    config = _read_config_or_404()
-    candidates = _search_music_recording_candidates(query, limit=int(limit), config=config)
-    logger.info("[MUSIC] mb_search q=%s limit=%s results=%s", query, int(limit), len(candidates))
-    return {
-        "status": "ok",
-        "results": candidates,
-    }
+    if not query:
+        return search_music_metadata("", mode, int(offset), int(limit))
+    return search_music_metadata(query, mode, int(offset), int(limit))
 
 
 @app.post("/api/music/enqueue")

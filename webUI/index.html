@@ -39,87 +39,200 @@
   <main class="layout">
     <section class="panel full page-full" id="home-panel" data-page="home">
       <div class="home-search-shell">
-        <input
-          id="home-search-input"
-          class="home-search-input"
-          type="text"
-          placeholder="Search YouTube, music, podcasts, archives…"
-          autocomplete="off"
-        />
+        <div id="standard-search-container">
+          <input
+            id="home-search-input"
+            class="home-search-input"
+            type="text"
+            placeholder="Search YouTube, music, podcasts, archives…"
+            autocomplete="off"
+          />
 
-        <div class="home-advanced-row">
-          <label class="home-advanced-field">
-            <span>Music Mode (Spotify metadata, album structure, validation)</span>
-            <input id="home-music-mode" type="checkbox">
-          </label>
-        </div>
+          <div class="home-advanced-row">
+            <label class="home-advanced-field">
+              <span>Music Mode (Spotify metadata, album structure, validation)</span>
+              <input id="music-mode-toggle" type="checkbox">
+            </label>
+          </div>
 
-        <div class="home-search-toggles">
-          <div id="home-source-filters" class="home-source-filters">
+          <div class="home-search-toggles">
+            <div id="home-source-filters" class="home-source-filters">
+              <button
+                id="home-source-toggle"
+                class="home-source-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="home-source-panel"
+              >
+                Sources: All
+              </button>
+              <div id="home-source-panel" class="home-source-panel" role="menu">
+                <label class="home-source-pill"><input type="checkbox" data-source="youtube" checked> <span>YouTube</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="youtube_music" checked> <span>YouTube Music</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="soundcloud" checked> <span>SoundCloud</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="bandcamp" checked> <span>Bandcamp</span></label>
+              </div>
+            </div>
+
             <button
-              id="home-source-toggle"
-              class="home-source-toggle"
+              id="home-advanced-toggle"
+              class="button ghost small home-advanced-toggle"
               type="button"
               aria-expanded="false"
-              aria-controls="home-source-panel"
+              aria-controls="home-advanced-panel"
             >
-              Sources: All
+              Advanced options
             </button>
-            <div id="home-source-panel" class="home-source-panel" role="menu">
-              <label class="home-source-pill"><input type="checkbox" data-source="youtube" checked> <span>YouTube</span></label>
-              <label class="home-source-pill"><input type="checkbox" data-source="youtube_music" checked> <span>YouTube Music</span></label>
-              <label class="home-source-pill"><input type="checkbox" data-source="soundcloud" checked> <span>SoundCloud</span></label>
-              <label class="home-source-pill"><input type="checkbox" data-source="bandcamp" checked> <span>Bandcamp</span></label>
+          </div>
+
+          <div id="home-advanced-panel" class="home-advanced-panel hidden">
+            <div class="home-advanced-row">
+              <label class="home-advanced-field">
+                <span>Format</span>
+                <select id="home-format">
+                  <option value="">Default</option>
+                  <option value="mp3">mp3</option>
+                  <option value="mp4">mp4</option>
+                  <option value="mkv">mkv</option>
+                  <option value="webm">webm</option>
+                </select>
+              </label>
+
+              <label class="home-advanced-field">
+                <span>Destination</span>
+                <div class="row">
+                  <input id="home-destination" type="text" placeholder="downloads">
+                  <button id="home-destination-browse" class="button ghost small" type="button">Browse</button>
+                </div>
+              </label>
             </div>
           </div>
 
-          <button
-            id="home-advanced-toggle"
-            class="button ghost small home-advanced-toggle"
-            type="button"
-            aria-expanded="false"
-            aria-controls="home-advanced-panel"
-          >
-            Advanced options
-          </button>
-        </div>
-
-        <div id="home-advanced-panel" class="home-advanced-panel hidden">
-          <div class="home-advanced-row">
-            <label class="home-advanced-field">
-              <span>Format</span>
-              <select id="home-format">
-                <option value="">Default</option>
-                <option value="mp3">mp3</option>
-                <option value="mp4">mp4</option>
-                <option value="mkv">mkv</option>
-                <option value="webm">webm</option>
-              </select>
-            </label>
-
-            <label class="home-advanced-field">
-              <span>Destination</span>
-              <div class="row">
-                <input id="home-destination" type="text" placeholder="downloads">
-                <button id="home-destination-browse" class="button ghost small" type="button">Browse</button>
-              </div>
-            </label>
+          <div class="home-search-actions">
+            <button id="home-search-only" class="button primary">Search</button>
+            <button id="home-search-download" class="button ghost">Search &amp; Download</button>
           </div>
         </div>
 
-        <div class="home-search-actions">
-          <button id="home-search-only" class="button primary">Search</button>
-          <button id="home-search-download" class="button ghost">Search &amp; Download</button>
+        <div id="music-mode-console" class="hidden">
+          <section class="panel">
+            <div class="panel-title">Media Search Console</div>
+            <div class="stack">
+              <div class="group">
+                <div class="group-title">Create Search Request</div>
+                <div class="grid two">
+                  <label class="field medium">
+                    <span>Artist</span>
+                    <input id="search-artist" type="text" placeholder="Artist name">
+                  </label>
+                  <label class="field medium">
+                    <span>Album</span>
+                    <input id="search-album" type="text" placeholder="Optional album">
+                  </label>
+                  <label class="field medium">
+                    <span>Track</span>
+                    <input id="search-track" type="text" placeholder="Optional track">
+                  </label>
+                  <label class="field short">
+                    <span>Intent</span>
+                    <select id="search-intent">
+                      <option value="track">track</option>
+                      <option value="album">album</option>
+                    </select>
+                  </label>
+                  <label class="field short">
+                    <span>Min match score</span>
+                    <input id="search-min-score" type="number" min="0" max="1" step="0.01" value="0.92">
+                  </label>
+                  <label class="field short">
+                    <span>Max candidates</span>
+                    <input id="search-max-candidates" type="number" min="1" max="50" value="5">
+                  </label>
+                </div>
+                <div class="group-title">Source priority</div>
+                <div id="search-source-list" class="stack source-priority-list">
+                  <div class="row source-priority-row" data-source="bandcamp">
+                    <label class="field inline">
+                      <span>bandcamp</span>
+                      <input class="source-enabled" type="checkbox" checked>
+                    </label>
+                    <div class="action-group">
+                      <button class="button ghost small" type="button" data-action="up">↑</button>
+                      <button class="button ghost small" type="button" data-action="down">↓</button>
+                    </div>
+                  </div>
+                  <div class="row source-priority-row" data-source="youtube_music">
+                    <label class="field inline">
+                      <span>youtube_music</span>
+                      <input class="source-enabled" type="checkbox" checked>
+                    </label>
+                    <div class="action-group">
+                      <button class="button ghost small" type="button" data-action="up">↑</button>
+                      <button class="button ghost small" type="button" data-action="down">↓</button>
+                    </div>
+                  </div>
+                  <div class="row source-priority-row" data-source="soundcloud">
+                    <label class="field inline">
+                      <span>soundcloud</span>
+                      <input class="source-enabled" type="checkbox" checked>
+                    </label>
+                    <div class="action-group">
+                      <button class="button ghost small" type="button" data-action="up">↑</button>
+                      <button class="button ghost small" type="button" data-action="down">↓</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="row">
+                  <label class="field inline">
+                    <span>Include albums</span>
+                    <input id="search-include-albums" type="checkbox" checked>
+                  </label>
+                  <label class="field inline">
+                    <span>Include singles</span>
+                    <input id="search-include-singles" type="checkbox" checked>
+                  </label>
+                  <label class="field inline">
+                    <span>Lossless only</span>
+                    <input id="search-lossless-only" type="checkbox">
+                  </label>
+                </div>
+                <div class="row">
+                  <label class="field">
+                    <span>Destination override</span>
+                    <div class="row">
+                      <input id="search-destination" type="text" placeholder="Leave blank for default">
+                      <button id="search-destination-browse" class="button ghost small" type="button">Browse</button>
+                    </div>
+                    <div class="meta" id="search-destination-resolved">Resolved: /downloads</div>
+                  </label>
+                  <div class="field">
+                    <span>Default destination</span>
+                    <div id="search-default-destination" class="meta">-</div>
+                  </div>
+                </div>
+                <div class="row">
+                  <div class="action-group">
+                    <button id="search-create-download" class="button">Search &amp; Download Top Result</button>
+                    <button id="search-create-only" class="button ghost">Search Only</button>
+                  </div>
+                  <div id="search-create-message" class="notice" role="status"></div>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
 
-        <div class="home-advanced-row">
-          <label class="home-advanced-field">
-            <span>Import playlist file</span>
-            <input id="home-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
-          </label>
-          <button id="home-import-button" class="button ghost small" type="button">Import Playlist</button>
+        <button id="import-playlist-toggle" class="button ghost small" type="button">Import Playlist</button>
+        <div id="import-playlist-panel">
+          <div class="home-advanced-row">
+            <label class="home-advanced-field">
+              <span>Import playlist file</span>
+              <input id="home-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
+            </label>
+            <button id="home-import-button" class="button ghost small" type="button">Import Playlist</button>
+          </div>
+          <div id="home-import-summary" class="meta"></div>
         </div>
-        <div id="home-import-summary" class="meta"></div>
 
         <div id="home-search-message" class="notice" role="status">
           Press Enter or click Search to discover media
@@ -646,115 +759,6 @@
         </div>
       </div>
     </section>
-
-    
-    <section class="panel" id="search-create-panel" data-page="advanced">
-      <div class="panel-title">Media Search Console</div>
-      <div class="stack">
-        <div class="group">
-          <div class="group-title">Create Search Request</div>
-          <div class="grid two">
-            <label class="field medium">
-              <span>Artist</span>
-              <input id="search-artist" type="text" placeholder="Artist name">
-            </label>
-            <label class="field medium">
-              <span>Album</span>
-              <input id="search-album" type="text" placeholder="Optional album">
-            </label>
-            <label class="field medium">
-              <span>Track</span>
-              <input id="search-track" type="text" placeholder="Optional track">
-            </label>
-            <label class="field short">
-              <span>Intent</span>
-              <select id="search-intent">
-                <option value="track">track</option>
-                <option value="album">album</option>
-              </select>
-            </label>
-            <label class="field short">
-              <span>Min match score</span>
-              <input id="search-min-score" type="number" min="0" max="1" step="0.01" value="0.92">
-            </label>
-            <label class="field short">
-              <span>Max candidates</span>
-              <input id="search-max-candidates" type="number" min="1" max="50" value="5">
-            </label>
-          </div>
-          <div class="group-title">Source priority</div>
-          <div id="search-source-list" class="stack source-priority-list">
-            <div class="row source-priority-row" data-source="bandcamp">
-              <label class="field inline">
-                <span>bandcamp</span>
-                <input class="source-enabled" type="checkbox" checked>
-              </label>
-              <div class="action-group">
-                <button class="button ghost small" type="button" data-action="up">↑</button>
-                <button class="button ghost small" type="button" data-action="down">↓</button>
-              </div>
-            </div>
-            <div class="row source-priority-row" data-source="youtube_music">
-              <label class="field inline">
-                <span>youtube_music</span>
-                <input class="source-enabled" type="checkbox" checked>
-              </label>
-              <div class="action-group">
-                <button class="button ghost small" type="button" data-action="up">↑</button>
-                <button class="button ghost small" type="button" data-action="down">↓</button>
-              </div>
-            </div>
-            <div class="row source-priority-row" data-source="soundcloud">
-              <label class="field inline">
-                <span>soundcloud</span>
-                <input class="source-enabled" type="checkbox" checked>
-              </label>
-              <div class="action-group">
-                <button class="button ghost small" type="button" data-action="up">↑</button>
-                <button class="button ghost small" type="button" data-action="down">↓</button>
-              </div>
-            </div>
-          </div>
-          <div class="row">
-            <label class="field inline">
-              <span>Include albums</span>
-              <input id="search-include-albums" type="checkbox" checked>
-            </label>
-            <label class="field inline">
-              <span>Include singles</span>
-              <input id="search-include-singles" type="checkbox" checked>
-            </label>
-            <label class="field inline">
-              <span>Lossless only</span>
-              <input id="search-lossless-only" type="checkbox">
-            </label>
-          </div>
-          <div class="row">
-            <label class="field">
-              <span>Destination override</span>
-              <div class="row">
-                <input id="search-destination" type="text" placeholder="Leave blank for default">
-                <button id="search-destination-browse" class="button ghost small" type="button">Browse</button>
-              </div>
-              <div class="meta" id="search-destination-resolved">Resolved: /downloads</div>
-            </label>
-            <div class="field">
-              <span>Default destination</span>
-              <div id="search-default-destination" class="meta">-</div>
-            </div>
-          </div>
-          <div class="row">
-            <div class="action-group">
-              <button id="search-create-download" class="button">Search &amp; Download Top Result</button>
-              <button id="search-create-only" class="button ghost">Search Only</button>
-            </div>
-            <div id="search-create-message" class="notice" role="status"></div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-
 
     <section class="panel" id="search-items-panel" data-page="advanced">
       <div class="panel-title">Search Items & Candidates</div>

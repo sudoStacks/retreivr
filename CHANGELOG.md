@@ -128,6 +128,18 @@ All notable changes to this project will be documented here.
   - Music Mode search calls `/api/music/search` and renders canonical MB result cards
   - card-level Download actions call `/api/music/enqueue`
   - non-music (normal) search flow remains unchanged
+- Home page layout now hosts the Media Search Console directly in Music Mode:
+  - moved from Advanced into Home
+  - gated by `music-mode-toggle`
+  - standard free-text search and import panels are wrapped in explicit Home containers
+- Music Mode Home submit now hard-switches to metadata-only flow:
+  - calls `GET /api/music/search`
+  - skips standard adapter-backed `/api/search/requests` polling/render path when Music Mode is ON
+- `/api/music/search` now supports mode-specific metadata search params:
+  - `q`, `mode` (`auto|artist|album|track`), `offset`, `limit`
+  - returns grouped MusicBrainz metadata (`artists`, `albums`, `tracks`) with `mode_used`
+- `/api/music/album/download` now accepts `release_group_mbid` and enqueues album tracks via MB release-group → release → tracklist expansion before worker acquisition.
+- Home album-card enqueue payload now sends `release_group_mbid` (not legacy `release_group_id`) and confirms `tracks_enqueued` after queueing.
 - Pre-enqueue MB binding is now enforced for all music acquisition paths (import, manual search enqueue, direct URL music enqueue).
 - Worker music-track execution now enforces binding invariants (`recording_mbid` + `mb_release_id`) before adapter resolution.
 - Manual/direct enqueue paths now prioritize canonical metadata fields for expected artist/track/album/duration inputs used by music scoring.
