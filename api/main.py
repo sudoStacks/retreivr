@@ -54,6 +54,7 @@ from engine.job_queue import (
     DownloadJobStore,
     DownloadWorkerEngine,
     atomic_move,
+    build_download_job_payload,
     build_output_filename,
     preview_direct_url,
     canonicalize_url,
@@ -591,6 +592,11 @@ class _IntentQueueAdapter:
         if store is None:
             logging.warning("Intent enqueue skipped: worker engine store unavailable")
             return
+        try:
+            runtime_config = load_config(app.state.config_path)
+        except Exception:
+            runtime_config = {}
+        base_dir = app.state.paths.single_downloads_dir
 
         media_intent = str(payload.get("media_intent") or "").strip() or "track"
         origin = "spotify_playlist" if payload.get("playlist_id") else "intent"
@@ -665,42 +671,24 @@ class _IntentQueueAdapter:
                 return
             query = quote(f"{normalized_artist} {normalized_track}".strip())
             url = f"https://music.youtube.com/search?q={query}"
-            output_template = {
-                "audio_mode": True,
+            canonical_metadata = {
                 "artist": normalized_artist,
                 "track": normalized_track,
                 "album": normalized_album,
-                "track_number": payload.get("track_number"),
-                "disc_number": payload.get("disc_number"),
-                "release_date": payload.get("release_date"),
                 "duration_ms": payload.get("duration_ms"),
-                "artwork_url": payload.get("artwork_url"),
                 "recording_mbid": normalized_recording_mbid,
                 "mb_recording_id": normalized_recording_mbid,
                 "mb_release_id": normalized_release_mbid,
                 "mb_release_group_id": normalized_release_group_mbid,
-                "canonical_metadata": {
-                    "artist": normalized_artist,
-                    "track": normalized_track,
-                    "album": normalized_album,
-                    "duration_ms": payload.get("duration_ms"),
-                    "recording_mbid": normalized_recording_mbid,
-                    "mb_recording_id": normalized_recording_mbid,
-                    "mb_release_id": normalized_release_mbid,
-                    "mb_release_group_id": normalized_release_group_mbid,
-                },
             }
-            if destination:
-                output_template["output_dir"] = destination
-            if final_format:
-                output_template["final_format"] = final_format
             canonical_id = _build_music_track_canonical_id(
                 normalized_artist,
                 normalized_album,
                 payload.get("track_number"),
                 normalized_track,
             )
-            store.enqueue_job(
+            enqueue_payload = build_download_job_payload(
+                config=runtime_config,
                 origin=origin,
                 origin_id=origin_id,
                 media_type="music",
@@ -708,10 +696,25 @@ class _IntentQueueAdapter:
                 source="youtube_music",
                 url=url,
                 input_url=url,
-                output_template=output_template,
-                resolved_destination=destination,
+                destination=destination,
+                base_dir=base_dir,
+                final_format_override=final_format,
+                resolved_metadata=canonical_metadata,
+                output_template_overrides={
+                    "audio_mode": True,
+                    "track_number": payload.get("track_number"),
+                    "disc_number": payload.get("disc_number"),
+                    "release_date": payload.get("release_date"),
+                    "duration_ms": payload.get("duration_ms"),
+                    "artwork_url": payload.get("artwork_url"),
+                    "recording_mbid": normalized_recording_mbid,
+                    "mb_recording_id": normalized_recording_mbid,
+                    "mb_release_id": normalized_release_mbid,
+                    "mb_release_group_id": normalized_release_group_mbid,
+                },
                 canonical_id=canonical_id,
             )
+            store.enqueue_job(**enqueue_payload)
             logging.info(
                 "Intent payload queued playlist_id=%s spotify_track_id=%s",
                 payload.get("playlist_id"),
@@ -753,20 +756,6 @@ class _IntentQueueAdapter:
             return
         source = str(resolved_media.get("source_id") or payload.get("source") or resolve_source(media_url)).strip() or "unknown"
         music_metadata = _to_dict(payload.get("music_metadata"))
-        output_template = {
-            "audio_mode": True,
-            "canonical_metadata": music_metadata,
-            "artist": music_metadata.get("artist"),
-            "album": music_metadata.get("album"),
-            "track": music_metadata.get("title"),
-            "track_number": music_metadata.get("track_num"),
-            "disc_number": music_metadata.get("disc_num"),
-            "duration_ms": resolved_media.get("duration_ms"),
-        }
-        if destination:
-            output_template["output_dir"] = destination
-        if final_format:
-            output_template["final_format"] = final_format
         external_ids = music_metadata.get("external_ids") if isinstance(music_metadata.get("external_ids"), dict) else {}
         canonical_id = str(
             music_metadata.get("isrc")
@@ -775,7 +764,8 @@ class _IntentQueueAdapter:
             or payload.get("spotify_track_id")
             or ""
         ).strip() or None
-        store.enqueue_job(
+        enqueue_payload = build_download_job_payload(
+            config=runtime_config,
             origin=origin,
             origin_id=origin_id,
             media_type="music",
@@ -783,10 +773,17 @@ class _IntentQueueAdapter:
             source=source,
             url=media_url,
             input_url=media_url,
-            output_template=output_template,
-            resolved_destination=destination,
+            destination=destination,
+            base_dir=base_dir,
+            final_format_override=final_format,
+            resolved_metadata=music_metadata,
+            output_template_overrides={
+                "audio_mode": True,
+                "duration_ms": resolved_media.get("duration_ms"),
+            },
             canonical_id=canonical_id,
         )
+        store.enqueue_job(**enqueue_payload)
         logging.info(
             "Intent payload queued playlist_id=%s spotify_track_id=%s",
             payload.get("playlist_id"),
@@ -4057,8 +4054,18 @@ async def import_playlist(file: UploadFile = File(...)):
     if queue_store is None:
         raise HTTPException(status_code=503, detail="queue_store_unavailable")
 
+    runtime_config = _read_config_or_404()
     try:
-        result = process_imported_tracks(track_intents, {"queue_store": queue_store})
+        result = process_imported_tracks(
+            track_intents,
+            {
+                "queue_store": queue_store,
+                "app_config": runtime_config,
+                "base_dir": app.state.paths.single_downloads_dir,
+                "destination_dir": None,
+                "final_format": runtime_config.get("final_format"),
+            },
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"import_processing_failed: {exc}") from exc
     import_batch_id = str(getattr(result, "import_batch_id", "") or "").strip()

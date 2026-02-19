@@ -39,6 +39,29 @@ class _FakeQueueStore:
         return "job-1", True, None
 
 
+def _spy_job_payload_builder(*, config, **kwargs):
+    output_template = {
+        "output_dir": kwargs.get("base_dir") or "/downloads",
+        "final_format": kwargs.get("final_format_override") or (config or {}).get("final_format"),
+    }
+    if isinstance(kwargs.get("resolved_metadata"), dict):
+        output_template["canonical_metadata"] = kwargs["resolved_metadata"]
+    if isinstance(kwargs.get("output_template_overrides"), dict):
+        output_template.update(kwargs["output_template_overrides"])
+    return {
+        "origin": kwargs["origin"],
+        "origin_id": kwargs["origin_id"],
+        "media_type": kwargs["media_type"],
+        "media_intent": kwargs["media_intent"],
+        "source": kwargs["source"],
+        "url": kwargs["url"],
+        "input_url": kwargs.get("input_url") or kwargs["url"],
+        "output_template": output_template,
+        "resolved_destination": output_template.get("output_dir"),
+        "canonical_id": kwargs.get("canonical_id"),
+    }
+
+
 def test_import_enqueue_does_not_override_archive_paths() -> None:
     queue_store = _FakeQueueStore()
     result = process_imported_tracks(
@@ -54,6 +77,9 @@ def test_import_enqueue_does_not_override_archive_paths() -> None:
         {
             "musicbrainz_service": _FakeMusicBrainzService(),
             "queue_store": queue_store,
+            "app_config": {"final_format": "mkv"},
+            "base_dir": "/downloads",
+            "job_payload_builder": _spy_job_payload_builder,
         },
     )
 
@@ -61,14 +87,13 @@ def test_import_enqueue_does_not_override_archive_paths() -> None:
     assert len(queue_store.enqueued) == 1
     enqueued = queue_store.enqueued[0]
 
-    # Import flow must rely on runtime canonical archive naming, not import-specific path overrides.
+    # Import flow must rely on canonical builder output template defaults.
     assert enqueued["origin"] == "import"
     assert enqueued["media_type"] == "music"
     assert enqueued["media_intent"] == "music_track"
-    assert "resolved_destination" not in enqueued
+    assert enqueued["resolved_destination"] == "/downloads"
     output_template = enqueued["output_template"]
-    assert "output_dir" not in output_template
-    assert "filename_template" not in output_template
-    assert "audio_filename_template" not in output_template
-    assert "playlist_item_id" not in output_template
-    assert "source_account" not in output_template
+    assert output_template.get("output_dir") == "/downloads"
+    assert output_template.get("final_format") == "mkv"
+    assert output_template.get("playlist_item_id") is None
+    assert output_template.get("source_account") is None

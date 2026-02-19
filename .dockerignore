@@ -23,4 +23,4 @@ __pycache__
 
 # Launcher - not included with docker anyway
 launcher/
-launcher/**
+launcher/**  

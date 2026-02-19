@@ -60,7 +60,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from engine.job_queue import DownloadJobStore, build_output_template, ensure_download_jobs_table, canonicalize_url
+from engine.job_queue import (
+    DownloadJobStore,
+    build_download_job_payload,
+    ensure_download_jobs_table,
+    canonicalize_url,
+)
 from engine.json_utils import safe_json_dumps
 from engine.paths import DATA_DIR
 from engine.search_adapters import default_adapters
@@ -1245,37 +1250,9 @@ class SearchResolutionService:
                 )
                 continue
 
-            output_template = None
             resolved_destination = None
-            if self.paths is not None:
-                try:
-                    output_template = build_output_template(
-                        self.config,
-                        destination=destination_dir,
-                        base_dir=self.paths.single_downloads_dir,
-                    )
-                    resolved_destination = output_template.get("output_dir")
-                except ValueError as exc:
-                    self.store.update_item_status(item["id"], "failed", error="invalid_destination")
-                    _log_event(
-                        logging.ERROR,
-                        "item_failed",
-                        request_id=request_id,
-                        item_id=item["id"],
-                        error=f"invalid_destination: {exc}",
-                    )
-                    continue
             request_override = self._get_request_override(request_id)
             final_format_override = request_override.get("final_format") if request_override else None
-            if final_format_override:
-                if output_template is None:
-                    output_template = {}
-                output_template["final_format"] = final_format_override
-
-                # Invariant: if an audio codec is requested (e.g. mp3), force the audio-mode pipeline
-                # even when the search request/item media_type is generic.
-                if _is_audio_final_format(final_format_override):
-                    output_template["audio_mode"] = True
 
             canonical_for_job = chosen.get("canonical_metadata") if isinstance(chosen, dict) else None
             if not canonical_for_job and isinstance(chosen, dict) and chosen.get("canonical_json"):
@@ -1283,31 +1260,43 @@ class SearchResolutionService:
                     canonical_for_job = json.loads(chosen.get("canonical_json"))
                 except json.JSONDecodeError:
                     canonical_for_job = None
-            if canonical_for_job:
-                if output_template is None:
-                    output_template = {}
-                output_template["canonical_metadata"] = canonical_for_job
 
             canonical_id = _extract_canonical_id(canonical_for_job or chosen)
             trace_id = uuid4().hex
             media_intent = "album" if item["item_type"] == "album" else "track"
             external_id = chosen.get("external_id") if isinstance(chosen, dict) else None
             canonical_url = canonicalize_url(chosen.get("source"), chosen.get("url"), external_id)
-            job_id, created, dedupe_reason = self.queue_store.enqueue_job(
-                origin=job_origin,
-                origin_id=request_id,
-                media_type=("music" if _is_audio_final_format(final_format_override) else item["media_type"]),
-                media_intent=media_intent,
-                source=chosen["source"],
-                url=chosen["url"],
-                input_url=chosen.get("url"),
-                canonical_url=canonical_url,
-                external_id=external_id,
-                output_template=output_template,
-                trace_id=trace_id,
-                resolved_destination=resolved_destination,
-                canonical_id=canonical_id,
-            )
+            try:
+                enqueue_payload = build_download_job_payload(
+                    config=self.config,
+                    origin=job_origin,
+                    origin_id=request_id,
+                    media_type=("music" if _is_audio_final_format(final_format_override) else item["media_type"]),
+                    media_intent=media_intent,
+                    source=chosen["source"],
+                    url=chosen["url"],
+                    input_url=chosen.get("url"),
+                    destination=destination_dir,
+                    base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
+                    final_format_override=final_format_override,
+                    resolved_metadata=canonical_for_job,
+                    trace_id=trace_id,
+                    canonical_id=canonical_id,
+                    canonical_url=canonical_url,
+                    external_id=external_id,
+                )
+                resolved_destination = enqueue_payload.get("resolved_destination")
+            except ValueError as exc:
+                self.store.update_item_status(item["id"], "failed", error="invalid_destination")
+                _log_event(
+                    logging.ERROR,
+                    "item_failed",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    error=f"invalid_destination: {exc}",
+                )
+                continue
+            job_id, created, dedupe_reason = self.queue_store.enqueue_job(**enqueue_payload)
 
             if not created and dedupe_reason == "duplicate":
                 self.store.update_item_status(
@@ -1414,25 +1403,6 @@ class SearchResolutionService:
                 final_format_override = request_override.get("final_format")
 
         destination_dir = request.get("destination_dir") or None
-        output_template = None
-        if self.paths is not None:
-            try:
-                output_template = build_output_template(
-                    self.config,
-                    destination=destination_dir,
-                    base_dir=self.paths.single_downloads_dir,
-                )
-            except ValueError as exc:
-                raise ValueError(f"invalid_destination: {exc}")
-        if final_format_override:
-            if output_template is None:
-                output_template = {}
-            output_template["final_format"] = final_format_override
-
-            # Invariant: if an audio codec is requested (e.g. mp3), force the audio-mode pipeline
-            # even when the item media_type is generic.
-            if _is_audio_final_format(final_format_override):
-                output_template["audio_mode"] = True
 
         canonical_payload = None
         canonical_raw = candidate.get("canonical_json")
@@ -1441,32 +1411,35 @@ class SearchResolutionService:
                 canonical_payload = json.loads(canonical_raw)
             except json.JSONDecodeError:
                 canonical_payload = None
-        if canonical_payload:
-            if output_template is None:
-                output_template = {}
-            output_template["canonical_metadata"] = canonical_payload
 
-        resolved_destination = output_template.get("output_dir") if output_template else None
         canonical_id = _extract_canonical_id(canonical_payload or candidate)
         trace_id = uuid4().hex
         media_intent = "album" if item.get("item_type") == "album" else "track"
         external_id = candidate.get("external_id") if isinstance(candidate, dict) else None
         canonical_url = canonicalize_url(candidate.get("source"), candidate_url, external_id)
-        job_id, created, dedupe_reason = self.queue_store.enqueue_job(
-            origin="search",
-            origin_id=request["id"],
-            media_type=("music" if _is_audio_final_format(final_format_override) else (item.get("media_type") or "generic")),
-            media_intent=media_intent,
-            source=candidate.get("source"),
-            url=candidate_url,
-            input_url=candidate_url,
-            canonical_url=canonical_url,
-            external_id=external_id,
-            output_template=output_template,
-            trace_id=trace_id,
-            resolved_destination=resolved_destination,
-            canonical_id=canonical_id,
-        )
+        try:
+            enqueue_payload = build_download_job_payload(
+                config=self.config,
+                origin="search",
+                origin_id=request["id"],
+                media_type=("music" if _is_audio_final_format(final_format_override) else (item.get("media_type") or "generic")),
+                media_intent=media_intent,
+                source=candidate.get("source"),
+                url=candidate_url,
+                input_url=candidate_url,
+                destination=destination_dir,
+                base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
+                final_format_override=final_format_override,
+                resolved_metadata=canonical_payload,
+                trace_id=trace_id,
+                canonical_id=canonical_id,
+                canonical_url=canonical_url,
+                external_id=external_id,
+            )
+        except ValueError as exc:
+            raise ValueError(f"invalid_destination: {exc}")
+        resolved_destination = enqueue_payload.get("resolved_destination")
+        job_id, created, dedupe_reason = self.queue_store.enqueue_job(**enqueue_payload)
 
         if not created and dedupe_reason == "duplicate":
             self.store.update_item_status(

@@ -44,6 +44,29 @@ class FakeQueueStore:
         return f"job-{len(self.enqueued)}", True, None
 
 
+def _spy_job_payload_builder(*, config, **kwargs):
+    output_template = {
+        "output_dir": kwargs.get("base_dir") or "/downloads",
+        "final_format": kwargs.get("final_format_override") or (config or {}).get("final_format"),
+    }
+    if isinstance(kwargs.get("resolved_metadata"), dict):
+        output_template["canonical_metadata"] = kwargs["resolved_metadata"]
+    if isinstance(kwargs.get("output_template_overrides"), dict):
+        output_template.update(kwargs["output_template_overrides"])
+    return {
+        "origin": kwargs["origin"],
+        "origin_id": kwargs["origin_id"],
+        "media_type": kwargs["media_type"],
+        "media_intent": kwargs["media_intent"],
+        "source": kwargs["source"],
+        "url": kwargs["url"],
+        "input_url": kwargs.get("input_url") or kwargs["url"],
+        "output_template": output_template,
+        "resolved_destination": output_template.get("output_dir"),
+        "canonical_id": kwargs.get("canonical_id"),
+    }
+
+
 def test_import_pipeline_resolves_musicbrainz_and_enqueues_music_track() -> None:
     mb = FakeMusicBrainzService(
         [
@@ -76,6 +99,8 @@ def test_import_pipeline_resolves_musicbrainz_and_enqueues_music_track() -> None
         {
             "musicbrainz_service": mb,
             "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
         },
     )
 
@@ -118,6 +143,8 @@ def test_import_pipeline_unresolved_when_no_acceptable_musicbrainz_match() -> No
         {
             "musicbrainz_service": mb,
             "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
         },
     )
 
@@ -149,6 +176,8 @@ def test_import_pipeline_uses_single_batch_id_for_all_enqueued_items() -> None:
         {
             "musicbrainz_service": mb,
             "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
         },
     )
 

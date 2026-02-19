@@ -58,6 +58,19 @@ def _get_queue_store(config: Any):
     raise ValueError("queue_store (or queue_db_path) required")
 
 
+def _get_job_payload_builder(config: Any):
+    if isinstance(config, dict):
+        builder = config.get("job_payload_builder")
+        if callable(builder):
+            return builder
+    module_path = Path(__file__).resolve().parent / "job_queue.py"
+    spec = importlib.util.spec_from_file_location("engine_job_payload_builder_for_import_pipeline", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module.build_download_job_payload
+
+
 def _score_value(recording: dict[str, Any]) -> float | None:
     if not isinstance(recording, dict):
         return None
@@ -142,7 +155,12 @@ def _canonical_artist(recording: dict[str, Any], fallback_artist: str | None = N
 
 def _enqueue_music_track_job(
     queue_store: Any,
+    job_payload_builder,
     *,
+    runtime_config,
+    base_dir,
+    destination,
+    final_format_override,
     import_batch_id: str,
     source_index: int,
     recording_mbid: str,
@@ -153,31 +171,18 @@ def _enqueue_music_track_job(
     track_number: int | None,
 ) -> bool:
     canonical_id = f"music_track:{recording_mbid}"
-    output_template = {
-        "kind": "music_track",
-        "recording_mbid": recording_mbid,
-        "mb_recording_id": recording_mbid,
-        "mb_release_id": release_mbid,
-        "source": "import",
-        "import_batch": import_batch_id,
-        "import_batch_id": import_batch_id,
-        "source_index": source_index,
+    canonical_metadata = {
         "artist": artist,
         "track": title,
         "album": album,
         "track_number": track_number,
-        "canonical_metadata": {
-            "artist": artist,
-            "track": title,
-            "album": album,
-            "track_number": track_number,
-            "recording_mbid": recording_mbid,
-            "mb_recording_id": recording_mbid,
-            "mb_release_id": release_mbid,
-        },
+        "recording_mbid": recording_mbid,
+        "mb_recording_id": recording_mbid,
+        "mb_release_id": release_mbid,
     }
     placeholder_url = f"musicbrainz://recording/{recording_mbid}"
-    _job_id, created, _reason = queue_store.enqueue_job(
+    enqueue_payload = job_payload_builder(
+        config=runtime_config,
         origin="import",
         origin_id=import_batch_id,
         media_type="music",
@@ -185,23 +190,46 @@ def _enqueue_music_track_job(
         source="music_import",
         url=placeholder_url,
         input_url=placeholder_url,
-        output_template=output_template,
+        destination=destination,
+        base_dir=base_dir,
+        final_format_override=final_format_override,
+        resolved_metadata=canonical_metadata,
+        output_template_overrides={
+            "kind": "music_track",
+            "source": "import",
+            "import_batch": import_batch_id,
+            "import_batch_id": import_batch_id,
+            "source_index": source_index,
+            "track_number": track_number,
+            "recording_mbid": recording_mbid,
+            "mb_recording_id": recording_mbid,
+            "mb_release_id": release_mbid,
+        },
         canonical_id=canonical_id,
     )
+    _job_id, created, _reason = queue_store.enqueue_job(**enqueue_payload)
     return bool(created)
 
 
 def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportResult:
     mb_service = _get_musicbrainz_service(config)
     queue_store = _get_queue_store(config)
+    job_payload_builder = _get_job_payload_builder(config)
     import_batch_id = uuid4().hex
     confidence_threshold = _DEFAULT_CONFIDENCE_THRESHOLD
+    runtime_config = config.get("app_config") if isinstance(config, dict) and isinstance(config.get("app_config"), dict) else (config if isinstance(config, dict) else {})
+    base_dir = "/downloads"
+    destination = None
+    final_format_override = None
     if isinstance(config, dict):
         try:
             if config.get("min_confidence") is not None:
                 confidence_threshold = float(config.get("min_confidence"))
         except (TypeError, ValueError):
             confidence_threshold = _DEFAULT_CONFIDENCE_THRESHOLD
+        base_dir = config.get("base_dir")
+        destination = config.get("destination_dir")
+        final_format_override = config.get("final_format")
 
     total_tracks = len(track_intents)
     resolved_count = 0
@@ -246,6 +274,11 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 track_number = None
             created = _enqueue_music_track_job(
                 queue_store,
+                job_payload_builder,
+                runtime_config=runtime_config,
+                base_dir=base_dir,
+                destination=destination,
+                final_format_override=final_format_override,
                 import_batch_id=import_batch_id,
                 source_index=idx,
                 recording_mbid=recording_mbid,

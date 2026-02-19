@@ -1547,18 +1547,49 @@ class DownloadWorkerEngine:
 
 
 class YouTubeAdapter:
+    _missing_final_format_warned = False
+
     def execute(self, job, config, paths, *, stop_event=None, cancel_check=None, cancel_reason=None, media_type=None, media_intent=None):
-        output_template = job.output_template or {}
+        output_template = job.output_template if isinstance(job.output_template, dict) else None
+        if output_template is None:
+            logger.error(
+                "[WORKER] invariant_failed job_id=%s missing_output_template",
+                getattr(job, "id", None),
+            )
+            raise RuntimeError("invariant_missing_output_template")
+        effective_media_type = media_type or getattr(job, "media_type", None)
+        if not effective_media_type:
+            logger.error(
+                "[WORKER] invariant_failed job_id=%s missing_media_type",
+                getattr(job, "id", None),
+            )
+            raise RuntimeError("invariant_missing_media_type")
         output_dir = output_template.get("output_dir") or paths.single_downloads_dir
         raw_final_format = output_template.get("final_format")
+        if raw_final_format is None and isinstance(config, dict):
+            raw_final_format = config.get("final_format")
+            if raw_final_format is not None:
+                output_template["final_format"] = raw_final_format
+                if not self._missing_final_format_warned:
+                    logger.warning(
+                        "[WORKER] missing final_format in job output_template; falling back to config.final_format=%s",
+                        raw_final_format,
+                    )
+                    self._missing_final_format_warned = True
         normalized_format = _normalize_format(raw_final_format)
         normalized_audio_format = _normalize_audio_format(raw_final_format)
+        if normalized_format is None and normalized_audio_format is None:
+            logger.error(
+                "[WORKER] invariant_failed job_id=%s unresolved_final_format",
+                getattr(job, "id", None),
+            )
+            raise RuntimeError("invariant_missing_final_format")
 
         # Strict separation:
         # - music_mode controls whether we run music metadata enrichment.
         # - audio_only controls whether we download audio-only / extract audio via ffmpeg.
         # IMPORTANT: Do NOT let a global/default final_format="mp3" force *video* jobs into audio-only.
-        music_mode = is_music_media_type(job.media_type)
+        music_mode = is_music_media_type(effective_media_type)
         audio_only_requested = bool(output_template.get("audio_only")) or bool(output_template.get("audio_mode"))
         audio_mode = bool(audio_only_requested) or (music_mode and normalized_audio_format in _AUDIO_FORMATS)
 
@@ -1582,7 +1613,7 @@ class YouTubeAdapter:
                 final_format=final_format,
                 cookie_file=cookie_file,
                 stop_event=stop_event,
-                media_type=media_type,
+                media_type=effective_media_type,
                 media_intent=media_intent,
                 job_id=job.id,
                 origin=job.origin,
@@ -1837,6 +1868,97 @@ def build_output_template(config, *, playlist_entry=None, destination=None, base
         "remove_after_download": bool(entry.get("remove_after_download")),
         "playlist_item_id": entry.get("playlistItemId") or entry.get("playlist_item_id"),
         "source_account": entry.get("account"),
+    }
+
+
+def build_download_job_payload(
+    *,
+    config,
+    origin,
+    origin_id,
+    media_type,
+    media_intent,
+    source,
+    url,
+    input_url=None,
+    destination=None,
+    base_dir=None,
+    playlist_entry=None,
+    final_format_override=None,
+    resolved_metadata=None,
+    output_template_overrides=None,
+    trace_id=None,
+    resolved_destination=None,
+    canonical_id=None,
+    canonical_url=None,
+    external_id=None,
+):
+    output_template = build_output_template(
+        config,
+        playlist_entry=playlist_entry,
+        destination=destination,
+        base_dir=base_dir,
+    )
+    effective_final_format = final_format_override
+    if effective_final_format is None:
+        effective_final_format = output_template.get("final_format")
+    if effective_final_format is None and isinstance(config, dict):
+        effective_final_format = config.get("final_format")
+    if effective_final_format:
+        output_template["final_format"] = effective_final_format
+
+    canonical_metadata = resolved_metadata if isinstance(resolved_metadata, dict) else None
+    if canonical_metadata:
+        output_template["canonical_metadata"] = canonical_metadata
+        output_template.setdefault("artist", canonical_metadata.get("artist") or canonical_metadata.get("album_artist"))
+        output_template.setdefault("album", canonical_metadata.get("album"))
+        output_template.setdefault("track", canonical_metadata.get("track") or canonical_metadata.get("title"))
+        output_template.setdefault("track_number", canonical_metadata.get("track_number") or canonical_metadata.get("track_num"))
+        output_template.setdefault("disc_number", canonical_metadata.get("disc_number") or canonical_metadata.get("disc_num"))
+        output_template.setdefault("release_date", canonical_metadata.get("release_date") or canonical_metadata.get("date"))
+
+    if isinstance(output_template_overrides, dict):
+        output_template.update(output_template_overrides)
+
+    # Canonical output-template schema: keep a stable key set across all enqueue paths.
+    for key in (
+        "canonical_metadata",
+        "artist",
+        "album",
+        "track",
+        "track_number",
+        "disc_number",
+        "release_date",
+        "audio_mode",
+        "duration_ms",
+        "artwork_url",
+        "recording_mbid",
+        "mb_recording_id",
+        "mb_release_id",
+        "mb_release_group_id",
+        "kind",
+        "source",
+        "import_batch",
+        "import_batch_id",
+        "source_index",
+    ):
+        output_template.setdefault(key, None)
+
+    computed_destination = resolved_destination or output_template.get("output_dir")
+    return {
+        "origin": origin,
+        "origin_id": origin_id,
+        "media_type": media_type,
+        "media_intent": media_intent,
+        "source": source,
+        "url": url,
+        "input_url": input_url or url,
+        "canonical_url": canonical_url,
+        "external_id": external_id,
+        "output_template": output_template,
+        "trace_id": trace_id,
+        "resolved_destination": computed_destination,
+        "canonical_id": canonical_id,
     }
 
 

@@ -24,6 +24,7 @@ All notable changes to this project will be documented here.
 - Album enqueue observability now reports structured summary fields (`added`, `skipped_existing`, `skipped_completed`).
 - Worker/state hardening completed to reduce orphan-risk for CLAIMED/DOWNLOADING transitions.
 - Import pipeline now has zero fallback to generic transport search (no SearchResolutionService, no adapter URL query fallback).
+- Unified DownloadJob payload construction across import/Spotify/search/direct/scheduler via canonical builder (`build_download_job_payload`) with stable output_template schema and final_format propagation.
 
 ### Fixed
 - Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.

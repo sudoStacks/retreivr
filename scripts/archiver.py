@@ -116,7 +116,16 @@ def main():
             if not track_intents:
                 raise ValueError("no tracks parsed")
             queue_store = DownloadJobStore(paths.db_path)
-            result = process_imported_tracks(track_intents, {"queue_store": queue_store})
+            result = process_imported_tracks(
+                track_intents,
+                {
+                    "queue_store": queue_store,
+                    "app_config": config,
+                    "base_dir": paths.single_downloads_dir,
+                    "destination_dir": None,
+                    "final_format": config.get("final_format"),
+                },
+            )
             import_batch_id = str(getattr(result, "import_batch_id", "") or "").strip()
             if args.import_finalize_m3u and import_batch_id:
                 write_import_m3u_from_batch(

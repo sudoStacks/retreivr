@@ -22,6 +22,7 @@ from yt_dlp import YoutubeDL
 from engine.job_queue import (
     DownloadWorkerEngine,
     DownloadJobStore,
+    build_download_job_payload,
     build_output_template,
     ensure_download_jobs_table,
     resolve_media_intent,
@@ -818,29 +819,25 @@ def run_single_download(
         source = resolve_source(video_url)
 
         try:
-            output_template = build_output_template(
-                config,
+            enqueue_payload = build_download_job_payload(
+                config=config,
+                origin=origin,
+                origin_id=origin_id,
+                media_type=media_type,
+                media_intent=media_intent,
+                source=source,
+                url=video_url,
                 destination=destination,
                 base_dir=paths.single_downloads_dir,
+                final_format_override=final_format_override,
             )
         except ValueError as exc:
             _status_set(status, "last_error_message", f"Invalid destination path: {exc}")
             status.single_download_ok = False
             return False
-        if final_format_override:
-            output_template["final_format"] = final_format_override
-
-        resolved_destination = output_template.get("output_dir")
         job_id, created, _dedupe_reason = store.enqueue_job(
-            origin=origin,
-            origin_id=origin_id,
-            media_type=media_type,
-            media_intent=media_intent,
-            source=source,
-            url=video_url,
-            output_template=output_template,
-            resolved_destination=resolved_destination,
             log_duplicate_event=False,
+            **enqueue_payload,
         )
         if created:
             _status_append(status, "run_successes", job_id)
@@ -1026,8 +1023,14 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                 job_entry["account"] = account
 
                 try:
-                    output_template = build_output_template(
-                        config,
+                    enqueue_payload = build_download_job_payload(
+                        config=config,
+                        origin="playlist",
+                        origin_id=playlist_id,
+                        media_type=media_type,
+                        media_intent=media_intent,
+                        source=source,
+                        url=video_url,
                         playlist_entry=job_entry,
                         base_dir=paths.single_downloads_dir,
                     )
@@ -1035,17 +1038,8 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                     logging.error("Invalid playlist folder path: %s", exc)
                     continue
 
-                resolved_destination = output_template.get("output_dir")
-
                 job_id, created, _dedupe_reason = store.enqueue_job(
-                    origin="playlist",
-                    origin_id=playlist_id,
-                    media_type=media_type,
-                    media_intent=media_intent,
-                    source=source,
-                    url=video_url,
-                    output_template=output_template,
-                    resolved_destination=resolved_destination,
+                    **enqueue_payload,
                 )
                 if created:
                     _status_append(status, "run_successes", job_id)

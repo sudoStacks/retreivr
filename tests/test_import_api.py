@@ -18,6 +18,7 @@ def _build_client(monkeypatch) -> TestClient:
     module.app.router.on_startup.clear()
     module.app.router.on_shutdown.clear()
     module.app.state.worker_engine = SimpleNamespace(store=object())
+    module._read_config_or_404 = lambda: {}
     return TestClient(module.app)
 
 
