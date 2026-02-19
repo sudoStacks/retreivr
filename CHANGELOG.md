@@ -32,6 +32,11 @@ All notable changes to this project will be documented here.
   - album-mismatch penalty
   - YouTube Music source preference
   - deterministic tie-break ordering validation
+- Mandatory release-enrichment regression coverage:
+  - missing track metadata is synchronously enriched from MusicBrainz before path build
+  - invalid/no-official-album release cases fail fast before folder creation
+  - missing release-group metadata is completed during enrichment
+  - no fallback to `Unknown Album` for music-track path generation
 
 ### Changed
 - Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
@@ -55,6 +60,15 @@ All notable changes to this project will be documented here.
 - Added optional `debug_music_scoring` config flag:
   - when enabled, logs per-candidate score components, penalties, duration delta, final score, and acceptance decision
   - when disabled, verbose per-candidate scoring logs are suppressed
+- Music-track file finalization now enforces synchronous, deterministic release enrichment before canonical folder construction.
+- Canonical music path build now hard-fails if required release metadata is incomplete (`album`, `release_date`, `track_number`, `disc_number`, `mb_release_id`, `mb_release_group_id`).
+- Deterministic release enrichment now:
+  - resolves recording releases with MusicBrainz release/release-group/media includes
+  - filters to Official Album releases only
+  - prefers release hint when present
+  - applies stable ordering (release date asc, release id lexicographic)
+  - extracts disc/track from matched recording in release media
+  - raises explicit enrichment errors when no valid release or recording-track mapping is found
 
 ### Fixed
 - Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.

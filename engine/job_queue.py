@@ -26,6 +26,7 @@ from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
 from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
+from metadata.services.musicbrainz_service import get_musicbrainz_service
 
 logger = logging.getLogger(__name__)
 
@@ -1669,6 +1670,28 @@ class YouTubeAdapter:
             ).strip()
             if release_group_mbid:
                 meta["mb_release_group_id"] = release_group_mbid
+            effective_media_intent = media_intent or getattr(job, "media_intent", None)
+            if is_music_media_type(effective_media_type) and str(effective_media_intent or "").strip().lower() == "music_track":
+                _ensure_release_enriched(job)
+                refreshed_template = job.output_template if isinstance(job.output_template, dict) else {}
+                refreshed_canonical = (
+                    refreshed_template.get("canonical_metadata")
+                    if isinstance(refreshed_template.get("canonical_metadata"), dict)
+                    else {}
+                )
+                for key in (
+                    "album",
+                    "release_date",
+                    "track_number",
+                    "disc_number",
+                    "mb_release_id",
+                    "mb_release_group_id",
+                ):
+                    value = refreshed_canonical.get(key)
+                    if value is None and isinstance(refreshed_template, dict):
+                        value = refreshed_template.get(key)
+                    if value is not None:
+                        meta[key] = value
             video_id = meta.get("video_id") or job.id
             ext = os.path.splitext(local_file)[1].lstrip(".")
             if audio_mode:
@@ -1728,6 +1751,243 @@ def default_adapters():
         "direct": adapter,
         "unknown": adapter,
     }
+
+
+def _extract_release_value(output_template, canonical, *keys):
+    for key in keys:
+        value = canonical.get(key) if isinstance(canonical, dict) else None
+        if value is None and isinstance(output_template, dict):
+            value = output_template.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+        if value in (None, ""):
+            continue
+        return value
+    return None
+
+
+def _normalize_positive_int(value):
+    parsed = normalize_track_number(value)
+    if parsed is None:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _release_fields_from_template(output_template, canonical):
+    album = _extract_release_value(output_template, canonical, "album")
+    release_date = _extract_release_value(output_template, canonical, "release_date", "date")
+    track_number = _normalize_positive_int(
+        _extract_release_value(output_template, canonical, "track_number", "track_num")
+    )
+    disc_number = _normalize_positive_int(
+        _extract_release_value(output_template, canonical, "disc_number", "disc", "disc_num")
+    )
+    mb_release_id = _extract_release_value(output_template, canonical, "mb_release_id", "release_id")
+    mb_release_group_id = _extract_release_value(
+        output_template,
+        canonical,
+        "mb_release_group_id",
+        "release_group_id",
+    )
+    return {
+        "album": album,
+        "release_date": release_date,
+        "track_number": track_number,
+        "disc_number": disc_number,
+        "mb_release_id": mb_release_id,
+        "mb_release_group_id": mb_release_group_id,
+    }
+
+
+def _release_fields_complete(fields):
+    return all(
+        fields.get(key) not in (None, "")
+        for key in (
+            "album",
+            "release_date",
+            "track_number",
+            "disc_number",
+            "mb_release_id",
+            "mb_release_group_id",
+        )
+    )
+
+
+def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str]) -> dict:
+    recording_mbid = str(recording_mbid or "").strip()
+    hint_release_id = str(release_id_hint or "").strip() or None
+    if not recording_mbid:
+        raise RuntimeError("no_valid_release_for_recording")
+
+    service = get_musicbrainz_service()
+    # recording?inc=releases+release-groups+media
+    recording_payload = service.get_recording(
+        recording_mbid,
+        includes=["releases", "release-groups", "media"],
+    )
+    recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
+    release_list = recording_data.get("release-list", []) if isinstance(recording_data, dict) else []
+    releases = [item for item in release_list if isinstance(item, dict) and str(item.get("id") or "").strip()]
+    if not releases:
+        raise RuntimeError("no_valid_release_for_recording")
+
+    def _release_sort_key(item):
+        release_id = str(item.get("id") or "")
+        date_text = str(item.get("date") or "")
+        year = _extract_release_year(date_text)
+        date_key = year or "9999"
+        hint_rank = 0 if hint_release_id and release_id == hint_release_id else 1
+        return (hint_rank, date_key, release_id)
+
+    sorted_releases = sorted(releases, key=_release_sort_key)
+
+    selected_release = None
+    selected_release_data = None
+    selected_release_group_id = None
+    selected_date_text = None
+
+    for release_item in sorted_releases:
+        release_id = str(release_item.get("id") or "").strip()
+        if not release_id:
+            continue
+        release_payload = service.get_release(
+            release_id,
+            includes=["recordings", "release-groups", "artist-credits", "media"],
+        )
+        release_data = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
+        if not isinstance(release_data, dict):
+            continue
+        status = str(release_data.get("status") or release_item.get("status") or "").strip().lower()
+        release_group = release_data.get("release-group")
+        if not isinstance(release_group, dict):
+            release_group = release_item.get("release-group") if isinstance(release_item.get("release-group"), dict) else {}
+        primary_type = str(release_group.get("primary-type") or "").strip().lower()
+
+        # valid release filter: Official Album only
+        if status != "official":
+            continue
+        if primary_type != "album":
+            continue
+
+        selected_release = release_id
+        selected_release_data = release_data
+        selected_release_group_id = str(release_group.get("id") or "").strip() or None
+        selected_date_text = str(release_data.get("date") or release_item.get("date") or "").strip() or None
+        break
+
+    if not selected_release or not isinstance(selected_release_data, dict):
+        raise RuntimeError("no_valid_release_for_recording")
+
+    track_number = None
+    disc_number = None
+    media = selected_release_data.get("medium-list", [])
+    if not isinstance(media, list):
+        media = []
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        medium_position = _normalize_positive_int(medium.get("position"))
+        track_list = medium.get("track-list", [])
+        if not isinstance(track_list, list):
+            track_list = []
+        for track in track_list:
+            if not isinstance(track, dict):
+                continue
+            recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+            candidate_recording_mbid = str(recording.get("id") or "").strip() or None
+            if candidate_recording_mbid != recording_mbid:
+                continue
+            disc_number = medium_position
+            track_number = _normalize_positive_int(track.get("position"))
+            break
+        if track_number is not None and disc_number is not None:
+            break
+
+    if track_number is None or disc_number is None:
+        raise RuntimeError("recording_not_found_in_release")
+
+    year_only = _extract_release_year(selected_date_text)
+    enriched = {
+        "album": selected_release_data.get("title"),
+        "release_date": year_only,
+        "track_number": track_number,
+        "disc_number": disc_number,
+        "mb_release_id": selected_release,
+        "mb_release_group_id": selected_release_group_id,
+    }
+    _log_event(
+        logging.INFO,
+        "release_enrichment_applied",
+        recording_mbid=recording_mbid,
+        release_mbid=selected_release,
+        release_group_mbid=selected_release_group_id,
+        track_number=track_number,
+        disc_number=disc_number,
+        release_date=year_only,
+    )
+    return enriched
+
+
+def _ensure_release_enriched(job):
+    output_template = job.output_template if isinstance(job.output_template, dict) else {}
+    canonical = output_template.get("canonical_metadata")
+    if not isinstance(canonical, dict):
+        canonical = {}
+        output_template["canonical_metadata"] = canonical
+
+    fields = _release_fields_from_template(output_template, canonical)
+    if _release_fields_complete(fields):
+        return
+
+    recording_mbid = _extract_release_value(
+        output_template,
+        canonical,
+        "recording_mbid",
+        "mb_recording_id",
+    )
+    release_id = _extract_release_value(
+        output_template,
+        canonical,
+        "mb_release_id",
+        "release_id",
+    )
+
+    try:
+        enriched = _fetch_release_enrichment(recording_mbid, release_id)
+    except Exception:
+        _log_event(
+            logging.ERROR,
+            "release_enrichment_failed",
+            recording_mbid=recording_mbid,
+            release_id=release_id,
+        )
+        raise RuntimeError("release_enrichment_incomplete")
+
+    if isinstance(enriched, dict):
+        for key in (
+            "album",
+            "release_date",
+            "track_number",
+            "disc_number",
+            "mb_release_id",
+            "mb_release_group_id",
+        ):
+            value = enriched.get(key)
+            if value not in (None, ""):
+                canonical[key] = value
+                output_template[key] = value
+
+    fields = _release_fields_from_template(output_template, canonical)
+    if not _release_fields_complete(fields):
+        _log_event(
+            logging.ERROR,
+            "release_enrichment_failed",
+            recording_mbid=recording_mbid,
+            release_id=fields.get("mb_release_id") or release_id,
+        )
+        raise RuntimeError("release_enrichment_incomplete")
 
 
 def resolve_cookie_file(config):
@@ -2900,6 +3160,19 @@ def _extract_release_year(value):
 
 
 def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
+    required_album = str(meta.get("album") or "").strip()
+    required_release_date = str(meta.get("release_date") or meta.get("date") or "").strip()
+    required_track_number = normalize_track_number(meta.get("track_number"))
+    required_release_group_id = str(meta.get("mb_release_group_id") or "").strip()
+    if (
+        not required_album
+        or not required_release_date
+        or required_track_number is None
+        or required_track_number <= 0
+        or not required_release_group_id
+    ):
+        raise RuntimeError("music_release_metadata_incomplete_before_path_build")
+
     album_artist = sanitize_for_filesystem(
         _normalize_nfc(_clean_audio_artist(meta.get("album_artist") or meta.get("artist") or ""))
     ) or "Unknown Artist"
