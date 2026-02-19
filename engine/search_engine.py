@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from engine.job_queue import build_output_template
 MAX_PARALLEL_ADAPTERS = 4
 
 # Helper to run one adapter safely
