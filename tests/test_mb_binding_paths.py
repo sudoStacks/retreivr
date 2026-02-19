@@ -579,6 +579,293 @@ def test_live_variant_without_intent_fails_binding():
     assert selected is None
 
 
+def test_album_beats_compilation_when_both_pass():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "rec-album",
+                    "title": "Song",
+                    "ext:score": "99",
+                    "length": "210000",
+                    "artist-credit": [{"name": "Artist"}],
+                },
+                {
+                    "id": "rec-comp",
+                    "title": "Song",
+                    "ext:score": "99",
+                    "length": "210000",
+                    "artist-credit": [{"name": "Artist"}],
+                },
+            ]
+        },
+        recording_payloads={
+            "rec-album": {"recording": {"id": "rec-album", "length": "210000", "release-list": [{"id": "rel-album", "date": "2012-01-01"}]}},
+            "rec-comp": {"recording": {"id": "rec-comp", "length": "210000", "release-list": [{"id": "rel-comp", "date": "2012-01-01"}]}},
+        },
+        release_payloads={
+            "rel-album": _release_payload(
+                "rel-album",
+                title="Studio Album",
+                recording_mbid="rec-album",
+                release_group_id="rg-album",
+                primary_type="Album",
+            ),
+            "rel-comp": {
+                "release": {
+                    **_release_payload(
+                        "rel-comp",
+                        title="Best Of",
+                        recording_mbid="rec-comp",
+                        release_group_id="rg-comp",
+                        primary_type="Album",
+                    )["release"],
+                    "release-group": {
+                        "id": "rg-comp",
+                        "primary-type": "Album",
+                        "secondary-type-list": ["Compilation"],
+                    },
+                }
+            },
+        },
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="Artist",
+        track="Song",
+        album=None,
+        duration_ms=210000,
+        country_preference="US",
+    )
+    assert selected is not None
+    assert selected["mb_release_id"] == "rel-album"
+    assert selected["recording_mbid"] == "rec-album"
+
+
+def test_compilation_beats_single_when_no_album_passes():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "rec-comp",
+                    "title": "Song",
+                    "ext:score": "99",
+                    "length": "210000",
+                    "artist-credit": [{"name": "Artist"}],
+                },
+                {
+                    "id": "rec-single",
+                    "title": "Song",
+                    "ext:score": "99",
+                    "length": "210000",
+                    "artist-credit": [{"name": "Artist"}],
+                },
+            ]
+        },
+        recording_payloads={
+            "rec-comp": {"recording": {"id": "rec-comp", "length": "210000", "release-list": [{"id": "rel-comp", "date": "2012-01-01"}]}},
+            "rec-single": {"recording": {"id": "rec-single", "length": "210000", "release-list": [{"id": "rel-single", "date": "2012-01-01"}]}},
+        },
+        release_payloads={
+            "rel-comp": {
+                "release": {
+                    **_release_payload(
+                        "rel-comp",
+                        title="Best Of",
+                        recording_mbid="rec-comp",
+                        release_group_id="rg-comp",
+                        primary_type="Album",
+                    )["release"],
+                    "release-group": {
+                        "id": "rg-comp",
+                        "primary-type": "Album",
+                        "secondary-type-list": ["Compilation"],
+                    },
+                }
+            },
+            "rel-single": _release_payload(
+                "rel-single",
+                title="Song (Single)",
+                recording_mbid="rec-single",
+                release_group_id="rg-single",
+                primary_type="Single",
+            ),
+        },
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="Artist",
+        track="Song",
+        album=None,
+        duration_ms=210000,
+        country_preference="US",
+        allow_non_album_fallback=True,
+    )
+    assert selected is not None
+    assert selected["mb_release_id"] == "rel-comp"
+    assert selected["recording_mbid"] == "rec-comp"
+
+
+def test_single_allowed_when_no_album_or_compilation_pass():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "rec-single",
+                    "title": "Song",
+                    "ext:score": "99",
+                    "length": "210000",
+                    "artist-credit": [{"name": "Artist"}],
+                }
+            ]
+        },
+        recording_payloads={
+            "rec-single": {"recording": {"id": "rec-single", "length": "210000", "release-list": [{"id": "rel-single", "date": "2012-01-01"}]}}
+        },
+        release_payloads={
+            "rel-single": _release_payload(
+                "rel-single",
+                title="Song (Single)",
+                recording_mbid="rec-single",
+                release_group_id="rg-single",
+                primary_type="Single",
+            ),
+        },
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="Artist",
+        track="Song",
+        album=None,
+        duration_ms=210000,
+        country_preference="US",
+        allow_non_album_fallback=True,
+    )
+    assert selected is not None
+    assert selected["mb_release_id"] == "rel-single"
+    assert selected["recording_mbid"] == "rec-single"
+
+
+def test_compilation_rejected_when_album_hint_mismatch():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "rec-comp",
+                    "title": "Song",
+                    "ext:score": "99",
+                    "length": "210000",
+                    "artist-credit": [{"name": "Artist"}],
+                }
+            ]
+        },
+        recording_payloads={
+            "rec-comp": {"recording": {"id": "rec-comp", "length": "210000", "release-list": [{"id": "rel-comp", "date": "2012-01-01"}]}}
+        },
+        release_payloads={
+            "rel-comp": {
+                "release": {
+                    **_release_payload(
+                        "rel-comp",
+                        title="Greatest Hits",
+                        recording_mbid="rec-comp",
+                        release_group_id="rg-comp",
+                        primary_type="Album",
+                    )["release"],
+                    "release-group": {
+                        "id": "rg-comp",
+                        "primary-type": "Album",
+                        "secondary-type-list": ["Compilation"],
+                    },
+                }
+            },
+        },
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="Artist",
+        track="Song",
+        album="Specific Studio Album",
+        duration_ms=210000,
+        country_preference="US",
+        allow_non_album_fallback=True,
+    )
+    assert selected is None
+    reasons = getattr(binding.resolve_best_mb_pair, "last_failure_reasons", [])
+    assert "compilation_album_mismatch" in reasons
+
+
+def test_bucket_selection_determinism_same_inputs_same_selected_pair():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {"id": "rec-album", "title": "Song", "ext:score": "99", "length": "210000", "artist-credit": [{"name": "Artist"}]},
+                {"id": "rec-comp", "title": "Song", "ext:score": "99", "length": "210000", "artist-credit": [{"name": "Artist"}]},
+            ]
+        },
+        recording_payloads={
+            "rec-album": {"recording": {"id": "rec-album", "length": "210000", "release-list": [{"id": "rel-album", "date": "2012-01-01"}]}},
+            "rec-comp": {"recording": {"id": "rec-comp", "length": "210000", "release-list": [{"id": "rel-comp", "date": "2012-01-01"}]}},
+        },
+        release_payloads={
+            "rel-album": _release_payload(
+                "rel-album",
+                title="Studio Album",
+                recording_mbid="rec-album",
+                release_group_id="rg-album",
+                primary_type="Album",
+            ),
+            "rel-comp": {
+                "release": {
+                    **_release_payload(
+                        "rel-comp",
+                        title="Best Of",
+                        recording_mbid="rec-comp",
+                        release_group_id="rg-comp",
+                        primary_type="Album",
+                    )["release"],
+                    "release-group": {
+                        "id": "rg-comp",
+                        "primary-type": "Album",
+                        "secondary-type-list": ["Compilation"],
+                    },
+                }
+            },
+        },
+    )
+    first = binding.resolve_best_mb_pair(
+        mb,
+        artist="Artist",
+        track="Song",
+        album=None,
+        duration_ms=210000,
+        country_preference="US",
+    )
+    second = binding.resolve_best_mb_pair(
+        mb,
+        artist="Artist",
+        track="Song",
+        album=None,
+        duration_ms=210000,
+        country_preference="US",
+    )
+    assert first is not None and second is not None
+    assert (
+        first["recording_mbid"],
+        first["mb_release_id"],
+        first["mb_release_group_id"],
+    ) == (
+        second["recording_mbid"],
+        second["mb_release_id"],
+        second["mb_release_group_id"],
+    )
+
+
 def test_manual_enqueue_logs_mb_pair_selected_before_job_enqueued(tmp_path: Path, caplog):
     import logging
 

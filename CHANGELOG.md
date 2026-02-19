@@ -53,6 +53,12 @@ All notable changes to this project will be documented here.
   - preserves semantic variants like `live` for downstream scoring/rejection behavior
   - verifies standard (non-music) mode is unaffected
 - Music Mode verification scenarios for noisy title binding and live-variant rejection.
+- Bucket-priority regression coverage for MB pair selection:
+  - album beats compilation when both pass
+  - compilation beats single when no album survives
+  - single fallback allowed only when no album/compilation candidates survive
+  - compilation is rejected on explicit album-hint mismatch
+  - deterministic repeated-input selection for `(recording_mbid, mb_release_id, mb_release_group_id)`
 
 ### Changed
 - Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
@@ -94,6 +100,11 @@ All notable changes to this project will be documented here.
   - correctness-first weighting (artist/title/duration/variant rejection)
   - completeness-secondary weighting (release-group/date/track+disc/album + metadata bonuses)
   - deterministic tie-break ordering for stable repeatable selection
+- Release classification now uses deterministic MB release buckets (`album`, `compilation`, `single`, `excluded`) before final selection.
+- Bucket priority weighting is now explicit in final selection scoring (`album` 1.00, `compilation` 0.96, `single` 0.92), applied only after hard rejects and correctness-floor checks.
+- Explicit album hints now guard against random compilation matches via `compilation_album_mismatch` rejection when similarity is too low.
+- Final candidate pool now enforces album/compilation-first selection with single fallback only when no album/compilation candidates survive.
+- MB binding observability now logs selected bucket details (`bucket`, `bucket_multiplier`) and per-run failure bucket counts (`bucket_counts`) on `mb_pair_selection_failed`.
 - Pre-enqueue MB binding is now enforced for all music acquisition paths (import, manual search enqueue, direct URL music enqueue).
 - Worker music-track execution now enforces binding invariants (`recording_mbid` + `mb_release_id`) before adapter resolution.
 - Manual/direct enqueue paths now prioritize canonical metadata fields for expected artist/track/album/duration inputs used by music scoring.

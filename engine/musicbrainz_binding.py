@@ -12,6 +12,11 @@ COMPLETENESS_WEIGHT = 0.2
 CORRECTNESS_FLOOR = 62.0
 MAX_DURATION_DELTA_MS = 12000
 PREVIEW_REJECT_MS = 45000
+BUCKET_MULTIPLIERS: dict[str, float] = {
+    "album": 1.00,
+    "compilation": 0.96,
+    "single": 0.92,
+}
 
 _WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _DISALLOWED_VARIANT_RE = re.compile(
@@ -110,6 +115,33 @@ def _extract_release_year(value: Any) -> str | None:
     return None
 
 
+def _classify_release_bucket(release_payload: dict) -> str:
+    release = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
+    if not isinstance(release, dict):
+        return "excluded"
+    release_group = release.get("release-group", {})
+    if not isinstance(release_group, dict):
+        return "excluded"
+
+    primary_type = str(release_group.get("primary-type") or "").strip().lower()
+    secondary_types_raw = release_group.get("secondary-type-list", [])
+    secondary_types = {
+        str(value or "").strip().lower()
+        for value in (secondary_types_raw if isinstance(secondary_types_raw, list) else [])
+        if str(value or "").strip()
+    }
+
+    if primary_type == "album":
+        if {"compilation", "retrospective"} & secondary_types:
+            return "compilation"
+        if {"live", "soundtrack", "remix"} & secondary_types:
+            return "excluded"
+        return "album"
+    if primary_type == "single":
+        return "single"
+    return "excluded"
+
+
 def _resolve_track_position(release_payload: dict[str, Any], recording_mbid: str) -> tuple[int | None, int | None]:
     release = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
     media = release.get("medium-list", []) if isinstance(release, dict) else []
@@ -159,6 +191,7 @@ def resolve_best_mb_pair(
 ) -> dict[str, Any] | None:
     resolve_best_mb_pair.last_failure_reasons = []
     failure_reasons: set[str] = set()
+    bucket_counts: dict[str, int] = {"album": 0, "compilation": 0, "single": 0, "excluded": 0}
     expected_artist = str(artist or "").strip()
     expected_track_raw = str(track or "").strip()
     expected_track_lookup = _normalize_title_for_mb_lookup(expected_track_raw)
@@ -190,7 +223,7 @@ def resolve_best_mb_pair(
     if not ranked_recordings:
         failure_reasons.add("no_recording_candidates")
         resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons)
-        logger.info({"message": "mb_pair_selection_failed", "reasons": sorted(failure_reasons)})
+        logger.info({"message": "mb_pair_selection_failed", "reasons": sorted(failure_reasons), "bucket_counts": bucket_counts})
         return None
 
     variant_allowed = _is_variant_explicitly_requested(expected_track, expected_album)
@@ -253,14 +286,19 @@ def resolve_best_mb_pair(
             release_group = release.get("release-group")
             if not isinstance(release_group, dict):
                 release_group = release_item.get("release-group") if isinstance(release_item.get("release-group"), dict) else {}
-            primary_type = str(release_group.get("primary-type") or "").strip().lower()
-            if primary_type == "album":
-                saw_album_type = True
-            elif primary_type in {"single", "ep"} and allow_non_album_fallback:
-                pass
-            else:
-                failure_reasons.add("non_album_release_type")
+            bucket = _classify_release_bucket(release_payload)
+            bucket_counts[bucket] = int(bucket_counts.get(bucket, 0)) + 1
+            if bucket == "excluded":
+                failure_reasons.add("invalid_release_type")
                 continue
+            if bucket == "album":
+                saw_album_type = True
+            elif bucket == "single":
+                if allow_non_album_fallback:
+                    pass
+                else:
+                    failure_reasons.add("non_album_release_type")
+                    continue
 
             track_number, disc_number = _resolve_track_position(release_payload, recording_mbid)
             if track_number is None or disc_number is None:
@@ -311,6 +349,19 @@ def resolve_best_mb_pair(
                 artist_similarity = 1.0
             title_similarity = _token_similarity(expected_track, recording_title or expected_track)
             album_similarity = _token_similarity(expected_album, release_title) if expected_album else 0.0
+            if expected_album and bucket == "compilation" and album_similarity < 0.40:
+                failure_reasons.add("compilation_album_mismatch")
+                if debug:
+                    logger.debug(
+                        {
+                            "message": "mb_pair_rejected",
+                            "recording_mbid": recording_mbid,
+                            "release_mbid": release_id,
+                            "reason": "compilation_album_mismatch",
+                            "album_similarity": album_similarity,
+                        }
+                    )
+                continue
             if duration_ms is not None and recording_duration_ms is not None:
                 duration_similarity = max(0.0, 1.0 - (float(duration_delta_ms or 0) / float(MAX_DURATION_DELTA_MS)))
             else:
@@ -359,6 +410,7 @@ def resolve_best_mb_pair(
                 "completeness": completeness,
                 "country_bonus": country_bonus,
                 "total": total,
+                "bucket": bucket,
                 "duration_delta_ms": duration_delta_ms if duration_delta_ms is not None else 999999999,
             }
             if debug:
@@ -385,20 +437,49 @@ def resolve_best_mb_pair(
         if prefer_country and not saw_country_match:
             failure_reasons.add("no_us_release")
         resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons or {"no_valid_release_for_recording"})
-        logger.info({"message": "mb_pair_selection_failed", "reasons": sorted(failure_reasons or {"no_valid_release_for_recording"})})
+        logger.info(
+            {
+                "message": "mb_pair_selection_failed",
+                "reasons": sorted(failure_reasons or {"no_valid_release_for_recording"}),
+                "bucket_counts": bucket_counts,
+            }
+        )
         return None
 
     eligible = [c for c in all_candidates if float(c.get("correctness") or 0.0) >= CORRECTNESS_FLOOR]
     if not eligible:
         failure_reasons.add("correctness_below_floor")
         resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons)
-        logger.info({"message": "mb_pair_selection_failed", "reasons": sorted(failure_reasons)})
+        logger.info({"message": "mb_pair_selection_failed", "reasons": sorted(failure_reasons), "bucket_counts": bucket_counts})
+        return None
+
+    for candidate in eligible:
+        raw_total = float(candidate.get("total") or 0.0)
+        bucket = str(candidate.get("bucket") or "excluded")
+        bucket_multiplier = BUCKET_MULTIPLIERS.get(bucket, 1.0)
+        candidate["bucket_multiplier"] = bucket_multiplier
+        candidate["final_score"] = raw_total * bucket_multiplier
+
+    album_compilation_candidates = [
+        c for c in eligible
+        if str(c.get("bucket") or "") in {"album", "compilation"}
+    ]
+    if album_compilation_candidates:
+        final_pool = album_compilation_candidates
+    else:
+        failure_reasons.add("no_album_or_compilation_candidate")
+        final_pool = eligible
+
+    if not final_pool:
+        failure_reasons.add("single_fallback_failed")
+        resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons)
+        logger.info({"message": "mb_pair_selection_failed", "reasons": sorted(failure_reasons), "bucket_counts": bucket_counts})
         return None
 
     ranked = sorted(
-        eligible,
+        final_pool,
         key=lambda c: (
-            -float(c.get("total") or 0.0),
+            -float(c.get("final_score") or 0.0),
             int(c.get("duration_delta_ms") or 999999999),
             0 if str(c.get("country") or "").upper() == "US" else 1,
             int(c.get("release_year") or 9999),
@@ -418,6 +499,8 @@ def resolve_best_mb_pair(
             "track_number": selected.get("track_number"),
             "disc_number": selected.get("disc_number"),
             "album": selected.get("album"),
+            "bucket": selected.get("bucket"),
+            "bucket_multiplier": selected.get("bucket_multiplier"),
         }
     )
     resolve_best_mb_pair.last_failure_reasons = []
