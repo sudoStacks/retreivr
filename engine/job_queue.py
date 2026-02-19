@@ -115,6 +115,8 @@ _MUSIC_SOURCE_PRIORITY_WEIGHTS = {
     "soundcloud": 4,
     "bandcamp": 2,
 }
+_VIDEO_CONTAINERS = {"mkv", "mp4", "webm"}
+_MUSIC_AUDIO_FORMAT_WARNED = False
 
 
 @dataclass(frozen=True)
@@ -1576,26 +1578,34 @@ class YouTubeAdapter:
                         raw_final_format,
                     )
                     self._missing_final_format_warned = True
-        normalized_format = _normalize_format(raw_final_format)
-        normalized_audio_format = _normalize_audio_format(raw_final_format)
-        if normalized_format is None and normalized_audio_format is None:
-            logger.error(
-                "[WORKER] invariant_failed job_id=%s unresolved_final_format",
-                getattr(job, "id", None),
-            )
-            raise RuntimeError("invariant_missing_final_format")
-
         # Strict separation:
         # - music_mode controls whether we run music metadata enrichment.
         # - audio_only controls whether we download audio-only / extract audio via ffmpeg.
         # IMPORTANT: Do NOT let a global/default final_format="mp3" force *video* jobs into audio-only.
         music_mode = is_music_media_type(effective_media_type)
         audio_only_requested = bool(output_template.get("audio_only")) or bool(output_template.get("audio_mode"))
-        audio_mode = bool(audio_only_requested) or (music_mode and normalized_audio_format in _AUDIO_FORMATS)
+        audio_mode = True if music_mode else bool(audio_only_requested)
 
         # If we're in audio_mode, final_format is the requested audio codec (mp3/m4a/flac).
         # Otherwise final_format is treated as a container preference (webm/mp4/mkv) or None.
-        final_format = normalized_audio_format if audio_mode else normalized_format
+        if audio_mode:
+            final_format = _resolve_target_audio_format(
+                {"final_format": raw_final_format},
+                config,
+                output_template,
+            )
+        else:
+            final_format = _resolve_target_video_container(
+                {"final_format": raw_final_format},
+                config,
+                output_template,
+            )
+        if final_format is None:
+            logger.error(
+                "[WORKER] invariant_failed job_id=%s unresolved_final_format",
+                getattr(job, "id", None),
+            )
+            raise RuntimeError("invariant_missing_final_format")
         filename_template = output_template.get("filename_template")
         audio_template = output_template.get("audio_filename_template")
 
@@ -1853,7 +1863,20 @@ def build_output_template(config, *, playlist_entry=None, destination=None, base
             output_dir = config.get("single_download_folder") or config.get("music_download_folder") or base_dir
     output_dir = resolve_dir(output_dir, base_dir)
 
-    final_format = entry.get("final_format") or config.get("final_format")
+    final_format = (
+        entry.get("final_format")
+        or entry.get("video_final_format")
+        or config.get("final_format")
+        or config.get("video_final_format")
+        or "mkv"
+    )
+    music_final_format = (
+        entry.get("music_final_format")
+        or entry.get("audio_final_format")
+        or config.get("music_final_format")
+        or config.get("audio_final_format")
+        or "mp3"
+    )
 
     filename_template = entry.get("filename_template") or config.get("filename_template")
     audio_template = entry.get("audio_filename_template") or config.get("audio_filename_template")
@@ -1863,6 +1886,7 @@ def build_output_template(config, *, playlist_entry=None, destination=None, base
     return {
         "output_dir": output_dir,
         "final_format": final_format,
+        "music_final_format": music_final_format,
         "filename_template": filename_template,
         "audio_filename_template": audio_template,
         "remove_after_download": bool(entry.get("remove_after_download")),
@@ -1893,19 +1917,13 @@ def build_download_job_payload(
     canonical_url=None,
     external_id=None,
 ):
+    config = config if isinstance(config, dict) else {}
     output_template = build_output_template(
         config,
         playlist_entry=playlist_entry,
         destination=destination,
         base_dir=base_dir,
     )
-    effective_final_format = final_format_override
-    if effective_final_format is None:
-        effective_final_format = output_template.get("final_format")
-    if effective_final_format is None and isinstance(config, dict):
-        effective_final_format = config.get("final_format")
-    if effective_final_format:
-        output_template["final_format"] = effective_final_format
 
     canonical_metadata = resolved_metadata if isinstance(resolved_metadata, dict) else None
     if canonical_metadata:
@@ -1919,6 +1937,29 @@ def build_download_job_payload(
 
     if isinstance(output_template_overrides, dict):
         output_template.update(output_template_overrides)
+
+    video_container = _resolve_target_video_container(
+        {"final_format": final_format_override},
+        config,
+        output_template,
+    )
+    audio_format = _resolve_target_audio_format(
+        {"final_format": None},
+        config,
+        output_template,
+    )
+    override_audio = _normalize_audio_format(final_format_override)
+    override_video = _normalize_format(final_format_override)
+    if is_music_media_type(media_type):
+        if override_audio in _AUDIO_FORMATS:
+            audio_format = override_audio
+    else:
+        if override_video in _VIDEO_CONTAINERS:
+            video_container = override_video
+        elif override_audio in _AUDIO_FORMATS:
+            audio_format = override_audio
+    output_template["final_format"] = video_container or "mkv"
+    output_template["music_final_format"] = audio_format or "mp3"
 
     # Canonical output-template schema: keep a stable key set across all enqueue paths.
     for key in (
@@ -2018,19 +2059,31 @@ def _is_http_url(url):
 
 def build_ytdlp_opts(context):
     operation = context.get("operation") or "download"
-    audio_mode = bool(context.get("audio_mode"))
+    media_type = context.get("media_type")
+    audio_mode = is_music_media_type(media_type)
+    context["audio_mode"] = audio_mode
     target_format = context.get("final_format")
     output_template = context.get("output_template")
+    output_template_meta = context.get("output_template_meta")
+    config = context.get("config") or {}
     overrides = context.get("overrides") or {}
     allow_chapter_outtmpl = bool(context.get("allow_chapter_outtmpl"))
 
-    normalized_audio_target = _normalize_audio_format(target_format)
-    normalized_target = _normalize_format(target_format)
+    resolved_audio_format = None
+    resolved_video_container = None
+    if audio_mode:
+        resolved_audio_format = _resolve_target_audio_format(context, config, output_template_meta)
+        normalized_audio_target = _normalize_audio_format(resolved_audio_format)
+        normalized_target = _normalize_format(resolved_audio_format)
+    else:
+        resolved_video_container = _resolve_target_video_container(context, config, output_template_meta)
+        normalized_audio_target = _normalize_audio_format(resolved_video_container)
+        normalized_target = _normalize_format(resolved_video_container)
 
     # If a video job accidentally receives an audio codec as "final_format" (e.g. global config),
     # do NOT interpret it as a yt-dlp "format" selector. That causes invalid downloads.
     # We only treat webm/mp4/mkv as container preferences for video mode here.
-    video_container_target = normalized_target if normalized_target in {"webm", "mp4", "mkv"} else None
+    video_container_target = normalized_target if normalized_target in _VIDEO_CONTAINERS else None
 
     def _url_looks_like_playlist(u: str | None) -> bool:
         if not u:
@@ -2102,17 +2155,12 @@ def build_ytdlp_opts(context):
     else:
         # Only enable addmetadata, embedthumbnail, writethumbnail, and audio postprocessors
         # when both audio_mode and media_type is music/audio
-        if audio_mode and is_music_media_type(context.get("media_type")):
-            if normalized_audio_target and normalized_audio_target in _AUDIO_FORMATS:
-                opts["postprocessors"] = _build_audio_postprocessors(normalized_audio_target)
-            else:
-                opts["postprocessors"] = _build_audio_postprocessors(None)
+        if audio_mode:
+            opts["postprocessors"] = _build_audio_postprocessors(normalized_audio_target)
             opts["format"] = _FORMAT_AUDIO
             opts["addmetadata"] = True
             opts["embedthumbnail"] = True
             opts["writethumbnail"] = True
-        elif audio_mode:
-            opts["format"] = _FORMAT_AUDIO
         else:
             # Video mode: honor only container preferences (webm/mp4/mkv).
             # Never treat an audio codec (mp3/m4a/flac/...) as a yt-dlp format selector.
@@ -2135,6 +2183,13 @@ def build_ytdlp_opts(context):
         for key in _YTDLP_DOWNLOAD_UNSAFE_KEYS:
             opts.pop(key, None)
 
+    if audio_mode and ("bestvideo" in str(opts.get("format") or "").lower() or opts.get("merge_output_format")):
+        raise RuntimeError("music_job_built_video_opts")
+    if not audio_mode:
+        postprocessors = opts.get("postprocessors") or []
+        if any((pp or {}).get("key") == "FFmpegExtractAudio" for pp in postprocessors if isinstance(pp, dict)):
+            raise RuntimeError("video_job_built_audio_opts")
+
     _log_event(
         logging.INFO,
         "audit_build_ytdlp_opts",
@@ -2144,7 +2199,11 @@ def build_ytdlp_opts(context):
         media_type=context.get("media_type"),
         media_intent=context.get("media_intent"),
         final_format=target_format,
+        resolved_audio_format=resolved_audio_format,
+        resolved_video_container=resolved_video_container,
         postprocessors=bool(opts.get("postprocessors")),
+        postprocessors_present=bool(opts.get("postprocessors")),
+        merge_output_format=opts.get("merge_output_format"),
         addmetadata=opts.get("addmetadata"),
         embedthumbnail=opts.get("embedthumbnail"),
         writethumbnail=opts.get("writethumbnail"),
@@ -2188,6 +2247,45 @@ def _build_audio_postprocessors(target_format):
             "preferredquality": "0",
         }
     ]
+
+
+def _resolve_target_audio_format(context, config, output_template):
+    global _MUSIC_AUDIO_FORMAT_WARNED
+    output_template = output_template if isinstance(output_template, dict) else {}
+    config = config if isinstance(config, dict) else {}
+    requested = (
+        output_template.get("music_final_format")
+        or output_template.get("audio_final_format")
+        or config.get("music_final_format")
+        or config.get("audio_final_format")
+        or "mp3"
+    )
+    normalized = _normalize_audio_format(requested) or "mp3"
+    if normalized in _VIDEO_CONTAINERS:
+        if not _MUSIC_AUDIO_FORMAT_WARNED:
+            logger.warning(
+                "[WORKER] invalid_music_audio_format=%s; forcing mp3",
+                normalized,
+            )
+            _MUSIC_AUDIO_FORMAT_WARNED = True
+        return "mp3"
+    return normalized
+
+
+def _resolve_target_video_container(context, config, output_template):
+    output_template = output_template if isinstance(output_template, dict) else {}
+    config = config if isinstance(config, dict) else {}
+    requested = (
+        output_template.get("final_format")
+        or output_template.get("video_final_format")
+        or config.get("final_format")
+        or config.get("video_final_format")
+        or "mkv"
+    )
+    normalized = _normalize_format(requested) or "mkv"
+    if normalized in _VIDEO_CONTAINERS:
+        return normalized
+    return "mkv"
 
 
 def _merge_overrides(opts, overrides, *, operation, lock_format=False):

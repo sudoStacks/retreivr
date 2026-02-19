@@ -217,11 +217,16 @@ data/config/config.json   (local/source default)
 
 Key areas:
 - Playlist definitions
-- Default `final_format`
+- Default `final_format` (video container, default `mkv`)
+- Default `music_final_format` (audio extraction/transcode format, default `mp3`)
 - Music mode toggle
 - OAuth configuration (optional)
 - Scheduler interval
 - Telegram notifications (optional)
+
+Format behavior:
+- Video jobs remux/output using `final_format`.
+- Music jobs always use audio extraction/transcode and write `music_final_format` (never video `final_format`).
 
 Spotify integration requires OAuth credentials and premium validation. Without it, Spotify functionality remains disabled.
 

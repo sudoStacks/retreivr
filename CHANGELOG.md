@@ -18,6 +18,11 @@ All notable changes to this project will be documented here.
 - Home UI import controls (file input + import action + result summary).
 - Stable `import_batch_id` attached to import result and all import-enqueued jobs.
 - Canonical M3U generation from `download_history` completed entries only.
+- Explicit `music_final_format` config support (`mp3` default) alongside `final_format` (`mkv` default for video).
+- Regression tests to enforce media pipeline separation:
+  - music jobs must build audio-only yt-dlp options
+  - video jobs must build video yt-dlp options
+  - invariant guard must fail if music opts include video merge fields
 
 ### Changed
 - Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
@@ -25,6 +30,14 @@ All notable changes to this project will be documented here.
 - Worker/state hardening completed to reduce orphan-risk for CLAIMED/DOWNLOADING transitions.
 - Import pipeline now has zero fallback to generic transport search (no SearchResolutionService, no adapter URL query fallback).
 - Unified DownloadJob payload construction across import/Spotify/search/direct/scheduler via canonical builder (`build_download_job_payload`) with stable output_template schema and final_format propagation.
+- Output-template schema now always carries both:
+  - `final_format` (video container)
+  - `music_final_format` (music audio format)
+- Music execution contract is now strict:
+  - music media types always run audio-mode yt-dlp
+  - output codec comes from `music_final_format`
+  - video `final_format` no longer leaks into music imports/downloads
+- Web UI config note now clarifies current single “Final format” field is video-oriented; music uses `music_final_format` in config.
 
 ### Fixed
 - Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.

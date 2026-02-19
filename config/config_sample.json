@@ -31,7 +31,7 @@
       "account": "example_account",
       "remove_after_download": false,
       "mode": "full",
-      "final_format": "mp3",
+      "final_format": "mkv",
       "music_mode": false
     }
   ],
@@ -71,7 +71,8 @@
   "music_metadata_debug": false,
   "dry_run": false,
   "upload_date_format": "MM-YYYY",
-  "final_format": "mp3",
+  "final_format": "mkv",
+  "music_final_format": "mp3",
   "js_runtime": "node:/usr/bin/node",
   "telegram": {
     "bot_token": "",
