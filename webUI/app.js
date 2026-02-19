@@ -5371,28 +5371,26 @@ function bindEvents() {
   const musicToggle = document.getElementById("music-mode-toggle");
   const musicConsole = document.getElementById("music-mode-console");
   const standardSearch = document.getElementById("standard-search-container");
-  const musicResults = document.getElementById("music-results-container");
-  if (musicToggle && musicConsole && standardSearch && musicResults) {
+  if (musicToggle && musicConsole && standardSearch) {
     musicToggle.addEventListener("change", () => {
-      state.homeMusicMode = !!musicToggle.checked;
-      saveHomeMusicModePreference();
-      updateHomeMusicModeUI();
       if (musicToggle.checked) {
         musicConsole.classList.remove("hidden");
         standardSearch.classList.add("hidden");
       } else {
         musicConsole.classList.add("hidden");
         standardSearch.classList.remove("hidden");
-        musicResults.innerHTML = "";
-        clearLegacyHomeSearchState();
+        const results = document.getElementById("music-results-container");
+        if (results) {
+          results.innerHTML = "";
+        }
       }
     });
   }
-  const importPlaylistToggle = $("#import-playlist-toggle");
-  const importPlaylistPanel = $("#import-playlist-panel");
-  if (importPlaylistToggle && importPlaylistPanel) {
-    importPlaylistToggle.addEventListener("click", () => {
-      importPlaylistPanel.classList.toggle("hidden");
+  const importToggle = document.getElementById("import-playlist-toggle");
+  const importPanel = document.getElementById("import-playlist-panel");
+  if (importToggle && importPanel) {
+    importToggle.addEventListener("click", () => {
+      importPanel.classList.toggle("hidden");
     });
   }
   const homeSourceToggle = $("#home-source-toggle");
@@ -5761,14 +5759,6 @@ async function init() {
     );
   });
   applyTheme(resolveTheme());
-  loadHomeMusicModePreference();
-  const musicToggle = document.getElementById("music-mode-toggle");
-  const musicConsole = document.getElementById("music-mode-console");
-  const standardSearch = document.getElementById("standard-search-container");
-  if (musicToggle && musicConsole && standardSearch && !musicToggle.checked) {
-    musicConsole.classList.add("hidden");
-    standardSearch.classList.remove("hidden");
-  }
   bindEvents();
   setupNavActions();
   await loadPaths();

@@ -156,9 +156,13 @@ All notable changes to this project will be documented here.
 - Music Mode now defaults to OFF on initial Home render:
   - `music-mode-toggle` is unchecked by default
   - init guard forces standard-search-visible + music-console-hidden when toggle is off
+- Music/Search visibility defaults are now enforced in markup:
+  - `#music-mode-console` is hidden by default via HTML class
+  - `#import-playlist-panel` is hidden by default via HTML class
 - Music console controls are now metadata-only:
   - replaced legacy intent selector with `#music-mode-select` (`auto|artist|album|track`)
   - removed min score/source priority/include/lossless controls from music metadata console
+- Music console title updated from `Media Search Console` to `Music Search`.
 - Track enqueue from Music Mode now posts MB IDs only:
   - payload is limited to `recording_mbid` and `release_mbid`
   - no title/query/adapter payload fields are sent from track cards
@@ -167,6 +171,13 @@ All notable changes to this project will be documented here.
 - Legacy Media Search Console submit handlers remain disabled so no parallel music submit path executes.
 - Home search flow is explicitly single-path for Music Mode:
   - Home submit -> `submitHomeSearch` -> hard short-circuit -> `performMusicModeSearch` -> return
+- Music toggle controller is now cleanly event-driven:
+  - no load-time auto-show of music console
+  - console visibility changes only on `music-mode-toggle` change
+  - standard toggle remains always visible
+- Import playlist panel controller is now cleanly event-driven:
+  - `import-playlist-toggle` only toggles hidden state
+  - no automatic unhide on page load
 - Pre-enqueue MB binding is now enforced for all music acquisition paths (import, manual search enqueue, direct URL music enqueue).
 - Worker music-track execution now enforces binding invariants (`recording_mbid` + `mb_release_id`) before adapter resolution.
 - Manual/direct enqueue paths now prioritize canonical metadata fields for expected artist/track/album/duration inputs used by music scoring.
