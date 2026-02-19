@@ -1,5 +1,4 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from engine.job_queue import build_output_template
 MAX_PARALLEL_ADAPTERS = 4
 
 # Helper to run one adapter safely
@@ -63,6 +62,7 @@ from uuid import uuid4
 
 from engine.job_queue import (
     DownloadJobStore,
+    build_output_template,
     build_download_job_payload,
     ensure_download_jobs_table,
     canonicalize_url,
@@ -71,6 +71,7 @@ from engine.json_utils import safe_json_dumps
 from engine.paths import DATA_DIR
 from engine.search_adapters import default_adapters
 from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
+from engine.musicbrainz_binding import _normalize_title_for_mb_lookup
 from metadata.canonical import CanonicalMetadataResolver
 
 REQUEST_STATUSES = {"pending", "resolving", "completed", "completed_with_skips", "failed"}
@@ -189,6 +190,61 @@ def _extract_canonical_id(metadata):
         if value:
             return str(value)
     return None
+
+
+def _normalize_threshold(value, *, default=0.78):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    if parsed > 1.0:
+        parsed = parsed / 100.0
+    if parsed < 0.0:
+        return 0.0
+    if parsed > 1.0:
+        return 1.0
+    return parsed
+
+
+def _token_set(value: str | None) -> set[str]:
+    return {m.group(0) for m in WORD_TOKEN_RE.finditer(str(value or "").lower())}
+
+
+def _query_contains_artist(query: str | None, artist_guess: str | None) -> bool:
+    query_tokens = _token_set(query)
+    artist_tokens = _token_set(artist_guess)
+    if not query_tokens or not artist_tokens:
+        return False
+    return artist_tokens.issubset(query_tokens)
+
+
+def _uploader_artist_similarity_ok(artist_guess: str | None, uploader: str | None) -> bool:
+    artist_tokens = _token_set(artist_guess)
+    uploader_tokens = _token_set(uploader)
+    if not artist_tokens or not uploader_tokens:
+        return False
+    overlap = len(artist_tokens & uploader_tokens)
+    return (overlap / max(len(artist_tokens), 1)) >= 0.5
+
+
+def _parse_artist_track_from_candidate(title: str, uploader: str | None, query: str | None) -> tuple[str | None, str | None]:
+    normalized_title = str(title or "").replace(" – ", " - ").strip()
+    uploader_value = str(uploader or "").strip() or None
+    query_value = str(query or "").strip() or None
+
+    if " - " in normalized_title:
+        left, right = normalized_title.split(" - ", 1)
+        artist_guess = left.strip() or None
+        track_guess = right.strip() or None
+        if artist_guess and track_guess:
+            left_token_count = len(_token_set(artist_guess))
+            if left_token_count <= 6:
+                if _uploader_artist_similarity_ok(artist_guess, uploader_value) or _query_contains_artist(query_value, artist_guess):
+                    return artist_guess, track_guess
+
+    fallback_artist = uploader_value
+    fallback_track = normalized_title or None
+    return fallback_artist, fallback_track
 
 
 
@@ -734,6 +790,10 @@ class SearchResolutionService:
         self.adapters = adapters or default_adapters()
         self.config = config or {}
         self.debug_music_scoring = self._as_bool(self.config.get("debug_music_scoring"))
+        self.music_source_match_threshold = _normalize_threshold(
+            self.config.get("music_source_match_threshold", MUSIC_TRACK_THRESHOLD),
+            default=MUSIC_TRACK_THRESHOLD,
+        )
         self.paths = paths
         self.store = SearchJobStore(search_db_path)
         self.store.ensure_schema()
@@ -941,7 +1001,7 @@ class SearchResolutionService:
         eligible = [c for c in ranked if not c.get("rejection_reason")]
         selected = select_best_candidate(
             eligible,
-            MUSIC_TRACK_THRESHOLD,
+            self.music_source_match_threshold,
             source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY),
         )
         if self.debug_music_scoring:
@@ -968,7 +1028,7 @@ class SearchResolutionService:
                     score_duration=candidate.get("score_duration"),
                     penalties_applied=breakdown.get("penalty_reasons"),
                     final_score=candidate_score,
-                    threshold=MUSIC_TRACK_THRESHOLD,
+                    threshold=self.music_source_match_threshold,
                     acceptance_decision=decision,
                 )
         return selected
@@ -1456,19 +1516,59 @@ class SearchResolutionService:
         media_intent = "album" if item.get("item_type") == "album" else "track"
         target_media_type = ("music" if _is_audio_final_format(final_format_override) else (item.get("media_type") or "generic"))
         if target_media_type == "music" and media_intent == "track":
-            if not expected_music_metadata.get("artist"):
-                expected_music_metadata["artist"] = item.get("artist")
-            if not expected_music_metadata.get("track"):
-                expected_music_metadata["track"] = item.get("track")
-            if not expected_music_metadata.get("album"):
-                expected_music_metadata["album"] = item.get("album")
+            candidate_title = candidate.get("title")
+            candidate_uploader = candidate.get("uploader") or candidate.get("channel")
+            query_hint = " ".join(
+                str(part).strip()
+                for part in (
+                    request.get("artist"),
+                    request.get("track"),
+                    request.get("album"),
+                )
+                if str(part or "").strip()
+            ) or None
+            parsed_artist, parsed_track = _parse_artist_track_from_candidate(
+                str(candidate_title or ""),
+                str(candidate_uploader or "") if candidate_uploader is not None else None,
+                query_hint,
+            )
+            # Lookup-only normalized track used for deterministic MB binding input diagnostics.
+            track_lookup = _normalize_title_for_mb_lookup(parsed_track or "")
+
+            expected_music_metadata["artist"] = (
+                parsed_artist
+                or expected_music_metadata.get("artist")
+                or item.get("artist")
+            )
+            expected_music_metadata["track"] = (
+                parsed_track
+                or expected_music_metadata.get("track")
+                or item.get("track")
+            )
+            if track_lookup:
+                expected_music_metadata["track_lookup"] = track_lookup
+
+            candidate_album = candidate.get("album_detected") or candidate.get("album")
+            if candidate_album and not expected_music_metadata.get("album"):
+                expected_music_metadata["album"] = candidate_album
+
             if not expected_music_metadata.get("duration_ms"):
+                duration_sec = candidate.get("duration_sec")
+                if duration_sec is None:
+                    duration_sec = candidate.get("duration")
                 try:
-                    hint_sec = int(request.get("duration_hint_sec")) if request.get("duration_hint_sec") is not None else None
+                    duration_int = int(duration_sec) if duration_sec is not None else None
                 except (TypeError, ValueError):
-                    hint_sec = None
-                if hint_sec:
-                    expected_music_metadata["duration_ms"] = hint_sec * 1000
+                    duration_int = None
+                if duration_int and duration_int > 0:
+                    expected_music_metadata["duration_ms"] = duration_int * 1000
+                else:
+                    try:
+                        hint_sec = int(request.get("duration_hint_sec")) if request.get("duration_hint_sec") is not None else None
+                    except (TypeError, ValueError):
+                        hint_sec = None
+                    if hint_sec:
+                        expected_music_metadata["duration_ms"] = hint_sec * 1000
         external_id = candidate.get("external_id") if isinstance(candidate, dict) else None
         canonical_url = canonicalize_url(candidate.get("source"), candidate_url, external_id)
         try:

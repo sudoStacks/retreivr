@@ -28,6 +28,7 @@ const state = {
   homeAlbumCandidatesRequestId: null,
   homeQueuedAlbumReleaseGroups: new Set(),
   homeAlbumCoverCache: {},
+  homeMusicResultMap: {},
   homeRequestContext: {},
   homeBestScores: {},
   homeCandidateCache: {},
@@ -1162,8 +1163,47 @@ async function refreshStatus() {
     } catch (err) {
       // Best-effort status enrichment; ignore when endpoint is unavailable.
     }
+    await refreshMusicFailures();
   } catch (err) {
     setNotice($("#home-search-message"), `Status error: ${err.message}`, true);
+  }
+}
+
+async function refreshMusicFailures() {
+  const countEl = $("#music-failures-count");
+  const listEl = $("#music-failures-list");
+  if (!countEl || !listEl) {
+    return;
+  }
+  try {
+    const data = await fetchJson("/api/music/failures?limit=25");
+    const rows = Array.isArray(data?.rows) ? data.rows : [];
+    countEl.textContent = String(Number.isFinite(Number(data?.count)) ? Number(data.count) : rows.length);
+    listEl.textContent = "";
+    if (!rows.length) {
+      const empty = document.createElement("div");
+      empty.className = "meta";
+      empty.textContent = "No music failures recorded.";
+      listEl.appendChild(empty);
+      return;
+    }
+    rows.forEach((row) => {
+      const item = document.createElement("div");
+      item.className = "meta";
+      const who = [row.artist, row.track].filter(Boolean).join(" - ") || row.last_query || "Unknown track";
+      const reasons = Array.isArray(row.reasons) && row.reasons.length ? row.reasons.join(", ") : "unknown_reason";
+      const when = formatTimestamp(row.created_at) || row.created_at || "-";
+      const batch = row.origin_batch_id ? `batch=${row.origin_batch_id}` : "batch=-";
+      item.textContent = `${when} | ${batch} | ${who} | reason=${reasons}`;
+      listEl.appendChild(item);
+    });
+  } catch (err) {
+    countEl.textContent = "-";
+    listEl.textContent = "";
+    const failed = document.createElement("div");
+    failed.className = "meta";
+    failed.textContent = `Failed to load music failures: ${err.message}`;
+    listEl.appendChild(failed);
   }
 }
 
@@ -1828,6 +1868,139 @@ function clearHomeAlbumCandidates() {
   if (existing) {
     existing.remove();
   }
+}
+
+function normalizeMusicSearchResults(rawResults) {
+  if (!Array.isArray(rawResults)) {
+    return [];
+  }
+  return rawResults
+    .map((item) => {
+      const recordingMbid = String(item?.recording_mbid || "").trim();
+      const releaseMbid = String(item?.release_mbid || "").trim();
+      const releaseGroupMbid = String(item?.release_group_mbid || "").trim();
+      const artist = String(item?.artist || "").trim();
+      const track = String(item?.track || "").trim();
+      if (!recordingMbid || !releaseMbid || !releaseGroupMbid || !artist || !track) {
+        return null;
+      }
+      const releaseDate = String(item?.release_date || item?.release_year || "").trim();
+      const durationMs = Number(item?.duration_ms);
+      const trackNumber = Number(item?.track_number);
+      const discNumber = Number(item?.disc_number);
+      return {
+        recording_mbid: recordingMbid,
+        mb_release_id: releaseMbid,
+        mb_release_group_id: releaseGroupMbid,
+        artist,
+        track,
+        album: String(item?.album || "").trim(),
+        release_date: releaseDate,
+        release_year: String(item?.release_year || "").trim(),
+        track_number: Number.isFinite(trackNumber) ? trackNumber : null,
+        disc_number: Number.isFinite(discNumber) ? discNumber : null,
+        duration_ms: Number.isFinite(durationMs) ? durationMs : null,
+        artwork_url: typeof item?.artwork_url === "string" ? item.artwork_url : null,
+      };
+    })
+    .filter(Boolean);
+}
+
+function renderHomeMusicSearchResults(results, query = "") {
+  const normalized = normalizeMusicSearchResults(results);
+  const container = $("#home-results-list");
+  if (!container) {
+    return;
+  }
+  state.homeMusicResultMap = {};
+  container.textContent = "";
+  showHomeResults(true);
+  setHomeResultsState({ hasResults: true, terminal: true });
+  setHomeSearchActive(false);
+  stopHomeResultPolling();
+  stopHomeJobPolling();
+  clearHomeAlbumCandidates();
+
+  if (!normalized.length) {
+    const empty = document.createElement("div");
+    empty.className = "home-results-empty";
+    empty.textContent = "No canonical MusicBrainz matches found.";
+    container.appendChild(empty);
+    setHomeResultsStatus("No music metadata matches");
+    setHomeResultsDetail("Try a more specific artist + track query.", true);
+    return;
+  }
+
+  setHomeResultsStatus("Music metadata results");
+  setHomeResultsDetail(
+    query ? `Showing canonical matches for “${query}”. Select one to enqueue.` : "Select a canonical match to enqueue.",
+    false
+  );
+
+  normalized.forEach((result) => {
+    const key = `${result.recording_mbid}::${result.mb_release_id}`;
+    state.homeMusicResultMap[key] = result;
+    const card = document.createElement("article");
+    card.className = "home-result-card";
+    card.dataset.musicResultKey = key;
+
+    const header = document.createElement("div");
+    header.className = "home-result-header";
+    const title = document.createElement("div");
+    title.innerHTML = `<strong>${result.track}</strong>`;
+    header.appendChild(title);
+    const badge = document.createElement("span");
+    badge.className = "home-result-badge matched";
+    badge.textContent = "MusicBrainz";
+    header.appendChild(badge);
+    card.appendChild(header);
+
+    const meta = document.createElement("div");
+    meta.className = "home-candidate-meta";
+    const albumLabel = result.album ? `${result.album}${result.release_year ? ` (${result.release_year})` : ""}` : "Unknown album";
+    const trackPos = result.track_number && result.disc_number
+      ? `Disc ${result.disc_number} • Track ${String(result.track_number).padStart(2, "0")}`
+      : "Track position unknown";
+    meta.textContent = `${result.artist} • ${albumLabel} • ${trackPos}`;
+    card.appendChild(meta);
+
+    const action = document.createElement("div");
+    action.className = "home-candidate-action";
+    const button = document.createElement("button");
+    button.className = "button primary small";
+    button.dataset.action = "home-music-enqueue";
+    button.dataset.musicResultKey = key;
+    button.textContent = "Download";
+    action.appendChild(button);
+    card.appendChild(action);
+    container.appendChild(card);
+  });
+}
+
+async function enqueueHomeMusicResult(resultKey, button, messageEl) {
+  const result = state.homeMusicResultMap[resultKey];
+  if (!result) {
+    throw new Error("Music result no longer available");
+  }
+  const destination = $("#home-destination")?.value.trim() || null;
+  const finalFormat = $("#home-format")?.value.trim() || null;
+  const payload = {
+    ...result,
+    destination,
+    final_format: finalFormat,
+    music_mode: true,
+  };
+  const response = await fetchJson("/api/music/enqueue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Queued...";
+  }
+  const statusText = response?.created ? `Queued job ${response.job_id}` : "Already queued";
+  setNotice(messageEl, statusText, false);
 }
 
 function normalizeMusicAlbumCandidates(rawCandidates) {
@@ -3367,6 +3540,7 @@ async function submitHomeSearch(autoEnqueue) {
   state.homeDirectPreview = null;
   stopHomeJobPolling();
   state.homeCandidateData = {};
+  state.homeMusicResultMap = {};
   state.homeAlbumCandidatesRequestId = null;
   clearHomeAlbumCandidates();
 
@@ -3411,6 +3585,19 @@ async function submitHomeSearch(autoEnqueue) {
         return;
       }
       await handleHomeDirectUrl(inputValue, destinationValue, messageEl);
+      return;
+    }
+    if (state.homeMusicMode) {
+      setNotice(messageEl, "Music Mode: resolving canonical metadata...", false);
+      const data = await fetchJson(
+        `/api/music/search?q=${encodeURIComponent(inputValue)}&limit=10`
+      );
+      const results = Array.isArray(data)
+        ? data
+        : (Array.isArray(data?.results) ? data.results : []);
+      renderHomeMusicSearchResults(results, inputValue);
+      setHomeSearchControlsEnabled(true);
+      setHomeSearchActive(false);
       return;
     }
     const payload = buildHomeSearchPayload(autoEnqueue, inputValue);
@@ -4077,10 +4264,16 @@ function renderConfig(cfg) {
     dry_run: false,
   };
   const musicMeta = cfg.music_metadata || {};
+  const musicMatchThresholdPercent = Number.isFinite(cfg.music_source_match_threshold)
+    ? Math.round(Number(cfg.music_source_match_threshold) * 100)
+    : (Number.isFinite(cfg.music_mb_binding_threshold)
+      ? Math.round(Number(cfg.music_mb_binding_threshold) * 100)
+      : 78);
   $("#cfg-music-meta-enabled").checked = typeof musicMeta.enabled === "boolean"
     ? musicMeta.enabled
     : musicMetaDefaults.enabled;
-  $("#cfg-music-meta-threshold").value = Number.isFinite(musicMeta.confidence_threshold)
+  $("#cfg-music-meta-threshold").value = musicMatchThresholdPercent;
+  $("#cfg-music-enrich-threshold").value = Number.isFinite(musicMeta.confidence_threshold)
     ? musicMeta.confidence_threshold
     : musicMetaDefaults.confidence_threshold;
   $("#cfg-music-meta-acoustid").checked = typeof musicMeta.use_acoustid === "boolean"
@@ -4552,12 +4745,18 @@ function buildConfigFromForm() {
     rate_limit_seconds: 1.5,
     dry_run: false,
   };
-  const metaThreshold = parseInt($("#cfg-music-meta-threshold").value, 10);
+  const matchThresholdPercent = parseInt($("#cfg-music-meta-threshold").value, 10);
+  const enrichThreshold = parseInt($("#cfg-music-enrich-threshold").value, 10);
   const metaArtworkSize = parseInt($("#cfg-music-meta-artwork-size").value, 10);
   const metaRate = parseFloat($("#cfg-music-meta-rate").value);
+  const normalizedMatchThresholdPercent = Number.isInteger(matchThresholdPercent)
+    ? Math.max(0, Math.min(100, matchThresholdPercent))
+    : 78;
+  base.music_mb_binding_threshold = normalizedMatchThresholdPercent / 100;
+  base.music_source_match_threshold = normalizedMatchThresholdPercent / 100;
   base.music_metadata = {
     enabled: $("#cfg-music-meta-enabled").checked,
-    confidence_threshold: Number.isInteger(metaThreshold) ? metaThreshold : metaDefaults.confidence_threshold,
+    confidence_threshold: Number.isInteger(enrichThreshold) ? enrichThreshold : metaDefaults.confidence_threshold,
     use_acoustid: $("#cfg-music-meta-acoustid").checked,
     acoustid_api_key: $("#cfg-music-meta-acoustid-key").value.trim(),
     embed_artwork: $("#cfg-music-meta-artwork").checked,
@@ -5087,6 +5286,23 @@ function bindEvents() {
         await handleHomeDirectUrl(directUrl, $("#home-destination")?.value.trim() || "", $("#home-search-message"));
         return;
       }
+      const musicButton = event.target.closest('button[data-action="home-music-enqueue"]');
+      if (musicButton) {
+        if (musicButton.disabled) return;
+        const resultKey = musicButton.dataset.musicResultKey;
+        if (!resultKey) return;
+        const originalText = musicButton.textContent;
+        musicButton.disabled = true;
+        musicButton.textContent = "Queuing...";
+        try {
+          await enqueueHomeMusicResult(resultKey, musicButton, $("#home-search-message"));
+        } catch (err) {
+          musicButton.disabled = false;
+          musicButton.textContent = originalText;
+          setNotice($("#home-search-message"), `Music enqueue failed: ${err.message}`, true);
+        }
+        return;
+      }
       const button = event.target.closest('button[data-action="home-download"]');
       if (!button) return;
       const itemId = button.dataset.itemId;
@@ -5276,6 +5492,10 @@ function bindEvents() {
       setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
     }
   });
+  const musicFailuresRefresh = $("#music-failures-refresh");
+  if (musicFailuresRefresh) {
+    musicFailuresRefresh.addEventListener("click", refreshMusicFailures);
+  }
 
   $("#toggle-theme").addEventListener("click", () => {
     const next = resolveTheme() === "light" ? "dark" : "light";

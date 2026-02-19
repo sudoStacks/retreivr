@@ -59,6 +59,18 @@ All notable changes to this project will be documented here.
   - single fallback allowed only when no album/compilation candidates survive
   - compilation is rejected on explicit album-hint mismatch
   - deterministic repeated-input selection for `(recording_mbid, mb_release_id, mb_release_group_id)`
+- Music Mode metadata-first search/enqueue API:
+  - `GET /api/music/search` returns MB-bound recording candidates (no transport IDs)
+  - `POST /api/music/enqueue` enqueues a selected canonical MB recording payload
+- Import failure diagnostics visibility:
+  - persisted `music_failures` rows with batch/artist/track/reasons/query context
+  - `GET /api/music/failures` status endpoint
+  - Status page “Music failures” panel with count + list + refresh
+- Regression tests for:
+  - manual candidate parsing/binding inputs
+  - MB bucket fallback behavior (single fallback, compilation precedence)
+  - MB threshold override behavior
+  - search destination NameError smoke path
 
 ### Changed
 - Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
@@ -105,6 +117,17 @@ All notable changes to this project will be documented here.
 - Explicit album hints now guard against random compilation matches via `compilation_album_mismatch` rejection when similarity is too low.
 - Final candidate pool now enforces album/compilation-first selection with single fallback only when no album/compilation candidates survive.
 - MB binding observability now logs selected bucket details (`bucket`, `bucket_multiplier`) and per-run failure bucket counts (`bucket_counts`) on `mb_pair_selection_failed`.
+- Search request destination resolution now safely imports and resolves via `build_output_template` (fixes `build_output_template not defined` regression).
+- Manual Music Mode candidate enqueue now derives MB binding inputs from selected candidate metadata (title/uploader/duration) instead of weak free-text query fields.
+- Music thresholds are now explicit and separated:
+  - `music_mb_binding_threshold` (pre-enqueue MB binding gate)
+  - `music_source_match_threshold` (adapter-source candidate acceptance gate)
+  - post-download enrichment threshold remains under `music_metadata.confidence_threshold`
+- Current UI threshold wiring now drives both music binding + source match thresholds, with enrichment threshold displayed separately.
+- Home Music Mode now supports metadata-first UX:
+  - Music Mode search calls `/api/music/search` and renders canonical MB result cards
+  - card-level Download actions call `/api/music/enqueue`
+  - non-music (normal) search flow remains unchanged
 - Pre-enqueue MB binding is now enforced for all music acquisition paths (import, manual search enqueue, direct URL music enqueue).
 - Worker music-track execution now enforces binding invariants (`recording_mbid` + `mb_release_id`) before adapter resolution.
 - Manual/direct enqueue paths now prioritize canonical metadata fields for expected artist/track/album/duration inputs used by music scoring.

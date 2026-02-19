@@ -71,6 +71,7 @@ from engine.job_queue import (
 )
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
+from engine.musicbrainz_binding import resolve_best_mb_pair
 from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
@@ -179,6 +180,155 @@ def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
         return []
     return _mb_service().search_release_groups(normalized_query, limit=limit)
 
+
+def _search_music_recording_candidates(query: str, *, limit: int, config: dict | None = None) -> list[dict]:
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return []
+
+    runtime_cfg = config if isinstance(config, dict) else {}
+    threshold_raw = runtime_cfg.get("music_mb_binding_threshold", 0.78)
+    try:
+        threshold = float(threshold_raw)
+    except (TypeError, ValueError):
+        threshold = 0.78
+    if threshold > 1.0:
+        threshold = threshold / 100.0
+    threshold = max(0.0, min(1.0, threshold))
+
+    prefer_country = str(
+        runtime_cfg.get("locale_country")
+        or runtime_cfg.get("country")
+        or "US"
+    ).strip().upper() or "US"
+    debug_scoring = bool(runtime_cfg.get("debug_music_scoring"))
+    allow_non_album_fallback = bool(runtime_cfg.get("allow_non_album_fallback", True))
+
+    artist_hint = None
+    track_hint = normalized_query
+    if " - " in normalized_query:
+        left, right = normalized_query.split(" - ", 1)
+        if left.strip() and right.strip():
+            artist_hint = left.strip()
+            track_hint = right.strip()
+
+    search_limit = max(int(limit) * 5, 20)
+    recordings_payload = _mb_service().search_recordings(
+        artist_hint,
+        track_hint,
+        album=None,
+        limit=search_limit,
+    )
+    recording_list = []
+    if isinstance(recordings_payload, dict):
+        raw = recordings_payload.get("recording-list")
+        if isinstance(raw, list):
+            recording_list = [entry for entry in raw if isinstance(entry, dict)]
+
+    def _score_value(recording):
+        try:
+            raw_score = recording.get("score")
+            if raw_score is None:
+                raw_score = recording.get("ext:score")
+            score = float(raw_score)
+            if score > 1.0:
+                score = score / 100.0
+            return max(0.0, min(1.0, score))
+        except Exception:
+            return 0.0
+
+    def _artist_credit_text(artist_credit):
+        if not isinstance(artist_credit, list):
+            return ""
+        parts = []
+        for part in artist_credit:
+            if isinstance(part, str):
+                parts.append(part)
+                continue
+            if isinstance(part, dict):
+                artist_obj = part.get("artist") if isinstance(part.get("artist"), dict) else {}
+                name = str(part.get("name") or artist_obj.get("name") or "").strip()
+                joinphrase = str(part.get("joinphrase") or "").strip()
+                if name:
+                    parts.append(name)
+                if joinphrase:
+                    parts.append(joinphrase)
+        return "".join(parts).strip()
+
+    ranked_recordings = sorted(
+        recording_list,
+        key=lambda rec: (-_score_value(rec), str(rec.get("id") or "")),
+    )
+    bound_results: list[dict] = []
+    seen_pairs: set[tuple[str, str]] = set()
+
+    for recording in ranked_recordings:
+        if len(bound_results) >= int(limit):
+            break
+        recording_mbid = str(recording.get("id") or "").strip()
+        if not recording_mbid:
+            continue
+        title = str(recording.get("title") or "").strip()
+        artist = _artist_credit_text(recording.get("artist-credit")) or (artist_hint or "")
+        try:
+            duration_ms = int(str(recording.get("length") or "").strip()) if recording.get("length") else None
+        except (TypeError, ValueError):
+            duration_ms = None
+
+        pair = resolve_best_mb_pair(
+            _mb_service(),
+            artist=artist or artist_hint,
+            track=title or track_hint,
+            album=None,
+            duration_ms=duration_ms,
+            country_preference=prefer_country,
+            allow_non_album_fallback=allow_non_album_fallback,
+            debug=debug_scoring,
+            threshold=threshold,
+        )
+        if not isinstance(pair, dict):
+            continue
+        release_mbid = str(pair.get("mb_release_id") or "").strip()
+        if not release_mbid:
+            continue
+        dedupe_key = (recording_mbid, release_mbid)
+        if dedupe_key in seen_pairs:
+            continue
+        seen_pairs.add(dedupe_key)
+        release_date = str(pair.get("release_date") or "").strip()
+        release_year = release_date[:4] if len(release_date) >= 4 and release_date[:4].isdigit() else None
+        track_number = pair.get("track_number")
+        disc_number = pair.get("disc_number")
+        pair_duration_ms = pair.get("duration_ms")
+        try:
+            track_number_int = int(track_number) if track_number is not None else None
+            disc_number_int = int(disc_number) if disc_number is not None else None
+            duration_ms_int = int(pair_duration_ms) if pair_duration_ms is not None else None
+        except (TypeError, ValueError):
+            continue
+        if not release_date or not release_year:
+            continue
+        if not track_number_int or not disc_number_int or not duration_ms_int:
+            continue
+        bound_results.append(
+            {
+                "recording_mbid": recording_mbid,
+                "artist": artist or None,
+                "track": title or None,
+                "release_mbid": release_mbid,
+                "release_group_mbid": str(pair.get("mb_release_group_id") or "").strip() or None,
+                "album": str(pair.get("album") or "").strip() or None,
+                "release_year": release_year,
+                "release_date": release_date or None,
+                "track_number": track_number_int,
+                "disc_number": disc_number_int,
+                "duration_ms": duration_ms_int,
+                "artwork_url": None,
+            }
+        )
+
+    return bound_results
+
 def _is_http_url(value: str | None) -> bool:
     if not value or not isinstance(value, str):
         return False
@@ -200,6 +350,27 @@ def _sanitize_non_http_urls(obj):
     if isinstance(obj, list):
         return [_sanitize_non_http_urls(v) for v in obj]
     return obj
+
+
+def _ensure_music_failures_table(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS music_failures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            origin_batch_id TEXT,
+            artist TEXT,
+            track TEXT,
+            reason_json TEXT,
+            recording_mbid_attempted TEXT,
+            last_query TEXT
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_music_failures_created_at ON music_failures (created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_music_failures_batch ON music_failures (origin_batch_id)")
+    conn.commit()
 
 def notify_run_summary(config, *, run_type: str, status, started_at, finished_at):
     if run_type not in {"scheduled", "watcher"}:
@@ -4378,9 +4549,109 @@ def music_albums_search(q: str = Query("", alias="q"), limit: int = Query(10, ge
 
 @app.get("/api/music/search")
 def music_search(q: str = Query("", alias="q"), limit: int = Query(10, ge=1, le=50)):
-    candidates = _search_music_album_candidates(str(q or ""), limit=int(limit))
-    logger.info("[MUSIC] mb_search q=%s limit=%s results=%s", str(q or ""), int(limit), len(candidates))
-    return candidates
+    query = str(q or "").strip()
+    config = _read_config_or_404()
+    candidates = _search_music_recording_candidates(query, limit=int(limit), config=config)
+    logger.info("[MUSIC] mb_search q=%s limit=%s results=%s", query, int(limit), len(candidates))
+    return {
+        "status": "ok",
+        "results": candidates,
+    }
+
+
+@app.post("/api/music/enqueue")
+def enqueue_music_track(data: dict = Body(...)):
+    payload = data if isinstance(data, dict) else {}
+    required_keys = (
+        "recording_mbid",
+        "mb_release_id",
+        "mb_release_group_id",
+        "artist",
+        "track",
+        "album",
+        "release_date",
+        "track_number",
+        "disc_number",
+        "duration_ms",
+    )
+    missing = []
+    for key in required_keys:
+        value = payload.get(key)
+        if value is None or str(value).strip() == "":
+            missing.append(key)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"missing_fields: {','.join(sorted(missing))}")
+
+    try:
+        track_number = int(payload.get("track_number"))
+        disc_number = int(payload.get("disc_number"))
+        duration_ms = int(payload.get("duration_ms"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="track_number/disc_number/duration_ms must be integers") from exc
+    if track_number <= 0 or disc_number <= 0 or duration_ms <= 0:
+        raise HTTPException(status_code=400, detail="track_number/disc_number/duration_ms must be > 0")
+
+    recording_mbid = str(payload.get("recording_mbid") or "").strip()
+    canonical_metadata = {
+        "artist": str(payload.get("artist") or "").strip(),
+        "track": str(payload.get("track") or "").strip(),
+        "album": str(payload.get("album") or "").strip(),
+        "release_date": str(payload.get("release_date") or "").strip(),
+        "track_number": track_number,
+        "disc_number": disc_number,
+        "duration_ms": duration_ms,
+        "recording_mbid": recording_mbid,
+        "mb_recording_id": recording_mbid,
+        "mb_release_id": str(payload.get("mb_release_id") or "").strip(),
+        "mb_release_group_id": str(payload.get("mb_release_group_id") or "").strip(),
+    }
+
+    destination = str(payload.get("destination") or payload.get("destination_dir") or "").strip() or None
+    final_format_override = str(payload.get("final_format") or "").strip() or None
+    runtime_config = _read_config_or_404()
+    engine = getattr(app.state, "worker_engine", None)
+    queue_store = getattr(engine, "store", None) if engine is not None else None
+    if queue_store is None:
+        queue_store = DownloadJobStore(app.state.paths.db_path)
+
+    placeholder_url = f"musicbrainz://recording/{recording_mbid}"
+    canonical_id = f"music_track:{recording_mbid}"
+    try:
+        enqueue_payload = build_download_job_payload(
+            config=runtime_config,
+            origin="music_search",
+            origin_id=recording_mbid,
+            media_type="music",
+            media_intent="music_track",
+            source="music_search",
+            url=placeholder_url,
+            input_url=placeholder_url,
+            destination=destination,
+            base_dir=app.state.paths.single_downloads_dir,
+            final_format_override=final_format_override,
+            resolved_metadata=canonical_metadata,
+            output_template_overrides={
+                "kind": "music_track",
+                "recording_mbid": recording_mbid,
+                "mb_recording_id": recording_mbid,
+                "mb_release_id": canonical_metadata["mb_release_id"],
+                "mb_release_group_id": canonical_metadata["mb_release_group_id"],
+                "track_number": track_number,
+                "disc_number": disc_number,
+                "release_date": canonical_metadata["release_date"],
+                "duration_ms": duration_ms,
+            },
+            canonical_id=canonical_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    job_id, created, dedupe_reason = queue_store.enqueue_job(**enqueue_payload)
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "created": bool(created),
+        "dedupe_reason": dedupe_reason,
+    }
 
 
 @app.get("/api/music/album/art/{album_id}")
@@ -5010,6 +5281,53 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
     finally:
         conn.close()
     return safe_json({"jobs": rows})
+
+
+@app.get("/api/music/failures")
+async def list_music_failures(limit: int = Query(50, ge=1, le=500)):
+    conn = sqlite3.connect(app.state.paths.db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        _ensure_music_failures_table(conn)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS c FROM music_failures")
+        total_count = int((cur.fetchone() or {"c": 0})["c"])
+        cur.execute(
+            """
+            SELECT id, created_at, origin_batch_id, artist, track, reason_json, recording_mbid_attempted, last_query
+            FROM music_failures
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        rows = []
+        for row in cur.fetchall():
+            reason_json = row["reason_json"]
+            reasons = []
+            if reason_json:
+                try:
+                    parsed = json.loads(reason_json)
+                    reasons = parsed.get("reasons") if isinstance(parsed, dict) else []
+                    if not isinstance(reasons, list):
+                        reasons = []
+                except Exception:
+                    reasons = []
+            rows.append(
+                {
+                    "id": row["id"],
+                    "created_at": row["created_at"],
+                    "origin_batch_id": row["origin_batch_id"],
+                    "artist": row["artist"],
+                    "track": row["track"],
+                    "reasons": reasons,
+                    "recording_mbid_attempted": row["recording_mbid_attempted"],
+                    "last_query": row["last_query"],
+                }
+            )
+    finally:
+        conn.close()
+    return {"count": total_count, "rows": rows}
 
 
 

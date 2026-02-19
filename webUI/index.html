@@ -275,6 +275,17 @@
           <span class="label">Last error</span>
           <span id="status-error" class="meta">-</span>
         </div>
+        <div class="group">
+          <div class="group-title">Music failures</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">Count</span>
+              <span id="music-failures-count">0</span>
+            </div>
+            <button id="music-failures-refresh" class="button ghost small" type="button">Refresh</button>
+          </div>
+          <div id="music-failures-list" class="stack"></div>
+        </div>
         <div class="row">
           <button id="status-cancel" class="button remove small" type="button">Kill downloads in progress</button>
         </div>
@@ -495,13 +506,17 @@
         <div class="group">
           <div class="group-title">Music metadata enrichment</div>
           <div class="grid two">
+            <label class="field short">
+              <span>Music mode match threshold (%)</span>
+              <input id="cfg-music-meta-threshold" type="number" min="0" max="100" step="1">
+            </label>
             <label class="field inline short">
               <span>Enabled</span>
               <input id="cfg-music-meta-enabled" type="checkbox">
             </label>
             <label class="field short">
-              <span>Confidence threshold</span>
-              <input id="cfg-music-meta-threshold" type="number" min="0" max="100" step="1">
+              <span>Enrichment confidence threshold (%)</span>
+              <input id="cfg-music-enrich-threshold" type="number" min="0" max="100" step="1">
             </label>
             <label class="field inline short">
               <span>Use AcoustID</span>

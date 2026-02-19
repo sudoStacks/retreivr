@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import sqlite3
+import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -19,7 +22,7 @@ except Exception:
     _BINDING_SPEC.loader.exec_module(_BINDING_MODULE)
     resolve_best_mb_pair = _BINDING_MODULE.resolve_best_mb_pair
 
-_DEFAULT_CONFIDENCE_THRESHOLD = 0.90
+_DEFAULT_CONFIDENCE_THRESHOLD = 0.78
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +35,91 @@ class ImportResult:
     failed_count: int
     resolved_mbids: list[str] = field(default_factory=list)
     import_batch_id: str = ""
+
+
+def _ensure_music_failures_table(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS music_failures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            origin_batch_id TEXT,
+            artist TEXT,
+            track TEXT,
+            reason_json TEXT,
+            recording_mbid_attempted TEXT,
+            last_query TEXT
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_music_failures_created_at ON music_failures (created_at)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_music_failures_batch ON music_failures (origin_batch_id)"
+    )
+    conn.commit()
+
+
+def _resolve_failure_db_path(config: Any, queue_store: Any) -> str | None:
+    if queue_store is not None:
+        db_path = getattr(queue_store, "db_path", None)
+        if db_path:
+            return str(db_path)
+    if isinstance(config, dict):
+        db_path = config.get("queue_db_path")
+        if db_path:
+            return str(db_path)
+    return None
+
+
+def _record_music_failure(
+    *,
+    db_path: str | None,
+    origin_batch_id: str,
+    artist: str | None,
+    track: str | None,
+    reasons: list[str] | None = None,
+    recording_mbid_attempted: str | None = None,
+    last_query: str | None = None,
+) -> None:
+    if not db_path:
+        return
+    safe_reasons = [str(r) for r in (reasons or []) if str(r or "").strip()]
+    payload = {"reasons": safe_reasons}
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            _ensure_music_failures_table(conn)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO music_failures (
+                    created_at,
+                    origin_batch_id,
+                    artist,
+                    track,
+                    reason_json,
+                    recording_mbid_attempted,
+                    last_query
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    origin_batch_id,
+                    str(artist or "").strip() or None,
+                    str(track or "").strip() or None,
+                    json.dumps(payload, sort_keys=True),
+                    str(recording_mbid_attempted or "").strip() or None,
+                    str(last_query or "").strip() or None,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("music_failure_record_persist_failed")
 
 
 def _build_query(intent: TrackIntent) -> str:
@@ -211,7 +299,6 @@ def _resolve_bound_mb_pair(
     country_preference: str = "US",
     threshold: float = _DEFAULT_CONFIDENCE_THRESHOLD,
 ) -> dict[str, Any] | None:
-    _ = threshold
     return resolve_best_mb_pair(
         mb_service,
         artist=artist,
@@ -220,6 +307,7 @@ def _resolve_bound_mb_pair(
         duration_ms=duration_ms,
         country_preference=country_preference,
         min_recording_score=float(threshold or 0.0),
+        threshold=float(threshold or _DEFAULT_CONFIDENCE_THRESHOLD),
     )
 
 
@@ -320,6 +408,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     queue_store = _get_queue_store(config)
     job_payload_builder = _get_job_payload_builder(config)
     import_batch_id = uuid4().hex
+    failure_db_path = _resolve_failure_db_path(config, queue_store)
     confidence_threshold = _DEFAULT_CONFIDENCE_THRESHOLD
     runtime_config = config.get("app_config") if isinstance(config, dict) and isinstance(config.get("app_config"), dict) else (config if isinstance(config, dict) else {})
     base_dir = "/downloads"
@@ -327,7 +416,9 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     final_format_override = None
     if isinstance(config, dict):
         try:
-            if config.get("min_confidence") is not None:
+            if config.get("music_mb_binding_threshold") is not None:
+                confidence_threshold = float(config.get("music_mb_binding_threshold"))
+            elif config.get("min_confidence") is not None:
                 confidence_threshold = float(config.get("min_confidence"))
         except (TypeError, ValueError):
             confidence_threshold = _DEFAULT_CONFIDENCE_THRESHOLD
@@ -368,10 +459,35 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
             )
             if not selected_pair:
                 unresolved_count += 1
+                reasons = []
+                try:
+                    last = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
+                    if isinstance(last, list):
+                        reasons = [str(item) for item in last if str(item or "").strip()]
+                except Exception:
+                    reasons = []
+                _record_music_failure(
+                    db_path=failure_db_path,
+                    origin_batch_id=import_batch_id,
+                    artist=artist,
+                    track=title,
+                    reasons=reasons or ["mb_pair_not_found"],
+                    recording_mbid_attempted=None,
+                    last_query=query,
+                )
                 continue
             recording_mbid = str(selected_pair.get("recording_mbid") or "").strip()
             if not recording_mbid:
                 unresolved_count += 1
+                _record_music_failure(
+                    db_path=failure_db_path,
+                    origin_batch_id=import_batch_id,
+                    artist=artist,
+                    track=title,
+                    reasons=["missing_recording_mbid"],
+                    recording_mbid_attempted=None,
+                    last_query=query,
+                )
                 continue
             release_mbid = str(selected_pair.get("mb_release_id") or "").strip() or None
             release_group_mbid = str(selected_pair.get("mb_release_group_id") or "").strip() or None
@@ -407,8 +523,17 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
             resolved_mbids.append(recording_mbid)
             if created:
                 enqueued_count += 1
-        except Exception:
+        except Exception as exc:
             failed_count += 1
+            _record_music_failure(
+                db_path=failure_db_path,
+                origin_batch_id=import_batch_id,
+                artist=artist,
+                track=title,
+                reasons=["import_exception", str(exc)],
+                recording_mbid_attempted=None,
+                last_query=query,
+            )
 
     unresolved_count = max(unresolved_count, total_tracks - resolved_count - failed_count)
     return ImportResult(

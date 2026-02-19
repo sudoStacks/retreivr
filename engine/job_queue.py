@@ -2345,6 +2345,7 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
                     allow_non_album_fallback=bool((config or {}).get("allow_non_album_fallback")),
                     debug=bool((config or {}).get("debug_music_scoring")),
                     min_recording_score=float((config or {}).get("min_confidence") or 0.0),
+                    threshold=float((config or {}).get("music_mb_binding_threshold", 0.78)),
                 )
                 if isinstance(pair, dict):
                     canonical.update(pair)
