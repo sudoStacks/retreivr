@@ -134,66 +134,17 @@
                     <input id="search-track" type="text" placeholder="Optional track">
                   </label>
                   <label class="field short">
-                    <span>Intent</span>
-                    <select id="search-intent">
-                      <option value="track">track</option>
-                      <option value="album">album</option>
+                    <span>Mode</span>
+                    <select id="music-mode-select">
+                      <option value="auto">Auto</option>
+                      <option value="artist">Artist</option>
+                      <option value="album">Album</option>
+                      <option value="track">Track</option>
                     </select>
-                  </label>
-                  <label class="field short">
-                    <span>Min match score</span>
-                    <input id="search-min-score" type="number" min="0" max="1" step="0.01" value="0.92">
                   </label>
                   <label class="field short">
                     <span>Max candidates</span>
                     <input id="search-max-candidates" type="number" min="1" max="50" value="5">
-                  </label>
-                </div>
-                <div class="group-title">Source priority</div>
-                <div id="search-source-list" class="stack source-priority-list">
-                  <div class="row source-priority-row" data-source="bandcamp">
-                    <label class="field inline">
-                      <span>bandcamp</span>
-                      <input class="source-enabled" type="checkbox" checked>
-                    </label>
-                    <div class="action-group">
-                      <button class="button ghost small" type="button" data-action="up">↑</button>
-                      <button class="button ghost small" type="button" data-action="down">↓</button>
-                    </div>
-                  </div>
-                  <div class="row source-priority-row" data-source="youtube_music">
-                    <label class="field inline">
-                      <span>youtube_music</span>
-                      <input class="source-enabled" type="checkbox" checked>
-                    </label>
-                    <div class="action-group">
-                      <button class="button ghost small" type="button" data-action="up">↑</button>
-                      <button class="button ghost small" type="button" data-action="down">↓</button>
-                    </div>
-                  </div>
-                  <div class="row source-priority-row" data-source="soundcloud">
-                    <label class="field inline">
-                      <span>soundcloud</span>
-                      <input class="source-enabled" type="checkbox" checked>
-                    </label>
-                    <div class="action-group">
-                      <button class="button ghost small" type="button" data-action="up">↑</button>
-                      <button class="button ghost small" type="button" data-action="down">↓</button>
-                    </div>
-                  </div>
-                </div>
-                <div class="row">
-                  <label class="field inline">
-                    <span>Include albums</span>
-                    <input id="search-include-albums" type="checkbox" checked>
-                  </label>
-                  <label class="field inline">
-                    <span>Include singles</span>
-                    <input id="search-include-singles" type="checkbox" checked>
-                  </label>
-                  <label class="field inline">
-                    <span>Lossless only</span>
-                    <input id="search-lossless-only" type="checkbox">
                   </label>
                 </div>
                 <div class="row">
@@ -221,6 +172,7 @@
             </div>
           </section>
         </div>
+        <div id="music-results-container"></div>
 
         <button id="import-playlist-toggle" class="button ghost small" type="button">Import Playlist</button>
         <div id="import-playlist-panel">

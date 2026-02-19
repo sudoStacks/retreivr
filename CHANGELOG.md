@@ -135,11 +135,38 @@ All notable changes to this project will be documented here.
 - Music Mode Home submit now hard-switches to metadata-only flow:
   - calls `GET /api/music/search`
   - skips standard adapter-backed `/api/search/requests` polling/render path when Music Mode is ON
+- Home Music Mode submit now has an explicit top-level short-circuit guard:
+  - checks `music-mode-toggle` first
+  - calls `performMusicModeSearch(query)` and returns immediately
+  - prevents legacy `/api/search/requests` execution in Music Mode
 - `/api/music/search` now supports mode-specific metadata search params:
   - `q`, `mode` (`auto|artist|album|track`), `offset`, `limit`
   - returns grouped MusicBrainz metadata (`artists`, `albums`, `tracks`) with `mode_used`
+- Music Mode frontend search now exclusively calls:
+  - `GET /api/music/search?q=...&mode=...&offset=0&limit=50`
+  - no legacy request creation, polling, or resolution calls in Music Mode path
 - `/api/music/album/download` now accepts `release_group_mbid` and enqueues album tracks via MB release-group → release → tracklist expansion before worker acquisition.
 - Home album-card enqueue payload now sends `release_group_mbid` (not legacy `release_group_id`) and confirms `tracks_enqueued` after queueing.
+- Music Mode metadata render target is now isolated:
+  - renders only into `#music-results-container`
+  - no writes from music metadata renderer into legacy home/advanced polling result containers
+- Music toggle show/hide behavior is now symmetric:
+  - ON: shows `#music-mode-console`, hides `#standard-search-container`
+  - OFF: hides music console, shows standard search, clears `#music-results-container`, resets legacy search state
+- Music Mode now defaults to OFF on initial Home render:
+  - `music-mode-toggle` is unchecked by default
+  - init guard forces standard-search-visible + music-console-hidden when toggle is off
+- Music console controls are now metadata-only:
+  - replaced legacy intent selector with `#music-mode-select` (`auto|artist|album|track`)
+  - removed min score/source priority/include/lossless controls from music metadata console
+- Track enqueue from Music Mode now posts MB IDs only:
+  - payload is limited to `recording_mbid` and `release_mbid`
+  - no title/query/adapter payload fields are sent from track cards
+- Legacy source-selection validation now runs only in standard mode:
+  - “Select at least one source” is bypassed in Music Mode metadata search flow
+- Legacy Media Search Console submit handlers remain disabled so no parallel music submit path executes.
+- Home search flow is explicitly single-path for Music Mode:
+  - Home submit -> `submitHomeSearch` -> hard short-circuit -> `performMusicModeSearch` -> return
 - Pre-enqueue MB binding is now enforced for all music acquisition paths (import, manual search enqueue, direct URL music enqueue).
 - Worker music-track execution now enforces binding invariants (`recording_mbid` + `mb_release_id`) before adapter resolution.
 - Manual/direct enqueue paths now prioritize canonical metadata fields for expected artist/track/album/duration inputs used by music scoring.
