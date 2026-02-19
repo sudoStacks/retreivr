@@ -408,6 +408,40 @@ def test_fail_fast_when_no_acceptable_mb_pair():
         raise AssertionError("Expected ValueError for missing acceptable MB pair")
 
 
+def test_job_queue_binding_uses_normalized_lookup_track_without_mutating_canonical_track(monkeypatch):
+    mb = _FakeMBService(recordings_payload={"recording-list": []}, recording_payloads={}, release_payloads={})
+    jq = _load_job_queue_with_fake_mb(mb)
+    captured = {}
+
+    def _fake_resolve_best_mb_pair(*args, **kwargs):
+        captured["track"] = kwargs.get("track")
+        return {
+            "recording_mbid": "mbid-x",
+            "mb_release_id": "rel-x",
+            "mb_release_group_id": "rg-x",
+            "album": "Album",
+            "release_date": "2015-01-01",
+            "track_number": 1,
+            "disc_number": 1,
+            "duration_ms": 210000,
+        }
+
+    monkeypatch.setattr(jq, "resolve_best_mb_pair", _fake_resolve_best_mb_pair)
+    payload = {
+        "output_template": {
+            "canonical_metadata": {
+                "artist": "Artist",
+                "track": "Song - Official Video [HD] (Visualizer)",
+            }
+        }
+    }
+    jq.ensure_mb_bound_music_track(payload, config={})
+    assert "music video" not in (captured.get("track") or "")
+    assert "official video" not in (captured.get("track") or "")
+    assert "visualizer" not in (captured.get("track") or "")
+    assert payload["output_template"]["canonical_metadata"]["track"] == "Song - Official Video [HD] (Visualizer)"
+
+
 def test_mb_binding_rejects_30s_preview_candidate():
     binding = _load_binding_module()
     mb = _FakeMBService(
@@ -441,6 +475,105 @@ def test_mb_binding_rejects_30s_preview_candidate():
         track="Song",
         album="Album",
         duration_ms=210000,
+        country_preference="US",
+    )
+    assert selected is None
+
+
+def test_music_video_query_normalizes_and_binds_to_official_album_release():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "jr-song",
+                    "title": "Shuttin’ Detroit Down",
+                    "ext:score": "99",
+                    "length": "211000",
+                    "artist-credit": [{"name": "John Rich"}],
+                }
+            ]
+        },
+        recording_payloads={
+            "jr-song": {
+                "recording": {
+                    "id": "jr-song",
+                    "length": "211000",
+                    "release-list": [{"id": "jr-rel", "date": "2009-01-01"}],
+                }
+            }
+        },
+        release_payloads={
+            "jr-rel": _release_payload(
+                "jr-rel",
+                title="Son of a Preacher Man",
+                recording_mbid="jr-song",
+                release_group_id="jr-rg",
+                date="2009-01-01",
+                country="US",
+                status="Official",
+                primary_type="Album",
+            ),
+        },
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="John Rich",
+        track="John Rich - Shuttin’ Detroit Down [Music Video]",
+        album="Son of a Preacher Man",
+        duration_ms=211000,
+        country_preference="US",
+    )
+    assert selected is not None
+    assert selected["album"] == "Son of a Preacher Man"
+    assert selected["mb_release_id"] == "jr-rel"
+    assert selected["mb_release_group_id"] == "jr-rg"
+    assert int(selected["track_number"]) > 0
+    assert int(selected["disc_number"]) > 0
+
+
+def test_live_variant_without_intent_fails_binding():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "live-rec",
+                    "title": "Shuttin’ Detroit Down (Live)",
+                    "ext:score": "99",
+                    "length": "211000",
+                    "artist-credit": [{"name": "John Rich"}],
+                }
+            ]
+        },
+        recording_payloads={
+            "live-rec": {
+                "recording": {
+                    "id": "live-rec",
+                    "length": "211000",
+                    "release-list": [{"id": "live-rel", "date": "2010-01-01"}],
+                }
+            }
+        },
+        release_payloads={
+            "live-rel": _release_payload(
+                "live-rel",
+                title="Live Album",
+                recording_mbid="live-rec",
+                release_group_id="live-rg",
+                date="2010-01-01",
+                country="US",
+                status="Official",
+                primary_type="Album",
+            ),
+        },
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="John Rich",
+        track="Shuttin’ Detroit Down",
+        album="Son of a Preacher Man",
+        duration_ms=211000,
         country_preference="US",
     )
     assert selected is None

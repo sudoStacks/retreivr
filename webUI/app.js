@@ -3678,7 +3678,12 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
     await refreshSearchRequestDetails(state.searchSelectedRequestId);
     await refreshSearchQueue();
   } catch (err) {
-    setNotice(messageEl, `Enqueue failed: ${err.message}`, true);
+    const rawMessage = String(err && err.message ? err.message : "");
+    if (rawMessage.includes("music_mode_mb_binding_failed")) {
+      setNotice(messageEl, "Music Mode rejected — No canonical album release found", true);
+      return;
+    }
+    setNotice(messageEl, `Enqueue failed: ${rawMessage}`, true);
   }
 }
 async function cancelSearchRequest(requestId) {

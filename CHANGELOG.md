@@ -48,6 +48,11 @@ All notable changes to this project will be documented here.
   - deterministic same-input MB pair selection checks
   - fail-fast validation when no acceptable MB pair exists
   - log-order checks proving `mb_pair_selected` occurs before `job_enqueued`
+- Music title-normalization regression coverage for Music Mode MB binding:
+  - strips transport-noise suffixes/tokens (`[Music Video]`, `(Official Video)`, `(Official Audio)`, `visualizer`)
+  - preserves semantic variants like `live` for downstream scoring/rejection behavior
+  - verifies standard (non-music) mode is unaffected
+- Music Mode verification scenarios for noisy title binding and live-variant rejection.
 
 ### Changed
 - Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
@@ -93,6 +98,8 @@ All notable changes to this project will be documented here.
 - Worker music-track execution now enforces binding invariants (`recording_mbid` + `mb_release_id`) before adapter resolution.
 - Manual/direct enqueue paths now prioritize canonical metadata fields for expected artist/track/album/duration inputs used by music scoring.
 - Music client-delivery fast-lane bypass is now blocked for music jobs so MB binding is never skipped.
+- Music Mode enqueue failure now returns structured API errors for MB bind failures (`music_mode_mb_binding_failed`) with reason payload.
+- Web UI now shows explicit fail-fast messaging when Music Mode binding is rejected: `Music Mode rejected — No canonical album release found`.
 
 ### Fixed
 - Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.

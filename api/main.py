@@ -4918,6 +4918,10 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
                 candidate_id,
                 source,
             )
+            if exc.args and isinstance(exc.args[0], dict):
+                payload = exc.args[0]
+                if payload.get("error") == "music_mode_mb_binding_failed":
+                    return JSONResponse(status_code=422, content=payload)
             error_msg = "Invalid destination"
             code = "INVALID_DESTINATION"
             if "invalid_destination" not in str(exc).lower():

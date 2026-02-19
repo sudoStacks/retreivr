@@ -29,13 +29,14 @@ from metadata.queue import enqueue_metadata
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 
 try:
-    from engine.musicbrainz_binding import resolve_best_mb_pair
+    from engine.musicbrainz_binding import _normalize_title_for_mb_lookup, resolve_best_mb_pair
 except Exception:
     _BINDING_PATH = os.path.join(os.path.dirname(__file__), "musicbrainz_binding.py")
     _BINDING_SPEC = importlib.util.spec_from_file_location("engine_musicbrainz_binding_job_queue", _BINDING_PATH)
     _BINDING_MODULE = importlib.util.module_from_spec(_BINDING_SPEC)
     assert _BINDING_SPEC and _BINDING_SPEC.loader
     _BINDING_SPEC.loader.exec_module(_BINDING_MODULE)
+    _normalize_title_for_mb_lookup = _BINDING_MODULE._normalize_title_for_mb_lookup
     resolve_best_mb_pair = _BINDING_MODULE.resolve_best_mb_pair
 
 logger = logging.getLogger(__name__)
@@ -2301,10 +2302,16 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
         recording_mbid = _coalesce_str(canonical.get("recording_mbid"))
         release_hint = _coalesce_str(canonical.get("mb_release_id"))
         if recording_mbid:
-            enriched = _fetch_release_enrichment(
-                recording_mbid,
-                release_hint,
-            )
+            try:
+                enriched = _fetch_release_enrichment(
+                    recording_mbid,
+                    release_hint,
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "music_track_requires_mb_bound_metadata",
+                    [str(exc)],
+                )
             for key in ("album", "release_date", "track_number", "disc_number", "mb_release_id", "mb_release_group_id"):
                 value = enriched.get(key) if isinstance(enriched, dict) else None
                 if value not in (None, ""):
@@ -2326,11 +2333,12 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
             track = _coalesce_str(canonical.get("track"), canonical.get("title"), template.get("track"), payload_or_intent.get("track"))
             album_hint = _coalesce_str(canonical.get("album"), template.get("album"), payload_or_intent.get("album"))
             if artist and track:
+                lookup_track = _normalize_title_for_mb_lookup(track)
                 service = get_musicbrainz_service()
                 pair = resolve_best_mb_pair(
                     service,
                     artist=artist,
-                    track=track,
+                    track=lookup_track or track,
                     album=album_hint,
                     duration_ms=_coalesce_pos_int(canonical.get("duration_ms"), template.get("duration_ms"), payload_or_intent.get("duration_ms")),
                     country_preference=country_preference,
@@ -2346,7 +2354,14 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
     canonical["disc_number"] = _coalesce_pos_int(canonical.get("disc_number"), 1)
     canonical["duration_ms"] = _coalesce_pos_int(canonical.get("duration_ms"))
     if not _is_complete(canonical):
-        raise ValueError("music_track_requires_mb_bound_metadata")
+        reasons = []
+        try:
+            last = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
+            if isinstance(last, list):
+                reasons = [str(item) for item in last if str(item or "").strip()]
+        except Exception:
+            reasons = []
+        raise ValueError("music_track_requires_mb_bound_metadata", reasons)
 
     # Keep top-level mirror fields in sync for legacy consumers.
     for key in required_keys:

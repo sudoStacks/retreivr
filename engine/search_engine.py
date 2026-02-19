@@ -1491,6 +1491,16 @@ class SearchResolutionService:
                 external_id=external_id,
             )
         except ValueError as exc:
+            if str(exc.args[0] if exc.args else exc).strip() == "music_track_requires_mb_bound_metadata":
+                reasons = []
+                if len(exc.args) > 1 and isinstance(exc.args[1], (list, tuple)):
+                    reasons = [str(item) for item in exc.args[1] if str(item or "").strip()]
+                raise ValueError(
+                    {
+                        "error": "music_mode_mb_binding_failed",
+                        "reason": reasons,
+                    }
+                )
             raise ValueError(f"invalid_destination: {exc}")
         resolved_destination = enqueue_payload.get("resolved_destination")
         job_id, created, dedupe_reason = self.queue_store.enqueue_job(**enqueue_payload)

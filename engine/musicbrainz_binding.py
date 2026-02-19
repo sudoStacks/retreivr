@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,18 @@ _DISALLOWED_VARIANT_RE = re.compile(
     re.IGNORECASE,
 )
 _PREVIEW_RE = re.compile(r"\b(preview|snippet|teaser)\b", re.IGNORECASE)
+_BRACKETED_SEGMENT_RE = re.compile(r"\([^)]*\)|\[[^\]]*\]")
+_TRANSPORT_TOKEN_RE = re.compile(
+    r"\b("
+    r"music video|official video|official music video|lyric video|visualizer|"
+    r"official audio|audio|hd|4k|cmt sessions|topic"
+    r")\b",
+    re.IGNORECASE,
+)
+_TRAILING_HYPHEN_SUFFIX_RE = re.compile(
+    r"\s*-\s*(official video|topic)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _tokens(value: Any) -> set[str]:
@@ -38,6 +51,24 @@ def _safe_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _normalize_title_for_mb_lookup(raw_title: str, *, query_flags: dict | None = None) -> str:
+    _ = query_flags
+    text = unicodedata.normalize("NFKC", str(raw_title or "")).lower()
+    def _strip_or_keep_bracketed(match: re.Match[str]) -> str:
+        segment = match.group(0)
+        inner = segment[1:-1].strip()
+        inner_lower = inner.lower()
+        if "live" in inner_lower or "acoustic" in inner_lower:
+            return f" {inner} "
+        return " "
+
+    text = _BRACKETED_SEGMENT_RE.sub(_strip_or_keep_bracketed, text)
+    text = _TRANSPORT_TOKEN_RE.sub(" ", text)
+    text = _TRAILING_HYPHEN_SUFFIX_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _score_value(recording: dict[str, Any]) -> float:
@@ -126,13 +157,30 @@ def resolve_best_mb_pair(
     debug: bool = False,
     min_recording_score: float = 0.0,
 ) -> dict[str, Any] | None:
+    resolve_best_mb_pair.last_failure_reasons = []
     failure_reasons: set[str] = set()
     expected_artist = str(artist or "").strip()
-    expected_track = str(track or "").strip()
+    expected_track_raw = str(track or "").strip()
+    expected_track_lookup = _normalize_title_for_mb_lookup(expected_track_raw)
+    expected_track = expected_track_raw
     expected_album = str(album or "").strip() or None
     prefer_country = str(country_preference or "").strip().upper() or None
 
-    recordings_payload = mb_service.search_recordings(expected_artist or None, expected_track, album=expected_album, limit=5)
+    if debug:
+        logger.debug(
+            {
+                "message": "mb_title_normalized",
+                "original": expected_track_raw,
+                "normalized": expected_track_lookup,
+            }
+        )
+
+    recordings_payload = mb_service.search_recordings(
+        expected_artist or None,
+        expected_track_lookup or expected_track_raw,
+        album=expected_album,
+        limit=5,
+    )
     recording_list = []
     if isinstance(recordings_payload, dict):
         raw = recordings_payload.get("recording-list")
@@ -141,6 +189,7 @@ def resolve_best_mb_pair(
     ranked_recordings = sorted(recording_list, key=lambda rec: (-_score_value(rec), str(rec.get("id") or "")))
     if not ranked_recordings:
         failure_reasons.add("no_recording_candidates")
+        resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons)
         logger.info({"message": "mb_pair_selection_failed", "reasons": sorted(failure_reasons)})
         return None
 
@@ -335,12 +384,14 @@ def resolve_best_mb_pair(
             failure_reasons.add("no_official_album")
         if prefer_country and not saw_country_match:
             failure_reasons.add("no_us_release")
+        resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons or {"no_valid_release_for_recording"})
         logger.info({"message": "mb_pair_selection_failed", "reasons": sorted(failure_reasons or {"no_valid_release_for_recording"})})
         return None
 
     eligible = [c for c in all_candidates if float(c.get("correctness") or 0.0) >= CORRECTNESS_FLOOR]
     if not eligible:
         failure_reasons.add("correctness_below_floor")
+        resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons)
         logger.info({"message": "mb_pair_selection_failed", "reasons": sorted(failure_reasons)})
         return None
 
@@ -369,6 +420,7 @@ def resolve_best_mb_pair(
             "album": selected.get("album"),
         }
     )
+    resolve_best_mb_pair.last_failure_reasons = []
     return {
         "recording_mbid": selected.get("recording_mbid"),
         "mb_release_id": selected.get("mb_release_id"),
