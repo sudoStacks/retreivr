@@ -5362,7 +5362,12 @@ function bindEvents() {
       if (homeInput) {
         homeInput.value = query;
       }
-      await submitHomeSearch(true);
+      try {
+        setNotice($("#home-search-message"), "Music Mode: searching metadata...", false);
+        await performMusicModeSearch(query);
+      } catch (err) {
+        setNotice($("#home-search-message"), `Music search failed: ${err.message}`, true);
+      }
     });
   }
   const musicSearchOnly = $("#search-create-only");
@@ -5377,7 +5382,12 @@ function bindEvents() {
       if (homeInput) {
         homeInput.value = query;
       }
-      await submitHomeSearch(false);
+      try {
+        setNotice($("#home-search-message"), "Music Mode: searching metadata...", false);
+        await performMusicModeSearch(query);
+      } catch (err) {
+        setNotice($("#home-search-message"), `Music search failed: ${err.message}`, true);
+      }
     });
   }
   $("#search-requests-refresh").addEventListener("click", refreshSearchRequests);
