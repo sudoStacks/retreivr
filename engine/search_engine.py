@@ -86,15 +86,9 @@ ITEM_STATUSES = {
 
 DEFAULT_SOURCE_PRIORITY = ["bandcamp", "youtube_music", "soundcloud"]
 MUSIC_TRACK_SOURCE_PRIORITY = ("youtube_music", "youtube", "soundcloud", "bandcamp")
-MUSIC_SOURCE_PRIORITY_WEIGHTS = {
-    "youtube_music": 10,
-    "youtube": 7,
-    "soundcloud": 4,
-    "bandcamp": 2,
-}
 MUSIC_TRACK_PENALIZE_TOKENS = ("live", "cover", "karaoke", "remix", "reaction", "ft.", "feat.", "instrumental")
 DEFAULT_MATCH_THRESHOLD = 0.92
-MUSIC_TRACK_THRESHOLD = min(DEFAULT_MATCH_THRESHOLD * 0.8, 0.70)
+MUSIC_TRACK_THRESHOLD = 0.78
 WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -738,12 +732,22 @@ class SearchResolutionService:
         self.queue_db_path = queue_db_path
         self.adapters = adapters or default_adapters()
         self.config = config or {}
+        self.debug_music_scoring = self._as_bool(self.config.get("debug_music_scoring"))
         self.paths = paths
         self.store = SearchJobStore(search_db_path)
         self.store.ensure_schema()
         self.queue_store = DownloadJobStore(queue_db_path)
         self._ensure_queue_schema()
         self.canonical_resolver = canonical_resolver or CanonicalMetadataResolver(config=self.config)
+
+    def _as_bool(self, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return False
 
     def ensure_schema(self):
         """
@@ -803,10 +807,11 @@ class SearchResolutionService:
                 title_match_increment = float(shared_count * 2)
             adjustment += title_match_increment
             reasons.append(f"title_match_{title_match_increment:.0f}")
-            logging.debug(
-                f"[MUSIC] title_match score_increase={title_match_increment:.0f} "
-                f"for candidate={candidate.get('url')}"
-            )
+            if self.debug_music_scoring:
+                logging.debug(
+                    f"[MUSIC] title_match score_increase={title_match_increment:.0f} "
+                    f"for candidate={candidate.get('url')}"
+                )
 
         if artist_tokens and uploader_tokens:
             overlap = len(artist_tokens & uploader_tokens) / max(len(artist_tokens), 1)
@@ -832,9 +837,10 @@ class SearchResolutionService:
                 if duration_increment > 0.0:
                     adjustment += duration_increment
                     reasons.append(f"duration_bonus_{duration_increment:.0f}")
-                logging.debug(
-                    f"[MUSIC] duration_bonus diff={diff_ms} score={duration_increment:.0f}"
-                )
+                if self.debug_music_scoring:
+                    logging.debug(
+                        f"[MUSIC] duration_bonus diff={diff_ms} score={duration_increment:.0f}"
+                    )
         except Exception:
             pass
 
@@ -855,10 +861,11 @@ class SearchResolutionService:
             if token in title_lower:
                 adjustment -= 10.0
                 reasons.append(f"penalty_{token}")
-                logging.debug(
-                    f"[MUSIC] penalizing token={token} new_score={adjustment:.0f} "
-                    f"for {candidate.get('url')}"
-                )
+                if self.debug_music_scoring:
+                    logging.debug(
+                        f"[MUSIC] penalizing token={token} new_score={adjustment:.0f} "
+                        f"for {candidate.get('url')}"
+                    )
         return adjustment, reasons
 
     def _build_music_track_query(self, artist, track, album=None):
@@ -907,49 +914,63 @@ class SearchResolutionService:
         return candidates
 
     def search_music_track_best_match(self, artist, track, album=None, duration_ms=None, limit=6):
+        query = self._build_music_track_query(artist, track, album)
         expected = {
             "artist": artist,
             "track": track,
             "album": album,
+            "query": query,
+            "media_intent": "music_track",
             "duration_hint_sec": (int(duration_ms) // 1000) if duration_ms is not None else None,
         }
-        allow_live = self._music_track_is_live(artist, track, album)
-        query = self._build_music_track_query(artist, track, album)
         scored = []
         for candidate in self.search_music_track_candidates(query, limit=limit):
             source = candidate.get("source")
             adapter = self.adapters.get(source)
             source_modifier = adapter.source_modifier(candidate) if adapter else 1.0
             candidate.update(score_candidate(expected, candidate, source_modifier=source_modifier))
-            base_score = self._normalize_score_100(candidate)
-            source_weight = int(MUSIC_SOURCE_PRIORITY_WEIGHTS.get(source, 0))
-            logging.debug(f"[MUSIC] source_priority={source} weight={source_weight}")
-            adjustment, reasons = self._music_track_adjust_score(expected, candidate, allow_live=allow_live)
-            if source_weight:
-                adjustment += float(source_weight)
-                reasons.append(f"source_priority_{source_weight}")
-            candidate["music_adjustment"] = adjustment
-            candidate["music_adjustment_reasons"] = ",".join(reasons)
-            candidate["base_score"] = base_score
-            candidate["final_score_100"] = max(0.0, min(100.0, base_score + adjustment))
-            candidate["final_score"] = candidate["final_score_100"] / 100.0
+            breakdown = candidate.get("score_breakdown") if isinstance(candidate.get("score_breakdown"), dict) else {}
+            candidate["base_score"] = breakdown.get("raw_score_100")
+            candidate["final_score_100"] = breakdown.get("final_score_100")
+            duration_delta_ms = candidate.get("duration_delta_ms")
             scored.append(candidate)
         if not scored:
             return None
-        ranked = sorted(
-            scored,
-            key=lambda c: (
-                -float(c.get("final_score") or 0.0),
-                str(c.get("source") or ""),
-                str(c.get("candidate_id") or ""),
-            ),
+        ranked = rank_candidates(scored, source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY))
+        eligible = [c for c in ranked if not c.get("rejection_reason")]
+        selected = select_best_candidate(
+            eligible,
+            MUSIC_TRACK_THRESHOLD,
+            source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY),
         )
-        for candidate in ranked:
-            candidate_score = float(candidate.get("final_score") or 0.0)
-            logging.debug(f"[MUSIC] threshold_used={MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
-            if candidate_score >= MUSIC_TRACK_THRESHOLD:
-                return candidate
-        return None
+        if self.debug_music_scoring:
+            selected_id = selected.get("candidate_id") if isinstance(selected, dict) else None
+            for candidate in ranked:
+                candidate_score = float(candidate.get("final_score") or 0.0)
+                breakdown = candidate.get("score_breakdown") if isinstance(candidate.get("score_breakdown"), dict) else {}
+                rejection_reason = candidate.get("rejection_reason")
+                decision = "below_threshold"
+                if rejection_reason:
+                    decision = f"rejected:{rejection_reason}"
+                elif selected_id and candidate.get("candidate_id") == selected_id:
+                    decision = "selected"
+                _log_event(
+                    logging.DEBUG,
+                    "music_track_candidate_scored",
+                    source=candidate.get("source"),
+                    title=candidate.get("title"),
+                    duration=candidate.get("duration_sec"),
+                    duration_delta=candidate.get("duration_delta_ms"),
+                    score_artist=candidate.get("score_artist"),
+                    score_track=candidate.get("score_track"),
+                    score_album=candidate.get("score_album"),
+                    score_duration=candidate.get("score_duration"),
+                    penalties_applied=breakdown.get("penalty_reasons"),
+                    final_score=candidate_score,
+                    threshold=MUSIC_TRACK_THRESHOLD,
+                    acceptance_decision=decision,
+                )
+        return selected
 
     def _resolve_request_destination(self, destination):
         if not self.paths:
@@ -1216,7 +1237,7 @@ class SearchResolutionService:
             request_media_type = request_row.get("media_type") or "generic"
             is_music_request = request_media_type == "music"
             selection_threshold = min_score if is_music_request else 0.0
-            chosen = select_best_candidate(ranked, selection_threshold)
+            chosen = select_best_candidate(ranked, selection_threshold, source_priority=source_priority)
             if not chosen:
                 self.store.update_item_status(item["id"], "failed", error="no_candidate_above_threshold")
                 _log_event(

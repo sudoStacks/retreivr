@@ -23,6 +23,15 @@ All notable changes to this project will be documented here.
   - music jobs must build audio-only yt-dlp options
   - video jobs must build video yt-dlp options
   - invariant guard must fail if music opts include video merge fields
+- Hardened music-track scoring regression suite:
+  - correct match acceptance
+  - 30s preview rejection
+  - live/acoustic rejection
+  - remaster penalty
+  - cover-artist rejection
+  - album-mismatch penalty
+  - YouTube Music source preference
+  - deterministic tie-break ordering validation
 
 ### Changed
 - Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
@@ -38,6 +47,14 @@ All notable changes to this project will be documented here.
   - output codec comes from `music_final_format`
   - video `final_format` no longer leaks into music imports/downloads
 - Web UI config note now clarifies current single “Final format” field is video-oriented; music uses `music_final_format` in config.
+- Music-track candidate selection now evaluates all scored candidates and picks the best eligible match (no first-hit selection).
+- Deterministic music tie-break ordering is now explicit:
+  1. higher source priority
+  2. smaller duration delta
+  3. lower title-noise score
+- Added optional `debug_music_scoring` config flag:
+  - when enabled, logs per-candidate score components, penalties, duration delta, final score, and acceptance decision
+  - when disabled, verbose per-candidate scoring logs are suppressed
 
 ### Fixed
 - Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.
