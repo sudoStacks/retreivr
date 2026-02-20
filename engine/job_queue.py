@@ -23,7 +23,7 @@ import requests
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, ExtractorError
 
-from engine.json_utils import json_sanity_check, safe_json_dumps
+from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
 from metadata.naming import sanitize_component
