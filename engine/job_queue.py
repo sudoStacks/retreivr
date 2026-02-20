@@ -2726,6 +2726,47 @@ def build_ytdlp_opts(context):
         lock_format = True
 
     opts = _merge_overrides(opts, overrides, operation=operation, lock_format=lock_format)
+
+    def _normalize_js_runtimes(value):
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            raw_items = list(value)
+        else:
+            raw_items = [value]
+        normalized = []
+        seen = set()
+        for item in raw_items:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if not text:
+                continue
+            for part in text.split(","):
+                runtime = part.strip()
+                if not runtime or runtime in seen:
+                    continue
+                seen.add(runtime)
+                normalized.append(runtime)
+        return normalized
+
+    config_js_runtimes = _normalize_js_runtimes(
+        config.get("js_runtimes") if isinstance(config, dict) else None
+    )
+    if not config_js_runtimes:
+        config_js_runtimes = _normalize_js_runtimes(
+            config.get("js_runtime") if isinstance(config, dict) else None
+        )
+    if config_js_runtimes:
+        existing_js_runtimes = _normalize_js_runtimes(opts.get("js_runtimes"))
+        if existing_js_runtimes:
+            for runtime in config_js_runtimes:
+                if runtime not in existing_js_runtimes:
+                    existing_js_runtimes.append(runtime)
+            opts["js_runtimes"] = existing_js_runtimes
+        else:
+            opts["js_runtimes"] = config_js_runtimes
+
     if operation == "download":
         for key in _YTDLP_DOWNLOAD_UNSAFE_KEYS:
             opts.pop(key, None)
