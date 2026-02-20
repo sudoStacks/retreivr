@@ -1,4 +1,5 @@
 import json
+import copy
 import importlib.util
 import logging
 import os
@@ -2124,7 +2125,6 @@ def _is_youtube_access_gate(message: str | None) -> bool:
         "geo blocked",
         "country",
         "region",
-        "format not available",
         "private",
         "removed",
     ]
@@ -3001,6 +3001,21 @@ def download_with_ytdlp(
 
     normalized_intent = str(media_intent or "").strip().lower()
     if audio_mode and is_music_media_type(media_type) and normalized_intent == "music_track":
+        if "format" not in opts:
+            _log_event(
+                logging.ERROR,
+                "music_track_opts_invalid",
+                job_id=job_id,
+                url=url,
+                media_type=media_type,
+                media_intent=media_intent,
+                format=None,
+                noplaylist=opts.get("noplaylist"),
+                has_extract_audio=False,
+                postprocessors=opts.get("postprocessors"),
+                error_message="music_track_missing_format",
+            )
+            raise RuntimeError("music_track_missing_format")
         fmt = str(opts.get("format") or "").strip().lower()
         valid_format = fmt in {"bestaudio/best", "best"}
         postprocessors = opts.get("postprocessors") or []
@@ -3091,67 +3106,37 @@ def download_with_ytdlp(
     info = None
     # Always get metadata via API (for output file info, etc.)
     try:
-        opts_for_probe = dict(opts)
-        opts_for_probe["skip_download"] = True
-        with YoutubeDL(opts_for_probe) as ydl:
+        probe_opts = copy.deepcopy(opts)
+        probe_opts.pop("format", None)
+        probe_opts.pop("postprocessors", None)
+        probe_opts.pop("merge_output_format", None)
+        probe_opts.pop("final_format", None)
+        probe_opts.pop("writethumbnail", None)
+        probe_opts.pop("embedthumbnail", None)
+        probe_opts["skip_download"] = True
+        logger.info(
+            {
+                "message": "metadata_probe_invocation",
+                "job_id": job_id,
+                "url": url,
+                "format_present": "format" in probe_opts,
+                "postprocessors_present": "postprocessors" in probe_opts,
+            }
+        )
+        with YoutubeDL(probe_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as exc:
-        if audio_mode:
-            _log_event(
-                logging.WARNING,
-                "ytdlp_metadata_probe_retrying_with_best",
-                job_id=job_id,
-                url=url,
-                error=str(exc),
-                failure_domain="metadata_probe",
-                error_message=str(exc),
-                candidate_id=extract_video_id(url),
-            )
-            try:
-                opts_for_probe_retry = dict(opts_for_probe)
-                opts_for_probe_retry["format"] = "best"
-                with YoutubeDL(opts_for_probe_retry) as ydl:
-                    info = ydl.extract_info(url, download=False)
-            except Exception as retry_exc:
-                _log_event(
-                    logging.WARNING,
-                    "ytdlp_metadata_probe_retrying_without_format",
-                    job_id=job_id,
-                    url=url,
-                    error=str(retry_exc),
-                    failure_domain="metadata_probe",
-                    error_message=str(retry_exc),
-                    candidate_id=extract_video_id(url),
-                )
-                try:
-                    opts_for_probe_retry_no_format = dict(opts_for_probe)
-                    opts_for_probe_retry_no_format.pop("format", None)
-                    with YoutubeDL(opts_for_probe_retry_no_format) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                except Exception as retry_no_format_exc:
-                    _log_event(
-                        logging.ERROR,
-                        "ytdlp_metadata_probe_failed",
-                        job_id=job_id,
-                        url=url,
-                        error=str(retry_no_format_exc),
-                        failure_domain="metadata_probe",
-                        error_message=str(retry_no_format_exc),
-                        candidate_id=extract_video_id(url),
-                    )
-                    raise RuntimeError(f"yt_dlp_metadata_probe_failed: {retry_no_format_exc}")
-        else:
-            _log_event(
-                logging.ERROR,
-                "ytdlp_metadata_probe_failed",
-                job_id=job_id,
-                url=url,
-                error=str(exc),
-                failure_domain="metadata_probe",
-                error_message=str(exc),
-                candidate_id=extract_video_id(url),
-            )
-            raise RuntimeError(f"yt_dlp_metadata_probe_failed: {exc}")
+        _log_event(
+            logging.ERROR,
+            "ytdlp_metadata_probe_failed",
+            job_id=job_id,
+            url=url,
+            error=str(exc),
+            failure_domain="metadata_probe",
+            error_message=str(exc),
+            candidate_id=extract_video_id(url),
+        )
+        raise RuntimeError(f"yt_dlp_metadata_probe_failed: {exc}")
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""

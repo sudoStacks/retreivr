@@ -15,6 +15,8 @@ All notable changes to this project will be documented here.
 - Music-track yt-dlp pipeline invariant logging:
   - structured `music_track_opts_validated` event for each music_track job
   - structured `music_track_opts_invalid` event and early fail on invalid audio opts
+- Probe invocation diagnostics:
+  - structured `metadata_probe_invocation` event logs whether `format`/`postprocessors` are present in probe opts
 - Runtime regression tests for music-mode hardening:
   - music track yt-dlp format assertion (`bestaudio/best` + audio postprocessing)
   - metadata probe fallback retry behavior (`bestaudio/best` → `best`)
@@ -102,6 +104,10 @@ All notable changes to this project will be documented here.
   - client request limit clamped to 1..15 before API call
 - Album enqueue success messaging now treats partial results as success (not error) while surfacing skipped-track diagnostics.
 - MusicBrainz duration-reject diagnostics now emit structured delta details (`duration_reject_detail`) for album-context or explicit duration-override paths.
+- Metadata probe execution is now strictly extraction-only:
+  - probe uses deep-copied opts with format/postprocessing fields removed
+  - single-attempt probe behavior (no format-based retry chain)
+- Music-track opts validation now includes explicit `format` presence guard to prevent accidental download-stage format removal.
 - Music-mode yt-dlp selector now uses `bestaudio/best` (removed stricter audio codec filter) while preserving canonical audio extraction postprocessors.
 - Music downloads now pass canonical `output_template` metadata through the shared yt-dlp options builder path (no separate inline music opts branch).
 - Album download track binding now uses a wider duration tolerance (`25s`) while single-track/manual binding keeps strict default duration tolerance.
@@ -236,7 +242,7 @@ All notable changes to this project will be documented here.
 
 ### Fixed
 - Fixed `sqlite3.Row` `.get()` misuse in queue row handling by normalizing rows to dicts before dict-style access.
-- Added third music metadata-probe fallback attempt with no explicit `format` key after `bestaudio/best` and `best` retries.
+- Removed legacy metadata-probe retry events and format-specific probe classification assumptions now that probe does not enforce format.
 - Music Mode no longer shows legacy “Select at least one source” validation in metadata search flow.
 - Music metadata results no longer render after Music Mode is toggled OFF while requests are in flight.
 - Album queue UI now correctly reflects backend HTTP 200 partial success responses instead of treating skipped tracks as fatal.
