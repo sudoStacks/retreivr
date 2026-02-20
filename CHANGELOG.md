@@ -178,6 +178,23 @@ All notable changes to this project will be documented here.
 - Import playlist panel controller is now cleanly event-driven:
   - `import-playlist-toggle` only toggles hidden state
   - no automatic unhide on page load
+- Music Mode search now uses structured backend fields end-to-end:
+  - `/api/music/search` accepts `artist`, `album`, `track`, `mode`, `offset`, `limit`
+  - no single-field `q` composition in endpoint handling
+  - frontend `performMusicModeSearch` sends structured params directly
+- Music metadata search query construction is now strictly fielded:
+  - artist-only -> `search_artists`
+  - album routes -> `search_release_groups`
+  - track routes -> `search_recordings`
+  - combined artist/album/track routes use explicit field conjunctions
+- `/api/music/search` discovery path is now confirmed metadata-only:
+  - no adapter search calls
+  - no `resolve_best_mb_pair` invocation in search endpoint path
+  - no transport scoring or duration acceptance logic in metadata search
+- Search resilience guardrails added for MusicBrainz metadata calls:
+  - hard cap `limit <= 15`
+  - immediate empty structured response when all fields are empty
+  - MB call exceptions are swallowed in search path and return structured empty/partial results instead of HTTP 500
 - Pre-enqueue MB binding is now enforced for all music acquisition paths (import, manual search enqueue, direct URL music enqueue).
 - Worker music-track execution now enforces binding invariants (`recording_mbid` + `mb_release_id`) before adapter resolution.
 - Manual/direct enqueue paths now prioritize canonical metadata fields for expected artist/track/album/duration inputs used by music scoring.

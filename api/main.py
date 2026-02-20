@@ -4597,15 +4597,25 @@ def music_albums_search(q: str = Query("", alias="q"), limit: int = Query(10, ge
 
 @app.get("/api/music/search")
 def music_search(
-    q: str = Query("", alias="q"),
+    artist: str = Query(""),
+    album: str = Query(""),
+    track: str = Query(""),
     mode: str = Query("auto"),
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
 ):
-    query = str(q or "").strip()
-    if not query:
-        return search_music_metadata("", mode, int(offset), int(limit))
-    return search_music_metadata(query, mode, int(offset), int(limit))
+    artist_value = str(artist or "").strip()
+    album_value = str(album or "").strip()
+    track_value = str(track or "").strip()
+
+    return search_music_metadata(
+        artist=artist_value,
+        album=album_value,
+        track=track_value,
+        mode=mode,
+        offset=int(offset),
+        limit=int(limit),
+    )
 
 
 @app.post("/api/music/enqueue")
