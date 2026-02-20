@@ -70,9 +70,8 @@ def test_music_cli_translation_parity_includes_runtime_cookie_and_audio_flags() 
     argv = jq._render_ytdlp_cli_argv(opts, context["url"])
 
     assert "-f" in argv and argv[argv.index("-f") + 1] == "bestaudio/best"
-    assert "--cookies" in argv and argv[argv.index("--cookies") + 1] == str(cookies_path)
-    assert "--js-runtimes" in argv and argv[argv.index("--js-runtimes") + 1] == "node:/usr/bin/node"
-    assert "--extractor-args" in argv
-    assert "youtube:player_client=android" in argv[argv.index("--extractor-args") + 1]
+    assert "--cookies" not in argv
+    assert "--js-runtimes" not in argv
+    assert "--extractor-args" not in argv
     assert "-x" in argv
     assert "--audio-format" in argv and argv[argv.index("--audio-format") + 1] == "mp3"

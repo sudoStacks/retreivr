@@ -2088,6 +2088,18 @@ def resolve_cookiefile_for_context(context, config):
         )
         return None
 
+    def _as_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return None
+
     cookiefile = None
     explicit_cookie = ctx.get("cookie_file")
     if explicit_cookie:
@@ -2101,7 +2113,17 @@ def resolve_cookiefile_for_context(context, config):
     if not cookiefile:
         cookiefile = resolve_cookie_file(cfg)
 
-    if cookiefile:
+    # Cookies are additive and must be explicitly enabled, or explicitly present by path.
+    # This must not alter media mode/extraction policy; it only controls cookie attachment.
+    enabled_flag = _as_bool(
+        cfg.get("cookies_enabled", cfg.get("allow_cookies", cfg.get("use_cookies")))
+    )
+    cookie_explicitly_present = bool(explicit_cookie) or bool(
+        cfg.get("yt_dlp_cookies") or cfg.get("cookiefile")
+    )
+    cookies_allowed = bool(cookie_explicitly_present) or bool(enabled_flag)
+
+    if cookiefile and cookies_allowed:
         _log_event(
             logging.INFO,
             "cookies_applied",
@@ -2116,7 +2138,7 @@ def resolve_cookiefile_for_context(context, config):
     _log_event(
         logging.INFO,
         "cookies_missing_or_disabled",
-        reason="missing_or_not_found",
+        reason="missing_or_not_found" if cookies_allowed else "not_enabled",
         job_id=ctx.get("job_id"),
         operation=ctx.get("operation"),
         media_type=ctx.get("media_type"),
@@ -2709,18 +2731,9 @@ def build_ytdlp_opts(context):
             return False
         return False
 
-    # Playlists: let yt-dlp expand playlists itself when the run/job indicates playlist intent.
-    # This must override the previous "single item" behavior; forcing noplaylist=True breaks scheduler/watcher.
-    allow_playlist = bool(context.get("allow_playlist"))
-    if not allow_playlist:
-        if context.get("media_intent") == "playlist":
-            allow_playlist = True
-        elif context.get("origin") == "playlist":
-            allow_playlist = True
-        elif operation in {"playlist", "playlist_probe", "playlist_metadata"}:
-            allow_playlist = True
-        elif _url_looks_like_playlist(context.get("url")):
-            allow_playlist = True
+    # Keep extraction policy mode-agnostic; mode-specific logic below controls only
+    # format / merge_output_format / postprocessors.
+    allow_playlist = False
 
     if isinstance(output_template, dict) and not allow_chapter_outtmpl:
         default_template = output_template.get("default")
@@ -2732,20 +2745,16 @@ def build_ytdlp_opts(context):
     opts = {
         "quiet": True,
         "no_warnings": True,
-        # CLI parity: allow playlist expansion when requested; otherwise behave like a single-URL download.
-        "noplaylist": False if allow_playlist else True,
+        "noplaylist": True,
         "outtmpl": output_template,
         # Avoid chapter workflows unless explicitly enabled.
         # (Chapter outtmpl dicts can trigger unexpected behavior in the Python API path.)
         "no_chapters": True if not allow_chapter_outtmpl else False,
         "retries": 3,
         "fragment_retries": 3,
+        "force_overwrites": True,
         "overwrites": True,
     }
-
-    cookie_file = resolve_cookiefile_for_context(context, config)
-    if cookie_file:
-        opts["cookiefile"] = cookie_file
 
     if operation == "playlist":
         opts["skip_download"] = True
@@ -2756,23 +2765,28 @@ def build_ytdlp_opts(context):
         # Only enable addmetadata, embedthumbnail, writethumbnail, and audio postprocessors
         # when both audio_mode and media_type is music/audio
         if audio_mode:
-            opts["postprocessors"] = _build_audio_postprocessors(normalized_audio_target)
+            opts["postprocessors"] = [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "0",
+                }
+            ]
             opts["format"] = _FORMAT_AUDIO
             opts["addmetadata"] = True
             opts["embedthumbnail"] = True
             opts["writethumbnail"] = True
-            if operation == "download":
-                opts.setdefault("extractor_args", {})
-                opts["extractor_args"].setdefault("youtube", {})
-                opts["extractor_args"]["youtube"]["player_client"] = ["android"]
         else:
-            # Video mode: honor only container preferences (webm/mp4/mkv).
-            # Never treat an audio codec (mp3/m4a/flac/...) as a yt-dlp format selector.
-            if video_container_target:
-                opts["format"] = "bestvideo+bestaudio/best"
+            # Video mode strategy:
+            # 1) best webm video + bestaudio
+            # 2) best mp4 video + bestaudio
+            # 3) fallback best single file
+            opts["format"] = "bestvideo[ext=webm]+bestaudio/bestvideo[ext=mp4]+bestaudio/best"
+            # Post-merge container policy:
+            # - mkv/mp4: force merge container
+            # - webm: keep native webm merge behavior (no forced merge_output_format)
+            if video_container_target in {"mkv", "mp4"}:
                 opts["merge_output_format"] = video_container_target
-            else:
-                opts["format"] = "best"
 
     # Only lock down format-related overrides when the target_format was actually applied
     # (audio codec in audio_mode, or video container preference in video mode).
@@ -2784,78 +2798,6 @@ def build_ytdlp_opts(context):
 
     opts = _merge_overrides(opts, overrides, operation=operation, lock_format=lock_format)
 
-    def _normalize_js_runtime_strings(value):
-        if value is None:
-            return []
-        if isinstance(value, (list, tuple, set)):
-            raw_items = list(value)
-        else:
-            raw_items = [value]
-        normalized = []
-        seen = set()
-        for item in raw_items:
-            if item is None:
-                continue
-            text = str(item).strip()
-            if not text:
-                continue
-            for part in text.split(","):
-                runtime = part.strip()
-                if not runtime or runtime in seen:
-                    continue
-                seen.add(runtime)
-                normalized.append(runtime)
-        return normalized
-
-    def _build_js_runtime_dict(runtime_items):
-        runtime_map = {}
-        for runtime in runtime_items:
-            value = str(runtime or "").strip()
-            if not value:
-                continue
-            runtime_name = value
-            runtime_path = None
-            if ":" in value:
-                runtime_name, runtime_path = value.split(":", 1)
-                runtime_name = runtime_name.strip()
-                runtime_path = runtime_path.strip() or None
-            if not runtime_name:
-                continue
-            runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
-        return runtime_map
-
-    def _normalized_key(key):
-        return str(key or "").strip().lower().replace("_", "").replace(" ", "")
-
-    def _extract_config_js_runtime_value(cfg):
-        if not isinstance(cfg, dict):
-            return False, None
-        for raw_key, raw_value in cfg.items():
-            if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
-                return True, raw_value
-        return False, None
-
-    has_js_runtime_config, config_js_runtime_value = _extract_config_js_runtime_value(config)
-    config_js_runtimes = _normalize_js_runtime_strings(config_js_runtime_value)
-    if has_js_runtime_config and not config_js_runtimes:
-        logging.warning("js_runtime_config_present_but_invalid")
-
-    if config_js_runtimes:
-        opts["js_runtimes"] = _build_js_runtime_dict(config_js_runtimes)
-    if has_js_runtime_config or opts.get("js_runtimes"):
-        logging.info(
-            json.dumps(
-                safe_json(
-                    {
-                        "message": "debug_effective_js_runtimes",
-                        "opts_js_runtimes": opts.get("js_runtimes"),
-                        "config_js_runtime": config.get("js_runtime") if isinstance(config, dict) else None,
-                        "config_js_runtimes": config.get("js_runtimes") if isinstance(config, dict) else None,
-                    }
-                ),
-                sort_keys=True,
-            )
-        )
     if operation == "download":
         for key in _YTDLP_DOWNLOAD_UNSAFE_KEYS:
             opts.pop(key, None)
@@ -2880,6 +2822,7 @@ def build_ytdlp_opts(context):
         resolved_video_container=resolved_video_container,
         postprocessors=bool(opts.get("postprocessors")),
         postprocessors_present=bool(opts.get("postprocessors")),
+        js_runtimes_present=bool(opts.get("js_runtimes")),
         merge_output_format=opts.get("merge_output_format"),
         addmetadata=opts.get("addmetadata"),
         embedthumbnail=opts.get("embedthumbnail"),
@@ -3028,7 +2971,7 @@ def _render_ytdlp_cli_argv(opts, url):
     elif opts.get("noplaylist") is False:
         argv.append("--yes-playlist")
 
-    if opts.get("overwrites") is True:
+    if opts.get("overwrites") is True or opts.get("force_overwrites") is True:
         argv.append("--force-overwrites")
 
     # Retries
@@ -3054,7 +2997,18 @@ def _render_ytdlp_cli_argv(opts, url):
             token = f"{name}:{path}" if path else name
             argv.extend(["--js-runtimes", token])
 
-    # Extractor args: {"youtube":{"player_client":["android"]}} -> --extractor-args youtube:player_client=android
+    remote_components = opts.get("remote_components")
+    if isinstance(remote_components, (list, tuple, set)):
+        for component in remote_components:
+            token = str(component or "").strip()
+            if token:
+                argv.extend(["--remote-components", token])
+    elif remote_components:
+        token = str(remote_components).strip()
+        if token:
+            argv.extend(["--remote-components", token])
+
+    # Extractor args: {"youtube":{"key":"value"}} -> --extractor-args youtube:key=value
     extractor_args = opts.get("extractor_args")
     if isinstance(extractor_args, dict):
         for extractor_name, extractor_cfg in extractor_args.items():
@@ -3178,6 +3132,9 @@ def download_with_ytdlp(
         context=context,
     )
     opts = invocation["opts"]
+    resolved_cookiefile = resolve_cookiefile_for_context(context, config)
+    if resolved_cookiefile:
+        opts["cookiefile"] = resolved_cookiefile
 
     normalized_intent = str(media_intent or "").strip().lower()
     if audio_mode and is_music_media_type(media_type) and normalized_intent == "music_track":
@@ -3352,6 +3309,10 @@ def download_with_ytdlp(
     # Remove progress_hooks if present
     if "progress_hooks" in opts_for_run:
         opts_for_run.pop("progress_hooks")
+    # First attempt must be clean/minimal (no cookies/js runtime).
+    configured_cookiefile = opts_for_run.pop("cookiefile", None)
+    opts_for_run.pop("js_runtimes", None)
+    opts_for_run.pop("remote_components", None)
     # Build CLI argv and run without a shell (prevents globbing of format strings like [acodec!=none])
     cmd_argv = _render_ytdlp_cli_argv(opts_for_run, url)
     cmd_log = _argv_to_redacted_cli(cmd_argv)
@@ -3374,6 +3335,127 @@ def download_with_ytdlp(
         )
     except CalledProcessError as exc:
         stderr_output = (exc.stderr or "").strip()
+
+        def _normalized_key(key):
+            return str(key or "").strip().lower().replace("_", "").replace(" ", "")
+
+        def _extract_config_js_runtime_values(cfg):
+            if not isinstance(cfg, dict):
+                return []
+            raw_value = None
+            for raw_key, candidate in cfg.items():
+                if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
+                    raw_value = candidate
+                    break
+            if raw_value is None:
+                return []
+            if isinstance(raw_value, (list, tuple, set)):
+                source = list(raw_value)
+            else:
+                source = [raw_value]
+            values = []
+            seen = set()
+            for item in source:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                for part in text.split(","):
+                    token = part.strip()
+                    if not token or token in seen:
+                        continue
+                    seen.add(token)
+                    values.append(token)
+            return values
+
+        def _build_js_runtime_dict(values):
+            runtime_map = {}
+            for value in values:
+                runtime_name = value
+                runtime_path = None
+                if ":" in value:
+                    runtime_name, runtime_path = value.split(":", 1)
+                    runtime_name = runtime_name.strip()
+                    runtime_path = runtime_path.strip() or None
+                if not runtime_name:
+                    continue
+                runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
+            return runtime_map
+
+        lower_error = stderr_output.lower()
+        should_escalate_js = any(
+            marker in lower_error
+            for marker in (
+                "signature solving failed",
+                "requested format is not available",
+                "n challenge solving failed",
+            )
+        )
+        should_try_cookies = any(
+            marker in lower_error
+            for marker in (
+                "sign in to confirm",
+                "age-restricted",
+                "forbidden",
+                "http error 403",
+                "private video",
+                "members-only",
+                "cookie",
+            )
+        )
+
+        retry_attempts = []
+        if should_escalate_js:
+            retry_attempts.append("js")
+        if should_try_cookies and configured_cookiefile:
+            retry_attempts.append("cookies")
+        if should_escalate_js and should_try_cookies and configured_cookiefile:
+            retry_attempts.append("js+cookies")
+
+        js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+        for attempt in retry_attempts:
+            retry_opts = dict(opts_for_run)
+            if attempt in {"js", "js+cookies"} and js_runtime_map:
+                retry_opts["js_runtimes"] = js_runtime_map
+                retry_opts["remote_components"] = "ejs:github"
+            if attempt in {"cookies", "js+cookies"} and configured_cookiefile:
+                retry_opts["cookiefile"] = configured_cookiefile
+
+            cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
+            cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
+            _log_event(
+                logging.WARNING,
+                "YTDLP_SMART_RETRY_ATTEMPT",
+                job_id=job_id,
+                url=url,
+                origin=origin,
+                media_type=media_type,
+                media_intent=media_intent,
+                strategy=attempt,
+                error=stderr_output,
+            )
+            try:
+                subprocess.run(
+                    cmd_retry_argv,
+                    check=True,
+                    stdout=DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                _log_event(
+                    logging.INFO,
+                    "YTDLP_CLI_EQUIVALENT",
+                    job_id=job_id,
+                    url=url,
+                    cli=cmd_retry_log,
+                )
+                if (stop_event and stop_event.is_set()) or (
+                    callable(cancel_check) and cancel_check()
+                ):
+                    raise CancelledError(cancel_reason or "Cancelled by user")
+                return info, _select_download_output(temp_dir, info, audio_mode)
+            except CalledProcessError as retry_exc:
+                stderr_output = (retry_exc.stderr or "").strip() or stderr_output
+
         fallback_cookie = _select_youtube_cookie_fallback(
             config=config,
             url=url,
@@ -3438,7 +3520,7 @@ def download_with_ytdlp(
                     error=fallback_message,
                 )
                 raise CookieFallbackError(f"yt_dlp_cookie_fallback_failed: {fallback_exc}")
-        if opts.get("cookiefile"):
+        if configured_cookiefile:
             found = False
             for entry in os.listdir(temp_dir):
                 if entry.endswith((".part", ".ytdl", ".temp")):
@@ -3612,60 +3694,76 @@ def preview_direct_url(url, config):
     if cookie_file:
         opts["cookiefile"] = cookie_file
 
-    def _normalize_js_runtime_strings(value):
-        if value is None:
-            return []
-        if isinstance(value, (list, tuple, set)):
-            raw_items = list(value)
-        else:
-            raw_items = [value]
-        normalized = []
-        seen = set()
-        for item in raw_items:
-            text = str(item or "").strip()
-            if not text:
-                continue
-            for part in text.split(","):
-                runtime = part.strip()
-                if not runtime or runtime in seen:
-                    continue
-                seen.add(runtime)
-                normalized.append(runtime)
-        return normalized
-
-    def _build_js_runtime_dict(runtime_items):
-        runtime_map = {}
-        for runtime in runtime_items:
-            value = str(runtime or "").strip()
-            if not value:
-                continue
-            runtime_name = value
-            runtime_path = None
-            if ":" in value:
-                runtime_name, runtime_path = value.split(":", 1)
-                runtime_name = runtime_name.strip()
-                runtime_path = runtime_path.strip() or None
-            if not runtime_name:
-                continue
-            runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
-        return runtime_map
-
-    def _normalized_key(key):
-        return str(key or "").strip().lower().replace("_", "").replace(" ", "")
-
-    js_runtime_value = None
-    for raw_key, raw_value in config.items():
-        if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
-            js_runtime_value = raw_value
-            break
-    js_runtimes = _normalize_js_runtime_strings(js_runtime_value)
-    if js_runtimes:
-        opts["js_runtimes"] = _build_js_runtime_dict(js_runtimes)
-
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as exc:
+        def _normalized_key(key):
+            return str(key or "").strip().lower().replace("_", "").replace(" ", "")
+
+        def _extract_config_js_runtime_values(cfg):
+            if not isinstance(cfg, dict):
+                return []
+            raw_value = None
+            for raw_key, candidate in cfg.items():
+                if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
+                    raw_value = candidate
+                    break
+            if raw_value is None:
+                return []
+            if isinstance(raw_value, (list, tuple, set)):
+                source = list(raw_value)
+            else:
+                source = [raw_value]
+            values = []
+            seen = set()
+            for item in source:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                for part in text.split(","):
+                    token = part.strip()
+                    if not token or token in seen:
+                        continue
+                    seen.add(token)
+                    values.append(token)
+            return values
+
+        def _build_js_runtime_dict(values):
+            runtime_map = {}
+            for value in values:
+                runtime_name = value
+                runtime_path = None
+                if ":" in value:
+                    runtime_name, runtime_path = value.split(":", 1)
+                    runtime_name = runtime_name.strip()
+                    runtime_path = runtime_path.strip() or None
+                if not runtime_name:
+                    continue
+                runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
+            return runtime_map
+
+        js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+        if js_runtime_map:
+            retry_opts = dict(opts)
+            retry_opts["js_runtimes"] = js_runtime_map
+            retry_opts["remote_components"] = "ejs:github"
+            try:
+                with YoutubeDL(retry_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            except Exception:
+                info = None
+            else:
+                meta = extract_meta(info, fallback_url=url)
+                return {
+                    "title": meta.get("title"),
+                    "uploader": meta.get("channel") or meta.get("artist"),
+                    "thumbnail_url": meta.get("thumbnail_url"),
+                    "url": meta.get("url") or url,
+                    "source": resolve_source(url),
+                    "duration_sec": info.get("duration") if isinstance(info, dict) else None,
+                }
+
         video_id = extract_video_id(url)
         _log_event(
             logging.WARNING,

@@ -90,6 +90,13 @@ All notable changes to this project will be documented here.
   - search destination NameError smoke path
 
 ### Changed
+- Direct URL execution now routes through the canonical smart download path (`download_with_ytdlp`) instead of a one-shot subprocess-only branch, aligning direct runs with worker retry behavior.
+- Download attempts now start with a clean baseline (no JS runtime / no remote components / no android client injection), then escalate only when failure signatures indicate challenge/runtime issues.
+- Smart retry escalation now applies targeted strategies from stderr signals:
+  - JS runtime retry (`js_runtimes` + `--remote-components ejs:github`) for signature/n-challenge/format-availability failures
+  - cookie retry only when auth/cookie-style failures are detected
+- Video post-processing policy now keeps webm-native output when `final_format=webm` (no forced merge container), while `mkv`/`mp4` still map to explicit merge container.
+- Shared extraction defaults in yt-dlp option building are now mode-agnostic and deterministic (`quiet/no_warnings/no-playlist/retries/fragment_retries/force-overwrites`).
 - `preview_direct_url` now uses a minimal metadata-only yt-dlp option set (no download-format/postprocessor/audio extraction flags), while still applying cookies and JS runtimes when configured.
 - Direct URL execution now uses a single canonical yt-dlp CLI path for both music and video flows (no separate music fast-lane), reducing option drift and keeping execution parity with shared option building.
 - Added canonical yt-dlp CLI invocation wrapper (`build_ytdlp_cli_invocation`) so direct URL execution consumes the same option authority used by worker/API option construction.
@@ -263,6 +270,9 @@ All notable changes to this project will be documented here.
 - Web UI now shows explicit fail-fast messaging when Music Mode binding is rejected: `Music Mode rejected — No canonical album release found`.
 
 ### Fixed
+- Fixed direct URL reliability regressions where first-attempt strict failures (signature/n-challenge/format unavailable) could terminate runs before runtime escalation.
+- Fixed preview fallback rendering by returning populated YouTube-safe fallback metadata (`title`, `uploader`, thumbnail when video id is present) instead of blank cards on extraction failure.
+- Fixed drift from residual android-client references by removing automatic `player_client` injection across the project.
 - Music-mode metadata probe failures no longer block downloads: for `music_track`/audio-mode jobs, probe failure is now non-fatal and download proceeds with fallback metadata context.
 - Direct URL preview now returns a safe fallback preview payload when yt-dlp metadata extraction fails, instead of raising and bubbling endpoint errors.
 - Fixed yt-dlp CLI translation parity gaps by mapping canonical opts into CLI argv for cookies, JS runtimes, extractor args, audio extraction flags, format, playlist mode, output template, and overwrite behavior.

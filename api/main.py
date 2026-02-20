@@ -1666,17 +1666,7 @@ def _run_direct_url_with_cli(
         "final_format": final_format_override,
         "output_template": outtmpl,
         "config": config,
-        "cookie_file": resolve_cookiefile_for_context(
-            {
-                "operation": "download",
-                "url": url,
-                "media_type": cli_media_type,
-                "media_intent": cli_media_intent,
-                "job_id": job_id,
-                "origin": "api",
-            },
-            config,
-        ),
+        "cookie_file": None,
         "overrides": (config or {}).get("yt_dlp_opts") or {},
         "media_type": cli_media_type,
         "media_intent": cli_media_intent,
@@ -1729,78 +1719,40 @@ def _run_direct_url_with_cli(
         )
     )
 
-
-    log_path = os.path.join(temp_dir, "ytdlp.log")
-
-    # Write full yt-dlp output to a log file (avoids stdout pipe buffering issues and keeps
-    # the process behavior closer to a normal CLI run).
-    log_fp = open(log_path, "w", encoding="utf-8", errors="replace")
-    proc = subprocess.Popen(
-        args,
-        stdout=log_fp,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-
-    # Expose for the Kill button path to terminate.
     try:
-        app.state.current_download_proc = proc
-        app.state.current_download_job_id = job_id
-    except Exception:
-        pass
-
-    try:
-        while True:
-            if stop_event.is_set() or getattr(app.state, "cancel_requested", False):
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                raise RuntimeError("direct_url_cancelled")
-
-            rc = proc.poll()
-            if rc is not None:
-                break
-            time.sleep(0.1)
-
-        # Close file handle so tail reads see all output.
+        audio_mode = is_music_media_type(cli_media_type)
+        resolved_final_format = final_format_override
+        if audio_mode:
+            resolved_final_format = (
+                _normalize_audio_format(final_format_override)
+                or _normalize_audio_format(config.get("music_final_format"))
+                or _normalize_audio_format(config.get("audio_final_format"))
+                or "mp3"
+            )
+        info, local_file = download_with_ytdlp(
+            url,
+            temp_dir,
+            config,
+            audio_mode=audio_mode,
+            final_format=resolved_final_format,
+            cookie_file=None,
+            stop_event=stop_event,
+            media_type=cli_media_type,
+            media_intent=cli_media_intent,
+            job_id=job_id,
+            origin="api",
+            resolved_destination=dest_dir,
+        )
+        if not info or not local_file:
+            raise RuntimeError("yt_dlp_no_output")
+        dst = os.path.join(dest_dir, os.path.basename(local_file))
         try:
-            log_fp.flush()
+            if os.path.exists(dst):
+                os.remove(dst)
         except Exception:
             pass
-        try:
-            log_fp.close()
-        except Exception:
-            pass
-
-        if rc != 0:
-            tail = _tail_lines(log_path, 80)
-            raise RuntimeError(f"yt_dlp_cli_failed rc={rc}\n{tail}")
-
-        # Move completed files into destination; ignore temp artifacts.
-        moved = []
-        for root, _dirs, files in os.walk(temp_dir):
-            for name in files:
-                if name.endswith(".part") or name.endswith(".ytdl") or name == "ytdlp.log":
-                    continue
-                src = os.path.join(root, name)
-                if not os.path.isfile(src):
-                    continue
-                dst = os.path.join(dest_dir, name)
-                # Overwrite behavior (CLI default is to overwrite when configured;
-                # ensure we don't fail here).
-                try:
-                    if os.path.exists(dst):
-                        os.remove(dst)
-                except Exception:
-                    pass
-                shutil.move(src, dst)
-                moved.append(dst)
-
-        if not moved:
-            tail = _tail_lines(log_path, 80)
-            raise RuntimeError(f"yt_dlp_cli_no_outputs\n{tail}")
+        shutil.move(local_file, dst)
+        moved = [dst]
 
         # Finalize engine status for UI consumers (CLI-equivalent direct URL run)
         if status is not None:
@@ -1855,17 +1807,6 @@ def _run_direct_url_with_cli(
             pass
 
     finally:
-        # Ensure the log file handle is closed.
-        try:
-            if not log_fp.closed:
-                log_fp.close()
-        except Exception:
-            pass
-        try:
-            if proc and proc.poll() is None:
-                proc.kill()
-        except Exception:
-            pass
         try:
             app.state.current_download_proc = None
             app.state.current_download_job_id = None
