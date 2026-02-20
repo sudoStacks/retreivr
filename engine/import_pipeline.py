@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from metadata.importers.base import TrackIntent
+from engine.job_queue import DownloadJobStore, build_download_job_payload
 
 try:
     from engine.musicbrainz_binding import resolve_best_mb_pair
@@ -138,15 +139,6 @@ def _get_musicbrainz_service(config: Any):
     return get_musicbrainz_service()
 
 
-def _build_queue_store_from_path(queue_db_path: str):
-    module_path = Path(__file__).resolve().parent / "job_queue.py"
-    spec = importlib.util.spec_from_file_location("engine_job_queue_for_import_pipeline", module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    spec.loader.exec_module(module)
-    return module.DownloadJobStore(queue_db_path)
-
-
 def _get_queue_store(config: Any):
     if isinstance(config, dict):
         queue_store = config.get("queue_store")
@@ -154,7 +146,7 @@ def _get_queue_store(config: Any):
             return queue_store
         queue_db_path = config.get("queue_db_path")
         if queue_db_path:
-            return _build_queue_store_from_path(str(queue_db_path))
+            return DownloadJobStore(str(queue_db_path))
     raise ValueError("queue_store (or queue_db_path) required")
 
 
@@ -163,12 +155,7 @@ def _get_job_payload_builder(config: Any):
         builder = config.get("job_payload_builder")
         if callable(builder):
             return builder
-    module_path = Path(__file__).resolve().parent / "job_queue.py"
-    spec = importlib.util.spec_from_file_location("engine_job_payload_builder_for_import_pipeline", module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    spec.loader.exec_module(module)
-    return module.build_download_job_payload
+    return build_download_job_payload
 
 
 def _score_value(recording: dict[str, Any]) -> float | None:

@@ -90,6 +90,11 @@ All notable changes to this project will be documented here.
   - search destination NameError smoke path
 
 ### Changed
+- Direct URL execution now uses a single canonical yt-dlp CLI path for both music and video flows (no separate music fast-lane), reducing option drift and keeping execution parity with shared option building.
+- Added canonical yt-dlp CLI invocation wrapper (`build_ytdlp_cli_invocation`) so direct URL execution consumes the same option authority used by worker/API option construction.
+- Cookie application is now centralized via `resolve_cookiefile_for_context(...)` and applied consistently from the same context/config resolution path.
+- Import pipeline queue/payload wiring now uses normal `engine.job_queue` imports instead of file-spec dynamic loading, reducing module divergence risk.
+- Canonical music payload builder now explicitly sets `output_template.audio_mode=True` for music media types to keep import/direct/music enqueue behavior self-contained and deterministic.
 - Canonical runtime config propagation is now enforced for direct URL execution:
   - startup stores a single loaded config object on app state
   - direct URL paths resolve config from canonical loaded state before yt-dlp execution
@@ -257,6 +262,9 @@ All notable changes to this project will be documented here.
 - Web UI now shows explicit fail-fast messaging when Music Mode binding is rejected: `Music Mode rejected — No canonical album release found`.
 
 ### Fixed
+- Fixed yt-dlp CLI translation parity gaps by mapping canonical opts into CLI argv for cookies, JS runtimes, extractor args, audio extraction flags, format, playlist mode, output template, and overwrite behavior.
+- Fixed direct URL option parity drift by routing direct URL CLI args through canonical opts translation instead of legacy ad-hoc argument assembly.
+- Fixed inconsistent cookie handling pathways that could silently skip cookies in some download contexts.
 - yt-dlp option building now fails fast on missing runtime config in production paths:
   - emits `empty_config_passed_to_build_ytdlp_opts` with operation/media context
   - raises `RuntimeError("empty_config_passed_to_build_ytdlp_opts")` instead of silently continuing with empty config

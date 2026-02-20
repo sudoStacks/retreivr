@@ -2058,7 +2058,8 @@ def _ensure_release_enriched(job):
 
 
 def resolve_cookie_file(config):
-    cookie_value = (config or {}).get("yt_dlp_cookies")
+    cfg = config if isinstance(config, dict) else {}
+    cookie_value = cfg.get("yt_dlp_cookies") or cfg.get("cookiefile")
     if not cookie_value:
         return None
     try:
@@ -2070,6 +2071,58 @@ def resolve_cookie_file(config):
         logging.warning("yt-dlp cookies file not found: %s", resolved)
         return None
     return resolved
+
+
+def resolve_cookiefile_for_context(context, config):
+    ctx = context if isinstance(context, dict) else {}
+    cfg = config if isinstance(config, dict) else {}
+    if bool(ctx.get("disable_cookies")):
+        _log_event(
+            logging.INFO,
+            "cookies_missing_or_disabled",
+            reason="explicitly_disabled",
+            job_id=ctx.get("job_id"),
+            operation=ctx.get("operation"),
+            media_type=ctx.get("media_type"),
+            media_intent=ctx.get("media_intent"),
+        )
+        return None
+
+    cookiefile = None
+    explicit_cookie = ctx.get("cookie_file")
+    if explicit_cookie:
+        try:
+            cookiefile = resolve_dir(explicit_cookie, TOKENS_DIR)
+        except ValueError:
+            cookiefile = None
+        if cookiefile and not os.path.exists(cookiefile):
+            cookiefile = None
+
+    if not cookiefile:
+        cookiefile = resolve_cookie_file(cfg)
+
+    if cookiefile:
+        _log_event(
+            logging.INFO,
+            "cookies_applied",
+            cookiefile=cookiefile,
+            job_id=ctx.get("job_id"),
+            operation=ctx.get("operation"),
+            media_type=ctx.get("media_type"),
+            media_intent=ctx.get("media_intent"),
+        )
+        return cookiefile
+
+    _log_event(
+        logging.INFO,
+        "cookies_missing_or_disabled",
+        reason="missing_or_not_found",
+        job_id=ctx.get("job_id"),
+        operation=ctx.get("operation"),
+        media_type=ctx.get("media_type"),
+        media_intent=ctx.get("media_intent"),
+    )
+    return None
 
 
 def resolve_youtube_cookie_fallback_file(config):
@@ -2496,6 +2549,8 @@ def build_download_job_payload(
             audio_format = override_audio
     output_template["final_format"] = video_container or "mkv"
     output_template["music_final_format"] = audio_format or "mp3"
+    if is_music_media_type(media_type):
+        output_template["audio_mode"] = True
 
     # Canonical output-template schema: keep a stable key set across all enqueue paths.
     for key in (
@@ -2688,13 +2743,8 @@ def build_ytdlp_opts(context):
         "overwrites": True,
     }
 
-    cookie_file = context.get("cookie_file")
-    # Cookies OFF by default. Only enable when explicitly allowed or when running in music mode.
-    # This prevents YouTube/SABR edge cases that produced empty/403 fragment downloads in the worker path.
-    allow_cookies = bool(context.get("allow_cookies")) or (
-        bool(context.get("audio_mode")) and is_music_media_type(context.get("media_type"))
-    )
-    if cookie_file and allow_cookies:
+    cookie_file = resolve_cookiefile_for_context(context, config)
+    if cookie_file:
         opts["cookiefile"] = cookie_file
 
     if operation == "playlist":
@@ -2711,17 +2761,10 @@ def build_ytdlp_opts(context):
             opts["addmetadata"] = True
             opts["embedthumbnail"] = True
             opts["writethumbnail"] = True
-            extractor_args = opts.get("extractor_args")
-            if not isinstance(extractor_args, dict):
-                extractor_args = {}
-            youtube_args = extractor_args.get("youtube")
-            if isinstance(youtube_args, dict):
-                merged_youtube_args = dict(youtube_args)
-                merged_youtube_args["player_client"] = ["android"]
-            else:
-                merged_youtube_args = {"player_client": ["android"]}
-            extractor_args["youtube"] = merged_youtube_args
-            opts["extractor_args"] = extractor_args
+            if operation == "download":
+                opts.setdefault("extractor_args", {})
+                opts["extractor_args"].setdefault("youtube", {})
+                opts["extractor_args"]["youtube"]["player_client"] = ["android"]
         else:
             # Video mode: honor only container preferences (webm/mp4/mkv).
             # Never treat an audio codec (mp3/m4a/flac/...) as a yt-dlp format selector.
@@ -2869,6 +2912,19 @@ def build_ytdlp_invocation(job, context):
     }
 
 
+def build_ytdlp_cli_invocation(context):
+    """
+    Canonical yt-dlp CLI invocation wrapper.
+    Uses the same option authority as Python API execution.
+    """
+    opts = build_ytdlp_opts(context)
+    url = str(context.get("url") or "").strip()
+    if not url:
+        raise ValueError("url is required for yt-dlp CLI invocation")
+    argv = _render_ytdlp_cli_argv(opts, url)
+    return {"opts": opts, "argv": argv}
+
+
 def _build_audio_postprocessors(target_format):
     preferred = _normalize_audio_format(target_format) or "mp3"
     if preferred not in _AUDIO_FORMATS:
@@ -2960,17 +3016,20 @@ def _render_ytdlp_cli_argv(opts, url):
 
     # Core selection/output
     if opts.get("format"):
-        argv.extend(["--format", str(opts["format"])])
+        argv.extend(["-f", str(opts["format"])])
     if opts.get("merge_output_format"):
         argv.extend(["--merge-output-format", str(opts["merge_output_format"])])
     if opts.get("outtmpl"):
-        argv.extend(["--output", str(opts["outtmpl"])])
+        argv.extend(["-o", str(opts["outtmpl"])])
 
     # Playlist behavior
     if opts.get("noplaylist") is True:
         argv.append("--no-playlist")
     elif opts.get("noplaylist") is False:
         argv.append("--yes-playlist")
+
+    if opts.get("overwrites") is True:
+        argv.append("--force-overwrites")
 
     # Retries
     if opts.get("retries") is not None:
@@ -2982,13 +3041,46 @@ def _render_ytdlp_cli_argv(opts, url):
     if opts.get("cookiefile"):
         argv.extend(["--cookies", str(opts.get("cookiefile"))])
 
+    # JS runtimes: {"node":{"path":"/usr/bin/node"}} -> --js-runtimes node:/usr/bin/node
+    js_runtimes = opts.get("js_runtimes")
+    if isinstance(js_runtimes, dict):
+        for runtime_name, runtime_cfg in js_runtimes.items():
+            name = str(runtime_name or "").strip()
+            if not name:
+                continue
+            path = None
+            if isinstance(runtime_cfg, dict):
+                path = str(runtime_cfg.get("path") or "").strip() or None
+            token = f"{name}:{path}" if path else name
+            argv.extend(["--js-runtimes", token])
+
+    # Extractor args: {"youtube":{"player_client":["android"]}} -> --extractor-args youtube:player_client=android
+    extractor_args = opts.get("extractor_args")
+    if isinstance(extractor_args, dict):
+        for extractor_name, extractor_cfg in extractor_args.items():
+            if not isinstance(extractor_cfg, dict):
+                continue
+            pieces = []
+            for arg_key, arg_value in extractor_cfg.items():
+                if isinstance(arg_value, (list, tuple)):
+                    value_text = ",".join(str(v).strip() for v in arg_value if str(v).strip())
+                else:
+                    value_text = str(arg_value or "").strip()
+                if not value_text:
+                    continue
+                pieces.append(f"{arg_key}={value_text}")
+            if pieces:
+                argv.extend(["--extractor-args", f"{extractor_name}:{';'.join(pieces)}"])
+
     # Audio extraction (CLI parity for FFmpegExtractAudio)
     if opts.get("postprocessors"):
         for pp in opts.get("postprocessors") or []:
             if pp.get("key") == "FFmpegExtractAudio":
-                argv.append("--extract-audio")
+                argv.append("-x")
                 if pp.get("preferredcodec"):
                     argv.extend(["--audio-format", str(pp.get("preferredcodec"))])
+                if pp.get("preferredquality"):
+                    argv.extend(["--audio-quality", str(pp.get("preferredquality"))])
 
     argv.append(str(url))
     return argv

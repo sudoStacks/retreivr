@@ -33,10 +33,20 @@ def _load_job_queue():
     _load_module("engine.json_utils", _ROOT / "engine" / "json_utils.py")
     _load_module("engine.paths", _ROOT / "engine" / "paths.py")
     _load_module("engine.search_scoring", _ROOT / "engine" / "search_scoring.py")
+    if "musicbrainzngs" not in sys.modules:
+        sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
     if "metadata.queue" not in sys.modules:
         metadata_queue = types.ModuleType("metadata.queue")
         metadata_queue.enqueue_metadata = lambda file_path, meta, config: None
         sys.modules["metadata.queue"] = metadata_queue
+    if "metadata.services.musicbrainz_service" not in sys.modules:
+        mb_service = types.ModuleType("metadata.services.musicbrainz_service")
+        mb_service.get_musicbrainz_service = lambda: None
+        sys.modules["metadata.services.musicbrainz_service"] = mb_service
+    if "metadata.services" not in sys.modules:
+        metadata_services = types.ModuleType("metadata.services")
+        metadata_services.get_musicbrainz_service = lambda: None
+        sys.modules["metadata.services"] = metadata_services
     return _load_module("engine_job_queue_media_classification", _ROOT / "engine" / "job_queue.py")
 
 
@@ -99,6 +109,7 @@ def test_import_job_media_type_and_ytdlp_audio_flags(monkeypatch, tmp_path: Path
     assert queue.payload is not None
     assert queue.payload["media_type"] == "music"
     assert queue.payload["media_intent"] == "music_track"
+    assert (queue.payload.get("output_template") or {}).get("audio_mode") is True
     assert jq.is_music_media_type(queue.payload["media_type"]) is True
 
     captured = {}

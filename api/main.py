@@ -55,6 +55,7 @@ from engine.job_queue import (
     DownloadJobStore,
     DownloadWorkerEngine,
     atomic_move,
+    build_ytdlp_cli_invocation,
     build_download_job_payload,
     build_output_filename,
     preview_direct_url,
@@ -1583,49 +1584,6 @@ def _run_immediate_download_to_client(
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
-# Fast-lane direct URL download via yt-dlp CLI
-def _build_direct_url_cli_args(*, url: str, outtmpl: str, final_format_override: str | None) -> list[str]:
-    """
-    Build yt-dlp CLI argv for the direct URL fast-lane.
-    IMPORTANT: This function is a mechanical refactor of the previous inline args logic.
-    It must not change behavior.
-    """
-    def _looks_like_playlist(u: str) -> bool:
-        u = (u or "").lower()
-        # Conservative heuristic: only allow playlist downloads when the user actually pasted a playlist URL.
-        # This keeps single-video URLs behaving like the CLI test (`--no-playlist`).
-        return (
-            "list=" in u
-            or "/playlist" in u
-            or "playlist?" in u
-            or "?playlist" in u
-        )
-
-    args: list[str] = ["yt-dlp"]
-
-    # Match the proven CLI behavior for single-video URLs.
-    # If the URL looks like a playlist URL, do NOT add --no-playlist.
-    if not _looks_like_playlist(url):
-        args.append("--no-playlist")
-
-    # Output template
-    args += ["-o", outtmpl]
-
-    # Optional final container override
-    if final_format_override:
-        fmt = final_format_override.strip().lower()
-        audio_formats = {"mp3", "m4a", "flac", "wav", "opus", "ogg"}
-        video_formats = {"webm", "mp4", "mkv"}
-        if fmt in audio_formats:
-            args += ["-f", "bestaudio", "--extract-audio", "--audio-format", fmt]
-        elif fmt in video_formats:
-            args += ["--merge-output-format", fmt]
-        else:
-            args += ["--merge-output-format", final_format_override]
-
-    args.append(url)
-    return args
-
 def _run_direct_url_with_cli(
     *,
     url: str,
@@ -1667,103 +1625,47 @@ def _run_direct_url_with_cli(
     temp_dir = os.path.join(paths.temp_downloads_dir, job_id)
     ensure_dir(temp_dir)
 
-    if bool(music_mode) or is_music_media_type(media_type) or str(media_intent or "").strip().lower() == "music_track":
-        raw_final_format = final_format_override
-        resolved_audio_format = (
-            _normalize_audio_format(raw_final_format)
-            or _normalize_audio_format(config.get("music_final_format"))
-            or _normalize_audio_format(config.get("audio_final_format"))
-            or "mp3"
+    logging.info(
+        json.dumps(
+            safe_json(
+                {
+                    "message": "direct_url_effective_config",
+                    "keys_count": len(config.keys()) if isinstance(config, dict) else 0,
+                    "has_js_runtime": bool(isinstance(config, dict) and "js_runtime" in config),
+                    "has_js_runtimes": bool(isinstance(config, dict) and "js_runtimes" in config),
+                }
+            ),
+            sort_keys=True,
         )
-        cookie_file = resolve_cookie_file(config)
-        logging.info(
-            json.dumps(
-                safe_json(
-                    {
-                        "message": "direct_url_effective_config",
-                        "keys_count": len(config.keys()) if isinstance(config, dict) else 0,
-                        "has_js_runtime": bool(isinstance(config, dict) and "js_runtime" in config),
-                        "has_js_runtimes": bool(isinstance(config, dict) and "js_runtimes" in config),
-                    }
-                ),
-                sort_keys=True,
-            )
-        )
-        info, local_file = download_with_ytdlp(
-            url,
-            temp_dir,
-            config,
-            audio_mode=True,
-            final_format=resolved_audio_format,
-            cookie_file=cookie_file,
-            stop_event=stop_event,
-            media_type="music",
-            media_intent="music_track",
-            job_id=job_id,
-            origin="api",
-            resolved_destination=dest_dir,
-        )
-        if not info or not local_file:
-            raise RuntimeError("yt_dlp_no_output")
-        meta = extract_meta(info, fallback_url=url)
-        video_id = meta.get("video_id") or job_id
-        audio_template = config.get("audio_filename_template") or config.get("music_filename_template")
-        cleaned_name = build_output_filename(meta, video_id, resolved_audio_format, audio_template, True)
-        final_tmp_path = os.path.join(temp_dir, cleaned_name)
-        if final_tmp_path != local_file:
-            atomic_move(local_file, final_tmp_path)
-        dst = os.path.join(dest_dir, os.path.basename(final_tmp_path))
-        try:
-            if os.path.exists(dst):
-                os.remove(dst)
-        except Exception:
-            pass
-        shutil.move(final_tmp_path, dst)
-        if status is not None:
-            try:
-                status.run_successes = [dst]
-                status.last_completed_path = dst
-                status.run_total = 1
-                status.run_failures = []
-                status.completed = True
-                status.completed_at = datetime.now(timezone.utc).isoformat()
-            except Exception:
-                pass
-        try:
-            _record_direct_url_history(paths.db_path, [dst], url)
-        except sqlite3.Error:
-            logging.exception("Failed to record direct URL history (sqlite)")
-        except Exception:
-            logging.exception("Failed to record direct URL history")
-        logging.info(
-            json.dumps(
-                safe_json(
-                    {
-                        "message": "DIRECT_URL_MUSIC_DONE",
-                        "job_id": job_id,
-                        "files": [dst],
-                        "destination": dest_dir,
-                    }
-                ),
-                sort_keys=True,
-            )
-        )
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception:
-            pass
-        return
+    )
 
     # Output template: keep simple and CLI-equivalent
     # Note: if the template is absolute, yt-dlp ignores --paths; so keep it absolute here.
     outtmpl = os.path.join(temp_dir, "%(title).200s-%(id)s.%(ext)s")
 
-    # Build the CLI args using the new helper
-    args = _build_direct_url_cli_args(
-        url=url,
-        outtmpl=outtmpl,
-        final_format_override=final_format_override,
-    )
+    # Build CLI args through canonical yt-dlp option authority.
+    cli_media_type = media_type
+    cli_media_intent = media_intent
+    if bool(music_mode) or str(media_intent or "").strip().lower() == "music_track":
+        cli_media_type = "music"
+        cli_media_intent = "music_track"
+    elif not is_music_media_type(cli_media_type) and _normalize_audio_format(final_format_override):
+        cli_media_type = "music"
+        cli_media_intent = "music_track"
+
+    cli_context = {
+        "operation": "download",
+        "url": url,
+        "final_format": final_format_override,
+        "output_template": outtmpl,
+        "config": config,
+        "cookie_file": resolve_cookie_file(config),
+        "overrides": (config or {}).get("yt_dlp_opts") or {},
+        "media_type": cli_media_type,
+        "media_intent": cli_media_intent,
+        "origin": "api",
+    }
+    args = build_ytdlp_cli_invocation(cli_context)["argv"]
 
     def _redact_cli_args(argv: list[str]) -> list[str]:
         redacted: list[str] = []
@@ -1779,6 +1681,19 @@ def _run_direct_url_with_cli(
             redacted.append(token)
             i += 1
         return redacted
+
+    logging.info(
+        json.dumps(
+            safe_json(
+                {
+                    "message": "DIRECT_URL_CANONICAL_ARGV",
+                    "job_id": job_id,
+                    "argv": _redact_cli_args(args),
+                }
+            ),
+            sort_keys=True,
+        )
+    )
 
     logging.info(
         json.dumps(
