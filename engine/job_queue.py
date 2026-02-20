@@ -3316,7 +3316,19 @@ def download_with_ytdlp(
             error_message=str(exc),
             candidate_id=extract_video_id(url),
         )
-        raise RuntimeError(f"yt_dlp_metadata_probe_failed: {exc}")
+        if audio_mode and is_music_media_type(media_type):
+            _log_event(
+                logging.WARNING,
+                "ytdlp_metadata_probe_nonfatal_proceeding",
+                job_id=job_id,
+                url=url,
+                media_type=media_type,
+                media_intent=media_intent,
+                error=str(exc),
+            )
+            info = {"id": extract_video_id(url), "webpage_url": url}
+        else:
+            raise RuntimeError(f"yt_dlp_metadata_probe_failed: {exc}")
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""
@@ -3579,22 +3591,100 @@ def _select_download_output(temp_dir, info, audio_mode):
 def preview_direct_url(url, config):
     if not isinstance(config, dict) or not config:
         raise RuntimeError("search_missing_runtime_config")
-    cookie_file = resolve_cookie_file(config)
     context = {
         "operation": "metadata",
         "url": url,
-        "audio_mode": False,
-        "final_format": None,
-        "output_template": None,
-        "cookie_file": cookie_file,
-        "overrides": config.get("yt_dlp_opts") or {},
         "config": config,
         "media_type": "video",
         "media_intent": "episode",
     }
-    opts = build_ytdlp_opts(context)
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "retries": 2,
+        "fragment_retries": 2,
+    }
+
+    cookie_file = resolve_cookiefile_for_context(context, config)
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+
+    def _normalize_js_runtime_strings(value):
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            raw_items = list(value)
+        else:
+            raw_items = [value]
+        normalized = []
+        seen = set()
+        for item in raw_items:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            for part in text.split(","):
+                runtime = part.strip()
+                if not runtime or runtime in seen:
+                    continue
+                seen.add(runtime)
+                normalized.append(runtime)
+        return normalized
+
+    def _build_js_runtime_dict(runtime_items):
+        runtime_map = {}
+        for runtime in runtime_items:
+            value = str(runtime or "").strip()
+            if not value:
+                continue
+            runtime_name = value
+            runtime_path = None
+            if ":" in value:
+                runtime_name, runtime_path = value.split(":", 1)
+                runtime_name = runtime_name.strip()
+                runtime_path = runtime_path.strip() or None
+            if not runtime_name:
+                continue
+            runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
+        return runtime_map
+
+    def _normalized_key(key):
+        return str(key or "").strip().lower().replace("_", "").replace(" ", "")
+
+    js_runtime_value = None
+    for raw_key, raw_value in config.items():
+        if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
+            js_runtime_value = raw_value
+            break
+    js_runtimes = _normalize_js_runtime_strings(js_runtime_value)
+    if js_runtimes:
+        opts["js_runtimes"] = _build_js_runtime_dict(js_runtimes)
+
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        video_id = extract_video_id(url)
+        _log_event(
+            logging.WARNING,
+            "preview_direct_url_extract_failed",
+            url=url,
+            source=resolve_source(url),
+            error=str(exc),
+        )
+        return {
+            "title": f"YouTube Video ({video_id})" if video_id else "YouTube Video",
+            "uploader": "YouTube",
+            "thumbnail_url": (
+                f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+            ),
+            "url": url,
+            "source": resolve_source(url),
+            "duration_sec": None,
+        }
+
     meta = extract_meta(info, fallback_url=url)
     return {
         "title": meta.get("title"),

@@ -90,6 +90,7 @@ All notable changes to this project will be documented here.
   - search destination NameError smoke path
 
 ### Changed
+- `preview_direct_url` now uses a minimal metadata-only yt-dlp option set (no download-format/postprocessor/audio extraction flags), while still applying cookies and JS runtimes when configured.
 - Direct URL execution now uses a single canonical yt-dlp CLI path for both music and video flows (no separate music fast-lane), reducing option drift and keeping execution parity with shared option building.
 - Added canonical yt-dlp CLI invocation wrapper (`build_ytdlp_cli_invocation`) so direct URL execution consumes the same option authority used by worker/API option construction.
 - Cookie application is now centralized via `resolve_cookiefile_for_context(...)` and applied consistently from the same context/config resolution path.
@@ -262,6 +263,8 @@ All notable changes to this project will be documented here.
 - Web UI now shows explicit fail-fast messaging when Music Mode binding is rejected: `Music Mode rejected — No canonical album release found`.
 
 ### Fixed
+- Music-mode metadata probe failures no longer block downloads: for `music_track`/audio-mode jobs, probe failure is now non-fatal and download proceeds with fallback metadata context.
+- Direct URL preview now returns a safe fallback preview payload when yt-dlp metadata extraction fails, instead of raising and bubbling endpoint errors.
 - Fixed yt-dlp CLI translation parity gaps by mapping canonical opts into CLI argv for cookies, JS runtimes, extractor args, audio extraction flags, format, playlist mode, output template, and overwrite behavior.
 - Fixed direct URL option parity drift by routing direct URL CLI args through canonical opts translation instead of legacy ad-hoc argument assembly.
 - Fixed inconsistent cookie handling pathways that could silently skip cookies in some download contexts.

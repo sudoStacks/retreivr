@@ -66,7 +66,7 @@ from engine.job_queue import (
     resolve_source,
     resolve_media_intent,
     resolve_media_type,
-    resolve_cookie_file,
+    resolve_cookiefile_for_context,
     extract_video_id,
     is_music_media_type,
     _normalize_audio_format,
@@ -1495,7 +1495,17 @@ def _run_immediate_download_to_client(
         audio_mode = bool(normalized_audio_format)
         final_format = normalized_audio_format if audio_mode else normalized_format
 
-    cookie_file = resolve_cookie_file(config)
+    cookie_file = resolve_cookiefile_for_context(
+        {
+            "operation": "download",
+            "url": url,
+            "media_type": media_type,
+            "media_intent": media_intent,
+            "job_id": job_id,
+            "origin": origin,
+        },
+        config,
+    )
     logging.info(
         json.dumps(
             safe_json(
@@ -1649,9 +1659,6 @@ def _run_direct_url_with_cli(
     if bool(music_mode) or str(media_intent or "").strip().lower() == "music_track":
         cli_media_type = "music"
         cli_media_intent = "music_track"
-    elif not is_music_media_type(cli_media_type) and _normalize_audio_format(final_format_override):
-        cli_media_type = "music"
-        cli_media_intent = "music_track"
 
     cli_context = {
         "operation": "download",
@@ -1659,7 +1666,17 @@ def _run_direct_url_with_cli(
         "final_format": final_format_override,
         "output_template": outtmpl,
         "config": config,
-        "cookie_file": resolve_cookie_file(config),
+        "cookie_file": resolve_cookiefile_for_context(
+            {
+                "operation": "download",
+                "url": url,
+                "media_type": cli_media_type,
+                "media_intent": cli_media_intent,
+                "job_id": job_id,
+                "origin": "api",
+            },
+            config,
+        ),
         "overrides": (config or {}).get("yt_dlp_opts") or {},
         "media_type": cli_media_type,
         "media_intent": cli_media_intent,

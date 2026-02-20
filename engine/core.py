@@ -26,11 +26,12 @@ from engine.job_queue import (
     build_output_template,
     ensure_download_jobs_table,
     preview_direct_url,
+    resolve_cookie_file as _resolve_cookie_file_canonical,
     resolve_media_intent,
     resolve_media_type,
     resolve_source,
 )
-from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
+from engine.paths import EnginePaths
 
 CLIENT_DELIVERY_TIMEOUT_SECONDS = 600
 
@@ -598,18 +599,7 @@ def is_video_downloaded(conn, video_id):
 
 
 def resolve_cookie_file(config):
-    cookie_value = (config or {}).get("yt_dlp_cookies")
-    if not cookie_value:
-        return None
-    try:
-        resolved = resolve_dir(cookie_value, TOKENS_DIR)
-    except ValueError as exc:
-        logging.error("Invalid yt-dlp cookies path: %s", exc)
-        return None
-    if not os.path.exists(resolved):
-        logging.warning("yt-dlp cookies file not found: %s", resolved)
-        return None
-    return resolved
+    return _resolve_cookie_file_canonical(config)
 
 
 def load_credentials(token_path):
