@@ -101,6 +101,7 @@ All notable changes to this project will be documented here.
   - UI cap set to 15
   - client request limit clamped to 1..15 before API call
 - Album enqueue success messaging now treats partial results as success (not error) while surfacing skipped-track diagnostics.
+- MusicBrainz duration-reject diagnostics now emit structured delta details (`duration_reject_detail`) for album-context or explicit duration-override paths.
 - Music-mode yt-dlp selector now uses `bestaudio/best` (removed stricter audio codec filter) while preserving canonical audio extraction postprocessors.
 - Music downloads now pass canonical `output_template` metadata through the shared yt-dlp options builder path (no separate inline music opts branch).
 - Album download track binding now uses a wider duration tolerance (`25s`) while single-track/manual binding keeps strict default duration tolerance.
@@ -234,6 +235,8 @@ All notable changes to this project will be documented here.
 - Web UI now shows explicit fail-fast messaging when Music Mode binding is rejected: `Music Mode rejected — No canonical album release found`.
 
 ### Fixed
+- Fixed `sqlite3.Row` `.get()` misuse in queue row handling by normalizing rows to dicts before dict-style access.
+- Added third music metadata-probe fallback attempt with no explicit `format` key after `bestaudio/best` and `best` retries.
 - Music Mode no longer shows legacy “Select at least one source” validation in metadata search flow.
 - Music metadata results no longer render after Music Mode is toggled OFF while requests are in flight.
 - Album queue UI now correctly reflects backend HTTP 200 partial success responses instead of treating skipped tracks as fatal.

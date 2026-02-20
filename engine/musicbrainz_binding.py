@@ -422,6 +422,7 @@ def resolve_best_mb_pair(
     binding_threshold = _normalize_threshold(threshold, default=0.78)
     binding_threshold_score = binding_threshold * 100.0
     duration_delta_limit_ms = _safe_int(max_duration_delta_ms) or MAX_DURATION_DELTA_MS
+    log_duration_reject_detail = bool(expected_album) or (max_duration_delta_ms is not None)
 
     if debug:
         logger.debug(
@@ -546,6 +547,17 @@ def resolve_best_mb_pair(
                 duration_delta_ms = abs(int(duration_ms) - int(recording_duration_ms))
                 if duration_delta_ms > duration_delta_limit_ms:
                     _add_failure("duration_delta_gt_limit")
+                    if log_duration_reject_detail:
+                        logger.info(
+                            {
+                                "message": "duration_reject_detail",
+                                "recording_mbid": recording_mbid,
+                                "mb_duration_ms": duration_ms,
+                                "candidate_duration_ms": recording_duration_ms,
+                                "delta_ms": duration_delta_ms,
+                                "limit_ms": duration_delta_limit_ms,
+                            }
+                        )
                     if debug:
                         logger.debug(
                             {

@@ -380,6 +380,8 @@ class DownloadJobStore:
     def _row_to_job(self, row):
         if not row:
             return None
+        if isinstance(row, sqlite3.Row):
+            row = dict(row)
         output_template = row["output_template"]
         parsed_output = None
         if output_template:
@@ -476,6 +478,8 @@ class DownloadJobStore:
     def _row_has_valid_output(self, row):
         if not row:
             return False
+        if isinstance(row, sqlite3.Row):
+            row = dict(row)
         if row["status"] != JOB_STATUS_COMPLETED:
             return False
         path = row.get("file_path")
@@ -3099,8 +3103,8 @@ def download_with_ytdlp(
                     info = ydl.extract_info(url, download=False)
             except Exception as retry_exc:
                 _log_event(
-                    logging.ERROR,
-                    "ytdlp_metadata_probe_failed",
+                    logging.WARNING,
+                    "ytdlp_metadata_probe_retrying_without_format",
                     job_id=job_id,
                     url=url,
                     error=str(retry_exc),
@@ -3108,7 +3112,23 @@ def download_with_ytdlp(
                     error_message=str(retry_exc),
                     candidate_id=extract_video_id(url),
                 )
-                raise RuntimeError(f"yt_dlp_metadata_probe_failed: {retry_exc}")
+                try:
+                    opts_for_probe_retry_no_format = dict(opts_for_probe)
+                    opts_for_probe_retry_no_format.pop("format", None)
+                    with YoutubeDL(opts_for_probe_retry_no_format) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                except Exception as retry_no_format_exc:
+                    _log_event(
+                        logging.ERROR,
+                        "ytdlp_metadata_probe_failed",
+                        job_id=job_id,
+                        url=url,
+                        error=str(retry_no_format_exc),
+                        failure_domain="metadata_probe",
+                        error_message=str(retry_no_format_exc),
+                        candidate_id=extract_video_id(url),
+                    )
+                    raise RuntimeError(f"yt_dlp_metadata_probe_failed: {retry_no_format_exc}")
         else:
             _log_event(
                 logging.ERROR,
