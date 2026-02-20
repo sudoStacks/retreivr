@@ -2697,6 +2697,17 @@ def build_ytdlp_opts(context):
             opts["addmetadata"] = True
             opts["embedthumbnail"] = True
             opts["writethumbnail"] = True
+            extractor_args = opts.get("extractor_args")
+            if not isinstance(extractor_args, dict):
+                extractor_args = {}
+            youtube_args = extractor_args.get("youtube")
+            if isinstance(youtube_args, dict):
+                merged_youtube_args = dict(youtube_args)
+                merged_youtube_args["player_client"] = ["android"]
+            else:
+                merged_youtube_args = {"player_client": ["android"]}
+            extractor_args["youtube"] = merged_youtube_args
+            opts["extractor_args"] = extractor_args
         else:
             # Video mode: honor only container preferences (webm/mp4/mkv).
             # Never treat an audio codec (mp3/m4a/flac/...) as a yt-dlp format selector.
