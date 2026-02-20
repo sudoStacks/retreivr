@@ -1434,11 +1434,12 @@ def _run_immediate_download_to_client(
     status: EngineStatus | None = None,
     origin: str | None = None,
 ):
+    if not isinstance(config, dict) or not config:
+        raise RuntimeError("direct_url_runtime_config_missing")
     job_id = uuid4().hex
     temp_dir = os.path.join(paths.temp_downloads_dir, job_id)
     ensure_dir(temp_dir)
 
-    config = config or {}
     filename_template = config.get("filename_template")
     audio_template = config.get("audio_filename_template") or config.get("music_filename_template")
 
@@ -1458,7 +1459,7 @@ def _run_immediate_download_to_client(
         audio_mode = bool(normalized_audio_format)
         final_format = normalized_audio_format if audio_mode else normalized_format
 
-    cookie_file = resolve_cookie_file(config or {})
+    cookie_file = resolve_cookie_file(config)
 
     try:
         info, local_file = download_with_ytdlp(
@@ -1599,6 +1600,8 @@ def _run_direct_url_with_cli(
     files into the destination. Metadata/enrichment can occur post-download.
     """
 
+    if not isinstance(config, dict) or not config:
+        raise RuntimeError("direct_url_missing_config")
     if not url or not isinstance(url, str):
         raise ValueError("single_url is required")
 
@@ -1618,15 +1621,15 @@ def _run_direct_url_with_cli(
         raw_final_format = final_format_override
         resolved_audio_format = (
             _normalize_audio_format(raw_final_format)
-            or _normalize_audio_format((config or {}).get("music_final_format"))
-            or _normalize_audio_format((config or {}).get("audio_final_format"))
+            or _normalize_audio_format(config.get("music_final_format"))
+            or _normalize_audio_format(config.get("audio_final_format"))
             or "mp3"
         )
-        cookie_file = resolve_cookie_file(config or {})
+        cookie_file = resolve_cookie_file(config)
         info, local_file = download_with_ytdlp(
             url,
             temp_dir,
-            config or {},
+            config,
             audio_mode=True,
             final_format=resolved_audio_format,
             cookie_file=cookie_file,
@@ -1641,7 +1644,7 @@ def _run_direct_url_with_cli(
             raise RuntimeError("yt_dlp_no_output")
         meta = extract_meta(info, fallback_url=url)
         video_id = meta.get("video_id") or job_id
-        audio_template = (config or {}).get("audio_filename_template") or (config or {}).get("music_filename_template")
+        audio_template = config.get("audio_filename_template") or config.get("music_filename_template")
         cleaned_name = build_output_filename(meta, video_id, resolved_audio_format, audio_template, True)
         final_tmp_path = os.path.join(temp_dir, cleaned_name)
         if final_tmp_path != local_file:
@@ -2384,12 +2387,15 @@ async def _start_run_with_config(
                     )
                 else:
                     if single_url:
+                        runtime_config = config if isinstance(config, dict) and config else _read_config_for_scheduler()
+                        if not isinstance(runtime_config, dict) or not runtime_config:
+                            raise RuntimeError("direct_url_runtime_config_missing")
                         resolved_music_mode = bool(music_mode) if music_mode is not None else False
                         if resolved_music_mode:
                             resolved_media_type = "music"
                             resolved_media_intent = "music_track"
                         else:
-                            resolved_media_type = resolve_media_type(config, url=single_url)
+                            resolved_media_type = resolve_media_type(runtime_config, url=single_url)
                             resolved_media_intent = resolve_media_intent("manual", resolved_media_type)
                         effective_delivery_mode = delivery_mode or "server"
                         if resolved_media_type == "music" and effective_delivery_mode == "client":
@@ -2400,7 +2406,7 @@ async def _start_run_with_config(
                             run_immediate=lambda: functools.partial(
                                 _run_immediate_download_to_client,
                                 url=single_url,
-                                config=config,
+                                config=runtime_config,
                                 paths=app.state.paths,
                                 media_type=resolved_media_type,
                                 media_intent=resolved_media_intent,
@@ -2413,7 +2419,7 @@ async def _start_run_with_config(
                                 _run_direct_url_with_cli,
                                 url=single_url,
                                 paths=app.state.paths,
-                                config=config,
+                                config=runtime_config,
                                 destination=destination,
                                 final_format_override=effective_final_format_override,
                                 media_type=resolved_media_type,

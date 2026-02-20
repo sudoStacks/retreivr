@@ -90,6 +90,16 @@ All notable changes to this project will be documented here.
   - search destination NameError smoke path
 
 ### Changed
+- Direct URL runtime now enforces full config propagation end-to-end:
+  - single-URL runs validate non-empty runtime config before execution
+  - direct URL server/client paths no longer silently degrade to `{}` config
+  - music-mode direct URL classification continues to force `media_type=music` and `media_intent=music_track`
+- yt-dlp JS runtime injection is now deterministic and config-safe:
+  - case-insensitive key detection for `js_runtime` / `js_runtimes` variants
+  - normalized ordered list merge into `opts.js_runtimes` without overwriting existing values
+  - invalid-but-present JS runtime config now emits an explicit warning
+- Config sample now uses canonical JS runtime key format:
+  - `js_runtimes: ["node:/usr/bin/node"]`
 - Home defaults are now explicit and stable on first load:
   - Music Mode forced OFF at init
   - Music Search panel hidden by default
@@ -242,6 +252,9 @@ All notable changes to this project will be documented here.
 - Web UI now shows explicit fail-fast messaging when Music Mode binding is rejected: `Music Mode rejected — No canonical album release found`.
 
 ### Fixed
+- Fixed direct URL config masking in music download path:
+  - removed `config or {}` fallback from direct URL `download_with_ytdlp(...)` call path
+  - hard-fail now occurs when direct URL config is missing instead of silently losing config-driven options
 - Fixed `sqlite3.Row` `.get()` misuse in queue row handling by normalizing rows to dicts before dict-style access.
 - Removed legacy metadata-probe retry events and format-specific probe classification assumptions now that probe does not enforce format.
 - Fixed Music Mode track-card download binding by moving to delegated `.music-download-btn` handling with explicit MBID data attributes (`recording_mbid`, `release_mbid`, `release_group_mbid`) and `/api/music/enqueue` routing.

@@ -2786,7 +2786,6 @@ def build_ytdlp_opts(context):
                 sort_keys=True,
             )
         )
-
     if operation == "download":
         for key in _YTDLP_DOWNLOAD_UNSAFE_KEYS:
             opts.pop(key, None)
