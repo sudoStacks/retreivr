@@ -2010,6 +2010,18 @@ async function enqueueTrack(recordingMbid, releaseMbid) {
   });
 }
 
+async function enqueueMusicTrack(payload = {}) {
+  return fetchJson("/api/music/enqueue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      recording_mbid: String(payload.recording_mbid || "").trim(),
+      release_mbid: String(payload.release_mbid || "").trim(),
+      release_group_mbid: String(payload.release_group_mbid || "").trim() || null,
+    }),
+  });
+}
+
 function renderMusicModeResults(response, query = "") {
   const artists = Array.isArray(response?.artists) ? response.artists : [];
   const albums = Array.isArray(response?.albums) ? response.albums : [];
@@ -2142,6 +2154,9 @@ function renderMusicModeResults(response, query = "") {
       state.homeMusicResultMap[key] = result;
       const card = document.createElement("article");
       card.className = "home-result-card";
+      card.dataset.recordingMbid = String(result.recording_mbid || "").trim();
+      card.dataset.releaseMbid = String(result.mb_release_id || "").trim();
+      card.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
 
       const header = document.createElement("div");
       header.className = "home-result-header";
@@ -2165,10 +2180,10 @@ function renderMusicModeResults(response, query = "") {
       const action = document.createElement("div");
       action.className = "home-candidate-action";
       const button = document.createElement("button");
-      button.className = "button primary small";
-      button.dataset.action = "home-music-track-enqueue";
-      button.dataset.recordingMbid = result.recording_mbid;
-      button.dataset.releaseMbid = result.mb_release_id;
+      button.className = "button primary small music-download-btn";
+      button.dataset.recordingMbid = String(result.recording_mbid || "").trim();
+      button.dataset.releaseMbid = String(result.mb_release_id || "").trim();
+      button.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
       button.textContent = "Download";
       action.appendChild(button);
       card.appendChild(action);
@@ -2183,8 +2198,8 @@ async function performMusicModeSearch() {
   const album = String(document.getElementById("search-album")?.value || "").trim();
   const track = String(document.getElementById("search-track")?.value || "").trim();
   const maxCandidatesInput = document.getElementById("search-max-candidates");
-  const rawLimit = parseInt(String(maxCandidatesInput?.value || "5"), 10);
-  const limit = Number.isFinite(rawLimit) ? Math.min(15, Math.max(1, rawLimit)) : 5;
+  const rawLimit = parseInt(String(maxCandidatesInput?.value || "10"), 10);
+  const limit = Number.isFinite(rawLimit) ? Math.min(15, Math.max(1, rawLimit)) : 10;
   if (maxCandidatesInput && String(maxCandidatesInput.value || "") !== String(limit)) {
     maxCandidatesInput.value = String(limit);
   }
@@ -5597,26 +5612,6 @@ function bindEvents() {
         }
         return;
       }
-      const musicTrackButton = event.target.closest('button[data-action="home-music-track-enqueue"]');
-      if (musicTrackButton) {
-        if (musicTrackButton.disabled) return;
-        const recordingMbid = String(musicTrackButton.dataset.recordingMbid || "").trim();
-        const releaseMbid = String(musicTrackButton.dataset.releaseMbid || "").trim();
-        if (!recordingMbid || !releaseMbid) return;
-        const originalText = musicTrackButton.textContent;
-        musicTrackButton.disabled = true;
-        musicTrackButton.textContent = "Queuing...";
-        try {
-          await enqueueTrack(recordingMbid, releaseMbid);
-          musicTrackButton.textContent = "Queued...";
-          setNotice($("#home-search-message"), "Track queued.", false);
-        } catch (err) {
-          musicTrackButton.disabled = false;
-          musicTrackButton.textContent = originalText;
-          setNotice($("#home-search-message"), `Music enqueue failed: ${err.message}`, true);
-        }
-        return;
-      }
       const button = event.target.closest('button[data-action="home-download"]');
       if (!button) return;
       const itemId = button.dataset.itemId;
@@ -5639,6 +5634,37 @@ function bindEvents() {
       }
     });
   }
+  document.addEventListener("click", async (event) => {
+    const btn = event.target.closest(".music-download-btn");
+    if (!btn) return;
+    if (btn.disabled) return;
+
+    const recording = String(btn.dataset.recordingMbid || "").trim();
+    const release = String(btn.dataset.releaseMbid || "").trim();
+    const releaseGroup = String(btn.dataset.releaseGroupMbid || "").trim();
+
+    if (!recording) {
+      console.error("Missing recording MBID on music download button");
+      return;
+    }
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Queuing...";
+    try {
+      await enqueueMusicTrack({
+        recording_mbid: recording,
+        release_mbid: release,
+        release_group_mbid: releaseGroup,
+      });
+      btn.textContent = "Queued...";
+      setNotice($("#home-search-message"), "Track queued.", false);
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      setNotice($("#home-search-message"), `Music enqueue failed: ${err.message}`, true);
+    }
+  });
   $("#search-requests-body").addEventListener("click", async (event) => {
     const actionButton = event.target.closest("button[data-action]");
     if (actionButton) {

@@ -102,6 +102,7 @@ All notable changes to this project will be documented here.
 - Music Search `Max candidates` now matches backend guardrail:
   - UI cap set to 15
   - client request limit clamped to 1..15 before API call
+- Music Search `Max candidates` default is now `10` (client fallback also defaults to 10 before clamping).
 - Album enqueue success messaging now treats partial results as success (not error) while surfacing skipped-track diagnostics.
 - MusicBrainz duration-reject diagnostics now emit structured delta details (`duration_reject_detail`) for album-context or explicit duration-override paths.
 - Metadata probe execution is now strictly extraction-only:
@@ -243,6 +244,7 @@ All notable changes to this project will be documented here.
 ### Fixed
 - Fixed `sqlite3.Row` `.get()` misuse in queue row handling by normalizing rows to dicts before dict-style access.
 - Removed legacy metadata-probe retry events and format-specific probe classification assumptions now that probe does not enforce format.
+- Fixed Music Mode track-card download binding by moving to delegated `.music-download-btn` handling with explicit MBID data attributes (`recording_mbid`, `release_mbid`, `release_group_mbid`) and `/api/music/enqueue` routing.
 - Music Mode no longer shows legacy “Select at least one source” validation in metadata search flow.
 - Music metadata results no longer render after Music Mode is toggled OFF while requests are in flight.
 - Album queue UI now correctly reflects backend HTTP 200 partial success responses instead of treating skipped tracks as fatal.
