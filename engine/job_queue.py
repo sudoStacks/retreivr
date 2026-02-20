@@ -2601,7 +2601,21 @@ def build_ytdlp_opts(context):
     target_format = context.get("final_format")
     output_template = context.get("output_template")
     output_template_meta = context.get("output_template_meta")
-    config = context.get("config") or {}
+    raw_config = context.get("config")
+    allow_empty_config = (
+        os.environ.get("RETREIVR_ALLOW_EMPTY_CONFIG", "").strip() == "1"
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
+    if (not isinstance(raw_config, dict) or not raw_config) and not allow_empty_config:
+        _log_event(
+            logging.ERROR,
+            "empty_config_passed_to_build_ytdlp_opts",
+            operation=operation,
+            media_type=context.get("media_type"),
+            media_intent=context.get("media_intent"),
+        )
+        raise RuntimeError("empty_config_passed_to_build_ytdlp_opts")
+    config = raw_config if isinstance(raw_config, dict) else {}
     overrides = context.get("overrides") or {}
     allow_chapter_outtmpl = bool(context.get("allow_chapter_outtmpl"))
 
@@ -2775,12 +2789,15 @@ def build_ytdlp_opts(context):
             opts["js_runtimes"] = existing_js_runtimes
         else:
             opts["js_runtimes"] = config_js_runtimes
+    if has_js_runtime_config or opts.get("js_runtimes"):
         logging.info(
             json.dumps(
                 safe_json(
                     {
-                        "message": "js_runtime_injected",
-                        "resolved_js_runtimes": opts.get("js_runtimes"),
+                        "message": "debug_effective_js_runtimes",
+                        "opts_js_runtimes": opts.get("js_runtimes"),
+                        "config_js_runtime": config.get("js_runtime") if isinstance(config, dict) else None,
+                        "config_js_runtimes": config.get("js_runtimes") if isinstance(config, dict) else None,
                     }
                 ),
                 sort_keys=True,
@@ -3047,6 +3064,7 @@ def download_with_ytdlp(
         "final_format": final_format,
         "output_template": output_template,
         "output_template_meta": output_template_meta,
+        "config": config,
         "cookie_file": cookie_file,
         "overrides": (config or {}).get("yt_dlp_opts") or {},
         "media_type": media_type,
@@ -3457,7 +3475,9 @@ def _select_download_output(temp_dir, info, audio_mode):
 
 
 def preview_direct_url(url, config):
-    cookie_file = resolve_cookie_file(config or {})
+    if not isinstance(config, dict) or not config:
+        raise RuntimeError("search_missing_runtime_config")
+    cookie_file = resolve_cookie_file(config)
     context = {
         "operation": "metadata",
         "url": url,
@@ -3465,7 +3485,8 @@ def preview_direct_url(url, config):
         "final_format": None,
         "output_template": None,
         "cookie_file": cookie_file,
-        "overrides": (config or {}).get("yt_dlp_opts") or {},
+        "overrides": config.get("yt_dlp_opts") or {},
+        "config": config,
         "media_type": "video",
         "media_intent": "episode",
     }

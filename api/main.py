@@ -176,6 +176,11 @@ def _mb_service():
     return get_musicbrainz_service()
 
 
+def get_loaded_config() -> dict:
+    cfg = getattr(app.state, "loaded_config", None) or getattr(app.state, "config", None)
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:
@@ -1051,12 +1056,40 @@ async def startup():
     app.state.schedule_next_run = state.get("next_run")
     schedule_config = _default_schedule_config()
     config = _read_config_for_scheduler()
-    if config:
-        schedule_config = _merge_schedule_config(config.get("schedule"))
+    app.state.loaded_config = config if isinstance(config, dict) else {}
+    app.state.config = app.state.loaded_config
+    config_exists = os.path.exists(app.state.config_path)
+    config_size = 0
+    if config_exists:
+        try:
+            config_size = int(os.path.getsize(app.state.config_path))
+        except OSError:
+            config_size = 0
+    startup_cfg = get_loaded_config()
+    logging.info(
+        json.dumps(
+            safe_json(
+                {
+                    "message": "config_loaded",
+                    "config_path": app.state.config_path,
+                    "exists": bool(config_exists),
+                    "bytes": config_size,
+                    "keys_count": len(startup_cfg.keys()) if isinstance(startup_cfg, dict) else 0,
+                    "has_js_runtime": bool(isinstance(startup_cfg, dict) and "js_runtime" in startup_cfg),
+                    "has_js_runtimes": bool(isinstance(startup_cfg, dict) and "js_runtimes" in startup_cfg),
+                    "js_runtime_value": startup_cfg.get("js_runtime") if isinstance(startup_cfg, dict) else None,
+                    "js_runtimes_value": startup_cfg.get("js_runtimes") if isinstance(startup_cfg, dict) else None,
+                }
+            ),
+            sort_keys=True,
+        )
+    )
+    if startup_cfg:
+        schedule_config = _merge_schedule_config(startup_cfg.get("schedule"))
     app.state.schedule_config = schedule_config
     app.state.scheduler.start()
     _apply_schedule_config(schedule_config)
-    _apply_spotify_schedule(config or {})
+    _apply_spotify_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
     if schedule_config.get("enabled") and schedule_config.get("run_on_startup"):
         asyncio.create_task(_handle_scheduled_run())
     if schedule_config.get("enabled"):
@@ -1064,13 +1097,13 @@ async def startup():
 
     init_db(app.state.paths.db_path)
     _ensure_watch_tables(app.state.paths.db_path)
-    app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, config)
+    app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, startup_cfg)
     logging.info("Search DB path: %s", app.state.search_db_path)
     app.state.search_service = SearchResolutionService(
         search_db_path=app.state.search_db_path,
         queue_db_path=app.state.paths.db_path,
         adapters=None,
-        config=config or {},
+        config=startup_cfg,
         paths=app.state.paths,
     )
     app.state.search_request_overrides = {}
@@ -1083,7 +1116,7 @@ async def startup():
         logging.info("RETREIVR_DIAG enabled; running direct URL self-test")
         await anyio.to_thread.run_sync(
             run_direct_url_self_test,
-            config or {},
+            startup_cfg,
             paths=app.state.paths,
             url=diag_url,
             final_format_override="mkv",
@@ -1095,7 +1128,7 @@ async def startup():
     app.state.worker_stop_event = threading.Event()
     app.state.worker_engine = DownloadWorkerEngine(
         app.state.paths.db_path,
-        config or {},
+        startup_cfg,
         app.state.paths,
         search_service=app.state.search_service,
     )
@@ -1113,11 +1146,11 @@ async def startup():
     app.state.worker_thread.start()
 
 
-    watch_policy = normalize_watch_policy(config or {})
+    watch_policy = normalize_watch_policy(startup_cfg)
     app.state.watch_policy = watch_policy
-    app.state.watch_config_cache = config
+    app.state.watch_config_cache = startup_cfg
     app.state.watcher_clients_cache = {}
-    enable_watcher = bool(config.get("enable_watcher")) if isinstance(config, dict) else False
+    enable_watcher = bool(startup_cfg.get("enable_watcher")) if isinstance(startup_cfg, dict) else False
     if not enable_watcher:
         app.state.watcher_lock = None
         app.state.watcher_task = None
@@ -1434,8 +1467,10 @@ def _run_immediate_download_to_client(
     status: EngineStatus | None = None,
     origin: str | None = None,
 ):
-    if not isinstance(config, dict) or not config:
+    effective_config = get_loaded_config() or config
+    if not isinstance(effective_config, dict) or not effective_config:
         raise RuntimeError("direct_url_runtime_config_missing")
+    config = effective_config
     job_id = uuid4().hex
     temp_dir = os.path.join(paths.temp_downloads_dir, job_id)
     ensure_dir(temp_dir)
@@ -1460,6 +1495,19 @@ def _run_immediate_download_to_client(
         final_format = normalized_audio_format if audio_mode else normalized_format
 
     cookie_file = resolve_cookie_file(config)
+    logging.info(
+        json.dumps(
+            safe_json(
+                {
+                    "message": "direct_url_effective_config",
+                    "keys_count": len(config.keys()) if isinstance(config, dict) else 0,
+                    "has_js_runtime": bool(isinstance(config, dict) and "js_runtime" in config),
+                    "has_js_runtimes": bool(isinstance(config, dict) and "js_runtimes" in config),
+                }
+            ),
+            sort_keys=True,
+        )
+    )
 
     try:
         info, local_file = download_with_ytdlp(
@@ -1600,8 +1648,10 @@ def _run_direct_url_with_cli(
     files into the destination. Metadata/enrichment can occur post-download.
     """
 
-    if not isinstance(config, dict) or not config:
+    effective_config = get_loaded_config() or config
+    if not isinstance(effective_config, dict) or not effective_config:
         raise RuntimeError("direct_url_missing_config")
+    config = effective_config
     if not url or not isinstance(url, str):
         raise ValueError("single_url is required")
 
@@ -1626,6 +1676,19 @@ def _run_direct_url_with_cli(
             or "mp3"
         )
         cookie_file = resolve_cookie_file(config)
+        logging.info(
+            json.dumps(
+                safe_json(
+                    {
+                        "message": "direct_url_effective_config",
+                        "keys_count": len(config.keys()) if isinstance(config, dict) else 0,
+                        "has_js_runtime": bool(isinstance(config, dict) and "js_runtime" in config),
+                        "has_js_runtimes": bool(isinstance(config, dict) and "js_runtimes" in config),
+                    }
+                ),
+                sort_keys=True,
+            )
+        )
         info, local_file = download_with_ytdlp(
             url,
             temp_dir,
@@ -2228,7 +2291,10 @@ def _read_config_or_404():
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
     _warn_deprecated_fields(config)
-    return safe_json(_strip_deprecated_fields(config))
+    normalized = safe_json(_strip_deprecated_fields(config))
+    app.state.loaded_config = normalized if isinstance(normalized, dict) else {}
+    app.state.config = app.state.loaded_config
+    return normalized
 
 
 def _spotify_client_credentials(config: dict | None) -> tuple[str, str]:
@@ -2283,7 +2349,10 @@ def _read_config_for_scheduler():
         logging.error("Schedule skipped: invalid config: %s", errors)
         return None
     _warn_deprecated_fields(config)
-    return _strip_deprecated_fields(config)
+    normalized = _strip_deprecated_fields(config)
+    app.state.loaded_config = normalized if isinstance(normalized, dict) else {}
+    app.state.config = app.state.loaded_config
+    return normalized
 
 
 def _read_config_for_watcher():
@@ -2308,6 +2377,8 @@ def _read_config_for_watcher():
         return cached
     _warn_deprecated_fields(config)
     config = _strip_deprecated_fields(config)
+    app.state.loaded_config = config if isinstance(config, dict) else {}
+    app.state.config = app.state.loaded_config
     policy = normalize_watch_policy(config)
     if not getattr(normalize_watch_policy, "valid", True):
         return cached or config
@@ -2334,6 +2405,15 @@ async def _start_run_with_config(
     now=None,
     delivery_mode=None,
 ):
+    runtime_config = get_loaded_config()
+    if not runtime_config and isinstance(config, dict) and config:
+        runtime_config = safe_json(_strip_deprecated_fields(config))
+        app.state.loaded_config = runtime_config
+        app.state.config = runtime_config
+    if not runtime_config:
+        runtime_config = _read_config_or_404()
+    config = runtime_config
+
     async with app.state.run_lock:
         if app.state.running:
             return "busy", None
@@ -2387,7 +2467,7 @@ async def _start_run_with_config(
                     )
                 else:
                     if single_url:
-                        runtime_config = config if isinstance(config, dict) and config else _read_config_for_scheduler()
+                        runtime_config = get_loaded_config() or config
                         if not isinstance(runtime_config, dict) or not runtime_config:
                             raise RuntimeError("direct_url_runtime_config_missing")
                         resolved_music_mode = bool(music_mode) if music_mode is not None else False
@@ -4130,7 +4210,7 @@ async def api_put_config_path(payload: ConfigPathRequest):
 
 @app.post("/api/run", status_code=202)
 async def api_run(request: RunRequest):
-    config = _read_config_or_404()
+    config = get_loaded_config() or _read_config_or_404()
     if request.single_url and request.playlist_id:
         raise HTTPException(status_code=400, detail="Provide either single_url or playlist_id, not both")
     if request.single_url and _looks_like_playlist_url(request.single_url):
@@ -4194,9 +4274,23 @@ async def api_direct_url_preview(request: DirectUrlPreviewRequest):
         )
     except ValueError:
         pass
-    config = _read_config_or_404()
+    runtime_config = get_loaded_config() or _read_config_or_404()
+    if not runtime_config:
+        raise RuntimeError("search_missing_runtime_config")
+    logging.info(
+        json.dumps(
+            safe_json(
+                {
+                    "message": "search_effective_config",
+                    "keys_count": len(runtime_config.keys()) if isinstance(runtime_config, dict) else 0,
+                    "has_js_runtime": bool(isinstance(runtime_config, dict) and "js_runtime" in runtime_config),
+                }
+            ),
+            sort_keys=True,
+        )
+    )
     try:
-        preview = preview_direct_url(url, config)
+        preview = preview_direct_url(url, runtime_config)
     except Exception as exc:
         logging.exception("Direct URL preview failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc

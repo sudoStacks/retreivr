@@ -90,6 +90,10 @@ All notable changes to this project will be documented here.
   - search destination NameError smoke path
 
 ### Changed
+- Canonical runtime config propagation is now enforced for direct URL execution:
+  - startup stores a single loaded config object on app state
+  - direct URL paths resolve config from canonical loaded state before yt-dlp execution
+  - structured startup load diagnostics now emit `config_loaded` with path, size, key counts, and js runtime presence
 - Direct URL runtime now enforces full config propagation end-to-end:
   - single-URL runs validate non-empty runtime config before execution
   - direct URL server/client paths no longer silently degrade to `{}` config
@@ -98,6 +102,7 @@ All notable changes to this project will be documented here.
   - case-insensitive key detection for `js_runtime` / `js_runtimes` variants
   - normalized ordered list merge into `opts.js_runtimes` without overwriting existing values
   - invalid-but-present JS runtime config now emits an explicit warning
+  - runtime injection diagnostics now emit `debug_effective_js_runtimes` with config + opts values when relevant
 - Config sample now uses canonical JS runtime key format:
   - `js_runtimes: ["node:/usr/bin/node"]`
 - Home defaults are now explicit and stable on first load:
@@ -252,6 +257,9 @@ All notable changes to this project will be documented here.
 - Web UI now shows explicit fail-fast messaging when Music Mode binding is rejected: `Music Mode rejected — No canonical album release found`.
 
 ### Fixed
+- yt-dlp option building now fails fast on missing runtime config in production paths:
+  - emits `empty_config_passed_to_build_ytdlp_opts` with operation/media context
+  - raises `RuntimeError("empty_config_passed_to_build_ytdlp_opts")` instead of silently continuing with empty config
 - Fixed direct URL config masking in music download path:
   - removed `config or {}` fallback from direct URL `download_with_ytdlp(...)` call path
   - hard-fail now occurs when direct URL config is missing instead of silently losing config-driven options
