@@ -43,6 +43,22 @@ def _load_job_queue():
 def test_import_job_media_type_and_ytdlp_audio_flags(monkeypatch, tmp_path: Path) -> None:
     pipeline = _load_import_pipeline()
     jq = _load_job_queue()
+    monkeypatch.setattr(
+        pipeline,
+        "resolve_best_mb_pair",
+        lambda *_args, **_kwargs: {
+            "recording_mbid": "mbid-abc-123",
+            "mb_release_id": "release-xyz",
+            "mb_release_group_id": "release-group-xyz",
+            "artist": "Artist",
+            "track": "Song",
+            "album": "Album",
+            "release_date": "2024",
+            "track_number": 1,
+            "disc_number": 1,
+            "duration_ms": 210000,
+        },
+    )
 
     class _FakeMB:
         def search_recordings(self, artist, title, *, album=None, limit=5):
@@ -103,7 +119,9 @@ def test_import_job_media_type_and_ytdlp_audio_flags(monkeypatch, tmp_path: Path
         resolved_destination=None,
         cancel_check=None,
         cancel_reason=None,
+        output_template_meta=None,
     ):
+        _ = output_template_meta
         context = {
             "operation": "download",
             "url": url,
@@ -171,5 +189,5 @@ def test_import_job_media_type_and_ytdlp_audio_flags(monkeypatch, tmp_path: Path
     assert captured["opts"]["addmetadata"] is True
     assert captured["opts"]["embedthumbnail"] is True
     assert captured["opts"]["writethumbnail"] is True
-    assert captured["opts"]["format"] == "bestaudio[acodec!=none]/bestaudio/best"
+    assert captured["opts"]["format"] == "bestaudio/best"
     assert any(pp.get("key") == "FFmpegExtractAudio" for pp in (captured["opts"].get("postprocessors") or []))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 
@@ -65,6 +66,16 @@ def _release_payload(release_id: str, *, recording_mbid: str):
 
 
 def _load_binding_module():
+    if "musicbrainzngs" not in sys.modules:
+        sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
+    if "metadata.services" not in sys.modules:
+        services_pkg = types.ModuleType("metadata.services")
+        services_pkg.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["metadata.services"] = services_pkg
+    if "metadata.services.musicbrainz_service" not in sys.modules:
+        mb_service_module = types.ModuleType("metadata.services.musicbrainz_service")
+        mb_service_module.get_musicbrainz_service = lambda: None
+        sys.modules["metadata.services.musicbrainz_service"] = mb_service_module
     return _load_module("engine_musicbrainz_binding_threshold_tests", _ROOT / "engine" / "musicbrainz_binding.py")
 
 
@@ -145,3 +156,81 @@ def test_mb_binding_threshold_low_accepts_same_borderline_candidate():
     assert selected["recording_mbid"] == "rec-1"
     assert selected["mb_release_id"] == "rel-1"
 
+
+def test_mb_binding_default_duration_limit_rejects_20s_delta():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "rec-1",
+                    "title": "Song",
+                    "ext:score": "99",
+                    "length": "198000",
+                    "artist-credit": [{"name": "Artist"}],
+                }
+            ]
+        },
+        recording_payloads={
+            "rec-1": {
+                "recording": {
+                    "id": "rec-1",
+                    "length": "198000",
+                    "release-list": [{"id": "rel-1", "date": "2012-01-01"}],
+                }
+            }
+        },
+        release_payloads={"rel-1": _release_payload("rel-1", recording_mbid="rec-1")},
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="Artist",
+        track="Song",
+        album=None,
+        duration_ms=218000,  # delta=20s
+        country_preference="US",
+        threshold=0.70,
+    )
+    assert selected is None
+    reasons = getattr(binding.resolve_best_mb_pair, "last_failure_reasons", [])
+    assert "duration_delta_gt_limit" in reasons
+
+
+def test_mb_binding_album_duration_limit_25s_accepts_20s_delta():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "rec-1",
+                    "title": "Song",
+                    "ext:score": "99",
+                    "length": "198000",
+                    "artist-credit": [{"name": "Artist"}],
+                }
+            ]
+        },
+        recording_payloads={
+            "rec-1": {
+                "recording": {
+                    "id": "rec-1",
+                    "length": "198000",
+                    "release-list": [{"id": "rel-1", "date": "2012-01-01"}],
+                }
+            }
+        },
+        release_payloads={"rel-1": _release_payload("rel-1", recording_mbid="rec-1")},
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="Artist",
+        track="Song",
+        album=None,
+        duration_ms=218000,  # delta=20s
+        country_preference="US",
+        threshold=0.70,
+        max_duration_delta_ms=25000,
+    )
+    assert selected is not None
+    assert selected["recording_mbid"] == "rec-1"
+    assert selected["mb_release_id"] == "rel-1"

@@ -4484,6 +4484,8 @@ def download_full_album(data: dict):
     store = getattr(engine, "store", None) if engine is not None else None
     tracks_enqueued = 0
     job_ids = []
+    failed_tracks = []
+    album_duration_delta_limit_ms = 25000
 
     for medium in media:
         if not isinstance(medium, dict):
@@ -4513,58 +4515,86 @@ def download_full_album(data: dict):
             except (TypeError, ValueError):
                 track_number = None
 
-            resolved = resolve_best_mb_pair(
-                mb,
-                artist=artist or None,
-                track=title,
-                album=release_title,
-                duration_ms=duration_ms_int,
-                threshold=binding_threshold,
-            )
-            if not resolved:
-                reasons = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
-                logger.info(
-                    "[MUSIC] album track skipped recording=%s track=%s reasons=%s",
+            try:
+                resolved = resolve_best_mb_pair(
+                    mb,
+                    artist=artist or None,
+                    track=title,
+                    album=release_title,
+                    duration_ms=duration_ms_int,
+                    threshold=binding_threshold,
+                    max_duration_delta_ms=album_duration_delta_limit_ms,
+                )
+                if not resolved:
+                    reasons = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
+                    reason_text = ",".join(reasons) if reasons else "mb_pair_not_resolved"
+                    logger.info(
+                        "[MUSIC] album track skipped recording=%s track=%s reasons=%s",
+                        recording_mbid,
+                        title,
+                        reasons,
+                    )
+                    failed_tracks.append(
+                        {
+                            "recording_mbid": recording_mbid,
+                            "track": title,
+                            "reason": reason_text,
+                        }
+                    )
+                    continue
+
+                payload = {
+                    "media_intent": "music_track",
+                    "artist": resolved.get("artist") or artist,
+                    "album": resolved.get("album") or release_title,
+                    "track": title,
+                    "recording_mbid": resolved.get("recording_mbid") or recording_mbid,
+                    "mb_recording_id": resolved.get("recording_mbid") or recording_mbid,
+                    "track_number": resolved.get("track_number") or track_number,
+                    "disc_number": resolved.get("disc_number") or disc_number,
+                    "release_date": resolved.get("release_date") or release_date,
+                    "mb_release_id": resolved.get("mb_release_id") or release_mbid,
+                    "mb_release_group_id": resolved.get("mb_release_group_id") or release_group_mbid,
+                    "release_id": resolved.get("mb_release_id") or release_mbid,
+                    "release_group_id": resolved.get("mb_release_group_id") or release_group_mbid,
+                    "duration_ms": resolved.get("duration_ms") or duration_ms_int,
+                }
+                canonical_id = _build_music_track_canonical_id(
+                    payload.get("artist"),
+                    payload.get("album"),
+                    payload.get("track_number"),
+                    payload.get("track"),
+                )
+                queue.enqueue(payload)
+                tracks_enqueued += 1
+                if store is not None:
+                    existing = store.get_job_by_canonical_id(canonical_id)
+                    if existing is not None and existing.id:
+                        job_ids.append(existing.id)
+            except Exception as exc:
+                reason_text = str(exc) or "track_enqueue_failed"
+                logger.warning(
+                    "[MUSIC] album track enqueue failed recording=%s track=%s reason=%s",
                     recording_mbid,
                     title,
-                    reasons,
+                    reason_text,
+                )
+                failed_tracks.append(
+                    {
+                        "recording_mbid": recording_mbid,
+                        "track": title,
+                        "reason": reason_text,
+                    }
                 )
                 continue
-
-            payload = {
-                "media_intent": "music_track",
-                "artist": resolved.get("artist") or artist,
-                "album": resolved.get("album") or release_title,
-                "track": title,
-                "recording_mbid": resolved.get("recording_mbid") or recording_mbid,
-                "mb_recording_id": resolved.get("recording_mbid") or recording_mbid,
-                "track_number": resolved.get("track_number") or track_number,
-                "disc_number": resolved.get("disc_number") or disc_number,
-                "release_date": resolved.get("release_date") or release_date,
-                "mb_release_id": resolved.get("mb_release_id") or release_mbid,
-                "mb_release_group_id": resolved.get("mb_release_group_id") or release_group_mbid,
-                "release_id": resolved.get("mb_release_id") or release_mbid,
-                "release_group_id": resolved.get("mb_release_group_id") or release_group_mbid,
-                "duration_ms": resolved.get("duration_ms") or duration_ms_int,
-            }
-            canonical_id = _build_music_track_canonical_id(
-                payload.get("artist"),
-                payload.get("album"),
-                payload.get("track_number"),
-                payload.get("track"),
-            )
-            queue.enqueue(payload)
-            tracks_enqueued += 1
-            if store is not None:
-                existing = store.get_job_by_canonical_id(canonical_id)
-                if existing is not None and existing.id:
-                    job_ids.append(existing.id)
 
     return {
         "status": "enqueued",
         "release_group_mbid": release_group_mbid,
         "release_mbid": release_mbid,
         "tracks_enqueued": tracks_enqueued,
+        "failed_tracks_count": len(failed_tracks),
+        "failed_tracks": failed_tracks,
         "job_ids": job_ids,
     }
 

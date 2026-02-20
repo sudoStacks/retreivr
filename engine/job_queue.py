@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import logging
 import os
 import re
@@ -77,7 +78,7 @@ _FORMAT_VIDEO = (
 )
 # Prefer audio-only formats first; fall back to any best format only if needed.
 # Keep this quoted/argument-safe in CLI execution (we do NOT use shell=True).
-_FORMAT_AUDIO = "bestaudio[acodec!=none]/bestaudio/best"
+_FORMAT_AUDIO = "bestaudio/best"
 
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
 
@@ -1199,12 +1200,23 @@ class DownloadWorkerEngine:
                     duration_ms=(duration_hint_sec * 1000) if duration_hint_sec else None,
                     limit=6,
                 )
-            except Exception:
+            except Exception as exc:
                 logging.exception("Music track search service failed query=%s", search_query)
+                retryable = is_retryable_error(exc)
+                _log_event(
+                    logging.ERROR,
+                    "music_track_adapter_search_failed",
+                    job_id=job.id,
+                    source=job.source,
+                    failure_domain="adapter_search",
+                    error_message=str(exc),
+                    candidate_id=None,
+                    retryable=retryable,
+                )
                 self.store.record_failure(
                     job,
-                    error_message="music_track_adapter_search_exception",
-                    retryable=False,
+                    error_message=f"music_track_adapter_search_exception:{exc}",
+                    retryable=retryable,
                     retry_delay_seconds=self.retry_delay_seconds,
                 )
                 return None
@@ -1556,6 +1568,14 @@ class DownloadWorkerEngine:
                 )
             error_message = f"{type(exc).__name__}: {exc}"
             retryable = is_retryable_error(exc)
+            error_text_lower = error_message.lower()
+            if "metadata_probe" in error_text_lower or "yt_dlp_metadata_probe_failed" in error_text_lower:
+                failure_domain = "metadata_probe"
+            elif "adapter" in error_text_lower or "search" in error_text_lower:
+                failure_domain = "adapter_search"
+            else:
+                failure_domain = "download_execution"
+            candidate_id = getattr(job, "external_id", None) or extract_video_id(getattr(job, "url", None))
             try:
                 new_status = self.store.record_failure(
                     job,
@@ -1582,6 +1602,9 @@ class DownloadWorkerEngine:
                 retryable=retryable,
                 status=new_status,
                 error=error_message,
+                failure_domain=failure_domain,
+                error_message=error_message,
+                candidate_id=candidate_id,
             )
 
 
@@ -1667,6 +1690,7 @@ class YouTubeAdapter:
                 resolved_destination=job.resolved_destination,
                 cancel_check=cancel_check,
                 cancel_reason=cancel_reason,
+                output_template_meta=output_template,
             )
             if not info or not local_file:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -2934,6 +2958,7 @@ def download_with_ytdlp(
     resolved_destination=None,
     cancel_check=None,
     cancel_reason=None,
+    output_template_meta=None,
 ):
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
         raise CancelledError(cancel_reason or "Cancelled by user")
@@ -2946,6 +2971,7 @@ def download_with_ytdlp(
         "audio_mode": audio_mode,
         "final_format": final_format,
         "output_template": output_template,
+        "output_template_meta": output_template_meta,
         "cookie_file": cookie_file,
         "overrides": (config or {}).get("yt_dlp_opts") or {},
         "media_type": media_type,
@@ -3018,14 +3044,46 @@ def download_with_ytdlp(
         with YoutubeDL(opts_for_probe) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as exc:
-        _log_event(
-            logging.ERROR,
-            "ytdlp_metadata_probe_failed",
-            job_id=job_id,
-            url=url,
-            error=str(exc),
-        )
-        raise RuntimeError(f"yt_dlp_metadata_probe_failed: {exc}")
+        if audio_mode:
+            _log_event(
+                logging.WARNING,
+                "ytdlp_metadata_probe_retrying_with_best",
+                job_id=job_id,
+                url=url,
+                error=str(exc),
+                failure_domain="metadata_probe",
+                error_message=str(exc),
+                candidate_id=extract_video_id(url),
+            )
+            try:
+                opts_for_probe_retry = dict(opts_for_probe)
+                opts_for_probe_retry["format"] = "best"
+                with YoutubeDL(opts_for_probe_retry) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            except Exception as retry_exc:
+                _log_event(
+                    logging.ERROR,
+                    "ytdlp_metadata_probe_failed",
+                    job_id=job_id,
+                    url=url,
+                    error=str(retry_exc),
+                    failure_domain="metadata_probe",
+                    error_message=str(retry_exc),
+                    candidate_id=extract_video_id(url),
+                )
+                raise RuntimeError(f"yt_dlp_metadata_probe_failed: {retry_exc}")
+        else:
+            _log_event(
+                logging.ERROR,
+                "ytdlp_metadata_probe_failed",
+                job_id=job_id,
+                url=url,
+                error=str(exc),
+                failure_domain="metadata_probe",
+                error_message=str(exc),
+                candidate_id=extract_video_id(url),
+            )
+            raise RuntimeError(f"yt_dlp_metadata_probe_failed: {exc}")
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""

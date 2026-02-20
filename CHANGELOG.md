@@ -5,6 +5,11 @@ All notable changes to this project will be documented here.
 ## v0.9.5 — Music Mode Hardening + Playlist File Import
 
 ### Added
+- Runtime regression tests for music-mode hardening:
+  - music track yt-dlp format assertion (`bestaudio/best` + audio postprocessing)
+  - metadata probe fallback retry behavior (`bestaudio/best` → `best`)
+  - album download partial-success response behavior (per-track failures isolated)
+  - duration-threshold split coverage (strict default vs album import override)
 - Playlist file import parsing layer for:
   - M3U/M3U8
   - CSV
@@ -73,6 +78,9 @@ All notable changes to this project will be documented here.
   - search destination NameError smoke path
 
 ### Changed
+- Music-mode yt-dlp selector now uses `bestaudio/best` (removed stricter audio codec filter) while preserving canonical audio extraction postprocessors.
+- Music downloads now pass canonical `output_template` metadata through the shared yt-dlp options builder path (no separate inline music opts branch).
+- Album download track binding now uses a wider duration tolerance (`25s`) while single-track/manual binding keeps strict default duration tolerance.
 - Music Mode enqueue now enforces MBID-based contracts on music-specific paths.
 - Album enqueue observability now reports structured summary fields (`added`, `skipped_existing`, `skipped_completed`).
 - Worker/state hardening completed to reduce orphan-risk for CLAIMED/DOWNLOADING transitions.
@@ -203,6 +211,9 @@ All notable changes to this project will be documented here.
 - Web UI now shows explicit fail-fast messaging when Music Mode binding is rejected: `Music Mode rejected — No canonical album release found`.
 
 ### Fixed
+- Music metadata probe failures now retry with permissive probe format (`best`) before failing the job.
+- Album download endpoint no longer returns HTTP 500 for a single-track failure; it returns HTTP 200 with partial success summary and failed-track reasons.
+- Music adapter-search failure handling now logs structured failure context and applies retryability classification instead of hardcoded non-retryable failures.
 - Canonical job dedupe race reduced with DB-level canonical ID uniqueness handling.
 - Deterministic search ranking tie-break behavior stabilized in general resolution paths.
 - Music path canonicalization enforced (disc folder presence, zero-padded tracks, NFC normalization).

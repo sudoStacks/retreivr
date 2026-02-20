@@ -389,6 +389,7 @@ def resolve_best_mb_pair(
     debug: bool = False,
     min_recording_score: float = 0.0,
     threshold: float = 0.78,
+    max_duration_delta_ms: int | None = None,
 ) -> dict[str, Any] | None:
     resolve_best_mb_pair.last_failure_reasons = []
     failure_reasons: set[str] = set()
@@ -420,6 +421,7 @@ def resolve_best_mb_pair(
     prefer_country = str(country_preference or "").strip().upper() or None
     binding_threshold = _normalize_threshold(threshold, default=0.78)
     binding_threshold_score = binding_threshold * 100.0
+    duration_delta_limit_ms = _safe_int(max_duration_delta_ms) or MAX_DURATION_DELTA_MS
 
     if debug:
         logger.debug(
@@ -542,10 +544,19 @@ def resolve_best_mb_pair(
             duration_delta_ms = None
             if duration_ms is not None and recording_duration_ms is not None:
                 duration_delta_ms = abs(int(duration_ms) - int(recording_duration_ms))
-                if duration_delta_ms > MAX_DURATION_DELTA_MS:
-                    _add_failure("duration_delta_gt_12s")
+                if duration_delta_ms > duration_delta_limit_ms:
+                    _add_failure("duration_delta_gt_limit")
                     if debug:
-                        logger.debug({"message": "mb_pair_rejected", "recording_mbid": recording_mbid, "release_mbid": release_id, "reason": "duration_delta_gt_12s", "duration_delta_ms": duration_delta_ms})
+                        logger.debug(
+                            {
+                                "message": "mb_pair_rejected",
+                                "recording_mbid": recording_mbid,
+                                "release_mbid": release_id,
+                                "reason": "duration_delta_gt_limit",
+                                "duration_delta_ms": duration_delta_ms,
+                                "duration_delta_limit_ms": duration_delta_limit_ms,
+                            }
+                        )
                     continue
             if recording_duration_ms is not None and recording_duration_ms < PREVIEW_REJECT_MS:
                 if duration_ms is None or int(duration_ms) >= 60000:
@@ -583,7 +594,10 @@ def resolve_best_mb_pair(
                     )
                 continue
             if duration_ms is not None and recording_duration_ms is not None:
-                duration_similarity = max(0.0, 1.0 - (float(duration_delta_ms or 0) / float(MAX_DURATION_DELTA_MS)))
+                duration_similarity = max(
+                    0.0,
+                    1.0 - (float(duration_delta_ms or 0) / float(duration_delta_limit_ms)),
+                )
             else:
                 duration_similarity = 0.5
 
