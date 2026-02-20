@@ -67,6 +67,7 @@ from engine.job_queue import (
     resolve_media_type,
     resolve_cookie_file,
     extract_video_id,
+    is_music_media_type,
     _normalize_audio_format,
     _normalize_format,
 )
@@ -1442,10 +1443,20 @@ def _run_immediate_download_to_client(
     audio_template = config.get("audio_filename_template") or config.get("music_filename_template")
 
     raw_final_format = final_format_override
+    is_music_direct = is_music_media_type(media_type) or str(media_intent or "").strip().lower() == "music_track"
     normalized_format = _normalize_format(raw_final_format)
     normalized_audio_format = _normalize_audio_format(raw_final_format)
-    audio_mode = bool(normalized_audio_format)
-    final_format = normalized_audio_format if audio_mode else normalized_format
+    if is_music_direct:
+        audio_mode = True
+        final_format = (
+            normalized_audio_format
+            or _normalize_audio_format(config.get("music_final_format"))
+            or _normalize_audio_format(config.get("audio_final_format"))
+            or "mp3"
+        )
+    else:
+        audio_mode = bool(normalized_audio_format)
+        final_format = normalized_audio_format if audio_mode else normalized_format
 
     cookie_file = resolve_cookie_file(config or {})
 
@@ -1573,6 +1584,9 @@ def _run_direct_url_with_cli(
     config: dict,
     destination: str | None,
     final_format_override: str | None,
+    media_type: str | None,
+    media_intent: str | None,
+    music_mode: bool = False,
     stop_event: threading.Event,
     status: EngineStatus | None = None,
 ):
@@ -1599,6 +1613,80 @@ def _run_direct_url_with_cli(
     # Always download into an isolated job temp dir
     temp_dir = os.path.join(paths.temp_downloads_dir, job_id)
     ensure_dir(temp_dir)
+
+    if bool(music_mode) or is_music_media_type(media_type) or str(media_intent or "").strip().lower() == "music_track":
+        raw_final_format = final_format_override
+        resolved_audio_format = (
+            _normalize_audio_format(raw_final_format)
+            or _normalize_audio_format((config or {}).get("music_final_format"))
+            or _normalize_audio_format((config or {}).get("audio_final_format"))
+            or "mp3"
+        )
+        cookie_file = resolve_cookie_file(config or {})
+        info, local_file = download_with_ytdlp(
+            url,
+            temp_dir,
+            config or {},
+            audio_mode=True,
+            final_format=resolved_audio_format,
+            cookie_file=cookie_file,
+            stop_event=stop_event,
+            media_type="music",
+            media_intent="music_track",
+            job_id=job_id,
+            origin="api",
+            resolved_destination=dest_dir,
+        )
+        if not info or not local_file:
+            raise RuntimeError("yt_dlp_no_output")
+        meta = extract_meta(info, fallback_url=url)
+        video_id = meta.get("video_id") or job_id
+        audio_template = (config or {}).get("audio_filename_template") or (config or {}).get("music_filename_template")
+        cleaned_name = build_output_filename(meta, video_id, resolved_audio_format, audio_template, True)
+        final_tmp_path = os.path.join(temp_dir, cleaned_name)
+        if final_tmp_path != local_file:
+            atomic_move(local_file, final_tmp_path)
+        dst = os.path.join(dest_dir, os.path.basename(final_tmp_path))
+        try:
+            if os.path.exists(dst):
+                os.remove(dst)
+        except Exception:
+            pass
+        shutil.move(final_tmp_path, dst)
+        if status is not None:
+            try:
+                status.run_successes = [dst]
+                status.last_completed_path = dst
+                status.run_total = 1
+                status.run_failures = []
+                status.completed = True
+                status.completed_at = datetime.now(timezone.utc).isoformat()
+            except Exception:
+                pass
+        try:
+            _record_direct_url_history(paths.db_path, [dst], url)
+        except sqlite3.Error:
+            logging.exception("Failed to record direct URL history (sqlite)")
+        except Exception:
+            logging.exception("Failed to record direct URL history")
+        logging.info(
+            json.dumps(
+                safe_json(
+                    {
+                        "message": "DIRECT_URL_MUSIC_DONE",
+                        "job_id": job_id,
+                        "files": [dst],
+                        "destination": dest_dir,
+                    }
+                ),
+                sort_keys=True,
+            )
+        )
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return
 
     # Output template: keep simple and CLI-equivalent
     # Note: if the template is absolute, yt-dlp ignores --paths; so keep it absolute here.
@@ -2296,8 +2384,13 @@ async def _start_run_with_config(
                     )
                 else:
                     if single_url:
-                        resolved_media_type = resolve_media_type(config, url=single_url)
-                        resolved_media_intent = resolve_media_intent("manual", resolved_media_type)
+                        resolved_music_mode = bool(music_mode) if music_mode is not None else False
+                        if resolved_music_mode:
+                            resolved_media_type = "music"
+                            resolved_media_intent = "music_track"
+                        else:
+                            resolved_media_type = resolve_media_type(config, url=single_url)
+                            resolved_media_intent = resolve_media_intent("manual", resolved_media_type)
                         effective_delivery_mode = delivery_mode or "server"
                         if resolved_media_type == "music" and effective_delivery_mode == "client":
                             # Music Mode must pass through queue MB binding; no client fast-lane bypass.
@@ -2323,6 +2416,9 @@ async def _start_run_with_config(
                                 config=config,
                                 destination=destination,
                                 final_format_override=effective_final_format_override,
+                                media_type=resolved_media_type,
+                                media_intent=resolved_media_intent,
+                                music_mode=resolved_music_mode,
                                 stop_event=app.state.stop_event,
                                 status=status,
                             ),
@@ -4042,6 +4138,19 @@ async def api_run(request: RunRequest):
         bool(request.single_url),
         request.playlist_id or "-",
     )
+    if request.single_url:
+        logging.info(
+            json.dumps(
+                safe_json(
+                    {
+                        "message": "direct_url_request_received",
+                        "music_mode": bool(request.music_mode),
+                        "url": request.single_url,
+                    }
+                ),
+                sort_keys=True,
+            )
+        )
     result, _next_allowed = await _start_run_with_config(
         config,
         single_url=request.single_url,

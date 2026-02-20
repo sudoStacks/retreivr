@@ -3984,7 +3984,8 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   if (!messageEl) return;
   setHomeSearchActive(true);
   const formatOverride = $("#home-format")?.value.trim();
-  const treatAsMusic = !!state.homeMusicMode;
+  const musicToggle = document.querySelector("#music-mode-toggle");
+  const treatAsMusic = Boolean(state.homeMusicMode && musicToggle?.checked);
   const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const playlistId = extractPlaylistIdFromUrl(url);
   if (playlistId) {
