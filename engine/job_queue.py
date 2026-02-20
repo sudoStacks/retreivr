@@ -2984,6 +2984,43 @@ def download_with_ytdlp(
     )
     opts = invocation["opts"]
 
+    normalized_intent = str(media_intent or "").strip().lower()
+    if audio_mode and is_music_media_type(media_type) and normalized_intent == "music_track":
+        fmt = str(opts.get("format") or "").strip().lower()
+        valid_format = fmt in {"bestaudio/best", "best"}
+        postprocessors = opts.get("postprocessors") or []
+        has_extract_audio = any(
+            isinstance(pp, dict) and pp.get("key") == "FFmpegExtractAudio"
+            for pp in postprocessors
+        )
+        noplaylist_is_true = bool(opts.get("noplaylist")) is True
+        if not (valid_format and has_extract_audio and noplaylist_is_true):
+            _log_event(
+                logging.ERROR,
+                "music_track_opts_invalid",
+                job_id=job_id,
+                url=url,
+                media_type=media_type,
+                media_intent=media_intent,
+                format=opts.get("format"),
+                noplaylist=opts.get("noplaylist"),
+                has_extract_audio=has_extract_audio,
+                postprocessors=opts.get("postprocessors"),
+                error_message="music_track_invalid_audio_pipeline_opts",
+            )
+            raise RuntimeError("music_track_invalid_audio_pipeline_opts")
+        _log_event(
+            logging.INFO,
+            "music_track_opts_validated",
+            job_id=job_id,
+            url=url,
+            media_type=media_type,
+            media_intent=media_intent,
+            format=opts.get("format"),
+            noplaylist=opts.get("noplaylist"),
+            has_extract_audio=has_extract_audio,
+        )
+
     _log_event(
         logging.INFO,
         "FINAL_YTDLP_OPTS",

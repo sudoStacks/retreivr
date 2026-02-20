@@ -143,28 +143,13 @@
                     </select>
                   </label>
                   <label class="field short">
-                    <span>Max candidates</span>
-                    <input id="search-max-candidates" type="number" min="1" max="50" value="5">
+                    <span>Max candidates (1-15)</span>
+                    <input id="search-max-candidates" type="number" min="1" max="15" value="5">
                   </label>
-                </div>
-                <div class="row">
-                  <label class="field">
-                    <span>Destination override</span>
-                    <div class="row">
-                      <input id="search-destination" type="text" placeholder="Leave blank for default">
-                      <button id="search-destination-browse" class="button ghost small" type="button">Browse</button>
-                    </div>
-                    <div class="meta" id="search-destination-resolved">Resolved: /downloads</div>
-                  </label>
-                  <div class="field">
-                    <span>Default destination</span>
-                    <div id="search-default-destination" class="meta">-</div>
-                  </div>
                 </div>
                 <div class="row">
                   <div class="action-group">
-                    <button id="search-create-download" class="button">Search &amp; Download Top Result</button>
-                    <button id="search-create-only" class="button ghost">Search Only</button>
+                    <button id="search-create-only" class="button">Search</button>
                   </div>
                   <div id="search-create-message" class="notice" role="status"></div>
                 </div>

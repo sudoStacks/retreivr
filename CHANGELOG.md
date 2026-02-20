@@ -5,6 +5,16 @@ All notable changes to this project will be documented here.
 ## v0.9.5 — Music Mode Hardening + Playlist File Import
 
 ### Added
+- Music Mode UI race-safety guardrails:
+  - in-flight metadata search sequence token to prevent stale render after toggle changes
+  - render-time guard to skip metadata paint when Music Mode is no longer enabled
+- Album enqueue UX summary in Home:
+  - reports `Album queued: X tracks`
+  - reports skipped count when partial success occurs
+  - optional expandable failed-track details list (track + reason)
+- Music-track yt-dlp pipeline invariant logging:
+  - structured `music_track_opts_validated` event for each music_track job
+  - structured `music_track_opts_invalid` event and early fail on invalid audio opts
 - Runtime regression tests for music-mode hardening:
   - music track yt-dlp format assertion (`bestaudio/best` + audio postprocessing)
   - metadata probe fallback retry behavior (`bestaudio/best` → `best`)
@@ -78,6 +88,19 @@ All notable changes to this project will be documented here.
   - search destination NameError smoke path
 
 ### Changed
+- Home defaults are now explicit and stable on first load:
+  - Music Mode forced OFF at init
+  - Music Search panel hidden by default
+  - Standard search shown by default
+  - Import Playlist remains collapsed unless explicitly toggled
+- Music Search panel is now metadata-first only:
+  - removed legacy destination override controls from the panel
+  - removed top-result “Search & Download” button from panel actions
+  - retained Artist / Album / Track / Mode / Max candidates + Search
+- Music Search `Max candidates` now matches backend guardrail:
+  - UI cap set to 15
+  - client request limit clamped to 1..15 before API call
+- Album enqueue success messaging now treats partial results as success (not error) while surfacing skipped-track diagnostics.
 - Music-mode yt-dlp selector now uses `bestaudio/best` (removed stricter audio codec filter) while preserving canonical audio extraction postprocessors.
 - Music downloads now pass canonical `output_template` metadata through the shared yt-dlp options builder path (no separate inline music opts branch).
 - Album download track binding now uses a wider duration tolerance (`25s`) while single-track/manual binding keeps strict default duration tolerance.
@@ -211,6 +234,9 @@ All notable changes to this project will be documented here.
 - Web UI now shows explicit fail-fast messaging when Music Mode binding is rejected: `Music Mode rejected — No canonical album release found`.
 
 ### Fixed
+- Music Mode no longer shows legacy “Select at least one source” validation in metadata search flow.
+- Music metadata results no longer render after Music Mode is toggled OFF while requests are in flight.
+- Album queue UI now correctly reflects backend HTTP 200 partial success responses instead of treating skipped tracks as fatal.
 - Music metadata probe failures now retry with permissive probe format (`best`) before failing the job.
 - Album download endpoint no longer returns HTTP 500 for a single-track failure; it returns HTTP 200 with partial success summary and failed-track reasons.
 - Music adapter-search failure handling now logs structured failure context and applies retryability classification instead of hardcoded non-retryable failures.

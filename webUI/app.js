@@ -25,6 +25,7 @@ const state = {
   homeResultsTimer: null,
   homeSearchMode: "searchOnly",
   homeMusicMode: false,
+  homeMusicSearchSeq: 0,
   homeAlbumCandidatesRequestId: null,
   homeQueuedAlbumReleaseGroups: new Set(),
   homeAlbumCoverCache: {},
@@ -1709,6 +1710,24 @@ function updateHomeMusicModeUI() {
   }
 }
 
+function setHomeMusicMode(enabled, { persist = true, clearResultsOnDisable = true } = {}) {
+  const previous = !!state.homeMusicMode;
+  state.homeMusicMode = !!enabled;
+  updateHomeMusicModeUI();
+  if (previous && !state.homeMusicMode && clearResultsOnDisable) {
+    // Invalidate any in-flight music metadata responses so stale results cannot render.
+    state.homeMusicSearchSeq += 1;
+    const results = document.getElementById("music-results-container");
+    if (results) {
+      results.innerHTML = "";
+    }
+    clearLegacyHomeSearchState();
+  }
+  if (persist) {
+    saveHomeMusicModePreference();
+  }
+}
+
 function loadHomeMusicModePreference() {
   const raw = localStorage.getItem(HOME_MUSIC_MODE_KEY);
   state.homeMusicMode = raw === "true";
@@ -1938,6 +1957,48 @@ async function enqueueAlbum(releaseGroupMbid) {
   });
 }
 
+function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
+  const messageEl = $("#home-search-message");
+  if (!messageEl) {
+    return;
+  }
+  const tracksEnqueued = Number.isFinite(Number(result?.tracks_enqueued))
+    ? Number(result.tracks_enqueued)
+    : 0;
+  const failedTracksCount = Number.isFinite(Number(result?.failed_tracks_count))
+    ? Number(result.failed_tracks_count)
+    : 0;
+  const failedTracks = Array.isArray(result?.failed_tracks) ? result.failed_tracks : [];
+  const summary = failedTracksCount > 0
+    ? `Album queued: ${tracksEnqueued} tracks · Skipped: ${failedTracksCount}`
+    : `Album queued: ${tracksEnqueued} tracks`;
+  setNotice(messageEl, summary, false);
+
+  let detailsEl = document.getElementById("home-album-failed-details");
+  if (!detailsEl) {
+    detailsEl = document.createElement("details");
+    detailsEl.id = "home-album-failed-details";
+    detailsEl.className = "meta";
+    messageEl.insertAdjacentElement("afterend", detailsEl);
+  }
+  if (failedTracksCount > 0 && failedTracks.length > 0) {
+    const items = failedTracks
+      .slice(0, 10)
+      .map((entry) => {
+        const track = String(entry?.track || "Unknown track");
+        const reason = String(entry?.reason || "unknown");
+        return `<li><strong>${track}</strong>: ${reason}</li>`;
+      })
+      .join("");
+    detailsEl.innerHTML = `<summary>${albumTitle}: ${failedTracksCount} skipped</summary><ul>${items}</ul>`;
+    detailsEl.open = false;
+    detailsEl.classList.remove("hidden");
+  } else {
+    detailsEl.innerHTML = "";
+    detailsEl.classList.add("hidden");
+  }
+}
+
 async function enqueueTrack(recordingMbid, releaseMbid) {
   return fetchJson("/api/music/enqueue", {
     method: "POST",
@@ -2061,7 +2122,7 @@ function renderMusicModeResults(response, query = "") {
             ? Number(result.tracks_enqueued)
             : 0;
           console.info("[MUSIC UI] album queued", { release_group_mbid: releaseGroupMbidValue, tracks_enqueued: count });
-          setNotice($("#home-search-message"), `Album queued: ${count} tracks`, false);
+          renderAlbumQueueSummary(result, { albumTitle: albumItem?.title || "Album" });
         } catch (err) {
           button.disabled = false;
           button.textContent = "Download";
@@ -2117,17 +2178,35 @@ function renderMusicModeResults(response, query = "") {
 }
 
 async function performMusicModeSearch() {
+  const requestSeq = ++state.homeMusicSearchSeq;
   const artist = String(document.getElementById("search-artist")?.value || "").trim();
   const album = String(document.getElementById("search-album")?.value || "").trim();
   const track = String(document.getElementById("search-track")?.value || "").trim();
+  const maxCandidatesInput = document.getElementById("search-max-candidates");
+  const rawLimit = parseInt(String(maxCandidatesInput?.value || "5"), 10);
+  const limit = Number.isFinite(rawLimit) ? Math.min(15, Math.max(1, rawLimit)) : 5;
+  if (maxCandidatesInput && String(maxCandidatesInput.value || "") !== String(limit)) {
+    maxCandidatesInput.value = String(limit);
+  }
+  const musicToggle = document.getElementById("music-mode-toggle");
+  const musicModeEnabledNow = !!state.homeMusicMode && !!(musicToggle && musicToggle.checked);
+  if (!musicModeEnabledNow) {
+    return;
+  }
   if (!artist && !album && !track) {
+    if (requestSeq !== state.homeMusicSearchSeq) {
+      return;
+    }
+    if (!(state.homeMusicMode && musicToggle && musicToggle.checked)) {
+      return;
+    }
     renderMusicModeResults({ artists: [], albums: [], tracks: [], mode_used: "auto" });
     return;
   }
   const modeSelect = document.getElementById("music-mode-select");
   const mode = modeSelect ? modeSelect.value : "auto";
   const response = await fetch(
-    `/api/music/search?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}&track=${encodeURIComponent(track)}&mode=${encodeURIComponent(mode)}&offset=0&limit=20`
+    `/api/music/search?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}&track=${encodeURIComponent(track)}&mode=${encodeURIComponent(mode)}&offset=0&limit=${limit}`
   );
   let payload = {};
   try {
@@ -2138,6 +2217,13 @@ async function performMusicModeSearch() {
   if (!response.ok) {
     const detail = payload && payload.detail ? payload.detail : `HTTP ${response.status}`;
     throw new Error(String(detail));
+  }
+  if (requestSeq !== state.homeMusicSearchSeq) {
+    return;
+  }
+  const musicModeStillEnabled = !!state.homeMusicMode && !!(musicToggle && musicToggle.checked);
+  if (!musicModeStillEnabled) {
+    return;
   }
   const displayQuery = [artist, album, track].filter(Boolean).join(" ");
   renderMusicModeResults(payload, displayQuery);
@@ -2413,11 +2499,7 @@ function renderHomeAlbumCandidates(candidates, query = "") {
       const count = Number.isFinite(Number(result?.tracks_enqueued))
         ? Number(result.tracks_enqueued)
         : 0;
-      setNotice(
-        $("#home-search-message"),
-        `Queued album: ${button.dataset.albumTitle || "Album"} — ${count} tracks`,
-        false
-      );
+      renderAlbumQueueSummary(result, { albumTitle: button.dataset.albumTitle || "Album" });
     } catch (err) {
       button.disabled = false;
       button.textContent = originalLabel;
@@ -3977,7 +4059,7 @@ async function createSearchRequest(autoEnqueue = true) {
   const messageEl = $("#search-create-message");
   const destinationValue = $("#search-destination")?.value.trim() || "";
   const musicToggle = document.getElementById("music-mode-toggle");
-  const musicModeEnabled = !!(musicToggle && musicToggle.checked);
+  const musicModeEnabled = !!state.homeMusicMode || !!(musicToggle && musicToggle.checked);
   if (musicModeEnabled) {
     setNotice(messageEl, "Music Mode uses Home search only.", true);
     return;
@@ -3987,12 +4069,11 @@ async function createSearchRequest(autoEnqueue = true) {
     return;
   }
   try {
-    const sources = getSearchSourcePriority();
-    if (!musicModeEnabled) {
-      if (!sources.length) {
-        setNotice(messageEl, "Select at least one source", true);
-        return;
-      }
+    // Source validation is legacy adapter-search behavior and only applies outside Music Mode.
+    const sources = musicModeEnabled ? [] : getSearchSourcePriority();
+    if (!musicModeEnabled && !sources.length) {
+      setNotice(messageEl, "Select at least one source", true);
+      return;
     }
     const payload = buildSearchRequestPayload(sources, { autoEnqueue });
     const modeLabel = autoEnqueue ? "Search & Download" : "Search Only";
@@ -5348,24 +5429,6 @@ function bindEvents() {
   $("#downloads-body").addEventListener("click", async (event) => {
     await handleCopy(event, $("#downloads-message"));
   });
-  const musicSearchDownload = $("#search-create-download");
-  if (musicSearchDownload) {
-    musicSearchDownload.addEventListener("click", async () => {
-      const artist = String(document.getElementById("search-artist")?.value || "").trim();
-      const album = String(document.getElementById("search-album")?.value || "").trim();
-      const track = String(document.getElementById("search-track")?.value || "").trim();
-      if (!artist && !album && !track) {
-        setNotice($("#home-search-message"), "Enter artist, album, or track for Music Search.", true);
-        return;
-      }
-      try {
-        setNotice($("#home-search-message"), "Music Mode: searching metadata...", false);
-        await performMusicModeSearch();
-      } catch (err) {
-        setNotice($("#home-search-message"), `Music search failed: ${err.message}`, true);
-      }
-    });
-  }
   const musicSearchOnly = $("#search-create-only");
   if (musicSearchOnly) {
     musicSearchOnly.addEventListener("click", async () => {
@@ -5414,21 +5477,9 @@ function bindEvents() {
     homeImportButton.addEventListener("click", importHomePlaylistFile);
   }
   const musicToggle = document.getElementById("music-mode-toggle");
-  const musicConsole = document.getElementById("music-mode-console");
-  const standardSearch = document.getElementById("standard-search-container");
-  if (musicToggle && musicConsole && standardSearch) {
+  if (musicToggle) {
     musicToggle.addEventListener("change", () => {
-      if (musicToggle.checked) {
-        musicConsole.classList.remove("hidden");
-        standardSearch.classList.add("hidden");
-      } else {
-        musicConsole.classList.add("hidden");
-        standardSearch.classList.remove("hidden");
-        const results = document.getElementById("music-results-container");
-        if (results) {
-          results.innerHTML = "";
-        }
-      }
+      setHomeMusicMode(!!musicToggle.checked);
     });
   }
   const importToggle = document.getElementById("import-playlist-toggle");
@@ -5805,6 +5856,8 @@ async function init() {
   });
   applyTheme(resolveTheme());
   bindEvents();
+  // Home default: Music Mode OFF, standard search visible, music panel hidden.
+  setHomeMusicMode(false, { persist: false, clearResultsOnDisable: false });
   setupNavActions();
   await loadPaths();
   const initialPage = (window.location.hash || "#home").replace("#", "");
