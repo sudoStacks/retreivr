@@ -2750,13 +2750,22 @@ def build_ytdlp_opts(context):
                 normalized.append(runtime)
         return normalized
 
-    config_js_runtimes = _normalize_js_runtimes(
-        config.get("js_runtimes") if isinstance(config, dict) else None
-    )
-    if not config_js_runtimes:
-        config_js_runtimes = _normalize_js_runtimes(
-            config.get("js_runtime") if isinstance(config, dict) else None
-        )
+    def _normalized_key(key):
+        return str(key or "").strip().lower().replace("_", "").replace(" ", "")
+
+    def _extract_config_js_runtime_value(cfg):
+        if not isinstance(cfg, dict):
+            return False, None
+        for raw_key, raw_value in cfg.items():
+            if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
+                return True, raw_value
+        return False, None
+
+    has_js_runtime_config, config_js_runtime_value = _extract_config_js_runtime_value(config)
+    config_js_runtimes = _normalize_js_runtimes(config_js_runtime_value)
+    if has_js_runtime_config and not config_js_runtimes:
+        logging.warning("js_runtime_config_present_but_invalid")
+
     if config_js_runtimes:
         existing_js_runtimes = _normalize_js_runtimes(opts.get("js_runtimes"))
         if existing_js_runtimes:
@@ -2766,6 +2775,17 @@ def build_ytdlp_opts(context):
             opts["js_runtimes"] = existing_js_runtimes
         else:
             opts["js_runtimes"] = config_js_runtimes
+        logging.info(
+            json.dumps(
+                safe_json(
+                    {
+                        "message": "js_runtime_injected",
+                        "resolved_js_runtimes": opts.get("js_runtimes"),
+                    }
+                ),
+                sort_keys=True,
+            )
+        )
 
     if operation == "download":
         for key in _YTDLP_DOWNLOAD_UNSAFE_KEYS:
