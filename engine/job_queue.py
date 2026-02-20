@@ -2741,7 +2741,7 @@ def build_ytdlp_opts(context):
 
     opts = _merge_overrides(opts, overrides, operation=operation, lock_format=lock_format)
 
-    def _normalize_js_runtimes(value):
+    def _normalize_js_runtime_strings(value):
         if value is None:
             return []
         if isinstance(value, (list, tuple, set)):
@@ -2764,6 +2764,23 @@ def build_ytdlp_opts(context):
                 normalized.append(runtime)
         return normalized
 
+    def _build_js_runtime_dict(runtime_items):
+        runtime_map = {}
+        for runtime in runtime_items:
+            value = str(runtime or "").strip()
+            if not value:
+                continue
+            runtime_name = value
+            runtime_path = None
+            if ":" in value:
+                runtime_name, runtime_path = value.split(":", 1)
+                runtime_name = runtime_name.strip()
+                runtime_path = runtime_path.strip() or None
+            if not runtime_name:
+                continue
+            runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
+        return runtime_map
+
     def _normalized_key(key):
         return str(key or "").strip().lower().replace("_", "").replace(" ", "")
 
@@ -2776,19 +2793,12 @@ def build_ytdlp_opts(context):
         return False, None
 
     has_js_runtime_config, config_js_runtime_value = _extract_config_js_runtime_value(config)
-    config_js_runtimes = _normalize_js_runtimes(config_js_runtime_value)
+    config_js_runtimes = _normalize_js_runtime_strings(config_js_runtime_value)
     if has_js_runtime_config and not config_js_runtimes:
         logging.warning("js_runtime_config_present_but_invalid")
 
     if config_js_runtimes:
-        existing_js_runtimes = _normalize_js_runtimes(opts.get("js_runtimes"))
-        if existing_js_runtimes:
-            for runtime in config_js_runtimes:
-                if runtime not in existing_js_runtimes:
-                    existing_js_runtimes.append(runtime)
-            opts["js_runtimes"] = existing_js_runtimes
-        else:
-            opts["js_runtimes"] = config_js_runtimes
+        opts["js_runtimes"] = _build_js_runtime_dict(config_js_runtimes)
     if has_js_runtime_config or opts.get("js_runtimes"):
         logging.info(
             json.dumps(
