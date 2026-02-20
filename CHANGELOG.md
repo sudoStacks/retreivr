@@ -271,6 +271,8 @@ All notable changes to this project will be documented here.
 
 ### Fixed
 - Fixed direct URL reliability regressions where first-attempt strict failures (signature/n-challenge/format unavailable) could terminate runs before runtime escalation.
+- Fixed direct URL video failures where metadata probe errors could abort runs before smart download retries; probe is now non-fatal with fallback metadata context and optional JS retry escalation.
+- Fixed direct URL finalization regression that produced ID-only filenames (`<video_id>.<ext>`): direct runs now reapply canonical final naming/embedding paths after download (`video: <title> - <channel>.<ext>`, music: canonical MB-based archive structure).
 - Fixed preview fallback rendering by returning populated YouTube-safe fallback metadata (`title`, `uploader`, thumbnail when video id is present) instead of blank cards on extraction failure.
 - Fixed drift from residual android-client references by removing automatic `player_client` injection across the project.
 - Music-mode metadata probe failures no longer block downloads: for `music_track`/audio-mode jobs, probe failure is now non-fatal and download proceeds with fallback metadata context.

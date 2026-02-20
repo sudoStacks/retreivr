@@ -58,6 +58,8 @@ from engine.job_queue import (
     build_ytdlp_cli_invocation,
     build_download_job_payload,
     build_output_filename,
+    ensure_mb_bound_music_track,
+    enqueue_media_metadata,
     preview_direct_url,
     canonicalize_url,
     download_with_ytdlp,
@@ -67,6 +69,7 @@ from engine.job_queue import (
     resolve_media_intent,
     resolve_media_type,
     resolve_cookiefile_for_context,
+    resolve_collision_path,
     extract_video_id,
     is_music_media_type,
     _normalize_audio_format,
@@ -1745,14 +1748,91 @@ def _run_direct_url_with_cli(
         )
         if not info or not local_file:
             raise RuntimeError("yt_dlp_no_output")
-        dst = os.path.join(dest_dir, os.path.basename(local_file))
-        try:
-            if os.path.exists(dst):
-                os.remove(dst)
-        except Exception:
-            pass
-        shutil.move(local_file, dst)
-        moved = [dst]
+        meta = extract_meta(info, fallback_url=url)
+        if not (meta.get("title") and (meta.get("channel") or meta.get("artist"))):
+            preview = preview_direct_url(url, config)
+            if isinstance(preview, dict):
+                if not meta.get("title"):
+                    meta["title"] = preview.get("title")
+                if not meta.get("channel") and preview.get("uploader"):
+                    meta["channel"] = preview.get("uploader")
+                if not meta.get("artist") and preview.get("uploader"):
+                    meta["artist"] = preview.get("uploader")
+                if not meta.get("thumbnail_url"):
+                    meta["thumbnail_url"] = preview.get("thumbnail_url")
+        video_id = meta.get("video_id") or extract_video_id(url) or job_id
+        ext = os.path.splitext(local_file)[1].lstrip(".")
+        if audio_mode:
+            ext = _normalize_audio_format(resolved_final_format) or ext or "mp3"
+            duration_sec = info.get("duration") if isinstance(info, dict) else None
+            duration_ms = int(float(duration_sec) * 1000) if duration_sec else None
+            binding_payload = {
+                "media_type": "music",
+                "media_intent": "music_track",
+                "artist": meta.get("artist") or meta.get("channel"),
+                "track": meta.get("track") or meta.get("title"),
+                "album": meta.get("album"),
+                "duration_ms": duration_ms,
+                "output_template": {
+                    "canonical_metadata": {
+                        "recording_mbid": meta.get("mb_recording_id") or meta.get("recording_mbid"),
+                        "mb_release_id": meta.get("mb_release_id"),
+                        "mb_release_group_id": meta.get("mb_release_group_id"),
+                        "album": meta.get("album"),
+                        "release_date": meta.get("release_date"),
+                        "track_number": meta.get("track_number"),
+                        "disc_number": meta.get("disc") or meta.get("disc_number"),
+                        "duration_ms": duration_ms,
+                        "artist": meta.get("artist") or meta.get("channel"),
+                        "track": meta.get("track") or meta.get("title"),
+                    }
+                },
+            }
+            ensure_mb_bound_music_track(
+                binding_payload,
+                config=config,
+                country_preference=str(config.get("country") or "US"),
+            )
+            canonical = (
+                binding_payload.get("output_template", {}).get("canonical_metadata")
+                if isinstance(binding_payload.get("output_template", {}), dict)
+                else {}
+            )
+            if isinstance(canonical, dict):
+                meta["artist"] = canonical.get("artist") or meta.get("artist")
+                meta["album_artist"] = canonical.get("artist") or meta.get("album_artist") or meta.get("artist")
+                meta["album"] = canonical.get("album")
+                meta["track"] = canonical.get("track") or meta.get("track") or meta.get("title")
+                meta["release_date"] = canonical.get("release_date")
+                meta["track_number"] = canonical.get("track_number")
+                meta["disc_number"] = canonical.get("disc_number")
+                meta["disc"] = canonical.get("disc_number")
+                meta["recording_mbid"] = canonical.get("recording_mbid")
+                meta["mb_recording_id"] = canonical.get("recording_mbid")
+                meta["mb_release_id"] = canonical.get("mb_release_id")
+                meta["mb_release_group_id"] = canonical.get("mb_release_group_id")
+        elif not ext:
+            ext = _normalize_format(resolved_final_format) or "mkv"
+
+        # Enforce canonical final naming:
+        # - video: "<title> - <channel>.<ext>"
+        # - music: canonical MB metadata path via build_audio_filename()
+        filename_template = None if not audio_mode else (config.get("audio_filename_template") or config.get("music_filename_template"))
+        cleaned_name = build_output_filename(meta, video_id, ext, filename_template, audio_mode)
+        final_path = os.path.join(dest_dir, cleaned_name)
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        final_path = resolve_collision_path(final_path)
+
+        if not audio_mode:
+            embed_metadata(local_file, meta, video_id, paths.thumbs_dir)
+
+        atomic_move(local_file, final_path)
+        if audio_mode:
+            try:
+                enqueue_media_metadata(final_path, meta, config)
+            except Exception:
+                pass
+        moved = [final_path]
 
         # Finalize engine status for UI consumers (CLI-equivalent direct URL run)
         if status is not None:

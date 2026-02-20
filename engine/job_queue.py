@@ -3241,6 +3241,51 @@ def download_with_ytdlp(
 
     from subprocess import DEVNULL, CalledProcessError
     info = None
+    def _normalized_key(key):
+        return str(key or "").strip().lower().replace("_", "").replace(" ", "")
+
+    def _extract_config_js_runtime_values(cfg):
+        if not isinstance(cfg, dict):
+            return []
+        raw_value = None
+        for raw_key, candidate in cfg.items():
+            if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
+                raw_value = candidate
+                break
+        if raw_value is None:
+            return []
+        if isinstance(raw_value, (list, tuple, set)):
+            source = list(raw_value)
+        else:
+            source = [raw_value]
+        values = []
+        seen = set()
+        for item in source:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            for part in text.split(","):
+                token = part.strip()
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                values.append(token)
+        return values
+
+    def _build_js_runtime_dict(values):
+        runtime_map = {}
+        for value in values:
+            runtime_name = value
+            runtime_path = None
+            if ":" in value:
+                runtime_name, runtime_path = value.split(":", 1)
+                runtime_name = runtime_name.strip()
+                runtime_path = runtime_path.strip() or None
+            if not runtime_name:
+                continue
+            runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
+        return runtime_map
+
     # Always get metadata via API (for output file info, etc.)
     try:
         probe_opts = copy.deepcopy(opts)
@@ -3263,17 +3308,57 @@ def download_with_ytdlp(
         with YoutubeDL(probe_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as exc:
+        probe_error = str(exc)
         _log_event(
             logging.ERROR,
             "ytdlp_metadata_probe_failed",
             job_id=job_id,
             url=url,
-            error=str(exc),
+            error=probe_error,
             failure_domain="metadata_probe",
-            error_message=str(exc),
+            error_message=probe_error,
             candidate_id=extract_video_id(url),
         )
-        if audio_mode and is_music_media_type(media_type):
+        lower_probe_error = probe_error.lower()
+        should_escalate_probe_js = any(
+            marker in lower_probe_error
+            for marker in (
+                "signature solving failed",
+                "requested format is not available",
+                "n challenge solving failed",
+            )
+        )
+        if should_escalate_probe_js:
+            js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+            if js_runtime_map:
+                retry_probe_opts = copy.deepcopy(probe_opts)
+                retry_probe_opts["js_runtimes"] = js_runtime_map
+                retry_probe_opts["remote_components"] = "ejs:github"
+                _log_event(
+                    logging.WARNING,
+                    "ytdlp_metadata_probe_js_retry",
+                    job_id=job_id,
+                    url=url,
+                    media_type=media_type,
+                    media_intent=media_intent,
+                    error=probe_error,
+                )
+                try:
+                    with YoutubeDL(retry_probe_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                except Exception as retry_exc:
+                    _log_event(
+                        logging.WARNING,
+                        "ytdlp_metadata_probe_js_retry_failed",
+                        job_id=job_id,
+                        url=url,
+                        media_type=media_type,
+                        media_intent=media_intent,
+                        error=str(retry_exc),
+                    )
+                    info = None
+
+        if info is None:
             _log_event(
                 logging.WARNING,
                 "ytdlp_metadata_probe_nonfatal_proceeding",
@@ -3281,11 +3366,9 @@ def download_with_ytdlp(
                 url=url,
                 media_type=media_type,
                 media_intent=media_intent,
-                error=str(exc),
+                error=probe_error,
             )
             info = {"id": extract_video_id(url), "webpage_url": url}
-        else:
-            raise RuntimeError(f"yt_dlp_metadata_probe_failed: {exc}")
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""
@@ -3335,51 +3418,6 @@ def download_with_ytdlp(
         )
     except CalledProcessError as exc:
         stderr_output = (exc.stderr or "").strip()
-
-        def _normalized_key(key):
-            return str(key or "").strip().lower().replace("_", "").replace(" ", "")
-
-        def _extract_config_js_runtime_values(cfg):
-            if not isinstance(cfg, dict):
-                return []
-            raw_value = None
-            for raw_key, candidate in cfg.items():
-                if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
-                    raw_value = candidate
-                    break
-            if raw_value is None:
-                return []
-            if isinstance(raw_value, (list, tuple, set)):
-                source = list(raw_value)
-            else:
-                source = [raw_value]
-            values = []
-            seen = set()
-            for item in source:
-                text = str(item or "").strip()
-                if not text:
-                    continue
-                for part in text.split(","):
-                    token = part.strip()
-                    if not token or token in seen:
-                        continue
-                    seen.add(token)
-                    values.append(token)
-            return values
-
-        def _build_js_runtime_dict(values):
-            runtime_map = {}
-            for value in values:
-                runtime_name = value
-                runtime_path = None
-                if ":" in value:
-                    runtime_name, runtime_path = value.split(":", 1)
-                    runtime_name = runtime_name.strip()
-                    runtime_path = runtime_path.strip() or None
-                if not runtime_name:
-                    continue
-                runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
-            return runtime_map
 
         lower_error = stderr_output.lower()
         should_escalate_js = any(
@@ -3766,7 +3804,7 @@ def preview_direct_url(url, config):
 
         video_id = extract_video_id(url)
         _log_event(
-            logging.WARNING,
+            logging.INFO,
             "preview_direct_url_extract_failed",
             url=url,
             source=resolve_source(url),
