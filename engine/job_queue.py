@@ -1767,6 +1767,10 @@ class YouTubeAdapter:
                 ext = final_format or "mkv"
             template = audio_template if audio_mode else filename_template
             cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
+            if audio_mode and str(effective_media_intent or "").strip().lower() == "music_track":
+                normalized_cleaned = str(cleaned_name or "").replace("\\", "/")
+                if not normalized_cleaned.startswith("Music/"):
+                    raise RuntimeError("music_filename_contract_violation")
 
             if stop_event and stop_event.is_set():
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -3110,9 +3114,13 @@ def download_with_ytdlp(
 ):
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
         raise CancelledError(cancel_reason or "Cancelled by user")
-    # Use an ID-based template in temp_dir (CLI parity and avoids title/path edge cases).
-    # The final user-facing name is applied later when we move/rename the completed file.
-    output_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
+    # Temp template:
+    # - video: include title/uploader/id so finalization can recover metadata even if probe fails
+    # - music: keep id-based temp naming (final canonical MB naming is applied later)
+    if audio_mode:
+        output_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
+    else:
+        output_template = os.path.join(temp_dir, "%(title).200s - %(uploader).120s - %(id)s.%(ext)s")
     context = {
         "operation": "download",
         "url": url,
@@ -3732,9 +3740,64 @@ def preview_direct_url(url, config):
     if cookie_file:
         opts["cookiefile"] = cookie_file
 
+    def _youtube_oembed_fallback(target_url: str, video_id: str | None):
+        oembed_title = None
+        oembed_author = None
+        oembed_thumbnail = None
+        candidate_urls = []
+        if target_url:
+            candidate_urls.append(target_url)
+        if video_id:
+            watch_url = f"https://www.youtube.com/watch?v={video_id}"
+            if watch_url not in candidate_urls:
+                candidate_urls.append(watch_url)
+            short_url = f"https://youtu.be/{video_id}"
+            if short_url not in candidate_urls:
+                candidate_urls.append(short_url)
+        for candidate_url in candidate_urls:
+            try:
+                oembed_resp = requests.get(
+                    "https://www.youtube.com/oembed",
+                    params={"url": candidate_url, "format": "json"},
+                    timeout=5,
+                )
+                if not oembed_resp.ok:
+                    continue
+                oembed_data = oembed_resp.json() if oembed_resp.content else {}
+                if not isinstance(oembed_data, dict):
+                    continue
+                oembed_title = str(oembed_data.get("title") or "").strip() or oembed_title
+                oembed_author = str(oembed_data.get("author_name") or "").strip() or oembed_author
+                oembed_thumbnail = str(oembed_data.get("thumbnail_url") or "").strip() or oembed_thumbnail
+                if oembed_title and oembed_author:
+                    break
+            except Exception:
+                continue
+        return oembed_title, oembed_author, oembed_thumbnail
+
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
+        meta = extract_meta(info, fallback_url=url)
+        title = meta.get("title")
+        uploader = meta.get("channel") or meta.get("artist")
+        thumb = meta.get("thumbnail_url")
+        if not (title and uploader):
+            video_id = extract_video_id(url)
+            oembed_title, oembed_author, oembed_thumbnail = _youtube_oembed_fallback(url, video_id)
+            title = title or oembed_title or (f"YouTube Video ({video_id})" if video_id else "YouTube Video")
+            uploader = uploader or oembed_author or "YouTube"
+            thumb = thumb or oembed_thumbnail or (
+                f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+            )
+        return {
+            "title": title,
+            "uploader": uploader,
+            "thumbnail_url": thumb,
+            "url": meta.get("url") or url,
+            "source": resolve_source(url),
+            "duration_sec": info.get("duration") if isinstance(info, dict) else None,
+        }
     except Exception as exc:
         def _normalized_key(key):
             return str(key or "").strip().lower().replace("_", "").replace(" ", "")
@@ -3803,33 +3866,25 @@ def preview_direct_url(url, config):
                 }
 
         video_id = extract_video_id(url)
+        oembed_title, oembed_author, oembed_thumbnail = _youtube_oembed_fallback(url, video_id)
         _log_event(
-            logging.INFO,
+            logging.WARNING,
             "preview_direct_url_extract_failed",
             url=url,
             source=resolve_source(url),
             error=str(exc),
         )
         return {
-            "title": f"YouTube Video ({video_id})" if video_id else "YouTube Video",
-            "uploader": "YouTube",
+            "title": oembed_title or (f"YouTube Video ({video_id})" if video_id else "YouTube Video"),
+            "uploader": oembed_author or "YouTube",
             "thumbnail_url": (
-                f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+                oembed_thumbnail
+                or (f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None)
             ),
             "url": url,
             "source": resolve_source(url),
             "duration_sec": None,
         }
-
-    meta = extract_meta(info, fallback_url=url)
-    return {
-        "title": meta.get("title"),
-        "uploader": meta.get("channel") or meta.get("artist"),
-        "thumbnail_url": meta.get("thumbnail_url"),
-        "url": meta.get("url") or url,
-        "source": resolve_source(url),
-        "duration_sec": info.get("duration") if isinstance(info, dict) else None,
-    }
 
 
 def extract_meta(info, *, fallback_url=None):

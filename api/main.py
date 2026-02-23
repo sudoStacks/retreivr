@@ -1342,6 +1342,45 @@ def _safe_filename(name):
     return cleaned or "download"
 
 
+def _resolve_direct_url_mode(
+    *,
+    media_type: str | None,
+    media_intent: str | None,
+    music_mode: bool = False,
+) -> tuple[str, str, bool]:
+    normalized_intent = str(media_intent or "").strip().lower()
+    if bool(music_mode) or normalized_intent == "music_track" or is_music_media_type(media_type):
+        return "music", "music_track", True
+
+    resolved_media_type = str(media_type or "").strip().lower() or "video"
+    resolved_media_intent = str(media_intent or "").strip().lower() or "episode"
+    return resolved_media_type, resolved_media_intent, False
+
+
+def _assert_music_canonical_metadata_contract(meta: dict) -> None:
+    if not isinstance(meta, dict):
+        raise RuntimeError("music_track_requires_mb_bound_metadata")
+    try:
+        track_number = int(meta.get("track_number"))
+    except Exception:
+        track_number = 0
+    try:
+        disc_number = int(meta.get("disc_number") or meta.get("disc") or 0)
+    except Exception:
+        disc_number = 0
+    required_present = all(
+        str(meta.get(key) or "").strip()
+        for key in (
+            "album",
+            "release_date",
+            "mb_release_id",
+            "mb_release_group_id",
+        )
+    )
+    if not required_present or track_number <= 0 or disc_number <= 0:
+        raise RuntimeError("music_track_requires_mb_bound_metadata")
+
+
 def _file_id_from_path(path):
     if not path:
         return None
@@ -1483,27 +1522,29 @@ def _run_immediate_download_to_client(
     audio_template = config.get("audio_filename_template") or config.get("music_filename_template")
 
     raw_final_format = final_format_override
-    is_music_direct = is_music_media_type(media_type) or str(media_intent or "").strip().lower() == "music_track"
+    resolved_media_type, resolved_media_intent, audio_mode = _resolve_direct_url_mode(
+        media_type=media_type,
+        media_intent=media_intent,
+        music_mode=False,
+    )
     normalized_format = _normalize_format(raw_final_format)
     normalized_audio_format = _normalize_audio_format(raw_final_format)
-    if is_music_direct:
-        audio_mode = True
-        final_format = (
-            normalized_audio_format
-            or _normalize_audio_format(config.get("music_final_format"))
-            or _normalize_audio_format(config.get("audio_final_format"))
-            or "mp3"
-        )
+    if audio_mode:
+        raise RuntimeError("music_client_delivery_unsupported")
     else:
-        audio_mode = bool(normalized_audio_format)
-        final_format = normalized_audio_format if audio_mode else normalized_format
+        final_format = (
+            normalized_format
+            or _normalize_format(config.get("final_format"))
+            or _normalize_format(config.get("video_final_format"))
+            or "mkv"
+        )
 
     cookie_file = resolve_cookiefile_for_context(
         {
             "operation": "download",
             "url": url,
-            "media_type": media_type,
-            "media_intent": media_intent,
+            "media_type": resolved_media_type,
+            "media_intent": resolved_media_intent,
             "job_id": job_id,
             "origin": origin,
         },
@@ -1532,8 +1573,8 @@ def _run_immediate_download_to_client(
             final_format=final_format,
             cookie_file=cookie_file,
             stop_event=stop_event,
-            media_type=media_type,
-            media_intent=media_intent,
+            media_type=resolved_media_type,
+            media_intent=resolved_media_intent,
             job_id=job_id,
             origin=origin,
             resolved_destination=None,
@@ -1657,11 +1698,11 @@ def _run_direct_url_with_cli(
     outtmpl = os.path.join(temp_dir, "%(title).200s-%(id)s.%(ext)s")
 
     # Build CLI args through canonical yt-dlp option authority.
-    cli_media_type = media_type
-    cli_media_intent = media_intent
-    if bool(music_mode) or str(media_intent or "").strip().lower() == "music_track":
-        cli_media_type = "music"
-        cli_media_intent = "music_track"
+    cli_media_type, cli_media_intent, audio_mode = _resolve_direct_url_mode(
+        media_type=media_type,
+        media_intent=media_intent,
+        music_mode=music_mode,
+    )
 
     cli_context = {
         "operation": "download",
@@ -1723,7 +1764,6 @@ def _run_direct_url_with_cli(
     )
 
     try:
-        audio_mode = is_music_media_type(cli_media_type)
         resolved_final_format = final_format_override
         if audio_mode:
             resolved_final_format = (
@@ -1731,6 +1771,13 @@ def _run_direct_url_with_cli(
                 or _normalize_audio_format(config.get("music_final_format"))
                 or _normalize_audio_format(config.get("audio_final_format"))
                 or "mp3"
+            )
+        else:
+            resolved_final_format = (
+                _normalize_format(final_format_override)
+                or _normalize_format(config.get("final_format"))
+                or _normalize_format(config.get("video_final_format"))
+                or "mkv"
             )
         info, local_file = download_with_ytdlp(
             url,
@@ -1811,14 +1858,23 @@ def _run_direct_url_with_cli(
                 meta["mb_recording_id"] = canonical.get("recording_mbid")
                 meta["mb_release_id"] = canonical.get("mb_release_id")
                 meta["mb_release_group_id"] = canonical.get("mb_release_group_id")
+            _assert_music_canonical_metadata_contract(meta)
         elif not ext:
             ext = _normalize_format(resolved_final_format) or "mkv"
 
         # Enforce canonical final naming:
         # - video: "<title> - <channel>.<ext>"
         # - music: canonical MB metadata path via build_audio_filename()
-        filename_template = None if not audio_mode else (config.get("audio_filename_template") or config.get("music_filename_template"))
+        filename_template = (
+            config.get("audio_filename_template") or config.get("music_filename_template")
+            if audio_mode
+            else config.get("filename_template")
+        )
         cleaned_name = build_output_filename(meta, video_id, ext, filename_template, audio_mode)
+        if audio_mode:
+            normalized_cleaned = str(cleaned_name or "").replace("\\", "/")
+            if not normalized_cleaned.startswith("Music/"):
+                raise RuntimeError("music_filename_contract_violation")
         final_path = os.path.join(dest_dir, cleaned_name)
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
         final_path = resolve_collision_path(final_path)
