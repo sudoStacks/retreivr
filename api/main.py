@@ -55,7 +55,6 @@ from engine.job_queue import (
     DownloadJobStore,
     DownloadWorkerEngine,
     atomic_move,
-    build_ytdlp_cli_invocation,
     build_download_job_payload,
     build_output_filename,
     ensure_mb_bound_music_track,
@@ -69,7 +68,6 @@ from engine.job_queue import (
     resolve_source,
     resolve_media_intent,
     resolve_media_type,
-    resolve_cookiefile_for_context,
     resolve_collision_path,
     extract_video_id,
     is_music_media_type,
@@ -1516,17 +1514,6 @@ def _run_immediate_download_to_client(
             or "mkv"
         )
 
-    cookie_file = resolve_cookiefile_for_context(
-        {
-            "operation": "download",
-            "url": url,
-            "media_type": resolved_media_type,
-            "media_intent": resolved_media_intent,
-            "job_id": job_id,
-            "origin": origin,
-        },
-        config,
-    )
     logging.info(
         json.dumps(
             safe_json(
@@ -1548,7 +1535,7 @@ def _run_immediate_download_to_client(
             config,
             audio_mode=audio_mode,
             final_format=final_format,
-            cookie_file=cookie_file,
+            cookie_file=None,
             stop_event=stop_event,
             media_type=resolved_media_type,
             media_intent=resolved_media_intent,
@@ -1671,70 +1658,25 @@ def _run_direct_url_with_cli(
         )
     )
 
-    # Output template: keep simple and CLI-equivalent
-    # Note: if the template is absolute, yt-dlp ignores --paths; so keep it absolute here.
-    outtmpl = os.path.join(temp_dir, "%(title).200s-%(id)s.%(ext)s")
-
-    # Build CLI args through canonical yt-dlp option authority.
+    # Resolve direct-url mode once and execute through the canonical download_with_ytdlp path.
     cli_media_type, cli_media_intent, audio_mode = _resolve_direct_url_mode(
         media_type=media_type,
         media_intent=media_intent,
         music_mode=music_mode,
     )
 
-    cli_context = {
-        "operation": "download",
-        "url": url,
-        "final_format": final_format_override,
-        "output_template": outtmpl,
-        "config": config,
-        "cookie_file": None,
-        "overrides": (config or {}).get("yt_dlp_opts") or {},
-        "media_type": cli_media_type,
-        "media_intent": cli_media_intent,
-        "origin": "api",
-    }
-    args = build_ytdlp_cli_invocation(cli_context)["argv"]
-
-    def _redact_cli_args(argv: list[str]) -> list[str]:
-        redacted: list[str] = []
-        i = 0
-        while i < len(argv):
-            token = argv[i]
-            if token in {"--cookies", "--cookiefile"}:
-                redacted.append(token)
-                if i + 1 < len(argv):
-                    redacted.append("<redacted>")
-                    i += 2
-                    continue
-            redacted.append(token)
-            i += 1
-        return redacted
-
     logging.info(
         json.dumps(
             safe_json(
                 {
-                    "message": "DIRECT_URL_CANONICAL_ARGV",
-                    "job_id": job_id,
-                    "argv": _redact_cli_args(args),
-                }
-            ),
-            sort_keys=True,
-        )
-    )
-
-    logging.info(
-        json.dumps(
-            safe_json(
-                {
-                    "message": "DIRECT_URL_CLI_START",
+                    "message": "DIRECT_URL_DOWNLOAD_START",
                     "url": url,
                     "job_id": job_id,
                     "destination": dest_dir,
-                    "outtmpl": outtmpl,
                     "final_format": final_format_override,
-                    "args": _redact_cli_args(args),
+                    "media_type": cli_media_type,
+                    "media_intent": cli_media_intent,
+                    "audio_mode": bool(audio_mode),
                 }
             ),
             sort_keys=True,
@@ -4305,11 +4247,11 @@ async def create_search_request(request: dict = Body(...)):
         normalized = normalize_search_payload(raw_payload, default_sources=enabled_sources)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    music_candidates = []
-    music_resolution = None
     if bool(normalized.get("music_mode")):
-        music_candidates = _mb_service().search_release_groups(str(normalized.get("query") or ""), limit=5)
-        logger.info(f"[MUSIC] mode=ON candidates={len(music_candidates)} resolution=null")
+        raise HTTPException(
+            status_code=400,
+            detail="music_mode_requests_must_use_api_music_search",
+        )
     logging.debug(
         "Home search: music_mode=%s query=%s",
         bool(normalized.get("music_mode")),
@@ -4326,8 +4268,8 @@ async def create_search_request(request: dict = Body(...)):
             "detected_intent": intent.type.value,
             "identifier": intent.identifier,
             "music_mode": bool(normalized["music_mode"]),
-            "music_candidates": music_candidates,
-            "music_resolution": music_resolution,
+            "music_candidates": [],
+            "music_resolution": None,
         }
 
     if "source_priority" not in raw_payload or not raw_payload.get("source_priority"):
@@ -4382,8 +4324,8 @@ async def create_search_request(request: dict = Body(...)):
     return {
         "request_id": request_id,
         "music_mode": bool(normalized["music_mode"]),
-        "music_candidates": music_candidates,
-        "music_resolution": music_resolution,
+        "music_candidates": [],
+        "music_resolution": None,
     }
 
 

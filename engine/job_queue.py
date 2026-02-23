@@ -2852,33 +2852,6 @@ def build_ytdlp_invocation(job, context):
     }
 
 
-def build_ytdlp_cli_invocation(context):
-    """
-    Canonical yt-dlp CLI invocation wrapper.
-    Uses the same option authority as Python API execution.
-    """
-    opts = build_ytdlp_opts(context)
-    url = str(context.get("url") or "").strip()
-    if not url:
-        raise ValueError("url is required for yt-dlp CLI invocation")
-    argv = _render_ytdlp_cli_argv(opts, url)
-    return {"opts": opts, "argv": argv}
-
-
-def _build_audio_postprocessors(target_format):
-    preferred = _normalize_audio_format(target_format) or "mp3"
-    if preferred not in _AUDIO_FORMATS:
-        logging.warning("Unsupported audio format %s; defaulting to mp3", preferred)
-        preferred = "mp3"
-    return [
-        {
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": preferred,
-            "preferredquality": "0",
-        }
-    ]
-
-
 def _resolve_target_audio_format(context, config, output_template):
     global _MUSIC_AUDIO_FORMAT_WARNED
     output_template = output_template if isinstance(output_template, dict) else {}
@@ -3050,6 +3023,55 @@ def _argv_to_redacted_cli(argv):
         redacted.append(tok)
         i += 1
     return shlex.join(redacted)
+
+
+
+def _normalized_config_key(key):
+    return str(key or "").strip().lower().replace("_", "").replace(" ", "")
+
+
+def _extract_config_js_runtime_values(cfg):
+    if not isinstance(cfg, dict):
+        return []
+    raw_value = None
+    for raw_key, candidate in cfg.items():
+        if _normalized_config_key(raw_key) in {"jsruntime", "jsruntimes"}:
+            raw_value = candidate
+            break
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, (list, tuple, set)):
+        source = list(raw_value)
+    else:
+        source = [raw_value]
+    values = []
+    seen = set()
+    for item in source:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        for part in text.split(","):
+            token = part.strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            values.append(token)
+    return values
+
+
+def _build_js_runtime_dict(values):
+    runtime_map = {}
+    for value in values:
+        runtime_name = value
+        runtime_path = None
+        if ":" in value:
+            runtime_name, runtime_path = value.split(":", 1)
+            runtime_name = runtime_name.strip()
+            runtime_path = runtime_path.strip() or None
+        if not runtime_name:
+            continue
+        runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
+    return runtime_map
 
 
 def _format_summary(info):
@@ -3242,51 +3264,6 @@ def download_with_ytdlp(
 
     from subprocess import DEVNULL, CalledProcessError
     info = None
-    def _normalized_key(key):
-        return str(key or "").strip().lower().replace("_", "").replace(" ", "")
-
-    def _extract_config_js_runtime_values(cfg):
-        if not isinstance(cfg, dict):
-            return []
-        raw_value = None
-        for raw_key, candidate in cfg.items():
-            if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
-                raw_value = candidate
-                break
-        if raw_value is None:
-            return []
-        if isinstance(raw_value, (list, tuple, set)):
-            source = list(raw_value)
-        else:
-            source = [raw_value]
-        values = []
-        seen = set()
-        for item in source:
-            text = str(item or "").strip()
-            if not text:
-                continue
-            for part in text.split(","):
-                token = part.strip()
-                if not token or token in seen:
-                    continue
-                seen.add(token)
-                values.append(token)
-        return values
-
-    def _build_js_runtime_dict(values):
-        runtime_map = {}
-        for value in values:
-            runtime_name = value
-            runtime_path = None
-            if ":" in value:
-                runtime_name, runtime_path = value.split(":", 1)
-                runtime_name = runtime_name.strip()
-                runtime_path = runtime_path.strip() or None
-            if not runtime_name:
-                continue
-            runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
-        return runtime_map
-
     # Always get metadata via API (for output file info, etc.)
     try:
         probe_opts = copy.deepcopy(opts)
@@ -3792,51 +3769,6 @@ def preview_direct_url(url, config):
             "duration_sec": info.get("duration") if isinstance(info, dict) else None,
         }
     except Exception as exc:
-        def _normalized_key(key):
-            return str(key or "").strip().lower().replace("_", "").replace(" ", "")
-
-        def _extract_config_js_runtime_values(cfg):
-            if not isinstance(cfg, dict):
-                return []
-            raw_value = None
-            for raw_key, candidate in cfg.items():
-                if _normalized_key(raw_key) in {"jsruntime", "jsruntimes"}:
-                    raw_value = candidate
-                    break
-            if raw_value is None:
-                return []
-            if isinstance(raw_value, (list, tuple, set)):
-                source = list(raw_value)
-            else:
-                source = [raw_value]
-            values = []
-            seen = set()
-            for item in source:
-                text = str(item or "").strip()
-                if not text:
-                    continue
-                for part in text.split(","):
-                    token = part.strip()
-                    if not token or token in seen:
-                        continue
-                    seen.add(token)
-                    values.append(token)
-            return values
-
-        def _build_js_runtime_dict(values):
-            runtime_map = {}
-            for value in values:
-                runtime_name = value
-                runtime_path = None
-                if ":" in value:
-                    runtime_name, runtime_path = value.split(":", 1)
-                    runtime_name = runtime_name.strip()
-                    runtime_path = runtime_path.strip() or None
-                if not runtime_name:
-                    continue
-                runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
-            return runtime_map
-
         js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
         if js_runtime_map:
             retry_opts = dict(opts)
@@ -3860,20 +3792,24 @@ def preview_direct_url(url, config):
 
         video_id = extract_video_id(url)
         oembed_title, oembed_author, oembed_thumbnail = _youtube_oembed_fallback(url, video_id)
+        fallback_title = oembed_title or (f"YouTube Video ({video_id})" if video_id else "YouTube Video")
+        fallback_uploader = oembed_author or "YouTube"
+        fallback_thumbnail = (
+            oembed_thumbnail
+            or (f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None)
+        )
+        fallback_has_core = bool(fallback_title and fallback_uploader)
         _log_event(
-            logging.WARNING,
-            "preview_direct_url_extract_failed",
+            logging.INFO if fallback_has_core else logging.WARNING,
+            "preview_direct_url_extract_failed_fallback_used" if fallback_has_core else "preview_direct_url_extract_failed",
             url=url,
             source=resolve_source(url),
             error=str(exc),
         )
         return {
-            "title": oembed_title or (f"YouTube Video ({video_id})" if video_id else "YouTube Video"),
-            "uploader": oembed_author or "YouTube",
-            "thumbnail_url": (
-                oembed_thumbnail
-                or (f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None)
-            ),
+            "title": fallback_title,
+            "uploader": fallback_uploader,
+            "thumbnail_url": fallback_thumbnail,
             "url": url,
             "source": resolve_source(url),
             "duration_sec": None,

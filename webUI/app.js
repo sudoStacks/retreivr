@@ -1728,12 +1728,6 @@ function setHomeMusicMode(enabled, { persist = true, clearResultsOnDisable = tru
   }
 }
 
-function loadHomeMusicModePreference() {
-  const raw = localStorage.getItem(HOME_MUSIC_MODE_KEY);
-  state.homeMusicMode = raw === "true";
-  updateHomeMusicModeUI();
-}
-
 function saveHomeMusicModePreference() {
   localStorage.setItem(HOME_MUSIC_MODE_KEY, state.homeMusicMode ? "true" : "false");
 }
@@ -1933,17 +1927,6 @@ function normalizeMusicSearchResults(rawResults) {
     .filter(Boolean);
 }
 
-function renderHomeMusicSearchResults(results, query = "") {
-  const normalized = normalizeMusicSearchResults(results);
-  const payload = {
-    artists: [],
-    albums: [],
-    tracks: normalized,
-    mode_used: "track",
-  };
-  renderMusicModeResults(payload, query);
-}
-
 async function enqueueAlbum(releaseGroupMbid) {
   return fetchJson("/api/music/album/download", {
     method: "POST",
@@ -1999,17 +1982,6 @@ function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
   }
 }
 
-async function enqueueTrack(recordingMbid, releaseMbid) {
-  return fetchJson("/api/music/enqueue", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      recording_mbid: String(recordingMbid || "").trim(),
-      release_mbid: String(releaseMbid || "").trim(),
-    }),
-  });
-}
-
 async function enqueueMusicTrack(payload = {}) {
   return fetchJson("/api/music/enqueue", {
     method: "POST",
@@ -2030,6 +2002,29 @@ async function enqueueMusicTrack(payload = {}) {
       music_mode: true,
     }),
   });
+}
+
+function buildMusicTrackEnqueuePayload({ button, result }) {
+  const recording = String(button?.dataset?.recordingMbid || "").trim();
+  const release = String(button?.dataset?.releaseMbid || "").trim();
+  const releaseGroup = String(button?.dataset?.releaseGroupMbid || "").trim();
+  const payload = {
+    recording_mbid: recording,
+    release_mbid: release,
+    release_group_mbid: releaseGroup,
+    destination: String($("#home-destination")?.value || "").trim() || null,
+    final_format: String($("#home-format")?.value || "").trim() || null,
+  };
+  if (result && typeof result === "object") {
+    payload.artist = result.artist || null;
+    payload.track = result.track || null;
+    payload.album = result.album || null;
+    payload.release_date = result.release_year || null;
+    payload.track_number = result.track_number || null;
+    payload.disc_number = result.disc_number || null;
+    payload.duration_ms = result.duration_ms || null;
+  }
+  return payload;
 }
 
 function renderMusicModeResults(response, query = "") {
@@ -2321,32 +2316,6 @@ async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   showHomeResults(true);
   startHomeResultPolling(data.request_id);
   await runSearchResolutionOnce({ preferRequestId: data.request_id, showMessage: false });
-}
-
-async function enqueueHomeMusicResult(resultKey, button, messageEl) {
-  const result = state.homeMusicResultMap[resultKey];
-  if (!result) {
-    throw new Error("Music result no longer available");
-  }
-  const destination = $("#home-destination")?.value.trim() || null;
-  const finalFormat = $("#home-format")?.value.trim() || null;
-  const payload = {
-    ...result,
-    destination,
-    final_format: finalFormat,
-    music_mode: true,
-  };
-  const response = await fetchJson("/api/music/enqueue", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (button) {
-    button.disabled = true;
-    button.textContent = "Queued...";
-  }
-  const statusText = response?.created ? `Queued job ${response.job_id}` : "Already queued";
-  setNotice(messageEl, statusText, false);
 }
 
 function normalizeMusicAlbumCandidates(rawCandidates) {
@@ -4082,41 +4051,6 @@ async function handleHomeDirectUrlPreview(url, destination, messageEl) {
   }
 }
 
-async function createSearchRequest(autoEnqueue = true) {
-  const messageEl = $("#search-create-message");
-  const destinationValue = $("#search-destination")?.value.trim() || "";
-  const musicToggle = document.getElementById("music-mode-toggle");
-  const musicModeEnabled = !!state.homeMusicMode || !!(musicToggle && musicToggle.checked);
-  if (musicModeEnabled) {
-    setNotice(messageEl, "Music Mode uses Home search only.", true);
-    return;
-  }
-  if (hasInvalidDestinationValue(destinationValue)) {
-    setNotice(messageEl, "Destination path is invalid; please select a folder within downloads.", true);
-    return;
-  }
-  try {
-    // Source validation is legacy adapter-search behavior and only applies outside Music Mode.
-    const sources = musicModeEnabled ? [] : getSearchSourcePriority();
-    if (!musicModeEnabled && !sources.length) {
-      setNotice(messageEl, "Select at least one source", true);
-      return;
-    }
-    const payload = buildSearchRequestPayload(sources, { autoEnqueue });
-    const modeLabel = autoEnqueue ? "Search & Download" : "Search Only";
-    setNotice(messageEl, `${modeLabel}: creating request...`, false);
-    const data = await fetchJson("/api/search/requests", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    setNotice(messageEl, `${modeLabel}: created ${data.request_id}`, false);
-    await runSearchResolutionOnce({ preferRequestId: data.request_id, showMessage: false });
-  } catch (err) {
-    setNotice(messageEl, `Create failed: ${err.message}`, true);
-  }
-}
-
 
 async function runSearchResolutionOnce({ preferRequestId = null, showMessage = true } = {}) {
   const messageEl = $("#search-requests-message");
@@ -5607,23 +5541,6 @@ function bindEvents() {
         await handleHomeDirectUrl(directUrl, $("#home-destination")?.value.trim() || "", $("#home-search-message"));
         return;
       }
-      const musicButton = event.target.closest('button[data-action="home-music-enqueue"]');
-      if (musicButton) {
-        if (musicButton.disabled) return;
-        const resultKey = musicButton.dataset.musicResultKey;
-        if (!resultKey) return;
-        const originalText = musicButton.textContent;
-        musicButton.disabled = true;
-        musicButton.textContent = "Queuing...";
-        try {
-          await enqueueHomeMusicResult(resultKey, musicButton, $("#home-search-message"));
-        } catch (err) {
-          musicButton.disabled = false;
-          musicButton.textContent = originalText;
-          setNotice($("#home-search-message"), `Music enqueue failed: ${err.message}`, true);
-        }
-        return;
-      }
       const button = event.target.closest('button[data-action="home-download"]');
       if (!button) return;
       const itemId = button.dataset.itemId;
@@ -5652,8 +5569,6 @@ function bindEvents() {
     if (btn.disabled) return;
 
     const recording = String(btn.dataset.recordingMbid || "").trim();
-    const release = String(btn.dataset.releaseMbid || "").trim();
-    const releaseGroup = String(btn.dataset.releaseGroupMbid || "").trim();
     const resultKey = String(btn.dataset.musicResultKey || "").trim();
     const selectedResult = resultKey ? state.homeMusicResultMap[resultKey] : null;
 
@@ -5666,22 +5581,7 @@ function bindEvents() {
     btn.disabled = true;
     btn.textContent = "Queuing...";
     try {
-      const payload = {
-        recording_mbid: recording,
-        release_mbid: release,
-        release_group_mbid: releaseGroup,
-      };
-      if (selectedResult && typeof selectedResult === "object") {
-        payload.artist = selectedResult.artist || null;
-        payload.track = selectedResult.track || null;
-        payload.album = selectedResult.album || null;
-        payload.release_date = selectedResult.release_year || null;
-        payload.track_number = selectedResult.track_number || null;
-        payload.disc_number = selectedResult.disc_number || null;
-        payload.duration_ms = selectedResult.duration_ms || null;
-      }
-      payload.destination = String($("#home-destination")?.value || "").trim() || null;
-      payload.final_format = String($("#home-format")?.value || "").trim() || null;
+      const payload = buildMusicTrackEnqueuePayload({ button: btn, result: selectedResult });
       await enqueueMusicTrack(payload);
       btn.textContent = "Queued...";
       setNotice($("#home-search-message"), "Track queued.", false);

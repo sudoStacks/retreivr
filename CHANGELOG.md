@@ -90,6 +90,12 @@ All notable changes to this project will be documented here.
   - search destination NameError smoke path
 
 ### Changed
+- Direct URL execution telemetry now reflects the actual canonical runtime path: removed duplicate precomputed CLI-argv logging in favor of a single `DIRECT_URL_DOWNLOAD_START` event before canonical download execution.
+- Direct URL client-delivery and server-delivery flows now share one cookie-resolution authority (`download_with_ytdlp`), removing duplicate cookie handling and reducing mode drift.
+- Generic `/api/search/requests` now hard-rejects `music_mode=true` (`music_mode_requests_must_use_api_music_search`) to enforce metadata-first music search via `/api/music/search` only.
+- Music enqueue UI path on Home is now single-authority: duplicate legacy handlers/helpers removed, and all Music Mode track downloads use one canonical payload builder before calling `/api/music/enqueue`.
+- JS-runtime normalization for yt-dlp fallback/escalation is now centralized in shared helpers (used by both preview and download paths), eliminating duplicate nested implementations.
+- Direct URL preview fallback logging is now lower-noise: fallback-backed previews log `preview_direct_url_extract_failed_fallback_used` at info level; warning remains only for degraded fallback cases.
 - Direct URL execution now routes through the canonical smart download path (`download_with_ytdlp`) instead of a one-shot subprocess-only branch, aligning direct runs with worker retry behavior.
 - Download attempts now start with a clean baseline (no JS runtime / no remote components / no android client injection), then escalate only when failure signatures indicate challenge/runtime issues.
 - Smart retry escalation now applies targeted strategies from stderr signals:
