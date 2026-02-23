@@ -1763,7 +1763,15 @@ class YouTubeAdapter:
                     if isinstance(refreshed_template.get("canonical_metadata"), dict)
                     else {}
                 )
-                # For music_track jobs, canonical path fields come from bound canonical metadata only.
+                # For music_track jobs, canonical path/tag fields come from bound canonical metadata only.
+                canonical_artist = refreshed_canonical.get("artist") or refreshed_canonical.get("album_artist")
+                canonical_track = refreshed_canonical.get("track") or refreshed_canonical.get("title")
+                if canonical_artist:
+                    meta["artist"] = canonical_artist
+                    meta["album_artist"] = canonical_artist
+                if canonical_track:
+                    meta["track"] = canonical_track
+                    meta["title"] = canonical_track
                 meta["album"] = refreshed_canonical.get("album")
                 meta["release_date"] = refreshed_canonical.get("release_date")
                 meta["track_number"] = refreshed_canonical.get("track_number")

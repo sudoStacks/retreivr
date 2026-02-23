@@ -6,6 +6,48 @@ import sys
 
 from metadata.importers.base import TrackIntent
 
+_CANONICAL_IDS_PATH = Path(__file__).resolve().parent.parent / "engine" / "canonical_ids.py"
+_CANONICAL_SPEC = importlib.util.spec_from_file_location("engine_canonical_ids_for_import_resolution_test", _CANONICAL_IDS_PATH)
+_CANONICAL_MODULE = importlib.util.module_from_spec(_CANONICAL_SPEC)
+assert _CANONICAL_SPEC and _CANONICAL_SPEC.loader
+sys.modules[_CANONICAL_SPEC.name] = _CANONICAL_MODULE
+_CANONICAL_SPEC.loader.exec_module(_CANONICAL_MODULE)
+build_music_track_canonical_id = _CANONICAL_MODULE.build_music_track_canonical_id
+
+
+engine_pkg = type(sys)("engine")
+engine_pkg.__path__ = [str(Path(__file__).resolve().parent.parent / "engine")]
+sys.modules.setdefault("engine", engine_pkg)
+
+metadata_pkg = type(sys)("metadata")
+metadata_pkg.__path__ = [str(Path(__file__).resolve().parent.parent / "metadata")]
+sys.modules.setdefault("metadata", metadata_pkg)
+
+if "musicbrainzngs" not in sys.modules:
+    sys.modules["musicbrainzngs"] = type(sys)("musicbrainzngs")
+
+if "metadata.queue" not in sys.modules:
+    mq = type(sys)("metadata.queue")
+    setattr(mq, "enqueue_metadata", lambda *_args, **_kwargs: None)
+    sys.modules["metadata.queue"] = mq
+
+if "metadata.services" not in sys.modules:
+    ms = type(sys)("metadata.services")
+    ms.__path__ = []
+    sys.modules["metadata.services"] = ms
+if "metadata.services.musicbrainz_service" not in sys.modules:
+    mbs = type(sys)("metadata.services.musicbrainz_service")
+    setattr(mbs, "get_musicbrainz_service", lambda: None)
+    sys.modules["metadata.services.musicbrainz_service"] = mbs
+
+google_mod = type(sys)("google")
+google_auth_mod = type(sys)("google.auth")
+google_auth_ex_mod = type(sys)("google.auth.exceptions")
+setattr(google_auth_ex_mod, "RefreshError", Exception)
+sys.modules.setdefault("google", google_mod)
+sys.modules.setdefault("google.auth", google_auth_mod)
+sys.modules.setdefault("google.auth.exceptions", google_auth_ex_mod)
+
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "engine" / "import_pipeline.py"
 _SPEC = importlib.util.spec_from_file_location("engine_import_pipeline", _MODULE_PATH)
 _MODULE = importlib.util.module_from_spec(_SPEC)
@@ -175,7 +217,15 @@ def test_import_pipeline_resolves_musicbrainz_and_enqueues_music_track() -> None
     payload = queue_store.enqueued[0]
     assert payload["media_intent"] == "music_track"
     assert payload["media_type"] == "music"
-    assert payload["canonical_id"] == "music_track:mbid-1"
+    assert payload["canonical_id"] == build_music_track_canonical_id(
+        "Daft Punk",
+        "Discovery",
+        1,
+        "Harder Better Faster Stronger",
+        recording_mbid="mbid-1",
+        mb_release_id="release-1",
+        disc_number=1,
+    )
     assert payload["url"] == "musicbrainz://recording/mbid-1"
     output = payload["output_template"]
     assert output["recording_mbid"] == "mbid-1"
@@ -249,3 +299,47 @@ def test_import_pipeline_uses_single_batch_id_for_all_enqueued_items() -> None:
     second = queue_store.enqueued[1]["output_template"]["import_batch_id"]
     assert first == result.import_batch_id
     assert second == result.import_batch_id
+
+
+def test_import_pipeline_threshold_uses_app_config_when_wrapper_passed() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-threshold",
+                        "title": "Threshold Track",
+                        "ext:score": "80",
+                        "artist-credit": [{"name": "Artist"}],
+                        "release-list": [{"id": "release-threshold"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    intents = [
+        TrackIntent(
+            artist="Artist",
+            title="Threshold Track",
+            album="Album",
+            raw_line="",
+            source_format="m3u",
+        )
+    ]
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {"music_mb_binding_threshold": 0.90},
+        },
+    )
+
+    assert result.total_tracks == 1
+    assert result.resolved_count == 0
+    assert result.unresolved_count == 1
+    assert result.enqueued_count == 0
+    assert len(queue_store.enqueued) == 0

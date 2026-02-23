@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from metadata.importers.base import TrackIntent
 from engine.job_queue import DownloadJobStore, build_download_job_payload
+from engine.canonical_ids import build_music_track_canonical_id
 
 try:
     from engine.musicbrainz_binding import resolve_best_mb_pair
@@ -341,7 +342,16 @@ def _enqueue_music_track_job(
     disc_number: int | None,
     duration_ms: int | None,
 ) -> bool:
-    canonical_id = f"music_track:{recording_mbid}"
+    canonical_id = build_music_track_canonical_id(
+        artist,
+        album,
+        track_number,
+        title,
+        recording_mbid=recording_mbid,
+        mb_release_id=release_mbid,
+        mb_release_group_id=release_group_mbid,
+        disc_number=disc_number,
+    )
     canonical_metadata = {
         "artist": artist,
         "track": title,
@@ -402,14 +412,24 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     destination = None
     final_format_override = None
     if isinstance(config, dict):
+        threshold_source = config
+        if isinstance(runtime_config, dict) and runtime_config:
+            threshold_source = runtime_config
         try:
-            if config.get("music_mb_binding_threshold") is not None:
-                confidence_threshold = float(config.get("music_mb_binding_threshold"))
-            elif config.get("min_confidence") is not None:
-                confidence_threshold = float(config.get("min_confidence"))
+            threshold_value = None
+            if isinstance(threshold_source, dict):
+                threshold_value = threshold_source.get("music_mb_binding_threshold")
+                if threshold_value is None:
+                    threshold_value = threshold_source.get("min_confidence")
+            if threshold_value is not None:
+                confidence_threshold = float(threshold_value)
         except (TypeError, ValueError):
             confidence_threshold = _DEFAULT_CONFIDENCE_THRESHOLD
-        base_dir = config.get("base_dir")
+        if confidence_threshold > 1.0:
+            confidence_threshold = confidence_threshold / 100.0
+        confidence_threshold = max(0.0, min(confidence_threshold, 1.0))
+
+        base_dir = config.get("base_dir") or base_dir
         destination = config.get("destination_dir")
         final_format_override = config.get("final_format")
 

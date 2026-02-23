@@ -93,6 +93,14 @@ def test_music_enqueue_allows_optional_missing_fields(monkeypatch) -> None:
     assert canonical["track_number"] is None
     assert canonical["disc_number"] is None
     assert canonical["duration_ms"] is None
+    module = importlib.import_module("api.main")
+    assert captured["builder_kwargs"]["canonical_id"] == module._build_music_track_canonical_id(
+        "Artist",
+        "",
+        None,
+        "Song",
+        recording_mbid="rec-1",
+    )
 
 
 def test_music_enqueue_returns_structured_binding_failure(monkeypatch) -> None:

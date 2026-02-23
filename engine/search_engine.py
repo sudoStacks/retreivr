@@ -72,6 +72,7 @@ from engine.paths import DATA_DIR
 from engine.search_adapters import default_adapters
 from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
 from engine.musicbrainz_binding import _normalize_title_for_mb_lookup
+from engine.canonical_ids import build_music_track_canonical_id
 from metadata.canonical import CanonicalMetadataResolver
 
 REQUEST_STATUSES = {"pending", "resolving", "completed", "completed_with_skips", "failed"}
@@ -184,7 +185,32 @@ def _is_audio_final_format(value: str | None) -> bool:
 def _extract_canonical_id(metadata):
     if not isinstance(metadata, dict):
         return None
+
     external_ids = metadata.get("external_ids") or {}
+    recording_mbid = (
+        metadata.get("recording_mbid")
+        or metadata.get("mb_recording_id")
+        or external_ids.get("musicbrainz_recording_id")
+    )
+    if recording_mbid:
+        return build_music_track_canonical_id(
+            metadata.get("artist"),
+            metadata.get("album"),
+            metadata.get("track_number") or metadata.get("track_num"),
+            metadata.get("track") or metadata.get("title"),
+            recording_mbid=recording_mbid,
+            mb_release_id=(
+                metadata.get("mb_release_id")
+                or metadata.get("release_id")
+                or external_ids.get("musicbrainz_release_id")
+            ),
+            mb_release_group_id=(
+                metadata.get("mb_release_group_id")
+                or metadata.get("release_group_id")
+            ),
+            disc_number=metadata.get("disc_number") or metadata.get("disc_num"),
+        )
+
     for key in ("spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id"):
         value = external_ids.get(key)
         if value:

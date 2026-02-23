@@ -77,6 +77,7 @@ from engine.job_queue import (
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
 from engine.musicbrainz_binding import resolve_best_mb_pair, search_music_metadata
+from engine.canonical_ids import build_music_track_canonical_id
 from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
@@ -760,14 +761,26 @@ class IntentExecutePayload(BaseModel):
     identifier: str
 
 
-def _build_music_track_canonical_id(artist, album, track_number, track):
-    normalized_artist = str(artist or "").strip().lower()
-    normalized_album = str(album or "").strip().lower()
-    normalized_track_number = str(track_number or "").strip()
-    normalized_track = str(track or "").strip().lower()
-    return (
-        f"music_track:{normalized_artist}:{normalized_album}:"
-        f"{normalized_track_number}:{normalized_track}"
+def _build_music_track_canonical_id(
+    artist,
+    album,
+    track_number,
+    track,
+    *,
+    recording_mbid=None,
+    mb_release_id=None,
+    mb_release_group_id=None,
+    disc_number=None,
+):
+    return build_music_track_canonical_id(
+        artist,
+        album,
+        track_number,
+        track,
+        recording_mbid=recording_mbid,
+        mb_release_id=mb_release_id,
+        mb_release_group_id=mb_release_group_id,
+        disc_number=disc_number,
     )
 
 
@@ -877,6 +890,10 @@ class _IntentQueueAdapter:
                 normalized_album,
                 payload.get("track_number"),
                 normalized_track,
+                recording_mbid=normalized_recording_mbid,
+                mb_release_id=normalized_release_mbid,
+                mb_release_group_id=normalized_release_group_mbid,
+                disc_number=payload.get("disc_number"),
             )
             enqueue_payload = build_download_job_payload(
                 config=runtime_config,
@@ -4702,6 +4719,10 @@ def download_full_album(data: dict):
                     payload.get("album"),
                     payload.get("track_number"),
                     payload.get("track"),
+                    recording_mbid=payload.get("recording_mbid") or payload.get("mb_recording_id"),
+                    mb_release_id=payload.get("mb_release_id") or payload.get("release_id"),
+                    mb_release_group_id=payload.get("mb_release_group_id") or payload.get("release_group_id"),
+                    disc_number=payload.get("disc_number"),
                 )
                 queue.enqueue(payload)
                 tracks_enqueued += 1
@@ -4897,7 +4918,16 @@ def enqueue_music_track(data: dict = Body(...)):
         queue_store = DownloadJobStore(app.state.paths.db_path)
 
     placeholder_url = f"musicbrainz://recording/{recording_mbid}"
-    canonical_id = f"music_track:{recording_mbid}"
+    canonical_id = _build_music_track_canonical_id(
+        artist,
+        album,
+        track_number,
+        track,
+        recording_mbid=recording_mbid,
+        mb_release_id=mb_release_id,
+        mb_release_group_id=mb_release_group_id,
+        disc_number=disc_number,
+    )
     try:
         enqueue_payload = build_download_job_payload(
             config=runtime_config,

@@ -29,6 +29,8 @@ def _load_job_queue():
     _load_module("engine.json_utils", _ROOT / "engine" / "json_utils.py")
     _load_module("engine.paths", _ROOT / "engine" / "paths.py")
     _load_module("engine.search_scoring", _ROOT / "engine" / "search_scoring.py")
+    if "musicbrainzngs" not in sys.modules:
+        sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
     if "metadata.queue" not in sys.modules:
         metadata_queue = types.ModuleType("metadata.queue")
         metadata_queue.enqueue_metadata = lambda file_path, meta, config: None
@@ -249,3 +251,100 @@ def test_no_unknown_album_fallback_occurs(jq):
             },
             "mp3",
         )
+
+
+def test_music_worker_enforces_canonical_artist_and_track_for_finalize(jq, monkeypatch):
+    recording_mbid = "rec-canon"
+    release_id = "rel-canon"
+    fake_service = _FakeMBService(
+        recording_payload={
+            "recording": {
+                "id": recording_mbid,
+                "release-list": [{"id": release_id, "date": "2014-09-01"}],
+            }
+        },
+        release_payloads={
+            release_id: _valid_release_payload(
+                release_id=release_id,
+                recording_mbid=recording_mbid,
+                title="Canonical Album",
+                date="2014-09-01",
+                release_group_id="rg-canon",
+            ),
+        },
+    )
+    monkeypatch.setattr(jq, "get_musicbrainz_service", lambda: fake_service)
+
+    captured = {}
+
+    def _fake_finalize_download_artifact(**kwargs):
+        captured["meta"] = dict(kwargs.get("meta") or {})
+        final_path = Path("/tmp/final-canon.mp3")
+        final_path.write_bytes(b"ok")
+        return str(final_path), captured["meta"]
+
+    def _fake_download_with_ytdlp(*args, **kwargs):
+        temp_dir = Path(args[1])
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        out = temp_dir / "tmp.mp3"
+        out.write_bytes(b"ok")
+        return {"id": "vid-canon", "title": "YouTube Messy Title", "uploader": "Uploader"}, str(out)
+
+    monkeypatch.setattr(jq, "download_with_ytdlp", _fake_download_with_ytdlp)
+    monkeypatch.setattr(
+        jq,
+        "extract_meta",
+        lambda info, fallback_url=None: {
+            "video_id": info.get("id"),
+            "title": "YouTube Messy Title",
+            "artist": "Uploader",
+            "track": "YouTube Messy Title",
+        },
+    )
+    monkeypatch.setattr(jq, "finalize_download_artifact", _fake_finalize_download_artifact)
+
+    job = SimpleNamespace(
+        id="job-canon",
+        url="musicbrainz://recording/rec-canon",
+        source="music_import",
+        origin="import",
+        media_type="music",
+        media_intent="music_track",
+        resolved_destination="/downloads",
+        output_template={
+            "output_dir": "/downloads",
+            "music_final_format": "mp3",
+            "recording_mbid": recording_mbid,
+            "canonical_metadata": {
+                "artist": "Canonical Artist",
+                "track": "Canonical Track",
+                "album": "Canonical Album",
+                "release_date": "2014",
+                "track_number": 1,
+                "disc_number": 1,
+                "mb_release_id": release_id,
+                "mb_release_group_id": "rg-canon",
+            },
+        },
+    )
+
+    paths = SimpleNamespace(
+        single_downloads_dir="/downloads",
+        temp_downloads_dir=str(Path("/tmp") / "retreivr-test-canon"),
+        thumbs_dir=str(Path("/tmp") / "retreivr-test-thumbs"),
+    )
+
+    adapter = jq.YouTubeAdapter()
+    result = adapter.execute(
+        job,
+        {"music_final_format": "mp3", "final_format": "mkv"},
+        paths,
+        media_type="music",
+        media_intent="music_track",
+    )
+
+    assert result is not None
+    assert captured["meta"]["artist"] == "Canonical Artist"
+    assert captured["meta"]["album_artist"] == "Canonical Artist"
+    assert captured["meta"]["track"] == "Canonical Track"
+    assert captured["meta"]["title"] == "Canonical Track"
