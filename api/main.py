@@ -386,8 +386,18 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
     if run_type not in {"scheduled", "watcher"}:
         return
 
-    successes = int(getattr(status, "run_successes", 0) or 0)
-    failures = int(getattr(status, "run_failures", 0) or 0)
+    def _count(value) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, (list, tuple, set)):
+            return len(value)
+        try:
+            return int(value)
+        except Exception:
+            return 0
+
+    successes = _count(getattr(status, "run_successes", 0))
+    failures = _count(getattr(status, "run_failures", 0))
     attempted = successes + failures
 
     if attempted <= 0:
@@ -4121,6 +4131,9 @@ async def api_put_config_path(payload: ConfigPathRequest):
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
     app.state.config_path = target
+    normalized = safe_json(_strip_deprecated_fields(config))
+    app.state.loaded_config = normalized if isinstance(normalized, dict) else {}
+    app.state.config = app.state.loaded_config
     return {"path": app.state.config_path}
 
 
@@ -5661,6 +5674,10 @@ async def api_put_config(payload: dict = Body(...)):
                 os.unlink(tmp.name)
             except Exception:
                 pass
+
+    normalized_payload = safe_json(payload)
+    app.state.loaded_config = normalized_payload if isinstance(normalized_payload, dict) else {}
+    app.state.config = app.state.loaded_config
 
     if "schedule" in payload:
         schedule = _merge_schedule_config(payload.get("schedule"))
