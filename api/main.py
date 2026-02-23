@@ -60,6 +60,7 @@ from engine.job_queue import (
     build_output_filename,
     ensure_mb_bound_music_track,
     enqueue_media_metadata,
+    finalize_download_artifact,
     preview_direct_url,
     canonicalize_url,
     download_with_ytdlp,
@@ -1357,30 +1358,6 @@ def _resolve_direct_url_mode(
     return resolved_media_type, resolved_media_intent, False
 
 
-def _assert_music_canonical_metadata_contract(meta: dict) -> None:
-    if not isinstance(meta, dict):
-        raise RuntimeError("music_track_requires_mb_bound_metadata")
-    try:
-        track_number = int(meta.get("track_number"))
-    except Exception:
-        track_number = 0
-    try:
-        disc_number = int(meta.get("disc_number") or meta.get("disc") or 0)
-    except Exception:
-        disc_number = 0
-    required_present = all(
-        str(meta.get(key) or "").strip()
-        for key in (
-            "album",
-            "release_date",
-            "mb_release_id",
-            "mb_release_group_id",
-        )
-    )
-    if not required_present or track_number <= 0 or disc_number <= 0:
-        raise RuntimeError("music_track_requires_mb_bound_metadata")
-
-
 def _file_id_from_path(path):
     if not path:
         return None
@@ -1584,19 +1561,20 @@ def _run_immediate_download_to_client(
 
         meta = extract_meta(info, fallback_url=url)
         video_id = meta.get("video_id") or job_id
-        ext = os.path.splitext(local_file)[1].lstrip(".")
-        if audio_mode:
-            ext = final_format or "mp3"
-        elif not ext:
-            ext = final_format or "mkv"
         template = audio_template if audio_mode else filename_template
-        cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
-        final_path = os.path.join(temp_dir, cleaned_name)
-
-        if not audio_mode:
-            embed_metadata(local_file, meta, video_id, paths.thumbs_dir)
-        if final_path != local_file:
-            atomic_move(local_file, final_path)
+        final_path, _ = finalize_download_artifact(
+            local_file=local_file,
+            meta=meta,
+            fallback_id=video_id,
+            destination_dir=temp_dir,
+            audio_mode=audio_mode,
+            final_format=final_format,
+            template=template,
+            paths=paths,
+            config=config,
+            enforce_music_contract=False,
+            enqueue_audio_metadata=False,
+        )
 
         size = 0
         try:
@@ -1808,9 +1786,7 @@ def _run_direct_url_with_cli(
                 if not meta.get("thumbnail_url"):
                     meta["thumbnail_url"] = preview.get("thumbnail_url")
         video_id = meta.get("video_id") or extract_video_id(url) or job_id
-        ext = os.path.splitext(local_file)[1].lstrip(".")
         if audio_mode:
-            ext = _normalize_audio_format(resolved_final_format) or ext or "mp3"
             duration_sec = info.get("duration") if isinstance(info, dict) else None
             duration_ms = int(float(duration_sec) * 1000) if duration_sec else None
             binding_payload = {
@@ -1858,36 +1834,25 @@ def _run_direct_url_with_cli(
                 meta["mb_recording_id"] = canonical.get("recording_mbid")
                 meta["mb_release_id"] = canonical.get("mb_release_id")
                 meta["mb_release_group_id"] = canonical.get("mb_release_group_id")
-            _assert_music_canonical_metadata_contract(meta)
-        elif not ext:
-            ext = _normalize_format(resolved_final_format) or "mkv"
 
-        # Enforce canonical final naming:
-        # - video: "<title> - <channel>.<ext>"
-        # - music: canonical MB metadata path via build_audio_filename()
         filename_template = (
             config.get("audio_filename_template") or config.get("music_filename_template")
             if audio_mode
             else config.get("filename_template")
         )
-        cleaned_name = build_output_filename(meta, video_id, ext, filename_template, audio_mode)
-        if audio_mode:
-            normalized_cleaned = str(cleaned_name or "").replace("\\", "/")
-            if not normalized_cleaned.startswith("Music/"):
-                raise RuntimeError("music_filename_contract_violation")
-        final_path = os.path.join(dest_dir, cleaned_name)
-        os.makedirs(os.path.dirname(final_path), exist_ok=True)
-        final_path = resolve_collision_path(final_path)
-
-        if not audio_mode:
-            embed_metadata(local_file, meta, video_id, paths.thumbs_dir)
-
-        atomic_move(local_file, final_path)
-        if audio_mode:
-            try:
-                enqueue_media_metadata(final_path, meta, config)
-            except Exception:
-                pass
+        final_path, meta = finalize_download_artifact(
+            local_file=local_file,
+            meta=meta,
+            fallback_id=video_id,
+            destination_dir=dest_dir,
+            audio_mode=audio_mode,
+            final_format=resolved_final_format,
+            template=filename_template,
+            paths=paths,
+            config=config,
+            enforce_music_contract=bool(audio_mode and str(cli_media_intent or "").strip().lower() == "music_track"),
+            enqueue_audio_metadata=bool(audio_mode),
+        )
         moved = [final_path]
 
         # Finalize engine status for UI consumers (CLI-equivalent direct URL run)

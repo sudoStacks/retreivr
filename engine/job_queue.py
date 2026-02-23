@@ -1760,29 +1760,30 @@ class YouTubeAdapter:
                 meta["mb_release_id"] = refreshed_canonical.get("mb_release_id")
                 meta["mb_release_group_id"] = refreshed_canonical.get("mb_release_group_id")
             video_id = meta.get("video_id") or job.id
-            ext = os.path.splitext(local_file)[1].lstrip(".")
-            if audio_mode:
-                ext = final_format or "mp3"
-            elif not ext:
-                ext = final_format or "mkv"
             template = audio_template if audio_mode else filename_template
-            cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
-            if audio_mode and str(effective_media_intent or "").strip().lower() == "music_track":
-                normalized_cleaned = str(cleaned_name or "").replace("\\", "/")
-                if not normalized_cleaned.startswith("Music/"):
-                    raise RuntimeError("music_filename_contract_violation")
+            enforce_music_contract = bool(
+                audio_mode
+                and is_music_media_type(effective_media_type)
+                and str(effective_media_intent or "").strip().lower() == "music_track"
+            )
 
             if stop_event and stop_event.is_set():
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
 
-            if not audio_mode:
-                embed_metadata(local_file, meta, video_id, paths.thumbs_dir)
-
-            final_path = os.path.join(resolved_dir, cleaned_name)
-            final_path = resolve_collision_path(final_path)
-            os.makedirs(os.path.dirname(final_path), exist_ok=True)
-            atomic_move(local_file, final_path)
+            final_path, meta = finalize_download_artifact(
+                local_file=local_file,
+                meta=meta,
+                fallback_id=video_id,
+                destination_dir=resolved_dir,
+                audio_mode=audio_mode,
+                final_format=final_format,
+                template=template,
+                paths=paths,
+                config=config if isinstance(config, dict) else {},
+                enforce_music_contract=enforce_music_contract,
+                enqueue_audio_metadata=bool(music_mode),
+            )
             logger.info(f"[MUSIC] finalized file: {final_path}")
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1797,14 +1798,6 @@ class YouTubeAdapter:
                 except OSError:
                     pass
                 raise RuntimeError("empty_output_file")
-
-            # Only enqueue metadata if music_mode is True
-            if music_mode:
-                try:
-                    enqueue_media_metadata(final_path, meta, config)
-                except Exception:
-                    # Never raise or affect download success
-                    pass
 
             return final_path, meta
         except Exception:
@@ -4032,6 +4025,74 @@ def build_output_filename(meta, fallback_id, ext, template, audio_mode):
         except Exception:
             pass
     return f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}.{ext}"
+
+
+def _assert_music_canonical_metadata_contract(meta):
+    if not isinstance(meta, dict):
+        raise RuntimeError("music_track_requires_mb_bound_metadata")
+    try:
+        track_number = int(meta.get("track_number"))
+    except Exception:
+        track_number = 0
+    try:
+        disc_number = int(meta.get("disc_number") or meta.get("disc") or 0)
+    except Exception:
+        disc_number = 0
+    required_present = all(
+        str(meta.get(key) or "").strip()
+        for key in ("album", "release_date", "mb_release_id", "mb_release_group_id")
+    )
+    if not required_present or track_number <= 0 or disc_number <= 0:
+        raise RuntimeError("music_track_requires_mb_bound_metadata")
+
+
+def finalize_download_artifact(
+    *,
+    local_file,
+    meta,
+    fallback_id,
+    destination_dir,
+    audio_mode,
+    final_format,
+    template,
+    paths=None,
+    config=None,
+    enforce_music_contract=False,
+    enqueue_audio_metadata=False,
+):
+    if not local_file:
+        raise RuntimeError("missing_local_file_for_finalize")
+    meta = dict(meta or {})
+    fallback_id = str(fallback_id or "")
+    ext = os.path.splitext(local_file)[1].lstrip(".")
+    if audio_mode:
+        ext = _normalize_audio_format(final_format) or ext or "mp3"
+    elif not ext:
+        ext = _normalize_format(final_format) or "mkv"
+
+    cleaned_name = build_output_filename(meta, fallback_id, ext, template, audio_mode)
+    if audio_mode and enforce_music_contract:
+        _assert_music_canonical_metadata_contract(meta)
+        normalized_cleaned = str(cleaned_name or "").replace("\\", "/")
+        if not normalized_cleaned.startswith("Music/"):
+            raise RuntimeError("music_filename_contract_violation")
+
+    final_path = os.path.join(destination_dir, cleaned_name)
+    final_path = resolve_collision_path(final_path)
+    os.makedirs(os.path.dirname(final_path), exist_ok=True)
+
+    if not audio_mode and paths is not None and getattr(paths, "thumbs_dir", None):
+        embed_metadata(local_file, meta, fallback_id, paths.thumbs_dir)
+
+    atomic_move(local_file, final_path)
+
+    if audio_mode and enqueue_audio_metadata and isinstance(config, dict):
+        try:
+            enqueue_media_metadata(final_path, meta, config)
+        except Exception:
+            pass
+
+    return final_path, meta
 
 
 def resolve_collision_path(path):
