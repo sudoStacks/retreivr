@@ -77,7 +77,7 @@ from engine.job_queue import (
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
 from engine.musicbrainz_binding import resolve_best_mb_pair, search_music_metadata
-from engine.canonical_ids import build_music_track_canonical_id
+from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
 from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
@@ -968,10 +968,11 @@ class _IntentQueueAdapter:
         canonical_id = str(
             music_metadata.get("isrc")
             or music_metadata.get("mbid")
-            or external_ids.get("isrc")
-            or payload.get("spotify_track_id")
             or ""
-        ).strip() or None
+        ).strip() or extract_external_track_canonical_id(
+            external_ids,
+            fallback_spotify_id=payload.get("spotify_track_id"),
+        )
         enqueue_payload = build_download_job_payload(
             config=runtime_config,
             origin=origin,

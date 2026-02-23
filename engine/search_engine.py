@@ -72,7 +72,7 @@ from engine.paths import DATA_DIR
 from engine.search_adapters import default_adapters
 from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
 from engine.musicbrainz_binding import _normalize_title_for_mb_lookup
-from engine.canonical_ids import build_music_track_canonical_id
+from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
 from metadata.canonical import CanonicalMetadataResolver
 
 REQUEST_STATUSES = {"pending", "resolving", "completed", "completed_with_skips", "failed"}
@@ -211,11 +211,7 @@ def _extract_canonical_id(metadata):
             disc_number=metadata.get("disc_number") or metadata.get("disc_num"),
         )
 
-    for key in ("spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id"):
-        value = external_ids.get(key)
-        if value:
-            return str(value)
-    return None
+    return extract_external_track_canonical_id(external_ids)
 
 
 def _normalize_threshold(value, *, default=0.78):

@@ -11,6 +11,11 @@ def _pos_or_zero(value: Any) -> int:
     return parsed if parsed > 0 else 0
 
 
+def _strip_or_none(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
 def build_music_track_canonical_id(
     artist: Any,
     album: Any,
@@ -44,3 +49,17 @@ def build_music_track_canonical_id(
         f"music_track:{normalized_artist}:{normalized_album}:"
         f"{normalized_track_number}:{normalized_track}"
     )
+
+
+def extract_external_track_canonical_id(
+    external_ids: Any,
+    *,
+    fallback_spotify_id: Any = None,
+) -> str | None:
+    """Extract a stable external-id canonical key with deterministic priority."""
+    ids = external_ids if isinstance(external_ids, dict) else {}
+    for key in ("spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id"):
+        value = _strip_or_none(ids.get(key))
+        if value:
+            return value
+    return _strip_or_none(fallback_spotify_id)
