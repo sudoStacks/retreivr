@@ -128,11 +128,21 @@ def _process_item(item):
         os.path.basename(file_path),
         sorted([key for key, value in tags.items() if value not in (None, "")]),
     )
-    apply_tags(
-        file_path,
-        tags,
-        artwork,
-        source_title=source.get("source_title"),
-        allow_overwrite=bool(config.get("allow_overwrite_tags", True)),
-        dry_run=dry_run,
-    )
+    try:
+        apply_tags(
+            file_path,
+            tags,
+            artwork,
+            source_title=source.get("source_title"),
+            allow_overwrite=bool(config.get("allow_overwrite_tags", True)),
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        logging.error(
+            "music_metadata_tagging_failed file=%s ext=%s error=%s",
+            file_path,
+            os.path.splitext(file_path)[1].lower(),
+            exc,
+            exc_info=True,
+        )
+        return

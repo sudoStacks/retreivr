@@ -44,6 +44,7 @@ from engine.job_queue import (
     build_output_filename,
     record_download_history,
     resolve_collision_path,
+    finalize_download_artifact,
 )
 
 
@@ -168,3 +169,33 @@ def test_record_download_history_persists_channel_id(tmp_path) -> None:
         conn.close()
 
     assert row == ("xyz987", "xyz987", "UC123456")
+
+
+def test_finalize_audio_uses_actual_output_extension_over_config(tmp_path) -> None:
+    local_file = tmp_path / "downloaded.mp3"
+    local_file.write_bytes(b"audio-bytes")
+
+    final_path, _meta = finalize_download_artifact(
+        local_file=str(local_file),
+        meta={
+            "artist": "Artist",
+            "album": "Album",
+            "track": "Track",
+            "track_number": 1,
+            "disc_number": 1,
+            "release_date": "2011",
+            "mb_release_group_id": "rg-1",
+        },
+        fallback_id="abc123",
+        destination_dir=str(tmp_path / "out"),
+        audio_mode=True,
+        final_format="m4a",
+        template=None,
+        paths=None,
+        config={},
+        enforce_music_contract=False,
+        enqueue_audio_metadata=False,
+    )
+
+    assert final_path.endswith(".mp3")
+    assert Path(final_path).exists()

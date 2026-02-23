@@ -89,8 +89,8 @@ def test_video_job_builds_video_ytdlp_opts(jq) -> None:
     opts = jq.build_ytdlp_opts(context)
 
     assert context["audio_mode"] is False
-    assert opts.get("format") == "bestvideo+bestaudio/best"
-    assert opts.get("merge_output_format") == "webm"
+    assert opts.get("format") == "bestvideo[ext=webm]+bestaudio/bestvideo[ext=mp4]+bestaudio/best"
+    assert "merge_output_format" not in opts
     postprocessors = opts.get("postprocessors") or []
     assert not any(pp.get("key") == "FFmpegExtractAudio" for pp in postprocessors if isinstance(pp, dict))
 
@@ -125,3 +125,59 @@ def test_music_invariant_raises_if_video_fields_present(jq, monkeypatch) -> None
 
     with pytest.raises(RuntimeError, match="music_job_built_video_opts"):
         jq.build_ytdlp_opts(context)
+
+
+def test_music_job_uses_resolved_music_codec_for_extract_audio(jq) -> None:
+    context = {
+        "operation": "download",
+        "url": "https://www.youtube.com/watch?v=abc123xyz00",
+        "media_type": "music",
+        "media_intent": "music_track",
+        "final_format": "mkv",
+        "output_template": "%(id)s.%(ext)s",
+        "output_template_meta": {
+            "final_format": "mkv",
+            "music_final_format": "m4a",
+        },
+        "config": {
+            "final_format": "mkv",
+            "music_final_format": "m4a",
+        },
+        "overrides": {},
+    }
+    opts = jq.build_ytdlp_opts(context)
+
+    postprocessors = opts.get("postprocessors") or []
+    extract_pp = next((pp for pp in postprocessors if pp.get("key") == "FFmpegExtractAudio"), None)
+    assert extract_pp is not None
+    assert extract_pp.get("preferredcodec") == "m4a"
+
+
+def test_video_mp4_job_enforces_quicktime_compatible_selector(jq) -> None:
+    context = {
+        "operation": "download",
+        "url": "https://www.youtube.com/watch?v=abc123xyz00",
+        "media_type": "video",
+        "media_intent": "episode",
+        "final_format": "mp4",
+        "output_template": "%(id)s.%(ext)s",
+        "output_template_meta": {
+            "final_format": "mp4",
+            "music_final_format": "mp3",
+        },
+        "config": {
+            "final_format": "mp4",
+            "music_final_format": "mp3",
+        },
+        "overrides": {},
+    }
+
+    opts = jq.build_ytdlp_opts(context)
+
+    assert context["audio_mode"] is False
+    assert opts.get("format") == (
+        "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a][ext=m4a]/"
+        "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+        "best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
+    )
+    assert opts.get("merge_output_format") == "mp4"

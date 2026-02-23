@@ -81,6 +81,14 @@ _FORMAT_VIDEO = (
 # Keep this quoted/argument-safe in CLI execution (we do NOT use shell=True).
 _FORMAT_AUDIO = "bestaudio/best"
 
+# QuickTime-compatible MP4 policy: require AVC/H.264 video + AAC audio.
+# This prevents VP9/Opus-in-MP4 outputs that fail in QuickTime.
+_FORMAT_VIDEO_QT_MP4 = (
+    "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a][ext=m4a]/"
+    "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
+)
+
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
 
 _AUDIO_TITLE_CLEAN_RE = re.compile(
@@ -2781,10 +2789,11 @@ def build_ytdlp_opts(context):
         # Only enable addmetadata, embedthumbnail, writethumbnail, and audio postprocessors
         # when both audio_mode and media_type is music/audio
         if audio_mode:
+            preferred_audio_codec = _normalize_audio_format(resolved_audio_format) or "mp3"
             opts["postprocessors"] = [
                 {
                     "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
+                    "preferredcodec": preferred_audio_codec,
                     "preferredquality": "0",
                 }
             ]
@@ -2794,15 +2803,18 @@ def build_ytdlp_opts(context):
             opts["writethumbnail"] = True
         else:
             # Video mode strategy:
-            # 1) best webm video + bestaudio
-            # 2) best mp4 video + bestaudio
-            # 3) fallback best single file
-            opts["format"] = "bestvideo[ext=webm]+bestaudio/bestvideo[ext=mp4]+bestaudio/best"
-            # Post-merge container policy:
-            # - mkv/mp4: force merge container
-            # - webm: keep native webm merge behavior (no forced merge_output_format)
-            if video_container_target in {"mkv", "mp4"}:
-                opts["merge_output_format"] = video_container_target
+            # - final_format=mp4: enforce QuickTime-compatible H.264 + AAC streams
+            # - otherwise: highest available quality (webm first, then mp4, then best single file)
+            if video_container_target == "mp4":
+                opts["format"] = _FORMAT_VIDEO_QT_MP4
+                opts["merge_output_format"] = "mp4"
+            else:
+                opts["format"] = "bestvideo[ext=webm]+bestaudio/bestvideo[ext=mp4]+bestaudio/best"
+                # Post-merge container policy:
+                # - mkv: force merge container
+                # - webm: keep native webm merge behavior (no forced merge_output_format)
+                if video_container_target == "mkv":
+                    opts["merge_output_format"] = "mkv"
 
     # Only lock down format-related overrides when the target_format was actually applied
     # (audio codec in audio_mode, or video container preference in video mode).
@@ -4178,7 +4190,10 @@ def finalize_download_artifact(
     fallback_id = str(fallback_id or "")
     ext = os.path.splitext(local_file)[1].lstrip(".")
     if audio_mode:
-        ext = _normalize_audio_format(final_format) or ext or "mp3"
+        actual_ext = str(ext or "").strip().lower()
+        normalized_actual_ext = _normalize_audio_format(actual_ext)
+        normalized_configured_ext = _normalize_audio_format(final_format)
+        ext = normalized_actual_ext or actual_ext or normalized_configured_ext or "mp3"
     elif not ext:
         ext = _normalize_format(final_format) or "mkv"
 
