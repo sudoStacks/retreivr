@@ -2016,8 +2016,18 @@ async function enqueueMusicTrack(payload = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       recording_mbid: String(payload.recording_mbid || "").trim(),
-      release_mbid: String(payload.release_mbid || "").trim(),
-      release_group_mbid: String(payload.release_group_mbid || "").trim() || null,
+      release_mbid: String(payload.release_mbid || payload.mb_release_id || "").trim() || null,
+      release_group_mbid: String(payload.release_group_mbid || payload.mb_release_group_id || "").trim() || null,
+      artist: String(payload.artist || "").trim() || null,
+      track: String(payload.track || "").trim() || null,
+      album: String(payload.album || "").trim() || null,
+      release_date: String(payload.release_date || payload.release_year || "").trim() || null,
+      track_number: Number.isFinite(Number(payload.track_number)) ? Number(payload.track_number) : null,
+      disc_number: Number.isFinite(Number(payload.disc_number)) ? Number(payload.disc_number) : null,
+      duration_ms: Number.isFinite(Number(payload.duration_ms)) ? Number(payload.duration_ms) : null,
+      destination: String(payload.destination || payload.destination_dir || "").trim() || null,
+      final_format: String(payload.final_format || "").trim() || null,
+      music_mode: true,
     }),
   });
 }
@@ -2181,6 +2191,7 @@ function renderMusicModeResults(response, query = "") {
       action.className = "home-candidate-action";
       const button = document.createElement("button");
       button.className = "button primary small music-download-btn";
+      button.dataset.musicResultKey = key;
       button.dataset.recordingMbid = String(result.recording_mbid || "").trim();
       button.dataset.releaseMbid = String(result.mb_release_id || "").trim();
       button.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
@@ -5643,6 +5654,8 @@ function bindEvents() {
     const recording = String(btn.dataset.recordingMbid || "").trim();
     const release = String(btn.dataset.releaseMbid || "").trim();
     const releaseGroup = String(btn.dataset.releaseGroupMbid || "").trim();
+    const resultKey = String(btn.dataset.musicResultKey || "").trim();
+    const selectedResult = resultKey ? state.homeMusicResultMap[resultKey] : null;
 
     if (!recording) {
       console.error("Missing recording MBID on music download button");
@@ -5653,11 +5666,23 @@ function bindEvents() {
     btn.disabled = true;
     btn.textContent = "Queuing...";
     try {
-      await enqueueMusicTrack({
+      const payload = {
         recording_mbid: recording,
         release_mbid: release,
         release_group_mbid: releaseGroup,
-      });
+      };
+      if (selectedResult && typeof selectedResult === "object") {
+        payload.artist = selectedResult.artist || null;
+        payload.track = selectedResult.track || null;
+        payload.album = selectedResult.album || null;
+        payload.release_date = selectedResult.release_year || null;
+        payload.track_number = selectedResult.track_number || null;
+        payload.disc_number = selectedResult.disc_number || null;
+        payload.duration_ms = selectedResult.duration_ms || null;
+      }
+      payload.destination = String($("#home-destination")?.value || "").trim() || null;
+      payload.final_format = String($("#home-format")?.value || "").trim() || null;
+      await enqueueMusicTrack(payload);
       btn.textContent = "Queued...";
       setNotice($("#home-search-message"), "Track queued.", false);
     } catch (err) {

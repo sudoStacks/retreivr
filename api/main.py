@@ -4834,48 +4834,103 @@ def music_search(
 @app.post("/api/music/enqueue")
 def enqueue_music_track(data: dict = Body(...)):
     payload = data if isinstance(data, dict) else {}
-    required_keys = (
-        "recording_mbid",
-        "mb_release_id",
-        "mb_release_group_id",
-        "artist",
-        "track",
-        "album",
-        "release_date",
-        "track_number",
-        "disc_number",
-        "duration_ms",
-    )
-    missing = []
-    for key in required_keys:
-        value = payload.get(key)
-        if value is None or str(value).strip() == "":
-            missing.append(key)
-    if missing:
-        raise HTTPException(status_code=400, detail=f"missing_fields: {','.join(sorted(missing))}")
-
-    try:
-        track_number = int(payload.get("track_number"))
-        disc_number = int(payload.get("disc_number"))
-        duration_ms = int(payload.get("duration_ms"))
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="track_number/disc_number/duration_ms must be integers") from exc
-    if track_number <= 0 or disc_number <= 0 or duration_ms <= 0:
-        raise HTTPException(status_code=400, detail="track_number/disc_number/duration_ms must be > 0")
-
     recording_mbid = str(payload.get("recording_mbid") or "").strip()
+    if not recording_mbid:
+        raise HTTPException(status_code=400, detail="missing_fields: recording_mbid")
+
+    mb_release_id = str(
+        payload.get("mb_release_id")
+        or payload.get("release_mbid")
+        or payload.get("release_id")
+        or ""
+    ).strip()
+    mb_release_group_id = str(
+        payload.get("mb_release_group_id")
+        or payload.get("release_group_mbid")
+        or payload.get("release_group_id")
+        or ""
+    ).strip()
+
+    artist = str(payload.get("artist") or "").strip()
+    track = str(payload.get("track") or "").strip()
+    album = str(payload.get("album") or "").strip()
+    release_date = str(payload.get("release_date") or payload.get("release_year") or "").strip()
+
+    def _optional_pos_int(value):
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="track_number/disc_number/duration_ms must be integers")
+        return parsed if parsed > 0 else None
+
+    track_number = _optional_pos_int(payload.get("track_number"))
+    disc_number = _optional_pos_int(payload.get("disc_number"))
+    duration_ms = _optional_pos_int(payload.get("duration_ms"))
+
+    # Enrich optional missing fields from MusicBrainz recording lookup when available.
+    if not artist or not track or duration_ms is None or not mb_release_id or not release_date:
+        try:
+            recording_payload = get_musicbrainz_service().get_recording(
+                recording_mbid,
+                includes=["artists", "releases", "isrcs"],
+            )
+            recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
+            if not track:
+                track = str(recording_data.get("title") or "").strip()
+            if not artist:
+                credits = recording_data.get("artist-credit")
+                if isinstance(credits, list):
+                    artist_tokens = []
+                    for credit in credits:
+                        if not isinstance(credit, dict):
+                            continue
+                        name = str(
+                            credit.get("name")
+                            or (credit.get("artist") or {}).get("name")
+                            or ""
+                        ).strip()
+                        if name:
+                            artist_tokens.append(name)
+                    artist = " & ".join(artist_tokens) if artist_tokens else artist
+            if duration_ms is None:
+                try:
+                    rec_len = int(recording_data.get("length"))
+                except Exception:
+                    rec_len = None
+                if rec_len and rec_len > 0:
+                    duration_ms = rec_len
+            release_list = recording_data.get("release-list")
+            if isinstance(release_list, list) and release_list:
+                first_release = release_list[0] if isinstance(release_list[0], dict) else {}
+                if not mb_release_id:
+                    mb_release_id = str(first_release.get("id") or "").strip()
+                if not release_date:
+                    release_date = str(first_release.get("date") or "").strip()
+        except Exception:
+            pass
+
+    missing_core = []
+    if not artist:
+        missing_core.append("artist")
+    if not track:
+        missing_core.append("track")
+    if missing_core:
+        raise HTTPException(status_code=400, detail=f"missing_fields: {','.join(sorted(missing_core))}")
+
     canonical_metadata = {
-        "artist": str(payload.get("artist") or "").strip(),
-        "track": str(payload.get("track") or "").strip(),
-        "album": str(payload.get("album") or "").strip(),
-        "release_date": str(payload.get("release_date") or "").strip(),
+        "artist": artist,
+        "track": track,
+        "album": album,
+        "release_date": release_date,
         "track_number": track_number,
         "disc_number": disc_number,
         "duration_ms": duration_ms,
         "recording_mbid": recording_mbid,
         "mb_recording_id": recording_mbid,
-        "mb_release_id": str(payload.get("mb_release_id") or "").strip(),
-        "mb_release_group_id": str(payload.get("mb_release_group_id") or "").strip(),
+        "mb_release_id": mb_release_id,
+        "mb_release_group_id": mb_release_group_id,
     }
 
     destination = str(payload.get("destination") or payload.get("destination_dir") or "").strip() or None
@@ -4906,8 +4961,8 @@ def enqueue_music_track(data: dict = Body(...)):
                 "kind": "music_track",
                 "recording_mbid": recording_mbid,
                 "mb_recording_id": recording_mbid,
-                "mb_release_id": canonical_metadata["mb_release_id"],
-                "mb_release_group_id": canonical_metadata["mb_release_group_id"],
+                "mb_release_id": canonical_metadata.get("mb_release_id"),
+                "mb_release_group_id": canonical_metadata.get("mb_release_group_id"),
                 "track_number": track_number,
                 "disc_number": disc_number,
                 "release_date": canonical_metadata["release_date"],
@@ -4916,6 +4971,18 @@ def enqueue_music_track(data: dict = Body(...)):
             canonical_id=canonical_id,
         )
     except ValueError as exc:
+        error_code = str(exc.args[0] if exc.args else exc).strip()
+        reasons = []
+        if len(exc.args) > 1 and isinstance(exc.args[1], list):
+            reasons = [str(item) for item in exc.args[1] if str(item or "").strip()]
+        if error_code == "music_track_requires_mb_bound_metadata":
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "music_mode_mb_binding_failed",
+                    "reason": reasons,
+                },
+            )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     job_id, created, dedupe_reason = queue_store.enqueue_job(**enqueue_payload)
     return {
