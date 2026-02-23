@@ -1702,6 +1702,17 @@ class YouTubeAdapter:
                 return None
 
             meta = extract_meta(info, fallback_url=job.url)
+            if not audio_mode:
+                meta = _hydrate_meta_from_output_template(meta, output_template)
+                meta = _hydrate_meta_from_local_filename(
+                    meta,
+                    local_file=local_file,
+                    fallback_id=(
+                        getattr(job, "external_id", None)
+                        or extract_video_id(getattr(job, "url", None))
+                        or getattr(job, "id", None)
+                    ),
+                )
             canonical = (
                 output_template.get("canonical_metadata")
                 if isinstance(output_template.get("canonical_metadata"), dict)
@@ -3006,6 +3017,10 @@ def _render_ytdlp_cli_argv(opts, url):
                 if pp.get("preferredquality"):
                     argv.extend(["--audio-quality", str(pp.get("preferredquality"))])
 
+    # Sidecar metadata improves post-download naming/tagging resilience.
+    if opts.get("writeinfojson"):
+        argv.append("--write-info-json")
+
     argv.append(str(url))
     return argv
 
@@ -3107,6 +3122,66 @@ def _select_youtube_cookie_fallback(
     if not _is_youtube_access_gate(stderr_text):
         return None
     return fallback_cookie
+
+
+def _load_info_json_from_temp_dir(temp_dir, *, fallback_id=None):
+    if not temp_dir or not os.path.isdir(temp_dir):
+        return None
+    candidates = []
+    for entry in os.listdir(temp_dir):
+        lower_entry = entry.lower()
+        if not lower_entry.endswith('.info.json'):
+            continue
+        path = os.path.join(temp_dir, entry)
+        if not os.path.isfile(path):
+            continue
+        score = 0
+        if fallback_id and fallback_id in entry:
+            score += 2
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0
+        candidates.append((score, mtime, path))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    _, _, selected_path = candidates[0]
+    try:
+        with open(selected_path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _enrich_info_from_sidecar(info, *, temp_dir, url, job_id=None):
+    fallback_id = None
+    if isinstance(info, dict):
+        fallback_id = str(info.get('id') or '').strip() or None
+    if not fallback_id:
+        fallback_id = extract_video_id(url)
+
+    sidecar = _load_info_json_from_temp_dir(temp_dir, fallback_id=fallback_id)
+    if not isinstance(sidecar, dict):
+        return info
+
+    merged = dict(sidecar)
+    if isinstance(info, dict):
+        for key, value in info.items():
+            if key not in merged or merged.get(key) in (None, '', [], {}):
+                merged[key] = value
+
+    _log_event(
+        logging.INFO,
+        'ytdlp_sidecar_metadata_loaded',
+        job_id=job_id,
+        url=url,
+        sidecar_id=sidecar.get('id'),
+        has_title=bool(sidecar.get('title')),
+        has_channel=bool(sidecar.get('channel') or sidecar.get('uploader')),
+    )
+    return merged
 
 
 def download_with_ytdlp(
@@ -3374,6 +3449,8 @@ def download_with_ytdlp(
     configured_cookiefile = opts_for_run.pop("cookiefile", None)
     opts_for_run.pop("js_runtimes", None)
     opts_for_run.pop("remote_components", None)
+    # Always request sidecar metadata from successful download attempts.
+    opts_for_run["writeinfojson"] = True
     # Build CLI argv and run without a shell (prevents globbing of format strings like [acodec!=none])
     cmd_argv = _render_ytdlp_cli_argv(opts_for_run, url)
     cmd_log = _argv_to_redacted_cli(cmd_argv)
@@ -3468,6 +3545,7 @@ def download_with_ytdlp(
                     callable(cancel_check) and cancel_check()
                 ):
                     raise CancelledError(cancel_reason or "Cancelled by user")
+                info = _enrich_info_from_sidecar(info, temp_dir=temp_dir, url=url, job_id=job_id)
                 return info, _select_download_output(temp_dir, info, audio_mode)
             except CalledProcessError as retry_exc:
                 stderr_output = (retry_exc.stderr or "").strip() or stderr_output
@@ -3522,6 +3600,7 @@ def download_with_ytdlp(
                     callable(cancel_check) and cancel_check()
                 ):
                     raise CancelledError(cancel_reason or "Cancelled by user")
+                info = _enrich_info_from_sidecar(info, temp_dir=temp_dir, url=url, job_id=job_id)
                 return info, _select_download_output(temp_dir, info, audio_mode)
             except CalledProcessError as fallback_exc:
                 fallback_message = (fallback_exc.stderr or "").strip()
@@ -3630,6 +3709,7 @@ def download_with_ytdlp(
 
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
         raise CancelledError(cancel_reason or "Cancelled by user")
+    info = _enrich_info_from_sidecar(info, temp_dir=temp_dir, url=url, job_id=job_id)
     return info, _select_download_output(temp_dir, info, audio_mode)
 
 
@@ -3649,7 +3729,22 @@ def _select_download_output(temp_dir, info, audio_mode):
     candidates = []
     audio_candidates = []
     for entry in os.listdir(temp_dir):
-        if entry.endswith((".part", ".ytdl", ".temp")):
+        lower_entry = entry.lower()
+        if lower_entry.endswith((".part", ".ytdl", ".temp")):
+            continue
+        if lower_entry.endswith((
+            ".info.json",
+            ".description",
+            ".json",
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".vtt",
+            ".srt",
+            ".ass",
+            ".lrc",
+        )):
             continue
         candidate = os.path.join(temp_dir, entry)
         if not os.path.isfile(candidate):
@@ -3957,10 +4052,83 @@ def build_output_filename(meta, fallback_id, ext, template, audio_mode):
                 "id": "",
             }
             if rendered:
+                # Guard against template artifacts when optional fields are blank
+                # (e.g. "<id> - - .mp4" or "Title - Channel - .mp4").
+                if re.search(r"\s-\s-", rendered) or re.search(r"\s-\s*\.[A-Za-z0-9]+$", rendered):
+                    return f"{pretty_filename(meta.get('title') or fallback_id, meta.get('channel'), meta.get('upload_date'))}.{ext}"
                 return rendered
         except Exception:
             pass
-    return f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}.{ext}"
+    return f"{pretty_filename(meta.get('title') or fallback_id, meta.get('channel'), meta.get('upload_date'))}.{ext}"
+
+
+def _hydrate_meta_from_output_template(meta, output_template):
+    if not isinstance(meta, dict):
+        meta = {}
+    if not isinstance(output_template, dict):
+        return meta
+
+    template_title = str(output_template.get("title") or output_template.get("track") or "").strip()
+    template_channel = str(
+        output_template.get("channel")
+        or output_template.get("uploader")
+        or output_template.get("artist")
+        or ""
+    ).strip()
+
+    if not str(meta.get("title") or "").strip() and template_title:
+        meta["title"] = template_title
+        if not str(meta.get("track") or "").strip():
+            meta["track"] = template_title
+
+    channel_present = str(meta.get("channel") or meta.get("artist") or "").strip()
+    if not channel_present and template_channel:
+        meta["channel"] = template_channel
+        if not str(meta.get("artist") or "").strip():
+            meta["artist"] = template_channel
+
+    return meta
+
+
+def _hydrate_meta_from_local_filename(meta, *, local_file, fallback_id=None):
+    if not isinstance(meta, dict):
+        meta = {}
+    filename = os.path.basename(str(local_file or "")).strip()
+    if not filename:
+        return meta
+
+    stem, _ = os.path.splitext(filename)
+    if not stem:
+        return meta
+
+    title_present = str(meta.get("title") or "").strip()
+    channel_present = str(meta.get("channel") or meta.get("artist") or "").strip()
+    if title_present and channel_present:
+        return meta
+
+    candidate_title = None
+    candidate_channel = None
+    parts = [part.strip() for part in stem.rsplit(" - ", 2)]
+    if len(parts) == 3:
+        maybe_title, maybe_channel, maybe_id = parts
+        id_hint = str(fallback_id or meta.get("video_id") or "").strip()
+        if id_hint and maybe_id and maybe_id != id_hint:
+            return meta
+        candidate_title = maybe_title
+        candidate_channel = maybe_channel
+    elif len(parts) == 2:
+        candidate_title, candidate_channel = parts
+
+    if not title_present and candidate_title:
+        meta["title"] = candidate_title
+        if not str(meta.get("track") or "").strip():
+            meta["track"] = candidate_title
+    if not channel_present and candidate_channel:
+        meta["channel"] = candidate_channel
+        if not str(meta.get("artist") or "").strip():
+            meta["artist"] = candidate_channel
+
+    return meta
 
 
 def _assert_music_canonical_metadata_contract(meta):

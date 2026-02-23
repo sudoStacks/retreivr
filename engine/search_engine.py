@@ -1571,6 +1571,16 @@ class SearchResolutionService:
                         expected_music_metadata["duration_ms"] = hint_sec * 1000
         external_id = candidate.get("external_id") if isinstance(candidate, dict) else None
         canonical_url = canonicalize_url(candidate.get("source"), candidate_url, external_id)
+        output_template_overrides = {}
+        candidate_title = str(candidate.get("title") or "").strip()
+        candidate_uploader = str(
+            candidate.get("uploader") or candidate.get("channel") or candidate.get("artist_detected") or ""
+        ).strip()
+        if candidate_title:
+            output_template_overrides["title"] = candidate_title
+        if candidate_uploader:
+            output_template_overrides["channel"] = candidate_uploader
+            output_template_overrides["artist"] = candidate_uploader
         try:
             enqueue_payload = build_download_job_payload(
                 config=self.config,
@@ -1585,6 +1595,7 @@ class SearchResolutionService:
                 base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
                 final_format_override=final_format_override,
                 resolved_metadata=(expected_music_metadata if expected_music_metadata else canonical_payload),
+                output_template_overrides=(output_template_overrides or None),
                 trace_id=trace_id,
                 canonical_id=canonical_id,
                 canonical_url=canonical_url,
