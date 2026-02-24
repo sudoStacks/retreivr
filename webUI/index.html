@@ -196,8 +196,38 @@
         <div id="home-results-list"></div>
       </div>
     </section>
+    <section class="panel" id="search-queue-panel" data-page="status">
+      <div class="panel-title">Download Queue</div>
+      <div class="notice">Live operations queue (completed jobs are shown in Download History).</div>
+      <div class="row">
+        <label class="field inline short">
+          <span>Limit</span>
+          <input id="search-queue-limit" type="number" min="1" max="5000" value="100">
+        </label>
+        <button id="search-queue-refresh" class="button ghost">Refresh</button>
+        <div id="search-queue-message" class="notice" role="status"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Job ID</th>
+              <th>Origin</th>
+              <th>Source</th>
+              <th>Media intent</th>
+              <th>Status</th>
+              <th>Attempts</th>
+              <th>Created</th>
+              <th>Last error</th>
+            </tr>
+          </thead>
+          <tbody id="search-queue-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel" id="status-panel" data-page="status">
-      <div class="panel-title">Status</div>
+      <div class="panel-title">Operations Status (Live)</div>
       <div class="stack">
         <div class="row">
           <span class="chip" id="status-running">idle</span>
@@ -708,7 +738,7 @@
     </section>
 
     <section class="panel" id="search-items-panel" data-page="advanced">
-      <div class="panel-title">Search Items & Candidates</div>
+      <div class="panel-title">Search Results (Discovery)</div>
       <div class="notice">Selected request: <span id="search-selected-request">-</span></div>
       <div class="group">
         <div class="group-title">Items</div>
@@ -753,7 +783,7 @@
 
 
     <section class="panel" id="search-requests-panel" data-page="advanced">
-      <div class="panel-title">Search Requests</div>
+      <div class="panel-title">Search History (Requests)</div>
       <div class="row">
         <button id="search-requests-refresh" class="button ghost">Refresh</button>
         <button id="search-requests-sort" class="button ghost">Sort: Newest</button>
@@ -781,37 +811,8 @@
 
     
 
-    <section class="panel" id="search-queue-panel" data-page="advanced">
-      <div class="panel-title">Unified Download Queue</div>
-      <div class="row">
-        <label class="field inline short">
-          <span>Limit</span>
-          <input id="search-queue-limit" type="number" min="1" max="5000" value="100">
-        </label>
-        <button id="search-queue-refresh" class="button ghost">Refresh</button>
-        <div id="search-queue-message" class="notice" role="status"></div>
-      </div>
-      <div class="table-wrap">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>Job ID</th>
-              <th>Origin</th>
-              <th>Source</th>
-              <th>Media intent</th>
-              <th>Status</th>
-              <th>Attempts</th>
-              <th>Created</th>
-              <th>Last error</th>
-            </tr>
-          </thead>
-          <tbody id="search-queue-body"></tbody>
-        </table>
-      </div>
-    </section>
-
     <section class="panel full page-full" id="logs-panel" data-page="status">
-      <div class="panel-title">Logs</div>
+      <div class="panel-title">System Logs (Diagnostics)</div>
       <div class="row">
         <label class="field inline short">
           <span>Lines</span>
@@ -827,7 +828,7 @@
     </section>
 
     <section class="panel full page-full" id="downloads-panel" data-page="status">
-      <div class="panel-title">Downloads</div>
+      <div class="panel-title">Library Downloads (Files)</div>
       <div class="row">
         <button id="downloads-refresh" class="button ghost">Refresh</button>
         <button id="cleanup-temp" class="button ghost">Clear temporary files</button>
@@ -866,7 +867,7 @@
     </section>
 
     <section class="panel full page-full" id="history-panel" data-page="status">
-      <div class="panel-title">History</div>
+      <div class="panel-title">Download History (Completed)</div>
       <div class="row">
         <button class="button ghost small filters-toggle" data-target="history-filters" type="button">Filters</button>
         <button id="history-refresh" class="button ghost">Refresh</button>

@@ -256,6 +256,7 @@ function setPage(page) {
     refreshStatus();
     refreshMetrics();
     refreshVersion();
+    refreshSearchQueue();
     refreshDownloads();
     refreshHistory();
     refreshLogs();
@@ -291,7 +292,6 @@ function setPage(page) {
         }
       })
       .catch(() => {});
-    refreshSearchQueue();
   }
 }
 
@@ -4652,11 +4652,14 @@ async function refreshSearchQueue() {
     const limitRaw = parseInt($("#search-queue-limit").value, 10);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100;
     const data = await fetchJson(`/api/download_jobs?limit=${limit}`);
-    const jobs = data.jobs || [];
+    const jobs = (data.jobs || []).filter((job) => {
+      const status = String(job?.status || "").trim().toLowerCase();
+      return status !== "completed";
+    });
 
     body.textContent = "";
     if (!jobs.length) {
-      renderSearchEmptyRow(body, 8, "No queued jobs found.");
+      renderSearchEmptyRow(body, 8, "No active queue jobs found.");
       if (messageEl) messageEl.textContent = "";
       return;
     }
@@ -5599,6 +5602,9 @@ function setupTimers() {
   }
   state.timers.status = setInterval(() => {
     withPollingGuard(refreshStatus);
+    if (state.currentPage === "status") {
+      withPollingGuard(refreshSearchQueue);
+    }
   }, 3000);
 
   if (state.timers.metrics) {
@@ -5660,6 +5666,7 @@ function bindEvents() {
     await refreshStatus();
     await refreshSchedule();
     await refreshMetrics();
+    await refreshSearchQueue();
     await refreshLogs();
     await refreshHistory();
     await refreshDownloads();
