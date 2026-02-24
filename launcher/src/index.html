@@ -10,22 +10,52 @@
     <main class="shell">
       <header class="header">
         <h1>Retreivr Launcher</h1>
-        <p class="subtitle">Local setup and runtime control for Retreivr Docker deployment.</p>
+        <p class="subtitle">Wizard-driven setup and runtime control for a local Docker deployment.</p>
       </header>
+
+      <section class="card">
+        <h2>Step 1: Diagnostics</h2>
+        <div class="diag-grid">
+          <p>Docker installed: <strong id="diagDockerInstalled">...</strong></p>
+          <p>Docker running: <strong id="diagDockerRunning">...</strong></p>
+          <p>Compose available: <strong id="diagComposeAvailable">...</strong></p>
+          <p>Compose file: <strong id="diagComposeExists">...</strong></p>
+          <p>Container: <strong id="diagContainerRunning">...</strong></p>
+          <p>Web reachable: <strong id="diagWebReachable">...</strong></p>
+        </div>
+        <button id="refreshBtn" type="button">Refresh Checks</button>
+      </section>
+
+      <section class="card">
+        <h2>Step 2: Setup</h2>
+        <form id="settingsForm" class="form-grid">
+          <label for="hostPort">Host Port</label>
+          <input id="hostPort" name="hostPort" type="number" min="1" max="65535" required />
+
+          <label for="image">Image</label>
+          <input id="image" name="image" type="text" required />
+
+          <label for="containerName">Container Name</label>
+          <input id="containerName" name="containerName" type="text" required />
+
+          <div class="actions-row">
+            <button id="saveBtn" type="submit">Save Setup</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card controls">
+        <h2>Step 3: Run</h2>
+        <div class="actions-row">
+          <button id="installBtn" type="button">Install / Start</button>
+          <button id="stopBtn" type="button">Stop</button>
+          <button id="openUI" type="button">Open Web UI</button>
+        </div>
+      </section>
 
       <section class="card">
         <p id="summary">Loading launcher state...</p>
         <p id="status" class="status">Initializing...</p>
-      </section>
-
-      <section class="card controls">
-        <button id="installBtn" type="button">Install / Start</button>
-        <button id="stopBtn" type="button">Stop</button>
-        <button id="openUI" type="button">Open Web UI</button>
-      </section>
-
-      <section class="card note">
-        <p>Default web endpoint: <code>http://localhost:8090</code></p>
       </section>
     </main>
     <script type="module" src="./main.js"></script>

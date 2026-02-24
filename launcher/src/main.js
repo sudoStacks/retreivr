@@ -1,77 +1,162 @@
 const { invoke } = window.__TAURI__.core;
 const openWeb = window.__TAURI__?.opener?.open;
-const RETREIVR_UI_URL = "http://localhost:8090";
 
 document.addEventListener("DOMContentLoaded", () => {
   const summaryEl = document.getElementById("summary");
   const statusEl = document.getElementById("status");
 
+  const refreshBtn = document.getElementById("refreshBtn");
+  const saveBtn = document.getElementById("saveBtn");
   const installBtn = document.getElementById("installBtn");
   const stopBtn = document.getElementById("stopBtn");
   const openBtn = document.getElementById("openUI");
 
-  async function refreshState() {
-    statusEl.textContent = "Refreshing state...";
+  const hostPortInput = document.getElementById("hostPort");
+  const imageInput = document.getElementById("image");
+  const containerNameInput = document.getElementById("containerName");
+  const settingsForm = document.getElementById("settingsForm");
+
+  const diagDockerInstalled = document.getElementById("diagDockerInstalled");
+  const diagDockerRunning = document.getElementById("diagDockerRunning");
+  const diagComposeAvailable = document.getElementById("diagComposeAvailable");
+  const diagComposeExists = document.getElementById("diagComposeExists");
+  const diagContainerRunning = document.getElementById("diagContainerRunning");
+  const diagWebReachable = document.getElementById("diagWebReachable");
+
+  let currentWebUrl = "http://localhost:8090";
+  let busy = false;
+
+  function setBusy(nextBusy) {
+    busy = nextBusy;
+    refreshBtn.disabled = nextBusy;
+    saveBtn.disabled = nextBusy;
+    installBtn.disabled = nextBusy;
+    stopBtn.disabled = nextBusy;
+    openBtn.disabled = nextBusy;
+  }
+
+  function renderBool(el, value) {
+    el.textContent = value ? "Yes" : "No";
+    el.className = value ? "ok" : "warn";
+  }
+
+  function readSettingsFromForm() {
+    return {
+      host_port: Number.parseInt(hostPortInput.value, 10),
+      image: imageInput.value.trim(),
+      container_name: containerNameInput.value.trim(),
+    };
+  }
+
+  function applySettingsToForm(settings) {
+    hostPortInput.value = String(settings.host_port);
+    imageInput.value = settings.image;
+    containerNameInput.value = settings.container_name;
+  }
+
+  async function refreshDiagnostics() {
+    const diagnostics = await invoke("docker_diagnostics");
+    currentWebUrl = diagnostics.web_url || currentWebUrl;
+
+    renderBool(diagDockerInstalled, diagnostics.docker_installed);
+    renderBool(diagDockerRunning, diagnostics.docker_running);
+    renderBool(diagComposeAvailable, diagnostics.compose_available);
+    renderBool(diagComposeExists, diagnostics.compose_exists);
+    renderBool(diagContainerRunning, diagnostics.container_running);
+    renderBool(diagWebReachable, diagnostics.service_reachable);
+
+    summaryEl.textContent =
+      `Web URL: ${currentWebUrl} | Compose file: ${diagnostics.compose_exists ? "Present" : "Missing"}`;
+
+    installBtn.disabled = busy || !diagnostics.docker_running || !diagnostics.compose_available;
+    stopBtn.disabled = busy || !diagnostics.container_running;
+    openBtn.disabled = busy || !diagnostics.service_reachable;
+  }
+
+  async function refreshAll() {
+    setBusy(true);
+    statusEl.textContent = "Refreshing launcher state...";
 
     try {
-      const docker = await invoke("docker_available");
-      if (!docker) {
-        summaryEl.textContent = "Docker: Not available";
-        installBtn.disabled = true;
-        stopBtn.disabled = true;
-        openBtn.disabled = true;
-        statusEl.textContent = "Start Docker Desktop and relaunch this app.";
-        return;
-      }
-
-      const hasCompose = await invoke("compose_exists");
-      const running = await invoke("container_running");
-
-      summaryEl.textContent =
-        `Docker: OK | Compose: ${hasCompose ? "Present" : "Missing"} | Container: ${running ? "Running" : "Stopped"}`;
-
-      installBtn.disabled = running;
-      stopBtn.disabled = !running;
-      openBtn.disabled = !running;
-
+      const settings = await invoke("get_launcher_settings");
+      applySettingsToForm(settings);
+      await refreshDiagnostics();
       statusEl.textContent = "Ready";
     } catch (error) {
-      summaryEl.textContent = "State check failed";
-      statusEl.textContent = "Unable to refresh launcher state.";
-      installBtn.disabled = true;
-      stopBtn.disabled = true;
-      openBtn.disabled = true;
+      summaryEl.textContent = "Launcher refresh failed";
+      statusEl.textContent = String(error);
       console.error(error);
+    } finally {
+      setBusy(false);
+      await refreshDiagnostics().catch(() => {});
     }
   }
 
-  installBtn.addEventListener("click", async () => {
-    statusEl.textContent = "Installing / starting Retreivr...";
+  settingsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    statusEl.textContent = "Saving setup...";
+
     try {
+      const settings = readSettingsFromForm();
+      await invoke("save_launcher_settings", { settings });
+      await refreshDiagnostics();
+      statusEl.textContent = "Setup saved";
+    } catch (error) {
+      statusEl.textContent = `Save failed: ${String(error)}`;
+      console.error(error);
+    } finally {
+      setBusy(false);
+      await refreshDiagnostics().catch(() => {});
+    }
+  });
+
+  refreshBtn.addEventListener("click", async () => {
+    if (busy) return;
+    await refreshAll();
+  });
+
+  installBtn.addEventListener("click", async () => {
+    setBusy(true);
+    statusEl.textContent = "Starting Retreivr...";
+
+    try {
+      const settings = readSettingsFromForm();
+      await invoke("save_launcher_settings", { settings });
       await invoke("install_retreivr");
-      await refreshState();
-    } catch (e) {
-      statusEl.textContent = "Install failed";
-      console.error(e);
+      await refreshDiagnostics();
+      statusEl.textContent = "Retreivr started";
+    } catch (error) {
+      statusEl.textContent = `Start failed: ${String(error)}`;
+      console.error(error);
+    } finally {
+      setBusy(false);
+      await refreshDiagnostics().catch(() => {});
     }
   });
 
   stopBtn.addEventListener("click", async () => {
+    setBusy(true);
     statusEl.textContent = "Stopping Retreivr...";
+
     try {
       await invoke("stop_retreivr");
-      await refreshState();
-    } catch (e) {
-      statusEl.textContent = "Stop failed";
-      console.error(e);
+      await refreshDiagnostics();
+      statusEl.textContent = "Retreivr stopped";
+    } catch (error) {
+      statusEl.textContent = `Stop failed: ${String(error)}`;
+      console.error(error);
+    } finally {
+      setBusy(false);
+      await refreshDiagnostics().catch(() => {});
     }
   });
 
   openBtn.addEventListener("click", async () => {
     if (typeof openWeb === "function") {
-      await openWeb(RETREIVR_UI_URL);
+      await openWeb(currentWebUrl);
     }
   });
 
-  refreshState();
+  refreshAll();
 });
