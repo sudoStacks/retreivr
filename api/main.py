@@ -5436,9 +5436,12 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
     async def _run_immediate():
         config = _read_config_or_404()
         effective_final_format = final_format_override or config.get("final_format")
-        media_type = item.get("media_type") or "generic"
-        if _normalize_audio_format(effective_final_format):
-            media_type = "music"
+        media_type = str(
+            item.get("media_type")
+            or request_row.get("media_type")
+            or "generic"
+        ).strip().lower() or "generic"
+        # Do not infer Music Mode from final_format; music enforcement must come from request/item media type.
         if media_type == "music":
             return JSONResponse(
                 status_code=400,

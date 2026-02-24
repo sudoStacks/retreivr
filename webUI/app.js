@@ -1674,23 +1674,6 @@ function homeMusicDebugLog(...args) {
   console.debug(...args);
 }
 
-function ensureHomeMusicModeBadge() {
-  let badge = $("#home-music-mode-badge");
-  if (badge) {
-    return badge;
-  }
-  const headerActions = document.querySelector(".home-results-header-actions");
-  if (!headerActions) {
-    return null;
-  }
-  badge = document.createElement("span");
-  badge.id = "home-music-mode-badge";
-  badge.className = "chip idle hidden";
-  badge.textContent = "Music Mode";
-  headerActions.appendChild(badge);
-  return badge;
-}
-
 function updateHomeMusicModeUI() {
   const toggle = $("#music-mode-toggle") || $("#home-music-mode");
   if (toggle) {
@@ -1704,11 +1687,12 @@ function updateHomeMusicModeUI() {
   if (musicModeConsole) {
     musicModeConsole.classList.toggle("hidden", !state.homeMusicMode);
   }
-  // Keep this badge strictly tied to active Music Mode + visible legacy results panel.
+  // Keep this badge strictly tied to the live toggle state.
   const badge = $("#home-music-mode-badge");
   if (badge) {
+    const toggleEnabled = !!($("#music-mode-toggle")?.checked);
     const resultsVisible = !$("#home-results")?.classList.contains("hidden");
-    badge.classList.toggle("hidden", !state.homeMusicMode || !resultsVisible);
+    badge.classList.toggle("hidden", !(toggleEnabled && state.homeMusicMode && resultsVisible));
   }
 }
 
