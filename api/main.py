@@ -340,7 +340,9 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
         active_placeholders = ",".join("?" for _ in active_statuses)
         cur.execute(
             f"""
-            SELECT id, status, source, origin, media_intent, attempts, max_attempts, created_at, updated_at, last_error
+            SELECT id, status, source, origin, media_intent, attempts, max_attempts, created_at, updated_at, last_error,
+                   progress_downloaded_bytes, progress_total_bytes, progress_percent, progress_speed_bps,
+                   progress_eta_seconds, progress_updated_at
             FROM download_jobs
             WHERE status IN ({active_placeholders})
             ORDER BY
@@ -367,11 +369,18 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
                 "last_error": row["last_error"],
+                "progress_downloaded_bytes": row["progress_downloaded_bytes"],
+                "progress_total_bytes": row["progress_total_bytes"],
+                "progress_percent": row["progress_percent"],
+                "progress_speed_bps": row["progress_speed_bps"],
+                "progress_eta_seconds": row["progress_eta_seconds"],
+                "progress_updated_at": row["progress_updated_at"],
             }
             for row in cur.fetchall()
         ]
     except sqlite3.OperationalError as exc:
-        if "no such table" not in str(exc).lower():
+        msg = str(exc).lower()
+        if "no such table" not in msg and "no such column" not in msg:
             logging.exception("Failed to build download queue snapshot")
     finally:
         conn.close()
@@ -6058,7 +6067,8 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
     try:
         cur = conn.cursor()
         query = (
-            "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error "
+            "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error, "
+            "progress_downloaded_bytes, progress_total_bytes, progress_percent, progress_speed_bps, progress_eta_seconds, progress_updated_at "
             "FROM download_jobs"
         )
         params = []
@@ -6069,7 +6079,47 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
         if limit:
             query += " LIMIT ?"
             params.append(limit)
-        cur.execute(query, params)
+        try:
+            cur.execute(query, params)
+        except sqlite3.OperationalError as exc:
+            if "no such column" not in str(exc).lower():
+                raise
+            # Backward compatibility if DB has not yet migrated progress columns.
+            query = (
+                "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error "
+                "FROM download_jobs"
+            )
+            params = []
+            if status:
+                query += " WHERE status=?"
+                params.append(status)
+            query += " ORDER BY created_at DESC"
+            if limit:
+                query += " LIMIT ?"
+                params.append(limit)
+            cur.execute(query, params)
+            rows = [
+                {
+                    "id": row[0],
+                    "origin": row[1],
+                    "origin_id": row[2],
+                    "url": row[3],
+                    "source": row[4],
+                    "media_intent": row[5],
+                    "status": row[6],
+                    "attempts": row[7],
+                    "created_at": row[8],
+                    "last_error": row[9],
+                    "progress_downloaded_bytes": None,
+                    "progress_total_bytes": None,
+                    "progress_percent": None,
+                    "progress_speed_bps": None,
+                    "progress_eta_seconds": None,
+                    "progress_updated_at": None,
+                }
+                for row in cur.fetchall()
+            ]
+            return safe_json({"jobs": rows})
         rows = [
             {
                 "id": row[0],
@@ -6082,6 +6132,12 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                 "attempts": row[7],
                 "created_at": row[8],
                 "last_error": row[9],
+                "progress_downloaded_bytes": row[10],
+                "progress_total_bytes": row[11],
+                "progress_percent": row[12],
+                "progress_speed_bps": row[13],
+                "progress_eta_seconds": row[14],
+                "progress_updated_at": row[15],
             }
             for row in cur.fetchall()
         ]

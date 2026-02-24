@@ -219,7 +219,13 @@ def ensure_download_jobs_table(conn):
             output_template TEXT,
             resolved_destination TEXT,
             canonical_id TEXT,
-            file_path TEXT
+            file_path TEXT,
+            progress_downloaded_bytes INTEGER,
+            progress_total_bytes INTEGER,
+            progress_percent REAL,
+            progress_speed_bps REAL,
+            progress_eta_seconds INTEGER,
+            progress_updated_at TEXT
         )
         """
     )
@@ -235,9 +241,20 @@ def ensure_download_jobs_table(conn):
         "input_url",
         "canonical_url",
         "external_id",
+        "progress_downloaded_bytes",
+        "progress_total_bytes",
+        "progress_percent",
+        "progress_speed_bps",
+        "progress_eta_seconds",
+        "progress_updated_at",
     ):
         if column not in existing_columns:
-            cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} TEXT")
+            if column in {"progress_downloaded_bytes", "progress_total_bytes", "progress_eta_seconds"}:
+                cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} INTEGER")
+            elif column in {"progress_percent", "progress_speed_bps"}:
+                cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} REAL")
+            else:
+                cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs (status)")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_download_jobs_source_status ON download_jobs (source, status)"
@@ -905,10 +922,60 @@ class DownloadJobStore:
             cur.execute(
                 """
                 UPDATE download_jobs
-                SET status=?, downloading=?, updated_at=?
+                SET status=?, downloading=?, updated_at=?,
+                    progress_downloaded_bytes=NULL,
+                    progress_total_bytes=NULL,
+                    progress_percent=NULL,
+                    progress_speed_bps=NULL,
+                    progress_eta_seconds=NULL,
+                    progress_updated_at=NULL
                 WHERE id=?
                 """,
                 (JOB_STATUS_DOWNLOADING, now, now, job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_download_progress(
+        self,
+        job_id,
+        *,
+        downloaded_bytes=None,
+        total_bytes=None,
+        progress_percent=None,
+        speed_bps=None,
+        eta_seconds=None,
+    ):
+        now = utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE download_jobs
+                SET progress_downloaded_bytes=?,
+                    progress_total_bytes=?,
+                    progress_percent=?,
+                    progress_speed_bps=?,
+                    progress_eta_seconds=?,
+                    progress_updated_at=?,
+                    updated_at=?
+                WHERE id=? AND status IN (?, ?, ?)
+                """,
+                (
+                    downloaded_bytes,
+                    total_bytes,
+                    progress_percent,
+                    speed_bps,
+                    eta_seconds,
+                    now,
+                    now,
+                    job_id,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_POSTPROCESSING,
+                ),
             )
             conn.commit()
         finally:
@@ -1488,6 +1555,23 @@ class DownloadWorkerEngine:
                 origin=job.origin,
                 media_intent=job.media_intent,
             )
+            last_progress_write = {"ts": 0.0}
+
+            def _on_progress(snapshot):
+                now = time.time()
+                # Throttle DB writes to avoid excessive sqlite contention.
+                if now - last_progress_write["ts"] < 0.4:
+                    return
+                last_progress_write["ts"] = now
+                self.store.update_download_progress(
+                    job.id,
+                    downloaded_bytes=snapshot.get("downloaded_bytes"),
+                    total_bytes=snapshot.get("total_bytes"),
+                    progress_percent=snapshot.get("progress_percent"),
+                    speed_bps=snapshot.get("speed_bps"),
+                    eta_seconds=snapshot.get("eta_seconds"),
+                )
+
             result = adapter.execute(
                 job,
                 self.config,
@@ -1497,6 +1581,7 @@ class DownloadWorkerEngine:
                 cancel_reason="Cancelled by user",
                 media_type=job.media_type,
                 media_intent=job.media_intent,
+                progress_callback=_on_progress,
             )
             if not result:
                 raise RuntimeError("adapter_execute_failed")
@@ -1626,7 +1711,19 @@ class DownloadWorkerEngine:
 class YouTubeAdapter:
     _missing_final_format_warned = False
 
-    def execute(self, job, config, paths, *, stop_event=None, cancel_check=None, cancel_reason=None, media_type=None, media_intent=None):
+    def execute(
+        self,
+        job,
+        config,
+        paths,
+        *,
+        stop_event=None,
+        cancel_check=None,
+        cancel_reason=None,
+        media_type=None,
+        media_intent=None,
+        progress_callback=None,
+    ):
         output_template = job.output_template if isinstance(job.output_template, dict) else None
         if output_template is None:
             logger.error(
@@ -1706,6 +1803,7 @@ class YouTubeAdapter:
                 cancel_check=cancel_check,
                 cancel_reason=cancel_reason,
                 output_template_meta=output_template,
+                progress_callback=progress_callback,
             )
             if not info or not local_file:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -2985,6 +3083,13 @@ def _render_ytdlp_cli_argv(opts, url):
         argv.extend(["--merge-output-format", str(opts["merge_output_format"])])
     if opts.get("outtmpl"):
         argv.extend(["-o", str(opts["outtmpl"])])
+    if opts.get("newline"):
+        argv.append("--newline")
+    if opts.get("nocolor"):
+        argv.append("--no-color")
+    progress_template = opts.get("progress_template")
+    if progress_template:
+        argv.extend(["--progress-template", str(progress_template)])
 
     # Playlist behavior
     if opts.get("noplaylist") is True:
@@ -3224,6 +3329,126 @@ def _enrich_info_from_sidecar(info, *, temp_dir, url, job_id=None):
     return merged
 
 
+_PROGRESS_MARKER = "[RETREIVR_PROGRESS]"
+
+
+def _parse_int_or_none(value):
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"none", "na", "n/a", "null"}:
+        return None
+    try:
+        return int(float(raw))
+    except Exception:
+        return None
+
+
+def _parse_float_or_none(value):
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"none", "na", "n/a", "null"}:
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _parse_progress_line(line):
+    if not line or _PROGRESS_MARKER not in line:
+        return None
+    payload = line.split(_PROGRESS_MARKER, 1)[1].strip()
+    parts = [part.strip() for part in payload.split("|")]
+    if len(parts) < 6:
+        return None
+
+    downloaded_bytes = _parse_int_or_none(parts[0])
+    total_bytes = _parse_int_or_none(parts[1]) or _parse_int_or_none(parts[2])
+    speed_bps = _parse_float_or_none(parts[3])
+    eta_seconds = _parse_int_or_none(parts[4])
+
+    percent_raw = parts[5].replace("%", "").strip()
+    percent = _parse_float_or_none(percent_raw)
+    if percent is None and downloaded_bytes is not None and total_bytes and total_bytes > 0:
+        percent = (float(downloaded_bytes) / float(total_bytes)) * 100.0
+    if percent is not None:
+        percent = max(0.0, min(100.0, percent))
+
+    return {
+        "downloaded_bytes": downloaded_bytes,
+        "total_bytes": total_bytes,
+        "progress_percent": percent,
+        "speed_bps": speed_bps,
+        "eta_seconds": eta_seconds,
+    }
+
+
+def _run_ytdlp_cli(
+    cmd_argv,
+    *,
+    cancel_check=None,
+    cancel_reason=None,
+    progress_callback=None,
+):
+    stderr_lines = []
+
+    proc = subprocess.Popen(
+        cmd_argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    def _read_stderr():
+        stream = proc.stderr
+        if stream is None:
+            return
+        for raw_line in iter(stream.readline, ""):
+            stderr_lines.append(raw_line)
+            parsed = _parse_progress_line(raw_line)
+            if parsed is not None and callable(progress_callback):
+                try:
+                    progress_callback(parsed)
+                except Exception:
+                    logger.exception("job_progress_callback_failed")
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=_read_stderr, name="ytdlp-stderr-reader", daemon=True)
+    reader.start()
+
+    cancelled = False
+    while proc.poll() is None:
+        if callable(cancel_check) and cancel_check():
+            cancelled = True
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            break
+        time.sleep(0.2)
+
+    if cancelled:
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            proc.wait()
+        reader.join(timeout=1)
+        raise CancelledError(cancel_reason or "Cancelled by user")
+
+    return_code = proc.wait()
+    reader.join(timeout=1)
+    stderr_output = "".join(stderr_lines).strip()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, cmd_argv, stderr=stderr_output)
+    return stderr_output
+
+
 def download_with_ytdlp(
     url,
     temp_dir,
@@ -3241,6 +3466,7 @@ def download_with_ytdlp(
     cancel_check=None,
     cancel_reason=None,
     output_template_meta=None,
+    progress_callback=None,
 ):
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
         raise CancelledError(cancel_reason or "Cancelled by user")
@@ -3377,7 +3603,7 @@ def download_with_ytdlp(
             or "forbidden" in msg_l
         )
 
-    from subprocess import DEVNULL, CalledProcessError
+    from subprocess import CalledProcessError
     info = None
     # Always get metadata via API (for output file info, etc.)
     try:
@@ -3491,17 +3717,23 @@ def download_with_ytdlp(
     opts_for_run.pop("remote_components", None)
     # Always request sidecar metadata from successful download attempts.
     opts_for_run["writeinfojson"] = True
+    opts_for_run["newline"] = True
+    opts_for_run["nocolor"] = True
+    opts_for_run["progress_template"] = (
+        f"download:{_PROGRESS_MARKER} "
+        "%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|"
+        "%(progress.speed)s|%(progress.eta)s|%(progress._percent_str)s"
+    )
     # Build CLI argv and run without a shell (prevents globbing of format strings like [acodec!=none])
     cmd_argv = _render_ytdlp_cli_argv(opts_for_run, url)
     cmd_log = _argv_to_redacted_cli(cmd_argv)
 
     try:
-        subprocess.run(
+        _run_ytdlp_cli(
             cmd_argv,
-            check=True,
-            stdout=DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
+            cancel_check=cancel_check,
+            cancel_reason=cancel_reason,
+            progress_callback=progress_callback,
         )
         # Log AFTER the command has been executed, per requirement.
         _log_event(
@@ -3567,12 +3799,11 @@ def download_with_ytdlp(
                 error=stderr_output,
             )
             try:
-                subprocess.run(
+                _run_ytdlp_cli(
                     cmd_retry_argv,
-                    check=True,
-                    stdout=DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                    cancel_check=cancel_check,
+                    cancel_reason=cancel_reason,
+                    progress_callback=progress_callback,
                 )
                 _log_event(
                     logging.INFO,
@@ -3613,12 +3844,11 @@ def download_with_ytdlp(
             cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
             cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
             try:
-                subprocess.run(
+                _run_ytdlp_cli(
                     cmd_retry_argv,
-                    check=True,
-                    stdout=DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                    cancel_check=cancel_check,
+                    cancel_reason=cancel_reason,
+                    progress_callback=progress_callback,
                 )
                 _log_event(
                     logging.INFO,
@@ -3687,7 +3917,12 @@ def download_with_ytdlp(
                 cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
                 cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
                 try:
-                    subprocess.run(cmd_retry_argv, check=True, stdout=DEVNULL, stderr=DEVNULL)
+                    _run_ytdlp_cli(
+                        cmd_retry_argv,
+                        cancel_check=cancel_check,
+                        cancel_reason=cancel_reason,
+                        progress_callback=progress_callback,
+                    )
                     _log_event(
                         logging.INFO,
                         "YTDLP_CLI_EQUIVALENT",

@@ -1235,8 +1235,11 @@ async function refreshStatus() {
     if (activeJobs.length) {
       const topJob = activeJobs[0] || {};
       const topJobLabel = [topJob.status, topJob.source].filter(Boolean).join(" · ");
+      const topPercent = Number.isFinite(Number(topJob.progress_percent))
+        ? `${Math.max(0, Math.min(100, Math.round(Number(topJob.progress_percent))))}%`
+        : "";
       if (topJobLabel) {
-        queueSummary.push(`head: ${topJobLabel}`);
+        queueSummary.push(`head: ${topJobLabel}${topPercent ? ` (${topPercent})` : ""}`);
       }
     }
     $("#status-queue-summary").textContent = queueSummary.join(" · ");
@@ -4735,12 +4738,37 @@ async function refreshSearchQueue() {
 
     body.textContent = "";
     if (!jobs.length) {
-      renderSearchEmptyRow(body, 8, "No active queue jobs found.");
+      renderSearchEmptyRow(body, 9, "No active queue jobs found.");
       if (messageEl) messageEl.textContent = "";
       return;
     }
 
     jobs.forEach((job) => {
+      const downloaded = Number.isFinite(Number(job.progress_downloaded_bytes))
+        ? Number(job.progress_downloaded_bytes)
+        : null;
+      const total = Number.isFinite(Number(job.progress_total_bytes))
+        ? Number(job.progress_total_bytes)
+        : null;
+      const percent = Number.isFinite(Number(job.progress_percent))
+        ? Math.max(0, Math.min(100, Math.round(Number(job.progress_percent))))
+        : ((downloaded !== null && total && total > 0)
+          ? Math.max(0, Math.min(100, Math.round((downloaded / total) * 100)))
+          : null);
+      const progressParts = [];
+      if (percent !== null) {
+        progressParts.push(`${percent}%`);
+      }
+      if (downloaded !== null || total !== null) {
+        progressParts.push(`${downloaded !== null ? formatBytes(downloaded) : "-"} / ${total !== null ? formatBytes(total) : "-"}`);
+      }
+      if (Number.isFinite(Number(job.progress_speed_bps))) {
+        progressParts.push(formatSpeed(Number(job.progress_speed_bps)));
+      }
+      if (Number.isFinite(Number(job.progress_eta_seconds))) {
+        progressParts.push(`ETA ${formatDuration(Number(job.progress_eta_seconds))}`);
+      }
+      const progressText = progressParts.length ? progressParts.join(" · ") : "-";
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${job.id || ""}</td>
@@ -4748,6 +4776,7 @@ async function refreshSearchQueue() {
         <td>${job.source || ""}</td>
         <td>${job.media_intent || ""}</td>
         <td>${job.status || ""}</td>
+        <td>${progressText}</td>
         <td>${job.attempts ?? ""}</td>
         <td>${formatTimestamp(job.created_at) || ""}</td>
         <td>${job.last_error || ""}</td>
@@ -4756,7 +4785,7 @@ async function refreshSearchQueue() {
     });
     if (messageEl) messageEl.textContent = "";
   } catch (err) {
-    renderSearchEmptyRow(body, 8, `Failed to load queue: ${err.message}`);
+    renderSearchEmptyRow(body, 9, `Failed to load queue: ${err.message}`);
     setNotice(messageEl, `Failed to load queue: ${err.message}`, true);
   }
 }
