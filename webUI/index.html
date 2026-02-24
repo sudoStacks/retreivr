@@ -30,9 +30,9 @@
       <div id="nav-actions" class="nav-actions"></div>
     </nav>
     <div class="top-actions" id="top-actions">
-      <button id="refresh-all" class="button">Refresh</button>
-      <button id="toggle-theme" class="button ghost">Light mode</button>
-      <a class="button ghost" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
+      <button id="refresh-all" class="button small">Refresh</button>
+      <button id="toggle-theme" class="button ghost small">Light mode</button>
+      <a class="button ghost small" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
     </div>
   </header>
 
@@ -99,8 +99,17 @@
               </label>
 
               <label class="home-advanced-field">
+                <span>Delivery</span>
+                <div id="home-delivery-toggle" class="home-delivery-toggle" role="group" aria-label="Delivery mode">
+                  <button type="button" class="button ghost small active" data-mode="server">Server</button>
+                  <button type="button" class="button ghost small" data-mode="client">Client</button>
+                </div>
+                <input id="home-delivery-mode" type="hidden" value="server">
+              </label>
+
+              <label class="home-advanced-field" id="home-destination-field">
                 <span>Destination</span>
-                <div class="row">
+                <div class="home-destination-row">
                   <input id="home-destination" type="text" placeholder="downloads">
                   <button id="home-destination-browse" class="button ghost small" type="button">Browse</button>
                 </div>

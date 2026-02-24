@@ -1734,6 +1734,54 @@ function saveHomeMusicModePreference() {
   localStorage.setItem(HOME_MUSIC_MODE_KEY, state.homeMusicMode ? "true" : "false");
 }
 
+function getHomeDeliveryMode() {
+  const value = String($("#home-delivery-mode")?.value || "server").trim().toLowerCase();
+  return value === "client" ? "client" : "server";
+}
+
+function updateHomeDeliveryModeUI() {
+  const mode = getHomeDeliveryMode();
+  const destinationField = $("#home-destination-field");
+  const destinationInput = $("#home-destination");
+  const browseButton = $("#home-destination-browse");
+  if (destinationField) {
+    destinationField.classList.toggle("hidden", mode === "client");
+  }
+  if (browseButton) {
+    browseButton.disabled = mode === "client";
+  }
+  if (mode === "client" && destinationInput) {
+    destinationInput.value = "";
+  }
+
+  const downloadButton = $("#home-search-download");
+  if (downloadButton) {
+    const blocked = mode === "client";
+    downloadButton.disabled = blocked || !state.homeSearchControlsEnabled;
+    downloadButton.setAttribute("aria-disabled", String(downloadButton.disabled));
+    downloadButton.title = blocked
+      ? "Search & Download is unavailable for client delivery. Use Search and click Download on a result."
+      : "";
+  }
+
+  const toggle = $("#home-delivery-toggle");
+  if (toggle) {
+    toggle.querySelectorAll("button[data-mode]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.mode === mode);
+      btn.setAttribute("aria-pressed", String(btn.dataset.mode === mode));
+    });
+  }
+}
+
+function setHomeDeliveryMode(mode) {
+  const normalized = mode === "client" ? "client" : "server";
+  const input = $("#home-delivery-mode");
+  if (input) {
+    input.value = normalized;
+  }
+  updateHomeDeliveryModeUI();
+}
+
 function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
   const preferAlbum = $("#home-prefer-albums")?.checked;
   const parsed = parseHomeSearchQuery($("#home-search-input")?.value, preferAlbum);
@@ -1837,12 +1885,21 @@ function handleHomeViewAdvanced() {
 
 function setHomeSearchControlsEnabled(enabled) {
   state.homeSearchControlsEnabled = enabled;
-  ["#home-search-download", "#home-search-only"].forEach((selector) => {
-    const el = $(selector);
-    if (!el) return;
-    el.disabled = !enabled;
-    el.setAttribute("aria-disabled", (!enabled).toString());
-  });
+  const searchOnly = $("#home-search-only");
+  if (searchOnly) {
+    searchOnly.disabled = !enabled;
+    searchOnly.setAttribute("aria-disabled", (!enabled).toString());
+  }
+  const download = $("#home-search-download");
+  if (download) {
+    const deliveryMode = getHomeDeliveryMode();
+    const blockedByMode = deliveryMode === "client";
+    download.disabled = !enabled || blockedByMode;
+    download.setAttribute("aria-disabled", String(download.disabled));
+    download.title = blockedByMode
+      ? "Search & Download is unavailable for client delivery. Use Search and click Download on a result."
+      : "";
+  }
 }
 
 function maybeReleaseHomeSearchControls(requestId, requestStatus) {
@@ -3616,6 +3673,42 @@ async function refreshHomeDirectJobStatus() {
     if (runData.run_id !== state.homeDirectJob.runId) {
       return;
     }
+
+    const deliveryMode = String(state.homeDirectJob.deliveryMode || "server").toLowerCase();
+    const statusPayload = runData?.status || {};
+    const clientDeliveryId = String(statusPayload.client_delivery_id || "").trim();
+    const clientFilename = String(statusPayload.client_delivery_filename || "").trim();
+
+    if (deliveryMode === "client" && clientDeliveryId) {
+      if (state.homeDirectJob.clientDeliveryId !== clientDeliveryId) {
+        state.homeDirectJob.clientDeliveryId = clientDeliveryId;
+        const a = document.createElement("a");
+        a.href = `/api/deliveries/${encodeURIComponent(clientDeliveryId)}/download`;
+        if (clientFilename) {
+          a.download = clientFilename;
+        }
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+      state.homeDirectJob.status = "completed";
+      state.homeDirectPreview = {
+        ...state.homeDirectPreview,
+        job_status: "completed",
+      };
+      container.textContent = "";
+      container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "completed"));
+      setHomeResultsStatus("Completed");
+      setHomeResultsDetail(
+        clientFilename ? `Client download started: ${clientFilename}` : "Client download started.",
+        false
+      );
+      setHomeResultsState({ hasResults: true, terminal: true });
+      stopHomeDirectJobPolling();
+      setHomeSearchControlsEnabled(true);
+      return;
+    }
+
     let runStatus = "queued";
     let runError = "";
     if (runData.state === "error" || runData.error) {
@@ -3992,6 +4085,12 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
     setHomeSearchActive(false);
     return;
   }
+  if (treatAsMusic && deliveryMode === "client") {
+    setNotice(messageEl, "Client delivery is not available for Music Mode direct URLs. Select Server delivery.", true);
+    setHomeSearchControlsEnabled(true);
+    setHomeSearchActive(false);
+    return;
+  }
   const payload = {};
   payload.single_url = url;
   if (destination && deliveryMode !== "client") {
@@ -4005,6 +4104,9 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   setNotice(messageEl, "Direct URL download requested...", false);
   try {
     const runInfo = await startRun(payload);
+    if (!runInfo) {
+      throw new Error("Run failed");
+    }
     state.homeSearchMode = "download";
     state.homeDirectJob = {
       url,
@@ -4012,6 +4114,8 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
       startedAt: new Date().toISOString(),
       runId: runInfo?.run_id || null,
       status: "queued",
+      deliveryMode,
+      clientDeliveryId: null,
     };
     state.homeDirectPreview = {
       title: url,
@@ -4100,7 +4204,8 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
   if (!itemId || !candidateId) return;
   const messageEl = options.messageEl || $("#search-requests-message");
   const finalFormat = $("#home-format")?.value.trim();
-  const payload = { candidate_id: candidateId };
+  const deliveryMode = getHomeDeliveryMode();
+  const payload = { candidate_id: candidateId, delivery_mode: deliveryMode };
   if (finalFormat) {
     payload.final_format = finalFormat;
   }
@@ -4111,11 +4216,23 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (data.created) {
+
+    if (deliveryMode === "client" && data?.delivery_url) {
+      const a = document.createElement("a");
+      a.href = data.delivery_url;
+      if (data.filename) {
+        a.download = data.filename;
+      }
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setNotice(messageEl, `Client download started${data.filename ? `: ${data.filename}` : ""}`, false);
+    } else if (data.created) {
       setNotice(messageEl, `Enqueued job ${data.job_id}`, false);
     } else {
       setNotice(messageEl, "Job already queued", false);
     }
+
     await refreshSearchRequestDetails(state.searchSelectedRequestId);
     await refreshSearchQueue();
   } catch (err) {
@@ -5457,6 +5574,14 @@ function bindEvents() {
       setHomeMusicMode(!!musicToggle.checked);
     });
   }
+  const homeDeliveryToggle = $("#home-delivery-toggle");
+  if (homeDeliveryToggle) {
+    homeDeliveryToggle.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-mode]");
+      if (!button) return;
+      setHomeDeliveryMode(button.dataset.mode || "server");
+    });
+  }
   const importToggle = document.getElementById("import-playlist-toggle");
   const importPanel = document.getElementById("import-playlist-panel");
   if (importToggle && importPanel) {
@@ -5824,6 +5949,7 @@ async function init() {
   bindEvents();
   // Home default: Music Mode OFF, standard search visible, music panel hidden.
   setHomeMusicMode(false, { persist: false, clearResultsOnDisable: false });
+  setHomeDeliveryMode(getHomeDeliveryMode());
   setupNavActions();
   await loadPaths();
   const initialPage = (window.location.hash || "#home").replace("#", "");
