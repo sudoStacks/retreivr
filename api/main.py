@@ -688,6 +688,8 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
     if run_type not in {"scheduled", "watcher"}:
         return
 
+    TELEGRAM_MAX_MESSAGE_CHARS = 4096
+
     def _count(value) -> int:
         if value is None:
             return 0
@@ -697,6 +699,99 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
             return int(value)
         except Exception:
             return 0
+
+    def _resolve_downloaded_labels(success_values) -> list[str]:
+        labels: list[str] = []
+        if not success_values:
+            return labels
+
+        raw_values: list[str] = []
+        pending_job_ids: list[str] = []
+        for value in success_values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            raw_values.append(text)
+            if re.fullmatch(r"[0-9a-f]{32}", text):
+                pending_job_ids.append(text)
+
+        job_id_to_path: dict[str, str] = {}
+        if pending_job_ids:
+            db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+            if db_path:
+                try:
+                    conn = sqlite3.connect(db_path)
+                    cur = conn.cursor()
+                    placeholders = ",".join("?" for _ in pending_job_ids)
+                    cur.execute(
+                        f"SELECT id, file_path FROM download_jobs WHERE id IN ({placeholders})",
+                        pending_job_ids,
+                    )
+                    for job_id, file_path in cur.fetchall():
+                        if job_id and file_path:
+                            job_id_to_path[str(job_id)] = str(file_path)
+                except Exception:
+                    logging.exception("Failed to resolve run success labels from download_jobs")
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        seen: set[str] = set()
+        for raw in raw_values:
+            candidate = job_id_to_path.get(raw, raw)
+            if os.path.sep in candidate:
+                candidate = os.path.basename(candidate)
+            candidate = str(candidate or "").strip()
+            if not candidate:
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            labels.append(candidate)
+
+        return labels
+
+    def _build_message(success_count: int, failure_count: int, duration_text: str, downloaded_labels: list[str]) -> str:
+        status_text = "completed" if failure_count <= 0 else "completed_with_errors"
+        header = (
+            "YouTube Archiver Summary\n"
+            f"Status: {status_text}\n"
+            f"\u2714 Success: {success_count}\n"
+            f"\u2716 Failed: {failure_count}\n"
+            f"Duration: {duration_text}"
+        )
+        footer = "\n\n__________"
+        lines = ["", "Downloaded:"]
+        if downloaded_labels:
+            lines.extend([f"\u2022 {label}" for label in downloaded_labels])
+        else:
+            lines.append("\u2022 (none)")
+        body = "\n".join(lines)
+        message = f"{header}\n{body}{footer}"
+        if len(message) <= TELEGRAM_MAX_MESSAGE_CHARS:
+            return message
+
+        # Trim downloaded list first, preserving header and a clear overflow marker.
+        trimmed_lines = ["", "Downloaded:"]
+        remaining = list(downloaded_labels)
+        while remaining:
+            next_line = f"\u2022 {remaining[0]}"
+            tentative = f"{header}\n" + "\n".join(trimmed_lines + [next_line]) + footer
+            if len(tentative) > TELEGRAM_MAX_MESSAGE_CHARS:
+                break
+            trimmed_lines.append(next_line)
+            remaining.pop(0)
+        if remaining:
+            overflow_line = f"\u2022 ... (+{len(remaining)} more)"
+            tentative = f"{header}\n" + "\n".join(trimmed_lines + [overflow_line]) + footer
+            if len(tentative) <= TELEGRAM_MAX_MESSAGE_CHARS:
+                trimmed_lines.append(overflow_line)
+        capped = f"{header}\n" + "\n".join(trimmed_lines) + footer
+        if len(capped) > TELEGRAM_MAX_MESSAGE_CHARS:
+            return f"{capped[:TELEGRAM_MAX_MESSAGE_CHARS - 1]}\u2026"
+        return capped
 
     successes = _count(getattr(status, "run_successes", 0))
     failures = _count(getattr(status, "run_failures", 0))
@@ -714,14 +809,8 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
             m, s = divmod(max(0, duration_sec), 60)
             duration_label = f"{m}m {s}s" if m else f"{s}s"
 
-    msg = (
-        "Retreivr Run Summary\n"
-        f"Run type: {run_type}\n"
-        f"Attempted: {attempted}\n"
-        f"Succeeded: {successes}\n"
-        f"Failed: {failures}\n"
-        f"Duration: {duration_label}"
-    )
+    downloaded_labels = _resolve_downloaded_labels(getattr(status, "run_successes", []) or [])
+    msg = _build_message(successes, failures, duration_label, downloaded_labels)
 
     try:
         telegram_notify(config, msg)

@@ -804,8 +804,12 @@ def telegram_notify(config, message):
     chat_id = telegram.get("chat_id")
     if not bot_token or not chat_id:
         return False
+    max_chars = 4096
+    text = str(message)
+    if len(text) > max_chars:
+        text = f"{text[:max_chars - 1]}…"
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message}
+    payload = {"chat_id": chat_id, "text": text}
     try:
         resp = requests.post(url, json=payload, timeout=15)
         if resp.ok:
