@@ -1,14 +1,33 @@
-<file name=main.rs path=/Users/Shared/NFS/Homes/mikesell/Projects/retreivr/launcher/src-tauri/src/main.rs>fn main() {
-    println!("Retreivr launcher backend started with compose support");
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Retreivr Launcher</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <h1>Retreivr Launcher</h1>
+        <p class="subtitle">Local setup and runtime control for Retreivr Docker deployment.</p>
+      </header>
 
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            docker_available,
-            compose_exists,
-            container_running,
-            install_retreivr,
-            stop_retreivr
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
-}
+      <section class="card">
+        <p id="summary">Loading launcher state...</p>
+        <p id="status" class="status">Initializing...</p>
+      </section>
+
+      <section class="card controls">
+        <button id="installBtn" type="button">Install / Start</button>
+        <button id="stopBtn" type="button">Stop</button>
+        <button id="openUI" type="button">Open Web UI</button>
+      </section>
+
+      <section class="card note">
+        <p>Default web endpoint: <code>http://localhost:8090</code></p>
+      </section>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
