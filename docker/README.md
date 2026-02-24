@@ -5,8 +5,9 @@ Quick start
 - Compose: use `docker/docker-compose.yml.example` as your base.
 
 Ports
-- Internal: 8000
-- Suggested host mapping: 8090
+- Internal container port: 8000
+- Suggested host mapping: `8090:8000` (`host:container`)
+- Access URL with default mapping: `http://localhost:8090`
 
 Volumes + paths
 - `/config` → config JSON
