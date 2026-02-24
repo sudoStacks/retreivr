@@ -1,3 +1,5 @@
+use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -349,11 +351,44 @@ fn host_port_available(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
+fn with_runtime_path(cmd: &mut Command) {
+    let program = cmd.get_program();
+    let is_docker = program == OsStr::new("docker")
+        || Path::new(program)
+            .file_name()
+            .is_some_and(|name| name == OsStr::new("docker"));
+
+    if !is_docker {
+        return;
+    }
+
+    let mut path_entries: Vec<String> = env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .collect();
+
+    for candidate in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/Applications/Docker.app/Contents/Resources/bin",
+    ] {
+        if Path::new(candidate).exists() && !path_entries.iter().any(|p| p == candidate) {
+            path_entries.push(candidate.to_string());
+        }
+    }
+
+    cmd.env("PATH", path_entries.join(":"));
+}
+
 fn command_success(mut cmd: Command) -> bool {
+    with_runtime_path(&mut cmd);
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn command_output(mut cmd: Command) -> Result<String, String> {
+    with_runtime_path(&mut cmd);
     let output = cmd.output().map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -740,11 +775,11 @@ fn update_retreivr_and_restart(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 fn docker_available() -> bool {
-    Command::new("docker")
-        .arg("info")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    command_success({
+        let mut cmd = Command::new("docker");
+        cmd.arg("info");
+        cmd
+    })
 }
 
 #[tauri::command]
@@ -786,12 +821,14 @@ fn container_running(app: AppHandle) -> bool {
         return false;
     }
 
-    Command::new("docker")
-        .args(["compose", "ps", "-q"])
-        .current_dir(app_support_dir(&app))
-        .output()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false)
+    command_output({
+        let mut cmd = Command::new("docker");
+        cmd.args(["compose", "ps", "-q"])
+            .current_dir(app_support_dir(&app));
+        cmd
+    })
+    .map(|stdout| !stdout.is_empty())
+    .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -1065,40 +1102,23 @@ fn install_retreivr(app: AppHandle) -> Result<(), String> {
     ensure_runtime_dirs(&app, &settings)?;
     fs::write(&compose, render_compose(&app, &settings)).map_err(|e| e.to_string())?;
 
-    let output = Command::new("docker")
-        .args(["compose", "up", "-d"])
-        .current_dir(&dir)
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "docker compose up failed".to_string()
-        } else {
-            stderr
-        });
-    }
+    command_output({
+        let mut cmd = Command::new("docker");
+        cmd.args(["compose", "up", "-d"]).current_dir(&dir);
+        cmd
+    })?;
 
     Ok(())
 }
 
 #[tauri::command]
 fn stop_retreivr(app: AppHandle) -> Result<(), String> {
-    let output = Command::new("docker")
-        .args(["compose", "down"])
-        .current_dir(app_support_dir(&app))
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "docker compose down failed".to_string()
-        } else {
-            stderr
-        });
-    }
+    command_output({
+        let mut cmd = Command::new("docker");
+        cmd.args(["compose", "down"])
+            .current_dir(app_support_dir(&app));
+        cmd
+    })?;
 
     Ok(())
 }
