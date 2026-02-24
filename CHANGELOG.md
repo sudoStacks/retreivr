@@ -25,6 +25,13 @@ All notable changes to this project will be documented here.
 - Playlist file import now runs as a background job (`POST /api/import/playlist` returns `202` + `job_id`) with progress polling via `GET /api/import/playlist/jobs/{job_id}` to avoid blocking the request path.
 - Scheduler, watcher, and scheduled Spotify sync ticks now pause while playlist imports are active to reduce runtime contention and UX conflicts.
 - Home import UX now enforces explicit confirmation, disables import controls while running, and displays a live progress modal with status counters and errors.
+- Album-run canonicalization now enforces one release context across all queued tracks:
+  - consistent `album`, `album_artist`, `release_date`, `mb_release_id`, `mb_release_group_id`, and `artwork_url`
+  - consistent album-wide genre best-effort (MusicBrainz release/release-group first, resolved fallback only when available)
+- Music library pathing now always keys artist folders from canonical `album_artist` (not per-track featured artist credits).
+- Music path builder now creates `Disc N` folders only when `disc_total > 1` (single-disc albums no longer force `Disc 1`).
+- Album-run queue payloads now propagate `track_total` and `disc_total` for downstream tag correctness.
+- Metadata worker now prefers album-run `artwork_url` for all tracks in an album run, with release-art fallback only when needed.
 
 ### Fixed
 - MusicBrainz recording include contract errors (`InvalidIncludeError`) in binding fetch paths.
@@ -32,6 +39,9 @@ All notable changes to this project will be documented here.
 - Direct URL preview blank-card fallback by returning safe title/uploader/thumbnail values on extraction failure.
 - Album enqueue hard-failure behavior: partial track failures now return a success summary instead of a full 500 response.
 - Fixed Home UI state drift and delivery-mode edge cases for clearer, consistent behavior.
+- Fixed album-mode metadata drift where featured-artist tracks could branch into separate artist folders.
+- Fixed inconsistent album artwork across tracks in the same album run by enforcing run-level cover art preference.
+- Fixed missing/partial track/disc total tag writes so players can reliably show `Track X of Y` and `Disc A of B`.
 
 ## v0.9.4 — Filesystem Layout Stabilization
 

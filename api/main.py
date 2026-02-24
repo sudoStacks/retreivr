@@ -1033,12 +1033,29 @@ class _IntentQueueAdapter:
             mb_release_id: str | None = None,
             mb_release_group_id: str | None = None,
         ) -> None:
+            def _optional_pos_int(value):
+                if value is None or str(value).strip() == "":
+                    return None
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    return None
+                return parsed if parsed > 0 else None
+
             normalized_artist = str(artist or "").strip()
             normalized_track = str(track or "").strip()
             normalized_album = str(album or "").strip() or None
+            normalized_album_artist = str(payload.get("album_artist") or "").strip() or None
             normalized_recording_mbid = str(recording_mbid or "").strip() or None
             normalized_release_mbid = str(mb_release_id or "").strip() or None
             normalized_release_group_mbid = str(mb_release_group_id or "").strip() or None
+            normalized_track_number = _optional_pos_int(payload.get("track_number"))
+            normalized_disc_number = _optional_pos_int(payload.get("disc_number"))
+            normalized_track_total = _optional_pos_int(payload.get("track_total"))
+            normalized_disc_total = _optional_pos_int(payload.get("disc_total"))
+            normalized_release_date = str(payload.get("release_date") or "").strip() or None
+            normalized_artwork_url = str(payload.get("artwork_url") or "").strip() or None
+            normalized_genre = str(payload.get("genre") or "").strip() or None
             if not normalized_artist or not normalized_track:
                 logging.warning("Intent enqueue skipped: music query missing artist/track")
                 return
@@ -1048,6 +1065,14 @@ class _IntentQueueAdapter:
                 "artist": normalized_artist,
                 "track": normalized_track,
                 "album": normalized_album,
+                "album_artist": normalized_album_artist,
+                "release_date": normalized_release_date,
+                "track_number": normalized_track_number,
+                "disc_number": normalized_disc_number,
+                "track_total": normalized_track_total,
+                "disc_total": normalized_disc_total,
+                "artwork_url": normalized_artwork_url,
+                "genre": normalized_genre,
                 "duration_ms": payload.get("duration_ms"),
                 "recording_mbid": normalized_recording_mbid,
                 "mb_recording_id": normalized_recording_mbid,
@@ -1079,11 +1104,15 @@ class _IntentQueueAdapter:
                 resolved_metadata=canonical_metadata,
                 output_template_overrides={
                     "audio_mode": True,
-                    "track_number": payload.get("track_number"),
-                    "disc_number": payload.get("disc_number"),
-                    "release_date": payload.get("release_date"),
+                    "album_artist": normalized_album_artist,
+                    "track_number": normalized_track_number,
+                    "disc_number": normalized_disc_number,
+                    "track_total": normalized_track_total,
+                    "disc_total": normalized_disc_total,
+                    "release_date": normalized_release_date,
                     "duration_ms": payload.get("duration_ms"),
-                    "artwork_url": payload.get("artwork_url"),
+                    "artwork_url": normalized_artwork_url,
+                    "genre": normalized_genre,
                     "recording_mbid": normalized_recording_mbid,
                     "mb_recording_id": normalized_recording_mbid,
                     "mb_release_id": normalized_release_mbid,
@@ -4789,7 +4818,7 @@ def download_full_album(data: dict):
         release_group_payload = mb._call_with_retry(  # noqa: SLF001
             lambda: musicbrainzngs.get_release_group_by_id(
                 release_group_mbid,
-                includes=["releases"],
+                includes=["releases", "tags", "genres"],
             )
         )
     except Exception:
@@ -4818,7 +4847,7 @@ def download_full_album(data: dict):
         release_payload = mb._call_with_retry(  # noqa: SLF001
             lambda: musicbrainzngs.get_release_by_id(
                 release_mbid,
-                includes=["recordings", "media", "artists"],
+                includes=["recordings", "media", "artists", "tags", "genres"],
             )
         )
     except Exception:
@@ -4832,6 +4861,41 @@ def download_full_album(data: dict):
     media = release_obj.get("medium-list", []) if isinstance(release_obj, dict) else []
     if not isinstance(media, list):
         media = []
+
+    def _safe_int(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _best_mb_genre(entity):
+        if not isinstance(entity, dict):
+            return None
+        genres = []
+        genre_list = entity.get("genre-list")
+        if isinstance(genre_list, list):
+            for item in genre_list:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if name:
+                    genres.append((_safe_int(item.get("count")), name))
+        if genres:
+            genres.sort(key=lambda entry: entry[0], reverse=True)
+            return genres[0][1]
+        tag_list = entity.get("tag-list")
+        tags = []
+        if isinstance(tag_list, list):
+            for item in tag_list:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if name:
+                    tags.append((_safe_int(item.get("count")), name))
+        if tags:
+            tags.sort(key=lambda entry: entry[0], reverse=True)
+            return tags[0][1]
+        return None
 
     def _credit_name(artist_credit):
         if not isinstance(artist_credit, list):
@@ -4852,6 +4916,37 @@ def download_full_album(data: dict):
                 parts.append(joinphrase)
         return "".join(parts).strip()
 
+    def _optional_pos_int(value):
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    album_artist = (
+        _credit_name(release_artist_credit)
+        or _credit_name(selected_release.get("artist-credit"))
+        or ""
+    )
+    disc_total = _optional_pos_int(release_obj.get("medium-count")) or len(
+        [item for item in media if isinstance(item, dict)]
+    )
+    if disc_total <= 0:
+        disc_total = 1
+    album_artwork_url = None
+    try:
+        album_artwork_url = mb.fetch_release_group_cover_art_url(release_group_mbid, timeout=8)
+    except Exception:
+        album_artwork_url = None
+    if not album_artwork_url:
+        try:
+            album_artwork_url = mb.cover_art_url(release_mbid)
+        except Exception:
+            album_artwork_url = None
+    album_genre = _best_mb_genre(release_obj) or _best_mb_genre(release_group)
+
     queue = _IntentQueueAdapter()
     engine = getattr(app.state, "worker_engine", None)
     store = getattr(engine, "store", None) if engine is not None else None
@@ -4869,6 +4964,7 @@ def download_full_album(data: dict):
         except (TypeError, ValueError):
             disc_number = 1
         tracks = medium.get("track-list", []) if isinstance(medium.get("track-list"), list) else []
+        track_total = len([item for item in tracks if isinstance(item, dict)])
         for track in tracks:
             if not isinstance(track, dict):
                 continue
@@ -4919,17 +5015,22 @@ def download_full_album(data: dict):
                 payload = {
                     "media_intent": "music_track",
                     "artist": resolved.get("artist") or artist,
-                    "album": resolved.get("album") or release_title,
+                    "album": release_title,
+                    "album_artist": album_artist or (resolved.get("album_artist") or resolved.get("artist") or artist),
                     "track": title,
                     "recording_mbid": resolved.get("recording_mbid") or recording_mbid,
                     "mb_recording_id": resolved.get("recording_mbid") or recording_mbid,
-                    "track_number": resolved.get("track_number") or track_number,
-                    "disc_number": resolved.get("disc_number") or disc_number,
-                    "release_date": resolved.get("release_date") or release_date,
-                    "mb_release_id": resolved.get("mb_release_id") or release_mbid,
-                    "mb_release_group_id": resolved.get("mb_release_group_id") or release_group_mbid,
-                    "release_id": resolved.get("mb_release_id") or release_mbid,
-                    "release_group_id": resolved.get("mb_release_group_id") or release_group_mbid,
+                    "track_number": track_number or resolved.get("track_number"),
+                    "disc_number": disc_number or resolved.get("disc_number"),
+                    "track_total": track_total or None,
+                    "disc_total": disc_total,
+                    "release_date": release_date or resolved.get("release_date"),
+                    "mb_release_id": release_mbid,
+                    "mb_release_group_id": release_group_mbid,
+                    "release_id": release_mbid,
+                    "release_group_id": release_group_mbid,
+                    "artwork_url": album_artwork_url,
+                    "genre": album_genre or (resolved.get("genre") if isinstance(resolved, dict) else None),
                     "duration_ms": resolved.get("duration_ms") or duration_ms_int,
                 }
                 canonical_id = _build_music_track_canonical_id(

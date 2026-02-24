@@ -56,6 +56,13 @@ def test_album_download_returns_partial_success_instead_of_500(monkeypatch) -> N
         def _call_with_retry(self, func):
             return func()
 
+        def fetch_release_group_cover_art_url(self, _release_group_id, timeout=8):
+            _ = timeout
+            return "https://img.test/cover.jpg"
+
+        def cover_art_url(self, release_id):
+            return f"https://coverartarchive.org/release/{release_id}/front"
+
     monkeypatch.setattr("api.main._mb_service", lambda: _MB())
     monkeypatch.setattr("api.main._read_config_or_404", lambda: {"music_mb_binding_threshold": 0.78})
 
@@ -138,4 +145,292 @@ def test_album_download_returns_partial_success_instead_of_500(monkeypatch) -> N
     assert payload["failed_tracks"][0]["track"] == "Track B"
     assert "forced_track_failure" in payload["failed_tracks"][0]["reason"]
     assert len(enqueued) == 1
+    assert enqueued[0].get("genre") is None
 
+
+def test_album_download_enforces_album_context_for_featured_tracks(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    class _MB:
+        def _call_with_retry(self, func):
+            return func()
+
+        def fetch_release_group_cover_art_url(self, _release_group_id, timeout=8):
+            _ = timeout
+            return "https://img.test/cover.jpg"
+
+        def cover_art_url(self, release_id):
+            return f"https://coverartarchive.org/release/{release_id}/front"
+
+    monkeypatch.setattr("api.main._mb_service", lambda: _MB())
+    monkeypatch.setattr("api.main._read_config_or_404", lambda: {"music_mb_binding_threshold": 0.78})
+
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_group_by_id",
+        lambda _rg, includes=None: {
+            "release-group": {
+                "release-list": [
+                    {"id": "rel-1", "status": "Official", "country": "US"},
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_by_id",
+        lambda _rid, includes=None: {
+            "release": {
+                "id": "rel-1",
+                "title": "Canonical Album",
+                "date": "2010-01-01",
+                "genre-list": [{"name": "Country", "count": "25"}],
+                "artist-credit": [{"name": "Main Artist"}],
+                "medium-list": [
+                    {
+                        "position": "1",
+                        "track-list": [
+                            {
+                                "position": "1",
+                                "title": "Track A",
+                                "recording": {"id": "rec-1", "title": "Track A", "length": "210000"},
+                            },
+                            {
+                                "position": "2",
+                                "title": "Track B",
+                                "recording": {
+                                    "id": "rec-2",
+                                    "title": "Track B",
+                                    "length": "211000",
+                                    "artist-credit": [{"name": "Main Artist"}, " feat. ", {"name": "Grace Potter"}],
+                                },
+                            },
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+
+    def _fake_resolve(_mb, *, track=None, **kwargs):
+        _ = kwargs
+        if track == "Track B":
+            return {
+                "recording_mbid": "rec-2",
+                "mb_release_id": "rel-featured",
+                "mb_release_group_id": "rg-featured",
+                "artist": "Main Artist feat. Grace Potter",
+                "album": "Featured Album Variant",
+                "track_number": 99,
+                "disc_number": 7,
+                "release_date": "2001",
+                "duration_ms": 211000,
+            }
+        return {
+            "recording_mbid": "rec-1",
+            "mb_release_id": "rel-1",
+            "mb_release_group_id": "rg-1",
+            "artist": "Main Artist",
+            "album": "Canonical Album",
+            "track_number": 1,
+            "disc_number": 1,
+            "release_date": "2010",
+            "duration_ms": 210000,
+        }
+
+    monkeypatch.setattr("api.main.resolve_best_mb_pair", _fake_resolve)
+
+    enqueued: list[dict] = []
+
+    def _capture_enqueue(self, payload: dict) -> None:
+        enqueued.append(dict(payload))
+
+    monkeypatch.setattr("api.main._IntentQueueAdapter.enqueue", _capture_enqueue)
+
+    response = client.post(
+        "/api/music/album/download",
+        json={"release_group_mbid": "rg-1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tracks_enqueued"] == 2
+    assert len(enqueued) == 2
+    assert [item["track_number"] for item in enqueued] == [1, 2]
+    assert all(item["disc_number"] == 1 for item in enqueued)
+    assert all(item["track_total"] == 2 for item in enqueued)
+    assert all(item["disc_total"] == 1 for item in enqueued)
+    assert all(item["album"] == "Canonical Album" for item in enqueued)
+    assert all(item["album_artist"] == "Main Artist" for item in enqueued)
+    assert all(item["mb_release_id"] == "rel-1" for item in enqueued)
+    assert all(item["mb_release_group_id"] == "rg-1" for item in enqueued)
+    assert all(item["artwork_url"] == "https://img.test/cover.jpg" for item in enqueued)
+    assert all(item["genre"] == "Country" for item in enqueued)
+
+
+def test_album_download_falls_back_to_resolved_genre_when_release_has_no_tags(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    class _MB:
+        def _call_with_retry(self, func):
+            return func()
+
+        def fetch_release_group_cover_art_url(self, _release_group_id, timeout=8):
+            _ = timeout
+            return "https://img.test/cover.jpg"
+
+        def cover_art_url(self, release_id):
+            return f"https://coverartarchive.org/release/{release_id}/front"
+
+    monkeypatch.setattr("api.main._mb_service", lambda: _MB())
+    monkeypatch.setattr("api.main._read_config_or_404", lambda: {"music_mb_binding_threshold": 0.78})
+
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_group_by_id",
+        lambda _rg, includes=None: {
+            "release-group": {
+                "release-list": [
+                    {"id": "rel-1", "status": "Official", "country": "US"},
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_by_id",
+        lambda _rid, includes=None: {
+            "release": {
+                "id": "rel-1",
+                "title": "Canonical Album",
+                "date": "2010-01-01",
+                "artist-credit": [{"name": "Main Artist"}],
+                "medium-list": [
+                    {
+                        "position": "1",
+                        "track-list": [
+                            {
+                                "position": "1",
+                                "title": "Track A",
+                                "recording": {"id": "rec-1", "title": "Track A", "length": "210000"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        "api.main.resolve_best_mb_pair",
+        lambda *_args, **_kwargs: {
+            "recording_mbid": "rec-1",
+            "mb_release_id": "rel-1",
+            "mb_release_group_id": "rg-1",
+            "artist": "Main Artist",
+            "album": "Canonical Album",
+            "track_number": 1,
+            "disc_number": 1,
+            "release_date": "2010",
+            "genre": "Rock",
+            "duration_ms": 210000,
+        },
+    )
+
+    enqueued: list[dict] = []
+    monkeypatch.setattr("api.main._IntentQueueAdapter.enqueue", lambda self, payload: enqueued.append(dict(payload)))
+
+    response = client.post(
+        "/api/music/album/download",
+        json={"release_group_mbid": "rg-1"},
+    )
+
+    assert response.status_code == 200
+    assert len(enqueued) == 1
+    assert enqueued[0]["genre"] == "Rock"
+
+
+def test_album_download_uses_release_group_genre_before_resolved_fallback(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    class _MB:
+        def _call_with_retry(self, func):
+            return func()
+
+        def fetch_release_group_cover_art_url(self, _release_group_id, timeout=8):
+            _ = timeout
+            return "https://img.test/cover.jpg"
+
+        def cover_art_url(self, release_id):
+            return f"https://coverartarchive.org/release/{release_id}/front"
+
+    monkeypatch.setattr("api.main._mb_service", lambda: _MB())
+    monkeypatch.setattr("api.main._read_config_or_404", lambda: {"music_mb_binding_threshold": 0.78})
+
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_group_by_id",
+        lambda _rg, includes=None: {
+            "release-group": {
+                "genre-list": [{"name": "Americana", "count": "7"}],
+                "release-list": [
+                    {"id": "rel-1", "status": "Official", "country": "US"},
+                ],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_by_id",
+        lambda _rid, includes=None: {
+            "release": {
+                "id": "rel-1",
+                "title": "Canonical Album",
+                "date": "2010-01-01",
+                "artist-credit": [{"name": "Main Artist"}],
+                "medium-list": [
+                    {
+                        "position": "1",
+                        "track-list": [
+                            {
+                                "position": "1",
+                                "title": "Track A",
+                                "recording": {"id": "rec-1", "title": "Track A", "length": "210000"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        "api.main.resolve_best_mb_pair",
+        lambda *_args, **_kwargs: {
+            "recording_mbid": "rec-1",
+            "mb_release_id": "rel-1",
+            "mb_release_group_id": "rg-1",
+            "artist": "Main Artist",
+            "album": "Canonical Album",
+            "track_number": 1,
+            "disc_number": 1,
+            "release_date": "2010",
+            "genre": "Rock",
+            "duration_ms": 210000,
+        },
+    )
+
+    enqueued: list[dict] = []
+    monkeypatch.setattr("api.main._IntentQueueAdapter.enqueue", lambda self, payload: enqueued.append(dict(payload)))
+
+    response = client.post(
+        "/api/music/album/download",
+        json={"release_group_mbid": "rg-1"},
+    )
+
+    assert response.status_code == 200
+    assert len(enqueued) == 1
+    assert enqueued[0]["genre"] == "Americana"

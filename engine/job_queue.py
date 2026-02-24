@@ -1772,11 +1772,13 @@ class YouTubeAdapter:
                     else {}
                 )
                 # For music_track jobs, canonical path/tag fields come from bound canonical metadata only.
-                canonical_artist = refreshed_canonical.get("artist") or refreshed_canonical.get("album_artist")
+                canonical_artist = refreshed_canonical.get("artist")
+                canonical_album_artist = refreshed_canonical.get("album_artist") or canonical_artist
                 canonical_track = refreshed_canonical.get("track") or refreshed_canonical.get("title")
                 if canonical_artist:
                     meta["artist"] = canonical_artist
-                    meta["album_artist"] = canonical_artist
+                if canonical_album_artist:
+                    meta["album_artist"] = canonical_album_artist
                 if canonical_track:
                     meta["track"] = canonical_track
                     meta["title"] = canonical_track
@@ -1784,6 +1786,14 @@ class YouTubeAdapter:
                 meta["release_date"] = refreshed_canonical.get("release_date")
                 meta["track_number"] = refreshed_canonical.get("track_number")
                 meta["disc_number"] = refreshed_canonical.get("disc_number")
+                meta["track_total"] = refreshed_canonical.get("track_total")
+                meta["disc_total"] = refreshed_canonical.get("disc_total")
+                meta["genre"] = refreshed_canonical.get("genre")
+                meta["artwork_url"] = (
+                    refreshed_canonical.get("artwork_url")
+                    or refreshed_template.get("artwork_url")
+                    or meta.get("artwork_url")
+                )
                 meta["mb_release_id"] = refreshed_canonical.get("mb_release_id")
                 meta["mb_release_group_id"] = refreshed_canonical.get("mb_release_group_id")
             video_id = meta.get("video_id") or job.id
@@ -2533,11 +2543,16 @@ def build_download_job_payload(
     if canonical_metadata:
         output_template["canonical_metadata"] = canonical_metadata
         output_template.setdefault("artist", canonical_metadata.get("artist") or canonical_metadata.get("album_artist"))
+        output_template.setdefault("album_artist", canonical_metadata.get("album_artist") or canonical_metadata.get("artist"))
         output_template.setdefault("album", canonical_metadata.get("album"))
         output_template.setdefault("track", canonical_metadata.get("track") or canonical_metadata.get("title"))
         output_template.setdefault("track_number", canonical_metadata.get("track_number") or canonical_metadata.get("track_num"))
         output_template.setdefault("disc_number", canonical_metadata.get("disc_number") or canonical_metadata.get("disc_num"))
+        output_template.setdefault("track_total", canonical_metadata.get("track_total"))
+        output_template.setdefault("disc_total", canonical_metadata.get("disc_total"))
         output_template.setdefault("release_date", canonical_metadata.get("release_date") or canonical_metadata.get("date"))
+        output_template.setdefault("artwork_url", canonical_metadata.get("artwork_url"))
+        output_template.setdefault("genre", canonical_metadata.get("genre"))
 
     if isinstance(output_template_overrides, dict):
         output_template.update(output_template_overrides)
@@ -4044,13 +4059,13 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
         raise RuntimeError("music_release_metadata_incomplete_before_path_build")
 
     album_artist = sanitize_for_filesystem(
-        _normalize_nfc(_clean_audio_artist(meta.get("album_artist") or meta.get("artist") or ""))
+        _normalize_nfc(_clean_audio_artist(meta.get("album_artist") or ""))
     ) or "Unknown Artist"
     album_title = sanitize_for_filesystem(_normalize_nfc(_clean_audio_title(meta.get("album") or ""))) or "Unknown Album"
     track = sanitize_for_filesystem(_normalize_nfc(_clean_audio_title(meta.get("track") or meta.get("title") or "")))
     track_number = format_track_number(meta.get("track_number")) or "00"
     disc_number = normalize_track_number(meta.get("disc") or meta.get("disc_number"))
-    disc_folder = sanitize_for_filesystem(_normalize_nfc(f"Disc {disc_number or 1}"))
+    disc_total = normalize_track_number(meta.get("disc_total"))
     release_year = _extract_release_year(meta.get("release_date") or meta.get("date"))
     album_folder = f"{album_title} ({release_year})" if release_year else album_title
     # Audio paths are canonical and intentionally ignore custom templates.
@@ -4059,7 +4074,10 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
     _ = fallback_id
 
     track_label = f"{track_number} - {track or 'media'}.{ext}"
-    return f"Music/{album_artist}/{album_folder}/{disc_folder}/{track_label}"
+    if disc_total and disc_total > 1:
+        disc_folder = sanitize_for_filesystem(_normalize_nfc(f"Disc {disc_number or 1}"))
+        return f"Music/{album_artist}/{album_folder}/{disc_folder}/{track_label}"
+    return f"Music/{album_artist}/{album_folder}/{track_label}"
 
 
 def build_output_filename(meta, fallback_id, ext, template, audio_mode):

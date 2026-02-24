@@ -131,7 +131,7 @@ def test_missing_track_number_enrichment_fills_metadata_and_path_builds(jq, monk
         "mp3",
     )
     assert "Unknown Album" not in path
-    assert "/Disc 1/" in path
+    assert "/Disc 1/" not in path
     assert "/07 - Track Name.mp3" in path
 
 

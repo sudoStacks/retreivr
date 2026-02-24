@@ -225,7 +225,8 @@ def test_server_direct_url_music_mode_enforces_mb_metadata_and_music_path(
 
     files = [str(p.relative_to(destination)).replace("\\", "/") for p in destination.rglob("*") if p.is_file()]
     assert len(files) == 1
-    assert files[0].startswith("Music/Canonical Artist/Canonical Album (2010)/Disc 1/")
+    assert files[0].startswith("Music/Canonical Artist/Canonical Album (2010)/")
+    assert "/Disc 1/" not in files[0]
     assert files[0].endswith("01 - Canonical Track.mp3")
 
 

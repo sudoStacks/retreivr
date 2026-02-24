@@ -70,11 +70,82 @@ def test_worker_does_not_build_unknown_album_when_mb_pair_present(jq, monkeypatc
                 "recording_mbid": "rec-1",
                 "canonical_metadata": {
                     "artist": "Artist Name",
+                    "album_artist": "Artist Name",
                     "track": "Track Name",
                     "album": "Bound Album",
                     "release_date": "2012",
                     "track_number": 4,
                     "disc_number": 1,
+                    "disc_total": 1,
+                    "genre": "Country",
+                    "mb_release_id": "rel-1",
+                    "mb_release_group_id": "rg-1",
+                    "recording_mbid": "rec-1",
+                    "mb_recording_id": "rec-1",
+                },
+            },
+        )
+        adapter = jq.YouTubeAdapter()
+
+        def _fake_download_with_ytdlp(*args, **kwargs):
+            temp_dir = Path(args[1])
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out = temp_dir / "tmp.mp3"
+            out.write_bytes(b"ok")
+            return {"id": "vid-1", "title": "Track Name", "ext": "mp3"}, str(out)
+
+        monkeypatch.setattr(jq, "download_with_ytdlp", _fake_download_with_ytdlp)
+        monkeypatch.setattr(
+            jq,
+            "extract_meta",
+            lambda info, fallback_url=None: {"video_id": info.get("id"), "title": "Track Name", "artist": "Artist Name", "track": "Track Name"},
+        )
+        monkeypatch.setattr(jq, "enqueue_media_metadata", lambda file_path, meta, config: None)
+
+        paths = SimpleNamespace(
+            single_downloads_dir=str(base_downloads),
+            temp_downloads_dir=str(Path(tmpdir) / "tmp"),
+            thumbs_dir=str(Path(tmpdir) / "thumbs"),
+        )
+
+        final = adapter.execute(
+            job,
+            {"final_format": "mkv", "music_final_format": "mp3"},
+            paths,
+            media_type="music",
+            media_intent="music_track",
+        )
+        assert final is not None
+        final_path, meta = final
+        assert "Unknown Album" not in final_path
+        assert "Bound Album (2012)" in final_path
+        assert "/Disc 1/" not in final_path
+        assert "/04 - Track Name.mp3" in final_path
+        assert meta.get("genre") == "Country"
+
+
+def test_worker_includes_disc_folder_when_disc_total_is_multi_disc(jq, monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base_downloads = Path(tmpdir) / "downloads"
+        job = SimpleNamespace(
+            id="job-1b",
+            url="https://example.test/v",
+            origin="import",
+            media_type="music",
+            media_intent="music_track",
+            resolved_destination=str(base_downloads),
+            output_template={
+                "output_dir": str(base_downloads),
+                "music_final_format": "mp3",
+                "recording_mbid": "rec-1",
+                "canonical_metadata": {
+                    "artist": "Artist Name",
+                    "track": "Track Name",
+                    "album": "Bound Album",
+                    "release_date": "2012",
+                    "track_number": 7,
+                    "disc_number": 2,
+                    "disc_total": 2,
                     "mb_release_id": "rel-1",
                     "mb_release_group_id": "rg-1",
                     "recording_mbid": "rec-1",
@@ -114,10 +185,85 @@ def test_worker_does_not_build_unknown_album_when_mb_pair_present(jq, monkeypatc
         )
         assert final is not None
         final_path, _ = final
-        assert "Unknown Album" not in final_path
-        assert "Bound Album (2012)" in final_path
-        assert "/Disc 1/" in final_path
-        assert "/04 - Track Name.mp3" in final_path
+        assert "/Disc 2/" in final_path
+
+
+def test_worker_path_uses_album_artist_not_featured_track_artist(jq, monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base_downloads = Path(tmpdir) / "downloads"
+        job = SimpleNamespace(
+            id="job-1c",
+            url="https://example.test/v",
+            origin="import",
+            media_type="music",
+            media_intent="music_track",
+            resolved_destination=str(base_downloads),
+            output_template={
+                "output_dir": str(base_downloads),
+                "music_final_format": "mp3",
+                "recording_mbid": "rec-3",
+                "canonical_metadata": {
+                    "artist": "Kenny Chesney feat. Grace Potter",
+                    "album_artist": "Kenny Chesney",
+                    "track": "Track Name",
+                    "album": "Bound Album",
+                    "release_date": "2012",
+                    "track_number": 3,
+                    "disc_number": 1,
+                    "disc_total": 1,
+                    "mb_release_id": "rel-1",
+                    "mb_release_group_id": "rg-1",
+                    "recording_mbid": "rec-3",
+                    "mb_recording_id": "rec-3",
+                },
+            },
+        )
+        adapter = jq.YouTubeAdapter()
+
+        def _fake_download_with_ytdlp(*args, **kwargs):
+            temp_dir = Path(args[1])
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            out = temp_dir / "tmp.mp3"
+            out.write_bytes(b"ok")
+            return {
+                "id": "vid-3",
+                "title": "Track Name",
+                "artist": "Kenny Chesney feat. Grace Potter",
+                "ext": "mp3",
+            }, str(out)
+
+        monkeypatch.setattr(jq, "download_with_ytdlp", _fake_download_with_ytdlp)
+        monkeypatch.setattr(
+            jq,
+            "extract_meta",
+            lambda info, fallback_url=None: {
+                "video_id": info.get("id"),
+                "title": "Track Name",
+                "artist": "Kenny Chesney feat. Grace Potter",
+                "track": "Track Name",
+            },
+        )
+        monkeypatch.setattr(jq, "enqueue_media_metadata", lambda file_path, meta, config: None)
+
+        paths = SimpleNamespace(
+            single_downloads_dir=str(base_downloads),
+            temp_downloads_dir=str(Path(tmpdir) / "tmp"),
+            thumbs_dir=str(Path(tmpdir) / "thumbs"),
+        )
+
+        final = adapter.execute(
+            job,
+            {"final_format": "mkv", "music_final_format": "mp3"},
+            paths,
+            media_type="music",
+            media_intent="music_track",
+        )
+        assert final is not None
+        final_path, meta = final
+        assert "/Music/Kenny Chesney/" in final_path
+        assert "Grace Potter" not in final_path
+        assert meta.get("artist") == "Kenny Chesney feat. Grace Potter"
+        assert meta.get("album_artist") == "Kenny Chesney"
 
 
 def test_worker_fails_fast_if_release_metadata_missing_and_enrichment_fails(jq, monkeypatch):

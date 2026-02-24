@@ -41,8 +41,18 @@ def _apply_id3_tags(file_path, tags, artwork, source_title, allow_overwrite):
     changed |= _set_id3_text(audio, "TALB", tags.get("album"), allow_overwrite)
     changed |= _set_id3_text(audio, "TIT2", tags.get("title"), allow_overwrite)
     changed |= _set_id3_text(audio, "TPE2", tags.get("album_artist"), allow_overwrite)
-    changed |= _set_id3_text(audio, "TRCK", tags.get("track_number"), allow_overwrite)
-    changed |= _set_id3_text(audio, "TPOS", tags.get("disc_number"), allow_overwrite)
+    changed |= _set_id3_text(
+        audio,
+        "TRCK",
+        _format_index_with_total(tags.get("track_number"), tags.get("track_total")),
+        allow_overwrite,
+    )
+    changed |= _set_id3_text(
+        audio,
+        "TPOS",
+        _format_index_with_total(tags.get("disc_number"), tags.get("disc_total")),
+        allow_overwrite,
+    )
     changed |= _set_id3_text(audio, "TDRC", tags.get("date") or tags.get("year"), allow_overwrite)
     changed |= _set_id3_text(audio, "TCON", tags.get("genre"), allow_overwrite)
     changed |= _set_id3_txxx(audio, "SOURCE", "YouTube", allow_overwrite)
@@ -95,12 +105,14 @@ def _apply_mp4_tags(file_path, tags, artwork, source_title, allow_overwrite):
     changed |= _set_mp4_value(mp4_tags, "\xa9lyr", tags.get("lyrics"), allow_overwrite)
     changed |= _set_mp4_value(mp4_tags, "aART", tags.get("album_artist"), allow_overwrite)
     track_number = _normalize_track(tags.get("track_number"))
+    track_total = _normalize_total(tags.get("track_total"), tags.get("track_number"))
     if track_number and (allow_overwrite or "trkn" not in mp4_tags):
-        mp4_tags["trkn"] = [(track_number, 0)]
+        mp4_tags["trkn"] = [(track_number, track_total or 0)]
         changed = True
     disc_number = _normalize_track(tags.get("disc_number"))
+    disc_total = _normalize_total(tags.get("disc_total"), tags.get("disc_number"))
     if disc_number and (allow_overwrite or "disk" not in mp4_tags):
-        mp4_tags["disk"] = [(disc_number, 0)]
+        mp4_tags["disk"] = [(disc_number, disc_total or 0)]
         changed = True
     date_value = tags.get("date") or tags.get("year")
     if date_value and (allow_overwrite or "\xa9day" not in mp4_tags):
@@ -143,8 +155,18 @@ def _apply_generic_tags(file_path, tags, artwork, source_title, allow_overwrite)
     changed |= _set_generic(audio.tags, "title", tags.get("title"), allow_overwrite)
     changed |= _set_generic(audio.tags, "lyrics", tags.get("lyrics"), allow_overwrite)
     changed |= _set_generic(audio.tags, "albumartist", tags.get("album_artist"), allow_overwrite)
-    changed |= _set_generic(audio.tags, "tracknumber", tags.get("track_number"), allow_overwrite)
-    changed |= _set_generic(audio.tags, "discnumber", tags.get("disc_number"), allow_overwrite)
+    changed |= _set_generic(
+        audio.tags,
+        "tracknumber",
+        _format_index_with_total(tags.get("track_number"), tags.get("track_total")),
+        allow_overwrite,
+    )
+    changed |= _set_generic(
+        audio.tags,
+        "discnumber",
+        _format_index_with_total(tags.get("disc_number"), tags.get("disc_total")),
+        allow_overwrite,
+    )
     changed |= _set_generic(audio.tags, "date", tags.get("date") or tags.get("year"), allow_overwrite)
     changed |= _set_generic(audio.tags, "genre", tags.get("genre"), allow_overwrite)
     changed |= _set_generic(audio.tags, "source", "YouTube", allow_overwrite)
@@ -235,6 +257,40 @@ def _normalize_track(value):
         return int(str(value).split("/")[0])
     except Exception:
         return None
+
+
+def _normalize_positive_int(value):
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _extract_fraction_total(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if "/" not in text:
+        return None
+    tail = text.split("/", 1)[1].strip()
+    return _normalize_positive_int(tail)
+
+
+def _normalize_total(explicit_total, fraction_value):
+    return _normalize_positive_int(explicit_total) or _extract_fraction_total(fraction_value)
+
+
+def _format_index_with_total(index_value, total_value):
+    number = _normalize_track(index_value)
+    if number is None:
+        return None
+    total = _normalize_total(total_value, index_value)
+    if total:
+        return f"{number}/{total}"
+    return str(number)
 
 
 def _format_tags(tags):

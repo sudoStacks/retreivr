@@ -64,7 +64,9 @@ def _process_item(item):
 
     best, score = matcher.select_best_match(source, candidates, duration)
     threshold = config.get("confidence_threshold", 70)
-    if not best or score < threshold:
+    best = best if isinstance(best, dict) else {}
+    match_ok = bool(best) and score >= threshold
+    if not match_ok and not str(meta.get("artwork_url") or "").strip():
         logging.warning(
             "Music metadata skipped (score=%s, threshold=%s) for %s",
             score if best else "none",
@@ -74,26 +76,35 @@ def _process_item(item):
         return
 
     tags = {
-        "artist": best.get("artist"),
-        "album": best.get("album"),
-        "title": best.get("title"),
-        "track_number": best.get("track_number"),
+        "artist": meta.get("artist") or best.get("artist"),
+        "album": meta.get("album") or best.get("album"),
+        "title": meta.get("track") or meta.get("title") or best.get("title"),
+        "track_number": meta.get("track_number") or best.get("track_number"),
+        "track_total": meta.get("track_total"),
         "year": best.get("year"),
         "date": meta.get("release_date") or meta.get("date") or best.get("date") or best.get("year"),
         "disc_number": meta.get("disc_number") or meta.get("disc") or best.get("disc_number"),
-        "genre": best.get("genre"),
-        "album_artist": best.get("album_artist") or best.get("artist"),
-        "recording_id": best.get("recording_id"),
+        "disc_total": meta.get("disc_total"),
+        "genre": meta.get("genre") or best.get("genre"),
+        "album_artist": meta.get("album_artist") or best.get("album_artist") or best.get("artist"),
+        "recording_id": best.get("recording_id") or meta.get("mb_recording_id") or meta.get("recording_mbid"),
         "mb_recording_id": meta.get("mb_recording_id") or meta.get("recording_mbid") or best.get("recording_id"),
         "mb_release_id": meta.get("mb_release_id") or best.get("release_id"),
     }
-    release_id = best.get("release_id")
+    release_id = meta.get("mb_release_id") or best.get("release_id")
     artwork = None
-    if config.get("embed_artwork") and release_id:
-        artwork = artwork_provider.fetch_artwork(
-            release_id,
-            max_size_px=config.get("max_artwork_size_px", 1500),
-        )
+    if config.get("embed_artwork"):
+        artwork_url = str(meta.get("artwork_url") or "").strip()
+        if artwork_url:
+            artwork = artwork_provider.fetch_artwork_from_url(
+                artwork_url,
+                max_size_px=config.get("max_artwork_size_px", 1500),
+            )
+        if artwork is None and release_id:
+            artwork = artwork_provider.fetch_artwork(
+                release_id,
+                max_size_px=config.get("max_artwork_size_px", 1500),
+            )
 
     display_artist = tags.get("artist") or "-"
     display_title = tags.get("title") or "-"
