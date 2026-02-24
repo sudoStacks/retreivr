@@ -9,8 +9,14 @@
   <body>
     <main class="shell">
       <header class="header">
-        <h1>Retreivr Launcher</h1>
-        <p class="subtitle">Guided setup and runtime control for local Retreivr on Docker.</p>
+        <div class="brand-row">
+          <img class="retreivr-mark" src="./assets/retreivr_icon_small.png" alt="Retreivr" />
+          <div class="brand-copy">
+            <h1>Retreivr Launcher</h1>
+            <p class="subtitle">Guided setup and runtime control for local Retreivr on Docker.</p>
+          </div>
+          <img class="sudostacks-mark" src="./assets/sudostacks.png" alt="SudoStacks" />
+        </div>
       </header>
 
       <section class="card">
@@ -80,6 +86,36 @@
 
           <label for="containerName">Container Name</label>
           <input id="containerName" name="containerName" type="text" required />
+
+          <label for="downloadsDir">Downloads Folder</label>
+          <div class="path-row">
+            <input id="downloadsDir" name="downloadsDir" type="text" required />
+            <button id="browseDownloadsDirBtn" type="button">Browse</button>
+          </div>
+
+          <label for="configDir">Config Folder</label>
+          <div class="path-row">
+            <input id="configDir" name="configDir" type="text" required />
+            <button id="browseConfigDirBtn" type="button">Browse</button>
+          </div>
+
+          <label for="tokensDir">Tokens Folder</label>
+          <div class="path-row">
+            <input id="tokensDir" name="tokensDir" type="text" required />
+            <button id="browseTokensDirBtn" type="button">Browse</button>
+          </div>
+
+          <label for="logsDir">Logs Folder</label>
+          <div class="path-row">
+            <input id="logsDir" name="logsDir" type="text" required />
+            <button id="browseLogsDirBtn" type="button">Browse</button>
+          </div>
+
+          <label for="dataDir">Data Folder</label>
+          <div class="path-row">
+            <input id="dataDir" name="dataDir" type="text" required />
+            <button id="browseDataDirBtn" type="button">Browse</button>
+          </div>
 
           <div class="actions-row">
             <button id="saveBtn" type="submit">Save Configuration</button>

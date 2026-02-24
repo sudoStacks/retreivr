@@ -10,6 +10,7 @@ use tauri::{AppHandle, Manager};
 
 const LAUNCHER_RELEASE_API: &str = "https://api.github.com/repos/sudostacks/retreivr/releases/latest";
 const LAUNCHER_RELEASES_URL: &str = "https://github.com/sudostacks/retreivr/releases";
+const DEFAULT_CONFIG_JSON: &str = include_str!("../../../config/config_sample.json");
 
 fn app_support_dir(app: &AppHandle) -> PathBuf {
     app.path()
@@ -28,17 +29,67 @@ fn settings_path(app: &AppHandle) -> PathBuf {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LauncherSettings {
+    #[serde(default = "default_host_port")]
     host_port: u16,
+    #[serde(default = "default_image")]
     image: String,
+    #[serde(default = "default_container_name")]
     container_name: String,
+    #[serde(default = "default_config_dir")]
+    config_dir: String,
+    #[serde(default = "default_data_dir")]
+    data_dir: String,
+    #[serde(default = "default_downloads_dir")]
+    downloads_dir: String,
+    #[serde(default = "default_logs_dir")]
+    logs_dir: String,
+    #[serde(default = "default_tokens_dir")]
+    tokens_dir: String,
+}
+
+fn default_host_port() -> u16 {
+    8090
+}
+
+fn default_image() -> String {
+    "ghcr.io/sudostacks/retreivr:latest".to_string()
+}
+
+fn default_container_name() -> String {
+    "retreivr".to_string()
+}
+
+fn default_config_dir() -> String {
+    "./config".to_string()
+}
+
+fn default_data_dir() -> String {
+    "./data".to_string()
+}
+
+fn default_downloads_dir() -> String {
+    "./downloads".to_string()
+}
+
+fn default_logs_dir() -> String {
+    "./logs".to_string()
+}
+
+fn default_tokens_dir() -> String {
+    "./tokens".to_string()
 }
 
 impl Default for LauncherSettings {
     fn default() -> Self {
         Self {
-            host_port: 8090,
-            image: "ghcr.io/sudostacks/retreivr:latest".to_string(),
-            container_name: "retreivr".to_string(),
+            host_port: default_host_port(),
+            image: default_image(),
+            container_name: default_container_name(),
+            config_dir: default_config_dir(),
+            data_dir: default_data_dir(),
+            downloads_dir: default_downloads_dir(),
+            logs_dir: default_logs_dir(),
+            tokens_dir: default_tokens_dir(),
         }
     }
 }
@@ -127,6 +178,34 @@ fn canonicalize_image_ref(image: &str) -> String {
     image.trim().to_ascii_lowercase()
 }
 
+fn canonicalize_mount_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if Path::new(trimmed).is_absolute() {
+        return trimmed.to_string();
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("./") {
+        return format!("./{}", rest.trim_start_matches('/'));
+    }
+
+    format!("./{}", trimmed.trim_start_matches('/'))
+}
+
+fn normalize_settings(settings: &LauncherSettings) -> LauncherSettings {
+    let mut out = settings.clone();
+    out.image = canonicalize_image_ref(&out.image);
+    out.config_dir = canonicalize_mount_path(&out.config_dir);
+    out.data_dir = canonicalize_mount_path(&out.data_dir);
+    out.downloads_dir = canonicalize_mount_path(&out.downloads_dir);
+    out.logs_dir = canonicalize_mount_path(&out.logs_dir);
+    out.tokens_dir = canonicalize_mount_path(&out.tokens_dir);
+    out
+}
+
 fn load_settings(app: &AppHandle) -> LauncherSettings {
     let path = settings_path(app);
     let content = match fs::read_to_string(path) {
@@ -134,16 +213,14 @@ fn load_settings(app: &AppHandle) -> LauncherSettings {
         Err(_) => return LauncherSettings::default(),
     };
 
-    let mut parsed = serde_json::from_str(&content).unwrap_or_else(|_| LauncherSettings::default());
-    parsed.image = canonicalize_image_ref(&parsed.image);
-    parsed
+    let parsed = serde_json::from_str(&content).unwrap_or_else(|_| LauncherSettings::default());
+    normalize_settings(&parsed)
 }
 
 fn save_settings_to_disk(app: &AppHandle, settings: &LauncherSettings) -> Result<(), String> {
     let dir = app_support_dir(app);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let mut normalized = settings.clone();
-    normalized.image = canonicalize_image_ref(&normalized.image);
+    let normalized = normalize_settings(settings);
     let payload = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
     fs::write(settings_path(app), payload).map_err(|e| e.to_string())
 }
@@ -173,10 +250,42 @@ fn validate_settings(settings: &LauncherSettings) -> Result<(), String> {
         return Err("container_name may only contain letters, numbers, '-', '_' and '.'".to_string());
     }
 
+    for (name, value) in [
+        ("config_dir", settings.config_dir.as_str()),
+        ("data_dir", settings.data_dir.as_str()),
+        ("downloads_dir", settings.downloads_dir.as_str()),
+        ("logs_dir", settings.logs_dir.as_str()),
+        ("tokens_dir", settings.tokens_dir.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("{name} cannot be empty"));
+        }
+    }
+
     Ok(())
 }
 
-fn render_compose(settings: &LauncherSettings) -> String {
+fn resolve_mount_source(app: &AppHandle, configured: &str) -> PathBuf {
+    let path = Path::new(configured);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
+    let cleaned = configured.trim_start_matches("./");
+    app_support_dir(app).join(cleaned)
+}
+
+fn yaml_quote_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\")
+}
+
+fn render_compose(app: &AppHandle, settings: &LauncherSettings) -> String {
+    let config_source = resolve_mount_source(app, &settings.config_dir);
+    let data_source = resolve_mount_source(app, &settings.data_dir);
+    let downloads_source = resolve_mount_source(app, &settings.downloads_dir);
+    let logs_source = resolve_mount_source(app, &settings.logs_dir);
+    let tokens_source = resolve_mount_source(app, &settings.tokens_dir);
+
     format!(
         r#"services:
   retreivr:
@@ -186,22 +295,47 @@ fn render_compose(settings: &LauncherSettings) -> String {
     ports:
       - "{host_port}:8000"
     volumes:
-      - "./config:/config"
-      - "./data:/data"
-      - "./downloads:/downloads"
-      - "./logs:/logs"
-      - "./tokens:/tokens"
+      - type: bind
+        source: "{config_source}"
+        target: "/config"
+      - type: bind
+        source: "{data_source}"
+        target: "/data"
+      - type: bind
+        source: "{downloads_source}"
+        target: "/downloads"
+      - type: bind
+        source: "{logs_source}"
+        target: "/logs"
+      - type: bind
+        source: "{tokens_source}"
+        target: "/tokens"
 "#,
         image = settings.image,
         container_name = settings.container_name,
-        host_port = settings.host_port
+        host_port = settings.host_port,
+        config_source = yaml_quote_path(&config_source),
+        data_source = yaml_quote_path(&data_source),
+        downloads_source = yaml_quote_path(&downloads_source),
+        logs_source = yaml_quote_path(&logs_source),
+        tokens_source = yaml_quote_path(&tokens_source)
     )
 }
 
-fn ensure_runtime_dirs(app: &AppHandle) -> Result<(), String> {
-    let dir = app_support_dir(app);
-    for child in ["config", "data", "downloads", "logs", "tokens"] {
-        fs::create_dir_all(dir.join(child)).map_err(|e| e.to_string())?;
+fn ensure_runtime_dirs(app: &AppHandle, settings: &LauncherSettings) -> Result<(), String> {
+    let config_dir = resolve_mount_source(app, &settings.config_dir);
+    let data_dir = resolve_mount_source(app, &settings.data_dir);
+    let downloads_dir = resolve_mount_source(app, &settings.downloads_dir);
+    let logs_dir = resolve_mount_source(app, &settings.logs_dir);
+    let tokens_dir = resolve_mount_source(app, &settings.tokens_dir);
+
+    for dir in [&config_dir, &data_dir, &downloads_dir, &logs_dir, &tokens_dir] {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+
+    let config_json_path = config_dir.join("config.json");
+    if !config_json_path.exists() {
+        fs::write(&config_json_path, DEFAULT_CONFIG_JSON).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -299,6 +433,59 @@ fn open_in_file_manager(path: &Path) -> Result<(), String> {
             Err("Failed to open folder in file manager.".to_string())
         }
     })
+}
+
+fn pick_folder_via_system() -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("osascript")
+            .args([
+                "-e",
+                "try",
+                "-e",
+                "POSIX path of (choose folder with prompt \"Select folder\")",
+                "-e",
+                "on error number -128",
+                "-e",
+                "return \"\"",
+                "-e",
+                "end try",
+            ])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok(if value.is_empty() { None } else { Some(value) });
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let script = "[void][Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath }";
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", script])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok(if value.is_empty() { None } else { Some(value) });
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let output = Command::new("zenity")
+            .args(["--file-selection", "--directory"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok(if value.is_empty() { None } else { Some(value) });
+    }
 }
 
 fn normalize_release_tag(tag: &str) -> String {
@@ -521,8 +708,8 @@ fn update_retreivr_and_restart(app: AppHandle) -> Result<String, String> {
     let settings = load_settings(&app);
     validate_settings(&settings)?;
     fs::create_dir_all(app_support_dir(&app)).map_err(|e| e.to_string())?;
-    ensure_runtime_dirs(&app)?;
-    fs::write(compose_path(&app), render_compose(&settings)).map_err(|e| e.to_string())?;
+    ensure_runtime_dirs(&app, &settings)?;
+    fs::write(compose_path(&app), render_compose(&app, &settings)).map_err(|e| e.to_string())?;
 
     let image = settings.image;
     let before = image_id_for(&image);
@@ -575,10 +762,11 @@ fn save_launcher_settings(
     app: AppHandle,
     settings: LauncherSettings,
 ) -> Result<LauncherSettings, String> {
-    let mut normalized = settings.clone();
-    normalized.image = canonicalize_image_ref(&normalized.image);
+    let normalized = normalize_settings(&settings);
     validate_settings(&normalized)?;
     save_settings_to_disk(&app, &normalized)?;
+    ensure_runtime_dirs(&app, &normalized)?;
+    fs::write(compose_path(&app), render_compose(&app, &normalized)).map_err(|e| e.to_string())?;
     Ok(normalized)
 }
 
@@ -587,7 +775,8 @@ fn reset_launcher_settings(app: AppHandle) -> Result<LauncherSettings, String> {
     let defaults = LauncherSettings::default();
     fs::create_dir_all(app_support_dir(&app)).map_err(|e| e.to_string())?;
     save_settings_to_disk(&app, &defaults)?;
-    fs::write(compose_path(&app), render_compose(&defaults)).map_err(|e| e.to_string())?;
+    fs::write(compose_path(&app), render_compose(&app, &defaults)).map_err(|e| e.to_string())?;
+    ensure_runtime_dirs(&app, &defaults)?;
     Ok(defaults)
 }
 
@@ -687,7 +876,7 @@ fn preflight_start_checks(app: AppHandle) -> PreflightReport {
                 details: e.to_string(),
                 fix: "Ensure your user can write to the launcher app-data directory.".to_string(),
             });
-        } else if let Err(e) = fs::write(compose_path(&app), render_compose(&settings)) {
+        } else if let Err(e) = fs::write(compose_path(&app), render_compose(&app, &settings)) {
             checks.push(PreflightCheck {
                 key: "compose_render".to_string(),
                 label: "Compose generation".to_string(),
@@ -848,9 +1037,15 @@ fn open_compose_folder(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn open_data_folder(app: AppHandle) -> Result<(), String> {
-    let data_dir = app_support_dir(&app).join("data");
+    let settings = load_settings(&app);
+    let data_dir = resolve_mount_source(&app, &settings.data_dir);
     fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
     open_in_file_manager(&data_dir)
+}
+
+#[tauri::command]
+fn browse_for_directory() -> Result<Option<String>, String> {
+    pick_folder_via_system()
 }
 
 #[tauri::command]
@@ -867,8 +1062,8 @@ fn install_retreivr(app: AppHandle) -> Result<(), String> {
 
     validate_settings(&settings)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    ensure_runtime_dirs(&app)?;
-    fs::write(&compose, render_compose(&settings)).map_err(|e| e.to_string())?;
+    ensure_runtime_dirs(&app, &settings)?;
+    fs::write(&compose, render_compose(&app, &settings)).map_err(|e| e.to_string())?;
 
     let output = Command::new("docker")
         .args(["compose", "up", "-d"])
@@ -921,6 +1116,7 @@ pub fn run() {
             get_launcher_settings,
             save_launcher_settings,
             reset_launcher_settings,
+            browse_for_directory,
             onboarding_checklist,
             open_compose_folder,
             open_data_folder,

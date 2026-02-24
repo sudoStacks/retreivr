@@ -34,6 +34,31 @@ body {
   letter-spacing: 0.01em;
 }
 
+.brand-row {
+  display: grid;
+  grid-template-columns: 64px 1fr 112px;
+  gap: 14px;
+  align-items: center;
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
+.retreivr-mark {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 1px solid #cbd5e1;
+}
+
+.sudostacks-mark {
+  width: 112px;
+  justify-self: end;
+  object-fit: contain;
+}
+
 .subtitle {
   margin: 6px 0 0;
   color: #334155;
@@ -206,10 +231,45 @@ strong.warn {
   flex: 1 1 280px;
 }
 
+.path-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.path-row input {
+  flex: 1 1 280px;
+}
+
 @media (max-width: 720px) {
   .shell {
     width: calc(100vw - 24px);
     margin: 20px auto;
+  }
+
+  .brand-row {
+    grid-template-columns: 52px 1fr;
+    grid-template-areas:
+      "retreivr copy"
+      "sudo sudo";
+  }
+
+  .retreivr-mark {
+    grid-area: retreivr;
+    width: 52px;
+    height: 52px;
+  }
+
+  .brand-copy {
+    grid-area: copy;
+  }
+
+  .sudostacks-mark {
+    grid-area: sudo;
+    justify-self: start;
+    width: 100px;
+    margin-top: 4px;
   }
 
   .diag-grid {
@@ -225,6 +285,10 @@ strong.warn {
   }
 
   .preset-row {
+    width: 100%;
+  }
+
+  .path-row {
     width: 100%;
   }
 }

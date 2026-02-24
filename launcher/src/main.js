@@ -22,10 +22,20 @@ document.addEventListener("DOMContentLoaded", () => {
   const updateRestartBtn = document.getElementById("updateRestartBtn");
   const openDockerInstallBtn = document.getElementById("openDockerInstall");
   const applyPresetBtn = document.getElementById("applyPresetBtn");
+  const browseDownloadsDirBtn = document.getElementById("browseDownloadsDirBtn");
+  const browseConfigDirBtn = document.getElementById("browseConfigDirBtn");
+  const browseTokensDirBtn = document.getElementById("browseTokensDirBtn");
+  const browseLogsDirBtn = document.getElementById("browseLogsDirBtn");
+  const browseDataDirBtn = document.getElementById("browseDataDirBtn");
 
   const hostPortInput = document.getElementById("hostPort");
   const imageInput = document.getElementById("image");
   const containerNameInput = document.getElementById("containerName");
+  const downloadsDirInput = document.getElementById("downloadsDir");
+  const configDirInput = document.getElementById("configDir");
+  const tokensDirInput = document.getElementById("tokensDir");
+  const logsDirInput = document.getElementById("logsDir");
+  const dataDirInput = document.getElementById("dataDir");
   const presetSelect = document.getElementById("presetSelect");
   const settingsForm = document.getElementById("settingsForm");
 
@@ -93,6 +103,11 @@ document.addEventListener("DOMContentLoaded", () => {
     updateRestartBtn.disabled = nextBusy;
     openDockerInstallBtn.disabled = nextBusy;
     applyPresetBtn.disabled = nextBusy;
+    browseDownloadsDirBtn.disabled = nextBusy;
+    browseConfigDirBtn.disabled = nextBusy;
+    browseTokensDirBtn.disabled = nextBusy;
+    browseLogsDirBtn.disabled = nextBusy;
+    browseDataDirBtn.disabled = nextBusy;
     if (!nextBusy) {
       reconcileUpdateButtons();
     }
@@ -108,6 +123,11 @@ document.addEventListener("DOMContentLoaded", () => {
       host_port: Number.parseInt(hostPortInput.value, 10),
       image: imageInput.value.trim(),
       container_name: containerNameInput.value.trim(),
+      downloads_dir: downloadsDirInput.value.trim(),
+      config_dir: configDirInput.value.trim(),
+      tokens_dir: tokensDirInput.value.trim(),
+      logs_dir: logsDirInput.value.trim(),
+      data_dir: dataDirInput.value.trim(),
     };
   }
 
@@ -115,6 +135,11 @@ document.addEventListener("DOMContentLoaded", () => {
     hostPortInput.value = String(settings.host_port);
     imageInput.value = settings.image;
     containerNameInput.value = settings.container_name;
+    downloadsDirInput.value = settings.downloads_dir;
+    configDirInput.value = settings.config_dir;
+    tokensDirInput.value = settings.tokens_dir;
+    logsDirInput.value = settings.logs_dir;
+    dataDirInput.value = settings.data_dir;
   }
 
   function applyPreset(preset) {
@@ -342,6 +367,27 @@ document.addEventListener("DOMContentLoaded", () => {
     openBtn.disabled = busy || !diagnostics.service_reachable;
   }
 
+  async function browseInto(inputEl) {
+    setBusy(true);
+    statusEl.textContent = "Opening folder picker...";
+    try {
+      const selected = await invoke("browse_for_directory");
+      if (selected) {
+        inputEl.value = selected;
+        statusEl.textContent = "Folder selected. Save configuration to persist.";
+      } else {
+        statusEl.textContent = "Folder selection cancelled";
+      }
+    } catch (error) {
+      const errorText = toErrorText(error);
+      statusEl.textContent = `Folder browse failed: ${errorText}`;
+      const issue = actionableFixes(errorText);
+      setErrorPanel(issue.title, issue.message, issue.fixes);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function refreshAll() {
     setBusy(true);
     statusEl.textContent = "Refreshing launcher status...";
@@ -428,6 +474,26 @@ document.addEventListener("DOMContentLoaded", () => {
     if (busy) return;
     applyPreset(presetSelect.value);
     statusEl.textContent = "Preset applied. Save configuration to persist.";
+  });
+
+  browseDownloadsDirBtn.addEventListener("click", async () => {
+    await browseInto(downloadsDirInput);
+  });
+
+  browseConfigDirBtn.addEventListener("click", async () => {
+    await browseInto(configDirInput);
+  });
+
+  browseTokensDirBtn.addEventListener("click", async () => {
+    await browseInto(tokensDirInput);
+  });
+
+  browseLogsDirBtn.addEventListener("click", async () => {
+    await browseInto(logsDirInput);
+  });
+
+  browseDataDirBtn.addEventListener("click", async () => {
+    await browseInto(dataDirInput);
   });
 
   checkLauncherUpdateBtn.addEventListener("click", async () => {
