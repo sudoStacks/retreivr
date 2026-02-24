@@ -127,6 +127,37 @@ _CLIENT_DELIVERIES = {}
 _CLIENT_DELIVERIES_LOCK = threading.Lock()
 
 
+def _cleanup_client_delivery_dir(cleanup_dir, *, attempts=3, retry_delay_sec=0.15):
+    target = str(cleanup_dir or "").strip()
+    if not target:
+        return True
+
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        if not os.path.isdir(target):
+            return True
+        try:
+            shutil.rmtree(target, ignore_errors=False)
+            return True
+        except OSError as exc:
+            if attempt >= attempts:
+                logging.warning(
+                    "Client delivery cleanup failed for temp dir %s (attempt %s/%s): %s",
+                    target,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                break
+            time.sleep(float(retry_delay_sec))
+
+    # Fallback best-effort removal if strict recursive delete fails.
+    try:
+        shutil.rmtree(target, ignore_errors=True)
+    except Exception:
+        pass
+    return not os.path.exists(target)
+
+
 def _register_client_delivery(path, filename, *, cleanup_dir=None):
     delivery_id = uuid4().hex
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=CLIENT_DELIVERY_TIMEOUT_SECONDS)
@@ -181,20 +212,15 @@ def _finalize_client_delivery(delivery_id, *, timeout=False):
     if not entry:
         return False
 
-    cleanup_dir = entry.get("cleanup_dir")
-    if cleanup_dir:
-        try:
-            if os.path.isdir(cleanup_dir):
-                shutil.rmtree(cleanup_dir, ignore_errors=False)
-        except OSError:
-            logging.warning("Client delivery cleanup failed for temp dir %s", cleanup_dir)
-
     path = entry.get("path")
     if path and os.path.exists(path):
         try:
             os.remove(path)
         except OSError:
             logging.warning("Client delivery cleanup failed for %s", path)
+    cleanup_dir = entry.get("cleanup_dir")
+    if cleanup_dir and not _cleanup_client_delivery_dir(cleanup_dir):
+        logging.warning("Client delivery cleanup left residual temp dir %s", cleanup_dir)
     if timeout:
         return False
     return bool(entry.get("delivered"))
