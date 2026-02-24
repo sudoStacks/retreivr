@@ -2907,10 +2907,13 @@ def _resolve_target_audio_format(context, config, output_template):
 
 
 def _resolve_target_video_container(context, config, output_template):
+    context = context if isinstance(context, dict) else {}
     output_template = output_template if isinstance(output_template, dict) else {}
     config = config if isinstance(config, dict) else {}
     requested = (
-        output_template.get("final_format")
+        context.get("final_format")
+        or context.get("video_final_format")
+        or output_template.get("final_format")
         or output_template.get("video_final_format")
         or config.get("final_format")
         or config.get("video_final_format")

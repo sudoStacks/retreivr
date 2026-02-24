@@ -144,6 +144,43 @@ function setNotice(el, message, isError = false) {
   el.style.color = isError ? "#ff7b7b" : "#59b0ff";
 }
 
+function triggerClientDeliveryDownload(downloadUrl, filename = "") {
+  const url = String(downloadUrl || "").trim();
+  if (!url) {
+    return false;
+  }
+
+  // Async callbacks (polling/fetch continuations) can lose trusted click context.
+  // Hidden iframe delivery is more reliable across browsers for attachment responses.
+  const frame = document.createElement("iframe");
+  frame.style.display = "none";
+  frame.src = url;
+  document.body.appendChild(frame);
+  window.setTimeout(() => {
+    frame.remove();
+  }, 60000);
+
+  return true;
+}
+
+function setClientDeliveryNotice(messageEl, baseMessage, downloadUrl, filename = "") {
+  setNotice(messageEl, baseMessage, false);
+  if (!messageEl || !downloadUrl) {
+    return;
+  }
+  const spacer = document.createTextNode(" ");
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.rel = "noopener";
+  link.target = "_blank";
+  link.textContent = "Download file";
+  if (filename) {
+    link.download = filename;
+  }
+  messageEl.appendChild(spacer);
+  messageEl.appendChild(link);
+}
+
 function clearConfigNotice() {
   if (!state.configNoticeClearable) {
     return;
@@ -3664,16 +3701,10 @@ async function refreshHomeDirectJobStatus() {
     const clientFilename = String(statusPayload.client_delivery_filename || "").trim();
 
     if (deliveryMode === "client" && clientDeliveryId) {
+      const clientDeliveryUrl = `/api/deliveries/${encodeURIComponent(clientDeliveryId)}/download`;
       if (state.homeDirectJob.clientDeliveryId !== clientDeliveryId) {
         state.homeDirectJob.clientDeliveryId = clientDeliveryId;
-        const a = document.createElement("a");
-        a.href = `/api/deliveries/${encodeURIComponent(clientDeliveryId)}/download`;
-        if (clientFilename) {
-          a.download = clientFilename;
-        }
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        triggerClientDeliveryDownload(clientDeliveryUrl, clientFilename || "");
       }
       state.homeDirectJob.status = "completed";
       state.homeDirectPreview = {
@@ -3683,10 +3714,16 @@ async function refreshHomeDirectJobStatus() {
       container.textContent = "";
       container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "completed"));
       setHomeResultsStatus("Completed");
-      setHomeResultsDetail(
-        clientFilename ? `Client download started: ${clientFilename}` : "Client download started.",
-        false
+      const downloadMessage = clientFilename
+        ? `Client download started: ${clientFilename}`
+        : "Client download started.";
+      setClientDeliveryNotice(
+        $("#home-search-message"),
+        downloadMessage,
+        clientDeliveryUrl,
+        clientFilename || ""
       );
+      setHomeResultsDetail(downloadMessage, false);
       setHomeResultsState({ hasResults: true, terminal: true });
       stopHomeDirectJobPolling();
       setHomeSearchControlsEnabled(true);
@@ -4202,15 +4239,13 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
     });
 
     if (deliveryMode === "client" && data?.delivery_url) {
-      const a = document.createElement("a");
-      a.href = data.delivery_url;
-      if (data.filename) {
-        a.download = data.filename;
+      const started = triggerClientDeliveryDownload(data.delivery_url, data.filename || "");
+      const msg = `Client download started${data.filename ? `: ${data.filename}` : ""}`;
+      if (started) {
+        setClientDeliveryNotice(messageEl, msg, data.delivery_url, data.filename || "");
+      } else {
+        setNotice(messageEl, "Client delivery ready. Click Download file.", false);
       }
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setNotice(messageEl, `Client download started${data.filename ? `: ${data.filename}` : ""}`, false);
     } else if (data.created) {
       setNotice(messageEl, `Enqueued job ${data.job_id}`, false);
     } else {

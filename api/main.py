@@ -749,6 +749,7 @@ def _purge_oauth_sessions():
 
 class EnqueueCandidatePayload(BaseModel):
     candidate_id: str
+    delivery_mode: Optional[str] = None
     final_format: Optional[str] = None
 
 
@@ -5266,6 +5267,7 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
             {
                 "item_id": item_id,
                 "candidate_id": candidate_id,
+                "delivery_mode": getattr(payload, "delivery_mode", None),
                 "final_format": getattr(payload, "final_format", None),
             }
         ),
@@ -5354,9 +5356,39 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
     request_overrides = None
     if hasattr(app.state, "search_request_overrides"):
         request_overrides = app.state.search_request_overrides.get(request_id)
-    delivery_mode = normalized_request.get("delivery_mode")
-    if request_overrides and request_overrides.get("delivery_mode"):
-        delivery_mode = request_overrides.get("delivery_mode")
+
+    payload_delivery_mode = str(getattr(payload, "delivery_mode", "") or "").strip().lower()
+    if payload_delivery_mode not in {"", "server", "client"}:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid delivery mode", "code": "INVALID_REQUEST"},
+        )
+    request_delivery_mode = str(normalized_request.get("delivery_mode") or "").strip().lower()
+    overrides_delivery_mode = (
+        str(request_overrides.get("delivery_mode") or "").strip().lower()
+        if request_overrides
+        else ""
+    )
+    effective_delivery_mode = (
+        payload_delivery_mode
+        or overrides_delivery_mode
+        or request_delivery_mode
+        or "server"
+    )
+    if effective_delivery_mode not in {"server", "client"}:
+        effective_delivery_mode = "server"
+    logging.info(
+        safe_json(
+            {
+                "message": "candidate_enqueue_delivery_mode",
+                "request_id": request_id,
+                "item_id": item_id,
+                "candidate_id": candidate_id,
+                "payload_delivery_mode": payload_delivery_mode or None,
+                "effective_delivery_mode": effective_delivery_mode,
+            }
+        )
+    )
 
     url = candidate.get("url")
     source = candidate.get("source")
@@ -5441,6 +5473,8 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
             or request_row.get("media_type")
             or "generic"
         ).strip().lower() or "generic"
+        if media_type == "generic":
+            media_type = "video"
         # Do not infer Music Mode from final_format; music enforcement must come from request/item media type.
         if media_type == "music":
             return JSONResponse(
@@ -5450,9 +5484,9 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
                     "code": "MUSIC_CLIENT_DELIVERY_UNSUPPORTED",
                 },
             )
-        media_intent = "album" if item.get("item_type") == "album" else "track"
+        media_intent = resolve_media_intent("search", media_type)
         try:
-            result = await anyio.to_thread.run_sync(
+            run_client_delivery = functools.partial(
                 _run_immediate_download_to_client,
                 url=url,
                 config=config,
@@ -5462,6 +5496,7 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
                 final_format_override=effective_final_format,
                 origin="search",
             )
+            result = await anyio.to_thread.run_sync(run_client_delivery)
         except Exception as exc:
             logging.warning(
                 "Search client delivery failed: %s request_id=%s item_id=%s candidate_id=%s source=%s",
@@ -5474,7 +5509,11 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
             )
             return JSONResponse(
                 status_code=500,
-                content={"error": "Client delivery failed.", "code": "CLIENT_DELIVERY_FAILED"},
+                content={
+                    "error": "Client delivery failed.",
+                    "code": "CLIENT_DELIVERY_FAILED",
+                    "detail": str(exc),
+                },
             )
 
         service.store.update_item_status(item_id, "enqueued", chosen=candidate)
@@ -5494,7 +5533,7 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
         )
 
     def _enqueue():
-        if delivery_mode == "client":
+        if effective_delivery_mode == "client":
             return JSONResponse(
                 status_code=400,
                 content={
@@ -5564,7 +5603,7 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
         return result
 
     result = execute_download(
-        delivery_mode=delivery_mode,
+        delivery_mode=effective_delivery_mode,
         run_immediate=_run_immediate,
         enqueue=_enqueue,
     )
