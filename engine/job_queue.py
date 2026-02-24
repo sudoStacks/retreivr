@@ -83,14 +83,6 @@ _FORMAT_VIDEO = (
 # Keep this quoted/argument-safe in CLI execution (we do NOT use shell=True).
 _FORMAT_AUDIO = "bestaudio/best"
 
-# QuickTime-compatible MP4 policy: require AVC/H.264 video + AAC audio.
-# This prevents VP9/Opus-in-MP4 outputs that fail in QuickTime.
-_FORMAT_VIDEO_QT_MP4 = (
-    "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a][ext=m4a]/"
-    "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
-    "best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
-)
-
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
 
 _AUDIO_TITLE_CLEAN_RE = re.compile(
@@ -2918,18 +2910,11 @@ def build_ytdlp_opts(context):
             opts["writethumbnail"] = True
         else:
             # Video mode strategy:
-            # - final_format=mp4: enforce QuickTime-compatible H.264 + AAC streams
-            # - otherwise: highest available quality (webm first, then mp4, then best single file)
-            if video_container_target == "mp4":
-                opts["format"] = _FORMAT_VIDEO_QT_MP4
-                opts["merge_output_format"] = "mp4"
-            else:
-                opts["format"] = "bestvideo[ext=webm]+bestaudio/bestvideo[ext=mp4]+bestaudio/best"
-                # Post-merge container policy:
-                # - mkv: force merge container
-                # - webm: keep native webm merge behavior (no forced merge_output_format)
-                if video_container_target == "mkv":
-                    opts["merge_output_format"] = "mkv"
+            # - Keep download selector stable and quality-first across all final containers.
+            # - Use final_format only as post-merge container preference.
+            opts["format"] = _FORMAT_VIDEO
+            if video_container_target in {"mp4", "mkv"}:
+                opts["merge_output_format"] = video_container_target
 
     # Only lock down format-related overrides when the target_format was actually applied
     # (audio codec in audio_mode, or video container preference in video mode).
