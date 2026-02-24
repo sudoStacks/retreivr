@@ -36,6 +36,24 @@ def build_music_relative_layout(
     return "/".join(segments)
 
 
+def resolve_music_root_path(payload: dict) -> Path:
+    """Resolve a base root path for canonical music placement from payload/config values."""
+    config = payload.get("config") if isinstance(payload, dict) else None
+    root_value = (
+        payload.get("music_root")
+        or payload.get("destination")
+        or payload.get("destination_dir")
+        or payload.get("output_dir")
+        or (config.get("music_download_folder") if isinstance(config, dict) else None)
+        or "."
+    )
+    root = Path(str(root_value))
+    # Canonical layout builders already include a leading "Music/" segment.
+    if root.name.lower() == "music":
+        return root.parent if str(root.parent) != "" else Path(".")
+    return root
+
+
 def build_music_path(root: Path, metadata: CanonicalMetadata, ext: str) -> Path:
     """Build and return a canonical music path without creating directories.
 

@@ -26,6 +26,7 @@ from yt_dlp.utils import DownloadError, ExtractorError
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
+from media.music_contract import format_zero_padded_track_number, parse_first_positive_int
 from media.path_builder import build_music_relative_layout
 from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
@@ -4012,26 +4013,11 @@ def _clean_audio_artist(value):
 
 
 def normalize_track_number(value):
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    value = str(value).strip()
-    if not value:
-        return None
-    if value.isdigit():
-        return int(value)
-    match = re.match(r"(\d+)", value)
-    if match:
-        return int(match.group(1))
-    return None
+    return parse_first_positive_int(value)
 
 
 def format_track_number(value):
-    normalized = normalize_track_number(value)
-    if normalized is None:
-        return ""
-    return f"{normalized:02d}"
+    return format_zero_padded_track_number(value)
 
 
 def _normalize_nfc(value):

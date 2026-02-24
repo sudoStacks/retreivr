@@ -32,6 +32,11 @@ All notable changes to this project will be documented here.
 - Music path builder now creates `Disc N` folders only when `disc_total > 1` (single-disc albums no longer force `Disc 1`).
 - Album-run queue payloads now propagate `track_total` and `disc_total` for downstream tag correctness.
 - Metadata worker now prefers album-run `artwork_url` for all tracks in an album run, with release-art fallback only when needed.
+- Consolidated music path contract authority across both runtime workers:
+  - shared relative music layout builder now drives both `engine.job_queue` and `download.worker`
+  - single source of truth for Disc-folder inclusion rules
+- Consolidated shared music contract helpers for integer parsing/track formatting and canonical metadata coercion to reduce drift between worker stacks.
+- Consolidated music root resolution logic into shared path utilities used by metadata download worker flows.
 
 ### Fixed
 - MusicBrainz recording include contract errors (`InvalidIncludeError`) in binding fetch paths.
@@ -42,6 +47,7 @@ All notable changes to this project will be documented here.
 - Fixed album-mode metadata drift where featured-artist tracks could branch into separate artist folders.
 - Fixed inconsistent album artwork across tracks in the same album run by enforcing run-level cover art preference.
 - Fixed missing/partial track/disc total tag writes so players can reliably show `Track X of Y` and `Disc A of B`.
+- Fixed lingering single-disc `Disc 1` folder creation in the secondary download worker path by migrating it to the shared layout authority.
 
 ## v0.9.4 — Filesystem Layout Stabilization
 

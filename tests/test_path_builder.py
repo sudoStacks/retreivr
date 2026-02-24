@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from media.path_builder import build_music_path
+from media.path_builder import build_music_path, resolve_music_root_path
 from metadata.types import MusicMetadata
 
 
@@ -92,3 +92,13 @@ def test_multi_disc_album_first_disc_includes_disc_folder_when_disc_total_presen
     path = build_music_path(Path("/library"), metadata, "mp3")
 
     assert path == Path("/library/Music/Artist Name/Album Name (2024)/Disc 1/01 - Track Title.mp3")
+
+
+def test_resolve_music_root_path_handles_music_leaf() -> None:
+    resolved = resolve_music_root_path({"destination": "/library/Music"})
+    assert resolved == Path("/library")
+
+
+def test_resolve_music_root_path_uses_music_folder_fallback() -> None:
+    resolved = resolve_music_root_path({"config": {"music_download_folder": "/library/music"}})
+    assert resolved == Path("/library")
