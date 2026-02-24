@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -126,12 +127,13 @@ _CLIENT_DELIVERIES = {}
 _CLIENT_DELIVERIES_LOCK = threading.Lock()
 
 
-def _register_client_delivery(path, filename):
+def _register_client_delivery(path, filename, *, cleanup_dir=None):
     delivery_id = uuid4().hex
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=CLIENT_DELIVERY_TIMEOUT_SECONDS)
     entry = {
         "path": path,
         "filename": filename,
+        "cleanup_dir": cleanup_dir,
         "expires_at": expires_at,
         "event": threading.Event(),
         "served": False,
@@ -178,6 +180,15 @@ def _finalize_client_delivery(delivery_id, *, timeout=False):
         entry = _CLIENT_DELIVERIES.pop(delivery_id, None)
     if not entry:
         return False
+
+    cleanup_dir = entry.get("cleanup_dir")
+    if cleanup_dir:
+        try:
+            if os.path.isdir(cleanup_dir):
+                shutil.rmtree(cleanup_dir, ignore_errors=False)
+        except OSError:
+            logging.warning("Client delivery cleanup failed for temp dir %s", cleanup_dir)
+
     path = entry.get("path")
     if path and os.path.exists(path):
         try:

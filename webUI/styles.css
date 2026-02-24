@@ -855,6 +855,14 @@ body.home-page .home-candidate-source-tag {
   color: var(--muted);
 }
 
+.group-subtitle {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  margin-top: -4px;
+  margin-bottom: 12px;
+}
+
 .grid {
   display: grid;
   gap: 12px;

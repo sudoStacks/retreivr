@@ -1603,6 +1603,7 @@ def _run_immediate_download_to_client(
         delivery_id, expires_at, _event = _register_client_delivery(
             final_path,
             os.path.basename(final_path),
+            cleanup_dir=temp_dir,
         )
 
         if status is not None:
