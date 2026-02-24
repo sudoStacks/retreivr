@@ -64,6 +64,13 @@ h2 {
   margin-bottom: 14px;
 }
 
+.updates-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(210px, 1fr));
+  gap: 10px 16px;
+  margin-bottom: 14px;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 140px 1fr;
@@ -88,6 +95,7 @@ h2 {
 }
 
 input,
+select,
 button {
   border: 1px solid #cbd5e1;
   border-radius: 10px;
@@ -116,6 +124,11 @@ button:disabled {
 }
 
 input:focus {
+  outline: 2px solid #7dd3fc;
+  border-color: #0284c7;
+}
+
+select:focus {
   outline: 2px solid #7dd3fc;
   border-color: #0284c7;
 }
@@ -156,8 +169,41 @@ strong.warn {
   min-height: 20px;
 }
 
+.checklist {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.checklist li {
+  margin-bottom: 6px;
+}
+
+.logs-output {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 12px;
+  background: #f8fafc;
+  font-size: 0.84rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
 .hidden {
   display: none;
+}
+
+.preset-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.preset-row select {
+  flex: 1 1 280px;
 }
 
 @media (max-width: 720px) {
@@ -170,7 +216,15 @@ strong.warn {
     grid-template-columns: 1fr;
   }
 
+  .updates-grid {
+    grid-template-columns: 1fr;
+  }
+
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .preset-row {
+    width: 100%;
   }
 }
