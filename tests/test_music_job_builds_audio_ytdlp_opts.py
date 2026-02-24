@@ -27,10 +27,20 @@ def _load_job_queue_module():
     _load_module("engine.json_utils", _ROOT / "engine" / "json_utils.py")
     _load_module("engine.paths", _ROOT / "engine" / "paths.py")
     _load_module("engine.search_scoring", _ROOT / "engine" / "search_scoring.py")
+    if "musicbrainzngs" not in sys.modules:
+        sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
     if "metadata.queue" not in sys.modules:
         metadata_queue = types.ModuleType("metadata.queue")
         metadata_queue.enqueue_metadata = lambda file_path, meta, config: None
         sys.modules["metadata.queue"] = metadata_queue
+    if "metadata.services.musicbrainz_service" not in sys.modules:
+        mb_service = types.ModuleType("metadata.services.musicbrainz_service")
+        mb_service.get_musicbrainz_service = lambda: None
+        sys.modules["metadata.services.musicbrainz_service"] = mb_service
+    if "metadata.services" not in sys.modules:
+        metadata_services = types.ModuleType("metadata.services")
+        metadata_services.get_musicbrainz_service = lambda: None
+        sys.modules["metadata.services"] = metadata_services
     return _load_module("engine_job_queue_music_opts_regression", _ROOT / "engine" / "job_queue.py")
 
 
@@ -89,7 +99,13 @@ def test_video_job_builds_video_ytdlp_opts(jq) -> None:
     opts = jq.build_ytdlp_opts(context)
 
     assert context["audio_mode"] is False
-    assert opts.get("format") == "bestvideo[ext=webm]+bestaudio/bestvideo[ext=mp4]+bestaudio/best"
+    assert opts.get("format") == (
+        "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
+        "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
+        "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
+        "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
+        "bestvideo*+bestaudio/best"
+    )
     assert "merge_output_format" not in opts
     postprocessors = opts.get("postprocessors") or []
     assert not any(pp.get("key") == "FFmpegExtractAudio" for pp in postprocessors if isinstance(pp, dict))
@@ -153,7 +169,7 @@ def test_music_job_uses_resolved_music_codec_for_extract_audio(jq) -> None:
     assert extract_pp.get("preferredcodec") == "m4a"
 
 
-def test_video_mp4_job_enforces_quicktime_compatible_selector(jq) -> None:
+def test_video_mp4_job_uses_same_download_selector_with_mp4_merge_target(jq) -> None:
     context = {
         "operation": "download",
         "url": "https://www.youtube.com/watch?v=abc123xyz00",
@@ -176,8 +192,10 @@ def test_video_mp4_job_enforces_quicktime_compatible_selector(jq) -> None:
 
     assert context["audio_mode"] is False
     assert opts.get("format") == (
-        "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a][ext=m4a]/"
-        "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
-        "best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
+        "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
+        "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
+        "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
+        "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
+        "bestvideo*+bestaudio/best"
     )
     assert opts.get("merge_output_format") == "mp4"
