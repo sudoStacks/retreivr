@@ -122,7 +122,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function refreshAll() {
     setBusy(true);
-    statusEl.textContent = "Refreshing launcher state...";
+    statusEl.textContent = "Refreshing launcher status...";
 
     try {
       installGuide = await invoke("install_guidance");
@@ -133,7 +133,7 @@ document.addEventListener("DOMContentLoaded", () => {
       statusEl.textContent = "Ready";
     } catch (error) {
       summaryEl.textContent = "Launcher refresh failed";
-      statusEl.textContent = String(error);
+      statusEl.textContent = `Refresh failed: ${String(error)}`;
       console.error(error);
     } finally {
       setBusy(false);
@@ -144,13 +144,13 @@ document.addEventListener("DOMContentLoaded", () => {
   settingsForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     setBusy(true);
-    statusEl.textContent = "Saving setup...";
+    statusEl.textContent = "Saving configuration...";
 
     try {
       const settings = readSettingsFromForm();
       await invoke("save_launcher_settings", { settings });
       await refreshDiagnostics();
-      statusEl.textContent = "Setup saved";
+      statusEl.textContent = "Configuration saved";
     } catch (error) {
       statusEl.textContent = `Save failed: ${String(error)}`;
       console.error(error);
@@ -162,7 +162,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   resetBtn.addEventListener("click", async () => {
     setBusy(true);
-    statusEl.textContent = "Resetting setup defaults...";
+    statusEl.textContent = "Restoring default configuration...";
 
     try {
       const defaults = await invoke("reset_launcher_settings");

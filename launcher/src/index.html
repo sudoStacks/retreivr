@@ -10,11 +10,11 @@
     <main class="shell">
       <header class="header">
         <h1>Retreivr Launcher</h1>
-        <p class="subtitle">Wizard-driven setup and runtime control for a local Docker deployment.</p>
+        <p class="subtitle">Guided setup and runtime control for local Retreivr on Docker.</p>
       </header>
 
       <section class="card">
-        <h2>Step 1: Diagnostics</h2>
+        <h2>Step 1: System Check</h2>
         <div class="diag-grid">
           <p>Docker installed: <strong id="diagDockerInstalled">...</strong></p>
           <p>Docker running: <strong id="diagDockerRunning">...</strong></p>
@@ -24,21 +24,21 @@
           <p>Web reachable: <strong id="diagWebReachable">...</strong></p>
         </div>
         <p id="diagError" class="diag-error"></p>
-        <button id="refreshBtn" type="button">Refresh Checks</button>
+        <button id="refreshBtn" type="button">Refresh Status</button>
       </section>
 
       <section id="dockerGuideCard" class="card hidden">
-        <h2 id="guideTitle">Docker Setup Guidance</h2>
+        <h2 id="guideTitle">Docker Guidance</h2>
         <p id="guideSummary"></p>
         <ul id="guideSteps" class="guide-steps"></ul>
         <div class="actions-row">
-          <button id="openDockerInstall" type="button">Open Docker Install Page</button>
+          <button id="openDockerInstall" type="button">Open Docker Download</button>
           <button id="recheckDocker" type="button">Recheck Docker</button>
         </div>
       </section>
 
       <section class="card">
-        <h2>Step 2: Setup</h2>
+        <h2>Step 2: Configuration</h2>
         <form id="settingsForm" class="form-grid">
           <label for="hostPort">Host Port</label>
           <input id="hostPort" name="hostPort" type="number" min="1" max="65535" required />
@@ -50,17 +50,17 @@
           <input id="containerName" name="containerName" type="text" required />
 
           <div class="actions-row">
-            <button id="saveBtn" type="submit">Save Setup</button>
-            <button id="resetBtn" type="button">Reset To Defaults</button>
+            <button id="saveBtn" type="submit">Save Configuration</button>
+            <button id="resetBtn" type="button">Reset Defaults</button>
           </div>
         </form>
       </section>
 
       <section class="card controls">
-        <h2>Step 3: Run</h2>
+        <h2>Step 3: Runtime</h2>
         <div class="actions-row">
-          <button id="installBtn" type="button">Install / Start</button>
-          <button id="stopBtn" type="button">Stop</button>
+          <button id="installBtn" type="button">Start Retreivr</button>
+          <button id="stopBtn" type="button">Stop Retreivr</button>
           <button id="openUI" type="button">Open Web UI</button>
         </div>
       </section>
