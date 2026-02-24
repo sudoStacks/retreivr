@@ -58,10 +58,13 @@ services:
     container_name: retreivr
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8090:8000"
     volumes:
       - "./config:/config"
+      - "./data:/data"
       - "./downloads:/downloads"
+      - "./logs:/logs"
+      - "./tokens:/tokens"
 "#;
         fs::write(&compose, content.trim_start()).map_err(|e| e.to_string())?;
     }
