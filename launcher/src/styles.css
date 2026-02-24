@@ -135,6 +135,11 @@ strong.warn {
   color: #b45309;
 }
 
+.diag-error {
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+
 @media (max-width: 720px) {
   .shell {
     width: calc(100vw - 24px);

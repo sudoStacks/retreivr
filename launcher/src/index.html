@@ -23,6 +23,7 @@
           <p>Container: <strong id="diagContainerRunning">...</strong></p>
           <p>Web reachable: <strong id="diagWebReachable">...</strong></p>
         </div>
+        <p id="diagError" class="diag-error"></p>
         <button id="refreshBtn" type="button">Refresh Checks</button>
       </section>
 
@@ -40,6 +41,7 @@
 
           <div class="actions-row">
             <button id="saveBtn" type="submit">Save Setup</button>
+            <button id="resetBtn" type="button">Reset To Defaults</button>
           </div>
         </form>
       </section>
@@ -55,6 +57,8 @@
 
       <section class="card">
         <p id="summary">Loading launcher state...</p>
+        <p id="composePath"></p>
+        <p id="runtimeDir"></p>
         <p id="status" class="status">Initializing...</p>
       </section>
     </main>

@@ -7,6 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const refreshBtn = document.getElementById("refreshBtn");
   const saveBtn = document.getElementById("saveBtn");
+  const resetBtn = document.getElementById("resetBtn");
   const installBtn = document.getElementById("installBtn");
   const stopBtn = document.getElementById("stopBtn");
   const openBtn = document.getElementById("openUI");
@@ -22,6 +23,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const diagComposeExists = document.getElementById("diagComposeExists");
   const diagContainerRunning = document.getElementById("diagContainerRunning");
   const diagWebReachable = document.getElementById("diagWebReachable");
+  const diagErrorEl = document.getElementById("diagError");
+  const composePathEl = document.getElementById("composePath");
+  const runtimeDirEl = document.getElementById("runtimeDir");
 
   let currentWebUrl = "http://localhost:8090";
   let busy = false;
@@ -30,6 +34,7 @@ document.addEventListener("DOMContentLoaded", () => {
     busy = nextBusy;
     refreshBtn.disabled = nextBusy;
     saveBtn.disabled = nextBusy;
+    resetBtn.disabled = nextBusy;
     installBtn.disabled = nextBusy;
     stopBtn.disabled = nextBusy;
     openBtn.disabled = nextBusy;
@@ -65,8 +70,13 @@ document.addEventListener("DOMContentLoaded", () => {
     renderBool(diagContainerRunning, diagnostics.container_running);
     renderBool(diagWebReachable, diagnostics.service_reachable);
 
+    diagErrorEl.textContent = diagnostics.last_error || "All checks passed.";
+    diagErrorEl.className = diagnostics.last_error ? "diag-error warn" : "diag-error ok";
+
     summaryEl.textContent =
       `Web URL: ${currentWebUrl} | Compose file: ${diagnostics.compose_exists ? "Present" : "Missing"}`;
+    composePathEl.textContent = `Compose path: ${diagnostics.compose_path}`;
+    runtimeDirEl.textContent = `Runtime dir: ${diagnostics.runtime_dir}`;
 
     installBtn.disabled = busy || !diagnostics.docker_running || !diagnostics.compose_available;
     stopBtn.disabled = busy || !diagnostics.container_running;
@@ -104,6 +114,24 @@ document.addEventListener("DOMContentLoaded", () => {
       statusEl.textContent = "Setup saved";
     } catch (error) {
       statusEl.textContent = `Save failed: ${String(error)}`;
+      console.error(error);
+    } finally {
+      setBusy(false);
+      await refreshDiagnostics().catch(() => {});
+    }
+  });
+
+  resetBtn.addEventListener("click", async () => {
+    setBusy(true);
+    statusEl.textContent = "Resetting setup defaults...";
+
+    try {
+      const defaults = await invoke("reset_launcher_settings");
+      applySettingsToForm(defaults);
+      await refreshDiagnostics();
+      statusEl.textContent = "Defaults restored";
+    } catch (error) {
+      statusEl.textContent = `Reset failed: ${String(error)}`;
       console.error(error);
     } finally {
       setBusy(false);

@@ -48,6 +48,9 @@ struct DockerDiagnostics {
     container_running: bool,
     service_reachable: bool,
     web_url: String,
+    compose_path: String,
+    runtime_dir: String,
+    last_error: Option<String>,
 }
 
 fn web_url(settings: &LauncherSettings) -> String {
@@ -134,6 +137,49 @@ fn command_success(mut cmd: Command) -> bool {
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+fn command_output(mut cmd: Command) -> Result<String, String> {
+    let output = cmd.output().map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            "command failed".to_string()
+        } else {
+            stderr
+        })
+    }
+}
+
+fn diagnostics_failure_message(
+    docker_installed: bool,
+    docker_running: bool,
+    compose_available: bool,
+    compose_exists: bool,
+    container_running: bool,
+    service_reachable: bool,
+) -> Option<String> {
+    if !docker_installed {
+        return Some("Docker CLI not found on PATH.".to_string());
+    }
+    if !docker_running {
+        return Some("Docker daemon not running. Start Docker Desktop.".to_string());
+    }
+    if !compose_available {
+        return Some("Docker Compose plugin unavailable.".to_string());
+    }
+    if !compose_exists {
+        return Some("Compose file has not been generated yet.".to_string());
+    }
+    if !container_running {
+        return Some("Retreivr container is not running.".to_string());
+    }
+    if !service_reachable {
+        return Some("Retreivr service is not reachable on configured host port.".to_string());
+    }
+    None
+}
+
 #[tauri::command]
 fn docker_available() -> bool {
     Command::new("docker")
@@ -164,6 +210,15 @@ fn save_launcher_settings(
 }
 
 #[tauri::command]
+fn reset_launcher_settings(app: AppHandle) -> Result<LauncherSettings, String> {
+    let defaults = LauncherSettings::default();
+    fs::create_dir_all(app_support_dir(&app)).map_err(|e| e.to_string())?;
+    save_settings_to_disk(&app, &defaults)?;
+    fs::write(compose_path(&app), render_compose(&defaults)).map_err(|e| e.to_string())?;
+    Ok(defaults)
+}
+
+#[tauri::command]
 fn container_running(app: AppHandle) -> bool {
     if !compose_path(&app).exists() {
         return false;
@@ -180,6 +235,8 @@ fn container_running(app: AppHandle) -> bool {
 #[tauri::command]
 fn docker_diagnostics(app: AppHandle) -> DockerDiagnostics {
     let settings = load_settings(&app);
+    let runtime_dir = app_support_dir(&app);
+    let compose_file = compose_path(&app);
     let docker_installed = command_success({
         let mut cmd = Command::new("docker");
         cmd.arg("--version");
@@ -195,17 +252,26 @@ fn docker_diagnostics(app: AppHandle) -> DockerDiagnostics {
         cmd.args(["compose", "version"]);
         cmd
     });
-    let compose_exists = compose_path(&app).exists();
+    let compose_exists = compose_file.exists();
     let container_running = docker_running
         && compose_exists
-        && Command::new("docker")
-            .args(["compose", "ps", "-q"])
-            .current_dir(app_support_dir(&app))
-            .output()
-            .map(|o| !o.stdout.is_empty())
-            .unwrap_or(false);
+        && command_output({
+            let mut cmd = Command::new("docker");
+            cmd.args(["compose", "ps", "-q"]).current_dir(&runtime_dir);
+            cmd
+        })
+        .map(|stdout| !stdout.is_empty())
+        .unwrap_or(false);
 
     let service_reachable = container_running && service_reachable(settings.host_port);
+    let last_error = diagnostics_failure_message(
+        docker_installed,
+        docker_running,
+        compose_available,
+        compose_exists,
+        container_running,
+        service_reachable,
+    );
 
     DockerDiagnostics {
         docker_installed,
@@ -215,6 +281,9 @@ fn docker_diagnostics(app: AppHandle) -> DockerDiagnostics {
         container_running,
         service_reachable,
         web_url: web_url(&settings),
+        compose_path: compose_file.to_string_lossy().to_string(),
+        runtime_dir: runtime_dir.to_string_lossy().to_string(),
+        last_error,
     }
 }
 
@@ -275,6 +344,7 @@ pub fn run() {
             compose_exists,
             get_launcher_settings,
             save_launcher_settings,
+            reset_launcher_settings,
             container_running,
             docker_diagnostics,
             install_retreivr,
