@@ -19,12 +19,15 @@ All notable changes to this project will be documented here.
 - Consolidated download payload/option authority: unified enqueue payload building, explicit `final_format` (video) vs `music_final_format` (audio), and consistent `audio_mode` handling for music.
 - Aligned direct URL and worker paths on canonical yt-dlp option/CLI building with controlled retry escalation and safer non-fatal metadata probing.
 - Stabilized Music Mode UX into a metadata-first Home flow with toggle gating, stale-response protection, and a single authoritative track enqueue path.
+- UI/UX fixes and updates across Home search, advanced options layout, status indicators, and delivery controls.
+- Client delivery was brought back on Home flows and now obeys the delivery toggle for both candidate and direct URL downloads.
 
 ### Fixed
 - MusicBrainz recording include contract errors (`InvalidIncludeError`) in binding fetch paths.
 - Search destination regression caused by missing `build_output_template` import.
 - Direct URL preview blank-card fallback by returning safe title/uploader/thumbnail values on extraction failure.
 - Album enqueue hard-failure behavior: partial track failures now return a success summary instead of a full 500 response.
+- Fixed Home UI state drift and delivery-mode edge cases for clearer, consistent behavior.
 
 ## v0.9.4 — Filesystem Layout Stabilization
 
