@@ -1,262 +1,125 @@
 <p align="center">
-  <img src="webUI/app_icon.png" width="160" alt="Retreivr Logo" />
+  <img src="webUI/app_icon.png" width="220" alt="Retreivr Logo" />
 </p>
 
 <h1 align="center">Retreivr</h1>
 
 <p align="center">
-  Deterministic media acquisition for self‑hosted archives
-</p>
-
-<p align="center">
-  <img src="webUI/assets/sudostacks.png" width="110" alt="sudoStacks Logo" />
-</p>
-
-<p align="center">
-  <sub>A sudoStacks project</sub>
+  Self-hosted media acquisition that stays deterministic, tidy, and boring in the best way.
 </p>
 
 ---
 
-## Overview
+## What Is Retreivr?
+Retreivr is a self-hosted download engine for building and maintaining a clean local media archive.
 
-Retreivr is a self‑hosted media acquisition engine built for deterministic archival.
+It takes your intent (URL, playlist, search, or Spotify sync), resolves targets, downloads media, applies canonical naming/metadata rules, and writes predictable files to disk.
 
-It takes user intent (URLs, search queries, or scheduled playlist syncs), resolves them into concrete media targets, downloads the media, applies canonical structure and metadata rules, and writes clean, reproducible files to disk.
+Retreivr is not a streaming server. It is the acquisition layer.
 
-Retreivr is not a media server and does not stream or index content. It focuses exclusively on reliable acquisition, correct metadata application, and predictable filesystem structure.
+## Why People Use It
+- Deterministic downloads (idempotent and repeatable)
+- Clean filesystem structure (no random naming chaos)
+- MusicBrainz-first metadata authority for music workflows
+- Unified queue + scheduler + watcher flows
+- Web UI and API for control and automation
+- Optional Telegram summaries
 
-The system is designed to be:
-
-- Deterministic (no duplicate or unstable outputs)
-- Idempotent (safe to re-run)
-- Canonical (consistent naming + metadata rules)
-- Local-first (runs entirely under your control)
-
----
-
-## Core Principles
-
-- Deterministic execution (no duplicate downloads)
-- Canonical metadata-first architecture (MusicBrainz authority)
-- Clean filesystem structure (no source IDs in filenames)
-- Idempotent scheduler behavior
-- Single-worker design for correctness
-- Local-first, Docker-first deployment
+## 0.9.5 Highlights
+- Background playlist import with progress tracking
+- Queue/status UI refresh with richer live progress signals
+- Album-mode consistency improvements (path/tag/artwork behavior)
+- Scheduler/watcher safeguards during import activity
+- Better short-term UX guardrails for heavy operations
 
 ---
 
-## What Retreivr Does
+## Quick Start (Docker Recommended)
 
-- Resolves search queries into concrete media candidates
-- Downloads media using yt-dlp
-- Applies canonical naming rules
-- Embeds structured metadata into files
-- Stores download history in SQLite
-- Synchronizes playlists via deterministic snapshot + diff
-- Provides a Web UI and REST API
-- Sends optional Telegram run summaries
-
----
-
-## What Retreivr Does NOT Do
-
-- Stream media
-- Replace Plex, Jellyfin, or music players
-- Auto-delete owned files
-- Circumvent DRM or protected platforms
-- Run as a cloud service
-- Collect telemetry
-
----
-
-## Architecture Summary
-
-### Intent Ingestion
-- Direct URL (single item)
-- Search queries
-- Scheduled playlist sync
-
-### Resolution
-- MusicBrainz-first canonical resolution
-- Spotify fallback only when OAuth + Premium validated
-
-### Download
-- Unified FIFO job queue
-- yt-dlp execution
-- Container finalized before metadata embedding
-- Atomic move to final destination
-
-### Metadata
-- Video: title, identifiers, channel_id, canonical URL embedded
-- Music: enriched via MusicBrainz (track, album, ISRC, MBIDs, artwork)
-- Files are never renamed after finalization
-
-### Scheduler
-- Deterministic playlist snapshot hashing
-- Reorder does not trigger re-download
-- Active-job duplicate prevention
-- Crash-safe idempotency
-- Single structured run summary
-
----
-
-## Canonical Filesystem Behavior
-
-### Music
-
-```
-Music/
-  Album Artist/
-    Album (Year)/
-      Disc 1/
-        01 - Track Title.ext
-```
-
-Rules:
-- No video IDs in filenames
-- No upload dates in filenames
-- Zero-padded track numbers
-- Unicode-safe normalization
-
-### Video
-
-- Filename = sanitized title only
-- Collision resolution via " (2)", " (3)"
-- Source identifiers stored in metadata + SQLite only
-
----
-
-## Default Container Policy
-
-As of v0.9.3:
-
-- Default video container: **MKV**
-- No forced re-encoding
-- Metadata embedded after container finalization
-
-MKV provides strong metadata support while preserving original codec fidelity.
-
----
-
-## Quick Start (Docker - Recommended)
-
-Pull the image:
-
-```bash
-docker pull ghcr.io/sudoStacks/retreivr:latest
-```
-
-Copy templates and start:
-
+### 1) Prepare files
 ```bash
 cp docker/docker-compose.yml.example docker/docker-compose.yml
 cp .env.example .env
+```
+
+### 2) Start Retreivr
+```bash
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-Canonical Docker mount layout:
+### 3) Open Web UI
+```text
+http://localhost:8090
+```
+Default mapping is `8090:8000` (`host:container`).
 
+### 4) Initial setup in UI
+- Open `Config` page
+- Add your playlist/search settings
+- Set destination folders (under `/downloads` in container)
+- Optional: configure Spotify OAuth and Telegram
+
+---
+
+## Canonical Docker Mounts
+Use these container paths for predictable behavior:
 - `/downloads` media output
-- `/data` runtime DB/temp data
+- `/data` runtime DB/temp
 - `/config` config.json
 - `/logs` logs
 - `/tokens` auth/cookies
 
-Open the Web UI at:
+---
 
+## Local Run (No Docker)
+Requirements:
+- Python `3.11.x`
+- `ffmpeg` on PATH
+
+Run:
+```bash
+python3.11 scripts/archiver.py --config data/config/config.json
 ```
-http://YOUR_HOST:8090
+
+Run API/UI locally:
+```bash
+python3.11 -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+Then open:
+```text
+http://localhost:8000
 ```
 
 ---
 
-## Requirements
-
-Docker deployment:
-- Docker Engine or Docker Desktop
-- docker compose (v2)
-
-Optional local/source:
-- Python 3.11
-- ffmpeg on PATH
-
----
-
-## Configuration Overview
-
-Primary config file:
-
-```
-/config/config.json   (Docker)
-data/config/config.json   (local/source default)
-```
-
-Key areas:
-- Playlist definitions
-- Default `final_format`
-- Music mode toggle
-- OAuth configuration (optional)
-- Scheduler interval
-- Telegram notifications (optional)
-
-Spotify integration requires OAuth credentials and premium validation. Without it, Spotify functionality remains disabled.
-
----
-
-## Music Metadata Enrichment (Optional)
-
-When enabled:
-
-- MusicBrainz resolves canonical track + release
-- MBIDs embedded
-- Artwork optionally embedded
-- Tags enriched without renaming files
-
-Spotify metadata is never authoritative.
-
----
-
-## API Overview
-
-Common endpoints:
-
+## Useful Endpoints
 - `GET /api/status`
 - `GET /api/metrics`
 - `POST /api/run`
-- `GET /api/history`
-- `GET /api/music/albums/search`
-- `POST /api/music/album/candidates`
-
-OpenAPI docs available at `/docs`.
+- `GET /api/download_jobs`
+- `POST /api/import/playlist`
+- `GET /docs` (OpenAPI)
 
 ---
 
-## Updating
-
+## Upgrade Notes
+If you are upgrading to `0.9.5`, pull latest image and restart:
 ```bash
-docker compose pull
-docker compose down
-docker compose up -d
+docker compose -f docker/docker-compose.yml pull
+docker compose -f docker/docker-compose.yml up -d
 ```
 
-Data persists in mounted volumes.
+Your mounted `/data`, `/downloads`, `/config`, and `/tokens` persist.
 
 ---
 
-## Project Scope (v0.9.3)
+## Scope Boundaries
+Retreivr does:
+- Acquire media reliably
+- Normalize metadata and output structure
+- Keep playlist/sync ingestion deterministic
 
-- Stable ingestion engine
-- MusicBrainz-first canonical resolution
-- Deterministic playlist snapshot behavior
-- Idempotent scheduler runs
-- MKV default container
-- Integration test coverage for core flows
-
-v0.9.3 is a stabilization milestone.
-
----
-
-## License
-
-MIT. See `LICENSE`.
+Retreivr does not:
+- Stream media
+- Replace Plex/Jellyfin players
+- Bypass DRM/protected content

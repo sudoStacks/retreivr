@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.5 — Music Mode Hardening + Playlist File Import
+
+### Added
+- MusicBrainz-first Music Mode API surface:
+  - `GET /api/music/search` (metadata-only discovery)
+  - `POST /api/music/enqueue` (track enqueue from canonical MB payload)
+  - `POST /api/music/album/download` (album enqueue by release group)
+- Playlist file import flow with batch finalize support for M3U/M3U8, CSV, Apple Music XML/plist, and Soundiiz JSON.
+- Music failure diagnostics persistence (`music_failures`) with status visibility.
+- Regression test coverage expanded across MB binding/scoring, yt-dlp option contracts, import behavior, and Music Mode UI flow.
+
+### Changed
+- Enforced strict MB-bound canonical metadata for `music_track` before enqueue/execution, with fail-fast behavior instead of degraded naming fallbacks.
+- Hardened deterministic MB pair selection and bucket handling (album > compilation > single fallback), including stronger duration/variant rejection and stable tie-breaks.
+- Consolidated download payload/option authority: unified enqueue payload building, explicit `final_format` (video) vs `music_final_format` (audio), and consistent `audio_mode` handling for music.
+- Aligned direct URL and worker paths on canonical yt-dlp option/CLI building with controlled retry escalation and safer non-fatal metadata probing.
+- Stabilized Music Mode UX into a metadata-first Home flow with toggle gating, stale-response protection, and a single authoritative track enqueue path.
+- UI/UX fixes and updates across Home search, advanced options layout, status indicators, and delivery controls.
+- Unified visual theme across Home/Info/Status/Config and renamed the `Advanced Search` nav label to `Info` for clearer navigation semantics.
+- Client delivery was brought back on Home flows and now obeys the delivery toggle for both candidate and direct URL downloads.
+- Playlist file import now runs as a background job (`POST /api/import/playlist` returns `202` + `job_id`) with progress polling via `GET /api/import/playlist/jobs/{job_id}` to avoid blocking the request path.
+- Scheduler, watcher, and scheduled Spotify sync ticks now pause while playlist imports are active to reduce runtime contention and UX conflicts.
+- Home import UX now enforces explicit confirmation, disables import controls while running, and displays a live progress modal with status counters and errors.
+- Album-run canonicalization now enforces one release context across all queued tracks:
+  - consistent `album`, `album_artist`, `release_date`, `mb_release_id`, `mb_release_group_id`, and `artwork_url`
+  - consistent album-wide genre best-effort (MusicBrainz release/release-group first, resolved fallback only when available)
+- Music library pathing now always keys artist folders from canonical `album_artist` (not per-track featured artist credits).
+- Music path builder now creates `Disc N` folders only when `disc_total > 1` (single-disc albums no longer force `Disc 1`).
+- Album-run queue payloads now propagate `track_total` and `disc_total` for downstream tag correctness.
+- Metadata worker now prefers album-run `artwork_url` for all tracks in an album run, with release-art fallback only when needed.
+- Consolidated music path contract authority across both runtime workers:
+  - shared relative music layout builder now drives both `engine.job_queue` and `download.worker`
+  - single source of truth for Disc-folder inclusion rules
+- Consolidated shared music contract helpers for integer parsing/track formatting and canonical metadata coercion to reduce drift between worker stacks.
+- Consolidated music root resolution logic into shared path utilities used by metadata download worker flows.
+
+### Fixed
+- MusicBrainz recording include contract errors (`InvalidIncludeError`) in binding fetch paths.
+- Search destination regression caused by missing `build_output_template` import.
+- Direct URL preview blank-card fallback by returning safe title/uploader/thumbnail values on extraction failure.
+- Album enqueue hard-failure behavior: partial track failures now return a success summary instead of a full 500 response.
+- Fixed Home UI state drift and delivery-mode edge cases for clearer, consistent behavior.
+- Fixed album-mode metadata drift where featured-artist tracks could branch into separate artist folders.
+- Fixed inconsistent album artwork across tracks in the same album run by enforcing run-level cover art preference.
+- Fixed missing/partial track/disc total tag writes so players can reliably show `Track X of Y` and `Disc A of B`.
+- Fixed lingering single-disc `Disc 1` folder creation in the secondary download worker path by migrating it to the shared layout authority.
+
 ## v0.9.4 — Filesystem Layout Stabilization
 
 ### Changed

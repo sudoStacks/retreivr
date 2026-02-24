@@ -60,11 +60,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from engine.job_queue import DownloadJobStore, build_output_template, ensure_download_jobs_table, canonicalize_url
+from engine.job_queue import (
+    DownloadJobStore,
+    build_output_template,
+    build_download_job_payload,
+    ensure_download_jobs_table,
+    canonicalize_url,
+)
 from engine.json_utils import safe_json_dumps
 from engine.paths import DATA_DIR
 from engine.search_adapters import default_adapters
 from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
+from engine.musicbrainz_binding import _normalize_title_for_mb_lookup
+from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
 from metadata.canonical import CanonicalMetadataResolver
 
 REQUEST_STATUSES = {"pending", "resolving", "completed", "completed_with_skips", "failed"}
@@ -81,15 +89,9 @@ ITEM_STATUSES = {
 
 DEFAULT_SOURCE_PRIORITY = ["bandcamp", "youtube_music", "soundcloud"]
 MUSIC_TRACK_SOURCE_PRIORITY = ("youtube_music", "youtube", "soundcloud", "bandcamp")
-MUSIC_SOURCE_PRIORITY_WEIGHTS = {
-    "youtube_music": 10,
-    "youtube": 7,
-    "soundcloud": 4,
-    "bandcamp": 2,
-}
 MUSIC_TRACK_PENALIZE_TOKENS = ("live", "cover", "karaoke", "remix", "reaction", "ft.", "feat.", "instrumental")
 DEFAULT_MATCH_THRESHOLD = 0.92
-MUSIC_TRACK_THRESHOLD = min(DEFAULT_MATCH_THRESHOLD * 0.8, 0.70)
+MUSIC_TRACK_THRESHOLD = 0.78
 WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -183,12 +185,88 @@ def _is_audio_final_format(value: str | None) -> bool:
 def _extract_canonical_id(metadata):
     if not isinstance(metadata, dict):
         return None
+
     external_ids = metadata.get("external_ids") or {}
-    for key in ("spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id"):
-        value = external_ids.get(key)
-        if value:
-            return str(value)
-    return None
+    recording_mbid = (
+        metadata.get("recording_mbid")
+        or metadata.get("mb_recording_id")
+        or external_ids.get("musicbrainz_recording_id")
+    )
+    if recording_mbid:
+        return build_music_track_canonical_id(
+            metadata.get("artist"),
+            metadata.get("album"),
+            metadata.get("track_number") or metadata.get("track_num"),
+            metadata.get("track") or metadata.get("title"),
+            recording_mbid=recording_mbid,
+            mb_release_id=(
+                metadata.get("mb_release_id")
+                or metadata.get("release_id")
+                or external_ids.get("musicbrainz_release_id")
+            ),
+            mb_release_group_id=(
+                metadata.get("mb_release_group_id")
+                or metadata.get("release_group_id")
+            ),
+            disc_number=metadata.get("disc_number") or metadata.get("disc_num"),
+        )
+
+    return extract_external_track_canonical_id(external_ids)
+
+
+def _normalize_threshold(value, *, default=0.78):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    if parsed > 1.0:
+        parsed = parsed / 100.0
+    if parsed < 0.0:
+        return 0.0
+    if parsed > 1.0:
+        return 1.0
+    return parsed
+
+
+def _token_set(value: str | None) -> set[str]:
+    return {m.group(0) for m in WORD_TOKEN_RE.finditer(str(value or "").lower())}
+
+
+def _query_contains_artist(query: str | None, artist_guess: str | None) -> bool:
+    query_tokens = _token_set(query)
+    artist_tokens = _token_set(artist_guess)
+    if not query_tokens or not artist_tokens:
+        return False
+    return artist_tokens.issubset(query_tokens)
+
+
+def _uploader_artist_similarity_ok(artist_guess: str | None, uploader: str | None) -> bool:
+    artist_tokens = _token_set(artist_guess)
+    uploader_tokens = _token_set(uploader)
+    if not artist_tokens or not uploader_tokens:
+        return False
+    overlap = len(artist_tokens & uploader_tokens)
+    return (overlap / max(len(artist_tokens), 1)) >= 0.5
+
+
+def _parse_artist_track_from_candidate(title: str, uploader: str | None, query: str | None) -> tuple[str | None, str | None]:
+    normalized_title = str(title or "").replace(" – ", " - ").strip()
+    uploader_value = str(uploader or "").strip() or None
+    query_value = str(query or "").strip() or None
+
+    if " - " in normalized_title:
+        left, right = normalized_title.split(" - ", 1)
+        artist_guess = left.strip() or None
+        track_guess = right.strip() or None
+        if artist_guess and track_guess:
+            left_token_count = len(_token_set(artist_guess))
+            if left_token_count <= 6:
+                if _uploader_artist_similarity_ok(artist_guess, uploader_value) or _query_contains_artist(query_value, artist_guess):
+                    return artist_guess, track_guess
+
+    fallback_artist = uploader_value
+    fallback_track = normalized_title or None
+    return fallback_artist, fallback_track
 
 
 
@@ -733,12 +811,26 @@ class SearchResolutionService:
         self.queue_db_path = queue_db_path
         self.adapters = adapters or default_adapters()
         self.config = config or {}
+        self.debug_music_scoring = self._as_bool(self.config.get("debug_music_scoring"))
+        self.music_source_match_threshold = _normalize_threshold(
+            self.config.get("music_source_match_threshold", MUSIC_TRACK_THRESHOLD),
+            default=MUSIC_TRACK_THRESHOLD,
+        )
         self.paths = paths
         self.store = SearchJobStore(search_db_path)
         self.store.ensure_schema()
         self.queue_store = DownloadJobStore(queue_db_path)
         self._ensure_queue_schema()
         self.canonical_resolver = canonical_resolver or CanonicalMetadataResolver(config=self.config)
+
+    def _as_bool(self, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return False
 
     def ensure_schema(self):
         """
@@ -798,10 +890,11 @@ class SearchResolutionService:
                 title_match_increment = float(shared_count * 2)
             adjustment += title_match_increment
             reasons.append(f"title_match_{title_match_increment:.0f}")
-            logging.debug(
-                f"[MUSIC] title_match score_increase={title_match_increment:.0f} "
-                f"for candidate={candidate.get('url')}"
-            )
+            if self.debug_music_scoring:
+                logging.debug(
+                    f"[MUSIC] title_match score_increase={title_match_increment:.0f} "
+                    f"for candidate={candidate.get('url')}"
+                )
 
         if artist_tokens and uploader_tokens:
             overlap = len(artist_tokens & uploader_tokens) / max(len(artist_tokens), 1)
@@ -827,9 +920,10 @@ class SearchResolutionService:
                 if duration_increment > 0.0:
                     adjustment += duration_increment
                     reasons.append(f"duration_bonus_{duration_increment:.0f}")
-                logging.debug(
-                    f"[MUSIC] duration_bonus diff={diff_ms} score={duration_increment:.0f}"
-                )
+                if self.debug_music_scoring:
+                    logging.debug(
+                        f"[MUSIC] duration_bonus diff={diff_ms} score={duration_increment:.0f}"
+                    )
         except Exception:
             pass
 
@@ -850,10 +944,11 @@ class SearchResolutionService:
             if token in title_lower:
                 adjustment -= 10.0
                 reasons.append(f"penalty_{token}")
-                logging.debug(
-                    f"[MUSIC] penalizing token={token} new_score={adjustment:.0f} "
-                    f"for {candidate.get('url')}"
-                )
+                if self.debug_music_scoring:
+                    logging.debug(
+                        f"[MUSIC] penalizing token={token} new_score={adjustment:.0f} "
+                        f"for {candidate.get('url')}"
+                    )
         return adjustment, reasons
 
     def _build_music_track_query(self, artist, track, album=None):
@@ -902,49 +997,63 @@ class SearchResolutionService:
         return candidates
 
     def search_music_track_best_match(self, artist, track, album=None, duration_ms=None, limit=6):
+        query = self._build_music_track_query(artist, track, album)
         expected = {
             "artist": artist,
             "track": track,
             "album": album,
+            "query": query,
+            "media_intent": "music_track",
             "duration_hint_sec": (int(duration_ms) // 1000) if duration_ms is not None else None,
         }
-        allow_live = self._music_track_is_live(artist, track, album)
-        query = self._build_music_track_query(artist, track, album)
         scored = []
         for candidate in self.search_music_track_candidates(query, limit=limit):
             source = candidate.get("source")
             adapter = self.adapters.get(source)
             source_modifier = adapter.source_modifier(candidate) if adapter else 1.0
             candidate.update(score_candidate(expected, candidate, source_modifier=source_modifier))
-            base_score = self._normalize_score_100(candidate)
-            source_weight = int(MUSIC_SOURCE_PRIORITY_WEIGHTS.get(source, 0))
-            logging.debug(f"[MUSIC] source_priority={source} weight={source_weight}")
-            adjustment, reasons = self._music_track_adjust_score(expected, candidate, allow_live=allow_live)
-            if source_weight:
-                adjustment += float(source_weight)
-                reasons.append(f"source_priority_{source_weight}")
-            candidate["music_adjustment"] = adjustment
-            candidate["music_adjustment_reasons"] = ",".join(reasons)
-            candidate["base_score"] = base_score
-            candidate["final_score_100"] = max(0.0, min(100.0, base_score + adjustment))
-            candidate["final_score"] = candidate["final_score_100"] / 100.0
+            breakdown = candidate.get("score_breakdown") if isinstance(candidate.get("score_breakdown"), dict) else {}
+            candidate["base_score"] = breakdown.get("raw_score_100")
+            candidate["final_score_100"] = breakdown.get("final_score_100")
+            duration_delta_ms = candidate.get("duration_delta_ms")
             scored.append(candidate)
         if not scored:
             return None
-        ranked = sorted(
-            scored,
-            key=lambda c: (
-                -float(c.get("final_score") or 0.0),
-                str(c.get("source") or ""),
-                str(c.get("candidate_id") or ""),
-            ),
+        ranked = rank_candidates(scored, source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY))
+        eligible = [c for c in ranked if not c.get("rejection_reason")]
+        selected = select_best_candidate(
+            eligible,
+            self.music_source_match_threshold,
+            source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY),
         )
-        for candidate in ranked:
-            candidate_score = float(candidate.get("final_score") or 0.0)
-            logging.info(f"[MUSIC] threshold_used={MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
-            if candidate_score >= MUSIC_TRACK_THRESHOLD:
-                return candidate
-        return None
+        if self.debug_music_scoring:
+            selected_id = selected.get("candidate_id") if isinstance(selected, dict) else None
+            for candidate in ranked:
+                candidate_score = float(candidate.get("final_score") or 0.0)
+                breakdown = candidate.get("score_breakdown") if isinstance(candidate.get("score_breakdown"), dict) else {}
+                rejection_reason = candidate.get("rejection_reason")
+                decision = "below_threshold"
+                if rejection_reason:
+                    decision = f"rejected:{rejection_reason}"
+                elif selected_id and candidate.get("candidate_id") == selected_id:
+                    decision = "selected"
+                _log_event(
+                    logging.DEBUG,
+                    "music_track_candidate_scored",
+                    source=candidate.get("source"),
+                    title=candidate.get("title"),
+                    duration=candidate.get("duration_sec"),
+                    duration_delta=candidate.get("duration_delta_ms"),
+                    score_artist=candidate.get("score_artist"),
+                    score_track=candidate.get("score_track"),
+                    score_album=candidate.get("score_album"),
+                    score_duration=candidate.get("score_duration"),
+                    penalties_applied=breakdown.get("penalty_reasons"),
+                    final_score=candidate_score,
+                    threshold=self.music_source_match_threshold,
+                    acceptance_decision=decision,
+                )
+        return selected
 
     def _resolve_request_destination(self, destination):
         if not self.paths:
@@ -1148,6 +1257,12 @@ class SearchResolutionService:
                             )
                             continue
                         cand["source"] = source
+                        cand["candidate_id"] = str(
+                            cand.get("candidate_id")
+                            or cand.get("external_id")
+                            or cand.get("url")
+                            or ""
+                        )
                         modifier = self.adapters[source].source_modifier(cand)
                         scores = score_candidate(item, cand, source_modifier=modifier)
                         cand.update(scores)
@@ -1205,7 +1320,7 @@ class SearchResolutionService:
             request_media_type = request_row.get("media_type") or "generic"
             is_music_request = request_media_type == "music"
             selection_threshold = min_score if is_music_request else 0.0
-            chosen = select_best_candidate(ranked, selection_threshold)
+            chosen = select_best_candidate(ranked, selection_threshold, source_priority=source_priority)
             if not chosen:
                 self.store.update_item_status(item["id"], "failed", error="no_candidate_above_threshold")
                 _log_event(
@@ -1239,37 +1354,9 @@ class SearchResolutionService:
                 )
                 continue
 
-            output_template = None
             resolved_destination = None
-            if self.paths is not None:
-                try:
-                    output_template = build_output_template(
-                        self.config,
-                        destination=destination_dir,
-                        base_dir=self.paths.single_downloads_dir,
-                    )
-                    resolved_destination = output_template.get("output_dir")
-                except ValueError as exc:
-                    self.store.update_item_status(item["id"], "failed", error="invalid_destination")
-                    _log_event(
-                        logging.ERROR,
-                        "item_failed",
-                        request_id=request_id,
-                        item_id=item["id"],
-                        error=f"invalid_destination: {exc}",
-                    )
-                    continue
             request_override = self._get_request_override(request_id)
             final_format_override = request_override.get("final_format") if request_override else None
-            if final_format_override:
-                if output_template is None:
-                    output_template = {}
-                output_template["final_format"] = final_format_override
-
-                # Invariant: if an audio codec is requested (e.g. mp3), force the audio-mode pipeline
-                # even when the search request/item media_type is generic.
-                if _is_audio_final_format(final_format_override):
-                    output_template["audio_mode"] = True
 
             canonical_for_job = chosen.get("canonical_metadata") if isinstance(chosen, dict) else None
             if not canonical_for_job and isinstance(chosen, dict) and chosen.get("canonical_json"):
@@ -1277,31 +1364,59 @@ class SearchResolutionService:
                     canonical_for_job = json.loads(chosen.get("canonical_json"))
                 except json.JSONDecodeError:
                     canonical_for_job = None
-            if canonical_for_job:
-                if output_template is None:
-                    output_template = {}
-                output_template["canonical_metadata"] = canonical_for_job
+            expected_music_metadata = dict(canonical_for_job) if isinstance(canonical_for_job, dict) else {}
 
             canonical_id = _extract_canonical_id(canonical_for_job or chosen)
             trace_id = uuid4().hex
             media_intent = "album" if item["item_type"] == "album" else "track"
+            target_media_type = ("music" if _is_audio_final_format(final_format_override) else item["media_type"])
+            if target_media_type == "music" and media_intent == "track":
+                if not expected_music_metadata.get("artist"):
+                    expected_music_metadata["artist"] = item.get("artist")
+                if not expected_music_metadata.get("track"):
+                    expected_music_metadata["track"] = item.get("track")
+                if not expected_music_metadata.get("album"):
+                    expected_music_metadata["album"] = item.get("album")
+                if not expected_music_metadata.get("duration_ms"):
+                    try:
+                        hint_sec = int(request_row.get("duration_hint_sec")) if request_row.get("duration_hint_sec") is not None else None
+                    except (TypeError, ValueError):
+                        hint_sec = None
+                    if hint_sec:
+                        expected_music_metadata["duration_ms"] = hint_sec * 1000
             external_id = chosen.get("external_id") if isinstance(chosen, dict) else None
             canonical_url = canonicalize_url(chosen.get("source"), chosen.get("url"), external_id)
-            job_id, created, dedupe_reason = self.queue_store.enqueue_job(
-                origin=job_origin,
-                origin_id=request_id,
-                media_type=("music" if _is_audio_final_format(final_format_override) else item["media_type"]),
-                media_intent=media_intent,
-                source=chosen["source"],
-                url=chosen["url"],
-                input_url=chosen.get("url"),
-                canonical_url=canonical_url,
-                external_id=external_id,
-                output_template=output_template,
-                trace_id=trace_id,
-                resolved_destination=resolved_destination,
-                canonical_id=canonical_id,
-            )
+            try:
+                enqueue_payload = build_download_job_payload(
+                    config=self.config,
+                    origin=job_origin,
+                    origin_id=request_id,
+                    media_type=target_media_type,
+                    media_intent=media_intent,
+                    source=chosen["source"],
+                    url=chosen["url"],
+                    input_url=chosen.get("url"),
+                    destination=destination_dir,
+                    base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
+                    final_format_override=final_format_override,
+                    resolved_metadata=(expected_music_metadata if expected_music_metadata else canonical_for_job),
+                    trace_id=trace_id,
+                    canonical_id=canonical_id,
+                    canonical_url=canonical_url,
+                    external_id=external_id,
+                )
+                resolved_destination = enqueue_payload.get("resolved_destination")
+            except ValueError as exc:
+                self.store.update_item_status(item["id"], "failed", error="invalid_destination")
+                _log_event(
+                    logging.ERROR,
+                    "item_failed",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    error=f"invalid_destination: {exc}",
+                )
+                continue
+            job_id, created, dedupe_reason = self.queue_store.enqueue_job(**enqueue_payload)
 
             if not created and dedupe_reason == "duplicate":
                 self.store.update_item_status(
@@ -1408,25 +1523,6 @@ class SearchResolutionService:
                 final_format_override = request_override.get("final_format")
 
         destination_dir = request.get("destination_dir") or None
-        output_template = None
-        if self.paths is not None:
-            try:
-                output_template = build_output_template(
-                    self.config,
-                    destination=destination_dir,
-                    base_dir=self.paths.single_downloads_dir,
-                )
-            except ValueError as exc:
-                raise ValueError(f"invalid_destination: {exc}")
-        if final_format_override:
-            if output_template is None:
-                output_template = {}
-            output_template["final_format"] = final_format_override
-
-            # Invariant: if an audio codec is requested (e.g. mp3), force the audio-mode pipeline
-            # even when the item media_type is generic.
-            if _is_audio_final_format(final_format_override):
-                output_template["audio_mode"] = True
 
         canonical_payload = None
         canonical_raw = candidate.get("canonical_json")
@@ -1435,32 +1531,112 @@ class SearchResolutionService:
                 canonical_payload = json.loads(canonical_raw)
             except json.JSONDecodeError:
                 canonical_payload = None
-        if canonical_payload:
-            if output_template is None:
-                output_template = {}
-            output_template["canonical_metadata"] = canonical_payload
+        expected_music_metadata = dict(canonical_payload) if isinstance(canonical_payload, dict) else {}
 
-        resolved_destination = output_template.get("output_dir") if output_template else None
         canonical_id = _extract_canonical_id(canonical_payload or candidate)
         trace_id = uuid4().hex
         media_intent = "album" if item.get("item_type") == "album" else "track"
+        target_media_type = ("music" if _is_audio_final_format(final_format_override) else (item.get("media_type") or "generic"))
+        if target_media_type == "music" and media_intent == "track":
+            candidate_title = candidate.get("title")
+            candidate_uploader = candidate.get("uploader") or candidate.get("channel")
+            query_hint = " ".join(
+                str(part).strip()
+                for part in (
+                    request.get("artist"),
+                    request.get("track"),
+                    request.get("album"),
+                )
+                if str(part or "").strip()
+            ) or None
+            parsed_artist, parsed_track = _parse_artist_track_from_candidate(
+                str(candidate_title or ""),
+                str(candidate_uploader or "") if candidate_uploader is not None else None,
+                query_hint,
+            )
+            # Lookup-only normalized track used for deterministic MB binding input diagnostics.
+            track_lookup = _normalize_title_for_mb_lookup(parsed_track or "")
+
+            expected_music_metadata["artist"] = (
+                parsed_artist
+                or expected_music_metadata.get("artist")
+                or item.get("artist")
+            )
+            expected_music_metadata["track"] = (
+                parsed_track
+                or expected_music_metadata.get("track")
+                or item.get("track")
+            )
+            if track_lookup:
+                expected_music_metadata["track_lookup"] = track_lookup
+
+            candidate_album = candidate.get("album_detected") or candidate.get("album")
+            if candidate_album and not expected_music_metadata.get("album"):
+                expected_music_metadata["album"] = candidate_album
+
+            if not expected_music_metadata.get("duration_ms"):
+                duration_sec = candidate.get("duration_sec")
+                if duration_sec is None:
+                    duration_sec = candidate.get("duration")
+                try:
+                    duration_int = int(duration_sec) if duration_sec is not None else None
+                except (TypeError, ValueError):
+                    duration_int = None
+                if duration_int and duration_int > 0:
+                    expected_music_metadata["duration_ms"] = duration_int * 1000
+                else:
+                    try:
+                        hint_sec = int(request.get("duration_hint_sec")) if request.get("duration_hint_sec") is not None else None
+                    except (TypeError, ValueError):
+                        hint_sec = None
+                    if hint_sec:
+                        expected_music_metadata["duration_ms"] = hint_sec * 1000
         external_id = candidate.get("external_id") if isinstance(candidate, dict) else None
         canonical_url = canonicalize_url(candidate.get("source"), candidate_url, external_id)
-        job_id, created, dedupe_reason = self.queue_store.enqueue_job(
-            origin="search",
-            origin_id=request["id"],
-            media_type=("music" if _is_audio_final_format(final_format_override) else (item.get("media_type") or "generic")),
-            media_intent=media_intent,
-            source=candidate.get("source"),
-            url=candidate_url,
-            input_url=candidate_url,
-            canonical_url=canonical_url,
-            external_id=external_id,
-            output_template=output_template,
-            trace_id=trace_id,
-            resolved_destination=resolved_destination,
-            canonical_id=canonical_id,
-        )
+        output_template_overrides = {}
+        candidate_title = str(candidate.get("title") or "").strip()
+        candidate_uploader = str(
+            candidate.get("uploader") or candidate.get("channel") or candidate.get("artist_detected") or ""
+        ).strip()
+        if candidate_title:
+            output_template_overrides["title"] = candidate_title
+        if candidate_uploader:
+            output_template_overrides["channel"] = candidate_uploader
+            output_template_overrides["artist"] = candidate_uploader
+        try:
+            enqueue_payload = build_download_job_payload(
+                config=self.config,
+                origin="search",
+                origin_id=request["id"],
+                media_type=target_media_type,
+                media_intent=media_intent,
+                source=candidate.get("source"),
+                url=candidate_url,
+                input_url=candidate_url,
+                destination=destination_dir,
+                base_dir=(self.paths.single_downloads_dir if self.paths is not None else "."),
+                final_format_override=final_format_override,
+                resolved_metadata=(expected_music_metadata if expected_music_metadata else canonical_payload),
+                output_template_overrides=(output_template_overrides or None),
+                trace_id=trace_id,
+                canonical_id=canonical_id,
+                canonical_url=canonical_url,
+                external_id=external_id,
+            )
+        except ValueError as exc:
+            if str(exc.args[0] if exc.args else exc).strip() == "music_track_requires_mb_bound_metadata":
+                reasons = []
+                if len(exc.args) > 1 and isinstance(exc.args[1], (list, tuple)):
+                    reasons = [str(item) for item in exc.args[1] if str(item or "").strip()]
+                raise ValueError(
+                    {
+                        "error": "music_mode_mb_binding_failed",
+                        "reason": reasons,
+                    }
+                )
+            raise ValueError(f"invalid_destination: {exc}")
+        resolved_destination = enqueue_payload.get("resolved_destination")
+        job_id, created, dedupe_reason = self.queue_store.enqueue_job(**enqueue_payload)
 
         if not created and dedupe_reason == "duplicate":
             self.store.update_item_status(

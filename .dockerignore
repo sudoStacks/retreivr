@@ -23,4 +23,12 @@ __pycache__
 
 # Launcher - not included with docker anyway
 launcher/
-launcher/**
+launcher/**  
+
+# tests
+tests/
+tests/**
+
+_project_management/
+_project_management/**
+

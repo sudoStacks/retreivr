@@ -79,6 +79,9 @@ The container mounts this folder to /config.
 Default URL:
 	•	http://<host-ip>:8090
 
+Port mapping reminder:
+	•	`8090:8000` means host port `8090` maps to container port `8000` (`host:container`).
+
 Notes
 	•	Portainer deployments should prefer absolute host paths. Avoid ./downloads style binds in Portainer stacks.
 	•	Playlist folder paths in config.json should be relative to /downloads inside the container.

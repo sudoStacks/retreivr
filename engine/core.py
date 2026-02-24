@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -22,13 +23,16 @@ from yt_dlp import YoutubeDL
 from engine.job_queue import (
     DownloadWorkerEngine,
     DownloadJobStore,
+    build_download_job_payload,
     build_output_template,
     ensure_download_jobs_table,
+    preview_direct_url,
+    resolve_cookie_file as _resolve_cookie_file_canonical,
     resolve_media_intent,
     resolve_media_type,
     resolve_source,
 )
-from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
+from engine.paths import EnginePaths
 
 CLIENT_DELIVERY_TIMEOUT_SECONDS = 600
 
@@ -123,12 +127,44 @@ _CLIENT_DELIVERIES = {}
 _CLIENT_DELIVERIES_LOCK = threading.Lock()
 
 
-def _register_client_delivery(path, filename):
+def _cleanup_client_delivery_dir(cleanup_dir, *, attempts=3, retry_delay_sec=0.15):
+    target = str(cleanup_dir or "").strip()
+    if not target:
+        return True
+
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        if not os.path.isdir(target):
+            return True
+        try:
+            shutil.rmtree(target, ignore_errors=False)
+            return True
+        except OSError as exc:
+            if attempt >= attempts:
+                logging.warning(
+                    "Client delivery cleanup failed for temp dir %s (attempt %s/%s): %s",
+                    target,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                break
+            time.sleep(float(retry_delay_sec))
+
+    # Fallback best-effort removal if strict recursive delete fails.
+    try:
+        shutil.rmtree(target, ignore_errors=True)
+    except Exception:
+        pass
+    return not os.path.exists(target)
+
+
+def _register_client_delivery(path, filename, *, cleanup_dir=None):
     delivery_id = uuid4().hex
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=CLIENT_DELIVERY_TIMEOUT_SECONDS)
     entry = {
         "path": path,
         "filename": filename,
+        "cleanup_dir": cleanup_dir,
         "expires_at": expires_at,
         "event": threading.Event(),
         "served": False,
@@ -175,12 +211,16 @@ def _finalize_client_delivery(delivery_id, *, timeout=False):
         entry = _CLIENT_DELIVERIES.pop(delivery_id, None)
     if not entry:
         return False
+
     path = entry.get("path")
     if path and os.path.exists(path):
         try:
             os.remove(path)
         except OSError:
             logging.warning("Client delivery cleanup failed for %s", path)
+    cleanup_dir = entry.get("cleanup_dir")
+    if cleanup_dir and not _cleanup_client_delivery_dir(cleanup_dir):
+        logging.warning("Client delivery cleanup left residual temp dir %s", cleanup_dir)
     if timeout:
         return False
     return bool(entry.get("delivered"))
@@ -306,12 +346,15 @@ def validate_config(config):
         errors.append("filename_template must be a string")
 
     final_format = config.get("final_format")
+    music_final_format = config.get("music_final_format")
     music_folder = config.get("music_download_folder")
     if music_folder is not None and not isinstance(music_folder, str):
         errors.append("music_download_folder must be a string")
 
     if final_format is not None and not isinstance(final_format, str):
         errors.append("final_format must be a string")
+    if music_final_format is not None and not isinstance(music_final_format, str):
+        errors.append("music_final_format must be a string")
 
     media_type = config.get("media_type")
     if media_type is not None and media_type not in {"music", "audio", "video"}:
@@ -593,18 +636,7 @@ def is_video_downloaded(conn, video_id):
 
 
 def resolve_cookie_file(config):
-    cookie_value = (config or {}).get("yt_dlp_cookies")
-    if not cookie_value:
-        return None
-    try:
-        resolved = resolve_dir(cookie_value, TOKENS_DIR)
-    except ValueError as exc:
-        logging.error("Invalid yt-dlp cookies path: %s", exc)
-        return None
-    if not os.path.exists(resolved):
-        logging.warning("yt-dlp cookies file not found: %s", resolved)
-        return None
-    return resolved
+    return _resolve_cookie_file_canonical(config)
 
 
 def load_credentials(token_path):
@@ -772,8 +804,12 @@ def telegram_notify(config, message):
     chat_id = telegram.get("chat_id")
     if not bot_token or not chat_id:
         return False
+    max_chars = 4096
+    text = str(message)
+    if len(text) > max_chars:
+        text = f"{text[:max_chars - 1]}…"
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message}
+    payload = {"chat_id": chat_id, "text": text}
     try:
         resp = requests.post(url, json=payload, timeout=15)
         if resp.ok:
@@ -816,32 +852,66 @@ def run_single_download(
         media_type = resolve_media_type(effective_config, url=video_url)
         media_intent = resolve_media_intent(origin, media_type)
         source = resolve_source(video_url)
+        resolved_metadata = None
+        if media_type == "music" and media_intent == "track":
+            try:
+                preview = preview_direct_url(video_url, config or {})
+            except Exception:
+                preview = {}
+            preview_title = str((preview or {}).get("title") or "").strip()
+            preview_uploader = str((preview or {}).get("uploader") or "").strip()
+            preview_track = preview_title
+            preview_artist = preview_uploader or None
+            if " - " in preview_title:
+                left, right = preview_title.split(" - ", 1)
+                left = left.strip()
+                right = right.strip()
+                if left and right:
+                    preview_artist = preview_artist or left
+                    preview_track = right
+            duration_sec = (preview or {}).get("duration_sec")
+            try:
+                duration_ms = int(duration_sec) * 1000 if duration_sec is not None else None
+            except (TypeError, ValueError):
+                duration_ms = None
+            resolved_metadata = {
+                "artist": preview_artist,
+                "track": preview_track,
+                "album": None,
+                "duration_ms": duration_ms,
+            }
 
         try:
-            output_template = build_output_template(
-                config,
+            enqueue_payload = build_download_job_payload(
+                config=config,
+                origin=origin,
+                origin_id=origin_id,
+                media_type=media_type,
+                media_intent=media_intent,
+                source=source,
+                url=video_url,
                 destination=destination,
                 base_dir=paths.single_downloads_dir,
+                final_format_override=final_format_override,
+                resolved_metadata=resolved_metadata,
             )
         except ValueError as exc:
             _status_set(status, "last_error_message", f"Invalid destination path: {exc}")
             status.single_download_ok = False
             return False
-        if final_format_override:
-            output_template["final_format"] = final_format_override
-
-        resolved_destination = output_template.get("output_dir")
         job_id, created, _dedupe_reason = store.enqueue_job(
-            origin=origin,
-            origin_id=origin_id,
-            media_type=media_type,
-            media_intent=media_intent,
-            source=source,
-            url=video_url,
-            output_template=output_template,
-            resolved_destination=resolved_destination,
             log_duplicate_event=False,
+            **enqueue_payload,
         )
+        if created:
+            logging.info(
+                "job_enqueued origin=%s source=%s media_type=%s media_intent=%s job_id=%s",
+                origin,
+                source,
+                media_type,
+                media_intent,
+                job_id,
+            )
         if created:
             _status_append(status, "run_successes", job_id)
         status.single_download_ok = job_id is not None
@@ -1026,8 +1096,14 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                 job_entry["account"] = account
 
                 try:
-                    output_template = build_output_template(
-                        config,
+                    enqueue_payload = build_download_job_payload(
+                        config=config,
+                        origin="playlist",
+                        origin_id=playlist_id,
+                        media_type=media_type,
+                        media_intent=media_intent,
+                        source=source,
+                        url=video_url,
                         playlist_entry=job_entry,
                         base_dir=paths.single_downloads_dir,
                     )
@@ -1035,17 +1111,8 @@ def run_once(config, *, paths: EnginePaths, status=None, stop_event=None, **_ign
                     logging.error("Invalid playlist folder path: %s", exc)
                     continue
 
-                resolved_destination = output_template.get("output_dir")
-
                 job_id, created, _dedupe_reason = store.enqueue_job(
-                    origin="playlist",
-                    origin_id=playlist_id,
-                    media_type=media_type,
-                    media_intent=media_intent,
-                    source=source,
-                    url=video_url,
-                    output_template=output_template,
-                    resolved_destination=resolved_destination,
+                    **enqueue_payload,
                 )
                 if created:
                     _status_append(status, "run_successes", job_id)

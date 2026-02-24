@@ -161,3 +161,47 @@ def test_liked_songs_sync_exits_cleanly_when_oauth_token_missing(monkeypatch) ->
     assert result["enqueued"] == 0
     assert enqueue_calls == []
     assert db.store_calls == []
+
+
+def test_liked_songs_sync_counts_skipped_from_enqueue_result(monkeypatch) -> None:
+    config = {"spotify": {"client_id": "cid", "client_secret": "csec"}}
+    db = _FakeSnapshotStore(latest_snapshot=None)
+    queue = object()
+    search_service = object()
+    spotify_client = _FakeSpotifyClient("snap-liked-2", [_item("a", 0), _item("b", 1)])
+
+    class _FakeOAuthStore:
+        def __init__(self, _db_path):
+            pass
+
+        def get_valid_token(self, _client_id, _client_secret, config=None):
+            return SimpleNamespace(access_token="oauth-token")
+
+    async def _spy_enqueue_spotify_track(queue, spotify_track: dict, search_service, playlist_id: str):
+        if spotify_track.get("spotify_track_id") == "a":
+            return {"created": False, "reason": "duplicate_isrc"}
+        return {"created": True}
+
+    monkeypatch.setattr("scheduler.jobs.spotify_playlist_watch.SpotifyOAuthStore", _FakeOAuthStore)
+    monkeypatch.setattr(
+        "scheduler.jobs.spotify_playlist_watch.enqueue_spotify_track",
+        _spy_enqueue_spotify_track,
+    )
+    monkeypatch.setattr(
+        "scheduler.jobs.spotify_playlist_watch._load_downloaded_track_paths",
+        lambda _playlist_id: [],
+    )
+
+    result = asyncio.run(
+        spotify_liked_songs_watch_job(
+            config=config,
+            db=db,
+            queue=queue,
+            spotify_client=spotify_client,
+            search_service=search_service,
+        )
+    )
+
+    assert result["status"] == "updated"
+    assert result["enqueued"] == 1
+    assert result["skipped"] == 1

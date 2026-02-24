@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+
 pytest.importorskip("fastapi")
 
 
@@ -103,3 +104,41 @@ def test_intent_queue_adapter_skips_non_searchable_payload(monkeypatch, caplog) 
     adapter.enqueue({"playlist_id": "pl-3"})
 
     assert "no media URL or searchable artist/title available" in caplog.text
+
+
+def test_intent_queue_adapter_music_track_prefers_mb_canonical_id(monkeypatch) -> None:
+    module = _load_module(monkeypatch)
+    captured = []
+
+    class _Store:
+        def enqueue_job(self, **kwargs):
+            captured.append(kwargs)
+            return "job-3"
+
+    module.app.state.worker_engine = SimpleNamespace(store=_Store())
+    adapter = module._IntentQueueAdapter()
+    adapter.enqueue(
+        {
+            "playlist_id": "pl-4",
+            "spotify_track_id": "trk-4",
+            "media_intent": "music_track",
+            "artist": "Artist",
+            "track": "Track",
+            "album": "Album",
+            "recording_mbid": "REC-1",
+            "mb_release_id": "REL-1",
+            "disc_number": 2,
+            "track_number": 7,
+        }
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["canonical_id"] == module._build_music_track_canonical_id(
+        "Artist",
+        "Album",
+        7,
+        "Track",
+        recording_mbid="REC-1",
+        mb_release_id="REL-1",
+        disc_number=2,
+    )

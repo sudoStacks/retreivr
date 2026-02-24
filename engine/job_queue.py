@@ -1,4 +1,6 @@
 import json
+import copy
+import importlib.util
 import logging
 import os
 import re
@@ -11,6 +13,7 @@ import traceback
 import threading
 import time
 import urllib.parse
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -20,11 +23,25 @@ import requests
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, ExtractorError
 
-from engine.json_utils import json_sanity_check, safe_json_dumps
+from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
+from media.music_contract import format_zero_padded_track_number, parse_first_positive_int
+from media.path_builder import build_music_relative_layout
 from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
+from metadata.services.musicbrainz_service import get_musicbrainz_service
+
+try:
+    from engine.musicbrainz_binding import _normalize_title_for_mb_lookup, resolve_best_mb_pair
+except Exception:
+    _BINDING_PATH = os.path.join(os.path.dirname(__file__), "musicbrainz_binding.py")
+    _BINDING_SPEC = importlib.util.spec_from_file_location("engine_musicbrainz_binding_job_queue", _BINDING_PATH)
+    _BINDING_MODULE = importlib.util.module_from_spec(_BINDING_SPEC)
+    assert _BINDING_SPEC and _BINDING_SPEC.loader
+    _BINDING_SPEC.loader.exec_module(_BINDING_MODULE)
+    _normalize_title_for_mb_lookup = _BINDING_MODULE._normalize_title_for_mb_lookup
+    resolve_best_mb_pair = _BINDING_MODULE.resolve_best_mb_pair
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +81,15 @@ _FORMAT_VIDEO = (
 )
 # Prefer audio-only formats first; fall back to any best format only if needed.
 # Keep this quoted/argument-safe in CLI execution (we do NOT use shell=True).
-_FORMAT_AUDIO = "bestaudio[acodec!=none]/bestaudio/best"
+_FORMAT_AUDIO = "bestaudio/best"
+
+# QuickTime-compatible MP4 policy: require AVC/H.264 video + AAC audio.
+# This prevents VP9/Opus-in-MP4 outputs that fail in QuickTime.
+_FORMAT_VIDEO_QT_MP4 = (
+    "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a][ext=m4a]/"
+    "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
+)
 
 _AUDIO_FORMATS = {"mp3", "m4a", "flac"}
 
@@ -114,6 +139,8 @@ _MUSIC_SOURCE_PRIORITY_WEIGHTS = {
     "soundcloud": 4,
     "bandcamp": 2,
 }
+_VIDEO_CONTAINERS = {"mkv", "mp4", "webm"}
+_MUSIC_AUDIO_FORMAT_WARNED = False
 
 
 @dataclass(frozen=True)
@@ -192,7 +219,13 @@ def ensure_download_jobs_table(conn):
             output_template TEXT,
             resolved_destination TEXT,
             canonical_id TEXT,
-            file_path TEXT
+            file_path TEXT,
+            progress_downloaded_bytes INTEGER,
+            progress_total_bytes INTEGER,
+            progress_percent REAL,
+            progress_speed_bps REAL,
+            progress_eta_seconds INTEGER,
+            progress_updated_at TEXT
         )
         """
     )
@@ -208,9 +241,20 @@ def ensure_download_jobs_table(conn):
         "input_url",
         "canonical_url",
         "external_id",
+        "progress_downloaded_bytes",
+        "progress_total_bytes",
+        "progress_percent",
+        "progress_speed_bps",
+        "progress_eta_seconds",
+        "progress_updated_at",
     ):
         if column not in existing_columns:
-            cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} TEXT")
+            if column in {"progress_downloaded_bytes", "progress_total_bytes", "progress_eta_seconds"}:
+                cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} INTEGER")
+            elif column in {"progress_percent", "progress_speed_bps"}:
+                cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} REAL")
+            else:
+                cur.execute(f"ALTER TABLE download_jobs ADD COLUMN {column} TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs (status)")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_download_jobs_source_status ON download_jobs (source, status)"
@@ -223,6 +267,36 @@ def ensure_download_jobs_table(conn):
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_download_jobs_url_dest_status_created "
         "ON download_jobs (url, resolved_destination, status, created_at DESC)"
+    )
+    # Migration: de-duplicate canonical IDs before adding uniqueness enforcement.
+    # Keep the newest row by created_at; break ties by rowid (latest inserted wins).
+    cur.execute(
+        """
+        DELETE FROM download_jobs
+        WHERE canonical_id IS NOT NULL
+          AND canonical_id != ''
+          AND rowid IN (
+              SELECT older.rowid
+              FROM download_jobs AS older
+              JOIN download_jobs AS newer
+                ON older.canonical_id = newer.canonical_id
+               AND (
+                    COALESCE(newer.created_at, '') > COALESCE(older.created_at, '')
+                    OR (
+                        COALESCE(newer.created_at, '') = COALESCE(older.created_at, '')
+                        AND newer.rowid > older.rowid
+                    )
+               )
+             WHERE older.canonical_id IS NOT NULL
+               AND older.canonical_id != ''
+          )
+        """
+    )
+    # Additive uniqueness constraint for canonical_id (null/empty values are excluded).
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_download_jobs_canonical_id "
+        "ON download_jobs (canonical_id) "
+        "WHERE canonical_id IS NOT NULL AND canonical_id != ''"
     )
     conn.commit()
 
@@ -302,6 +376,26 @@ def _normalize_format(value: str | None) -> str | None:
         return None
     return str(value).strip().lower()
 
+
+def _extract_music_binding_ids(job: DownloadJob) -> tuple[str | None, str | None]:
+    payload = job.output_template if isinstance(job.output_template, dict) else {}
+    canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+    recording_mbid = str(
+        payload.get("recording_mbid")
+        or payload.get("mb_recording_id")
+        or canonical.get("recording_mbid")
+        or canonical.get("mb_recording_id")
+        or ""
+    ).strip() or None
+    release_mbid = str(
+        payload.get("mb_release_id")
+        or payload.get("release_id")
+        or canonical.get("mb_release_id")
+        or canonical.get("release_id")
+        or ""
+    ).strip() or None
+    return recording_mbid, release_mbid
+
 class DownloadJobStore:
     def __init__(self, db_path):
         self.db_path = db_path
@@ -314,6 +408,8 @@ class DownloadJobStore:
     def _row_to_job(self, row):
         if not row:
             return None
+        if isinstance(row, sqlite3.Row):
+            row = dict(row)
         output_template = row["output_template"]
         parsed_output = None
         if output_template:
@@ -410,6 +506,8 @@ class DownloadJobStore:
     def _row_has_valid_output(self, row):
         if not row:
             return False
+        if isinstance(row, sqlite3.Row):
+            row = dict(row)
         if row["status"] != JOB_STATUS_COMPLETED:
             return False
         path = row.get("file_path")
@@ -632,6 +730,29 @@ class DownloadJobStore:
                     )
                     conn.commit()
                     return job_id, True, None
+                except sqlite3.IntegrityError as exc:
+                    conn.rollback()
+                    err = str(exc).lower()
+                    if canonical_id and "canonical_id" in err:
+                        duplicate_job = self.get_job_by_canonical_id(canonical_id)
+                        if duplicate_job:
+                            if log_duplicate_event:
+                                _log_event(
+                                    logging.INFO,
+                                    "job_skipped_duplicate",
+                                    job_id=duplicate_job.id,
+                                    trace_id=duplicate_job.trace_id,
+                                    origin=origin,
+                                    origin_id=origin_id,
+                                    source=source,
+                                    url=url,
+                                    destination=destination,
+                                    canonical_id=canonical_id,
+                                    status=duplicate_job.status,
+                                )
+                            return duplicate_job.id, False, "duplicate"
+                        return job_id, False, "duplicate"
+                    raise
                 except sqlite3.OperationalError as exc:
                     msg = str(exc).lower()
                     if "locked" in msg or "busy" in msg:
@@ -801,10 +922,60 @@ class DownloadJobStore:
             cur.execute(
                 """
                 UPDATE download_jobs
-                SET status=?, downloading=?, updated_at=?
+                SET status=?, downloading=?, updated_at=?,
+                    progress_downloaded_bytes=NULL,
+                    progress_total_bytes=NULL,
+                    progress_percent=NULL,
+                    progress_speed_bps=NULL,
+                    progress_eta_seconds=NULL,
+                    progress_updated_at=NULL
                 WHERE id=?
                 """,
                 (JOB_STATUS_DOWNLOADING, now, now, job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_download_progress(
+        self,
+        job_id,
+        *,
+        downloaded_bytes=None,
+        total_bytes=None,
+        progress_percent=None,
+        speed_bps=None,
+        eta_seconds=None,
+    ):
+        now = utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE download_jobs
+                SET progress_downloaded_bytes=?,
+                    progress_total_bytes=?,
+                    progress_percent=?,
+                    progress_speed_bps=?,
+                    progress_eta_seconds=?,
+                    progress_updated_at=?,
+                    updated_at=?
+                WHERE id=? AND status IN (?, ?, ?)
+                """,
+                (
+                    downloaded_bytes,
+                    total_bytes,
+                    progress_percent,
+                    speed_bps,
+                    eta_seconds,
+                    now,
+                    now,
+                    job_id,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_POSTPROCESSING,
+                ),
             )
             conn.commit()
         finally:
@@ -1032,7 +1203,7 @@ class DownloadWorkerEngine:
         ranked = rank_candidates(scored, source_priority=source_priority)
         for candidate in ranked:
             candidate_score = float(candidate.get("final_score") or 0.0)
-            logger.info(f"[MUSIC] threshold_used={_MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
+            logger.debug(f"[MUSIC] threshold_used={_MUSIC_TRACK_THRESHOLD:.2f} candidate_score={candidate_score:.3f}")
             if candidate_score >= _MUSIC_TRACK_THRESHOLD:
                 return candidate
         logger.warning(f"[MUSIC] top 5 candidates for track={track} scores:")
@@ -1049,23 +1220,11 @@ class DownloadWorkerEngine:
     def _resolve_music_track_job(self, job):
         payload = job.output_template if isinstance(job.output_template, dict) else {}
         canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
-        artist = str(payload.get("artist") or canonical.get("artist") or "").strip()
-        track = str(payload.get("track") or canonical.get("track") or canonical.get("title") or "").strip()
-        album = str(payload.get("album") or canonical.get("album") or "").strip() or None
-        recording_mbid = str(
-            payload.get("recording_mbid")
-            or payload.get("mb_recording_id")
-            or canonical.get("recording_mbid")
-            or canonical.get("mb_recording_id")
-            or ""
-        ).strip() or None
-        release_mbid = str(
-            payload.get("mb_release_id")
-            or payload.get("release_id")
-            or canonical.get("mb_release_id")
-            or canonical.get("release_id")
-            or ""
-        ).strip() or None
+        # Prefer bound MB canonical metadata for scoring expectations.
+        artist = str(canonical.get("artist") or payload.get("artist") or "").strip()
+        track = str(canonical.get("track") or canonical.get("title") or payload.get("track") or "").strip()
+        album = str(canonical.get("album") or payload.get("album") or "").strip() or None
+        recording_mbid, release_mbid = _extract_music_binding_ids(job)
         release_group_mbid = str(
             payload.get("mb_release_group_id")
             or payload.get("release_group_id")
@@ -1073,9 +1232,9 @@ class DownloadWorkerEngine:
             or canonical.get("release_group_id")
             or ""
         ).strip() or None
-        duration_ms_raw = payload.get("duration_ms")
+        duration_ms_raw = canonical.get("duration_ms")
         if duration_ms_raw is None:
-            duration_ms_raw = canonical.get("duration_ms")
+            duration_ms_raw = payload.get("duration_ms")
         if duration_ms_raw is None:
             duration_ms_raw = canonical.get("duration")
         duration_hint_sec = None
@@ -1084,6 +1243,14 @@ class DownloadWorkerEngine:
                 duration_hint_sec = max(int(duration_ms_raw) // 1000, 1)
         except Exception:
             duration_hint_sec = None
+        if not recording_mbid or not release_mbid:
+            self.store.record_failure(
+                job,
+                error_message="music_track_binding_missing",
+                retryable=False,
+                retry_delay_seconds=self.retry_delay_seconds,
+            )
+            return None
         allow_live = self._music_track_is_live(artist, track, album)
         if not artist or not track:
             logging.error("Music track search failed")
@@ -1115,12 +1282,23 @@ class DownloadWorkerEngine:
                     duration_ms=(duration_hint_sec * 1000) if duration_hint_sec else None,
                     limit=6,
                 )
-            except Exception:
+            except Exception as exc:
                 logging.exception("Music track search service failed query=%s", search_query)
+                retryable = is_retryable_error(exc)
+                _log_event(
+                    logging.ERROR,
+                    "music_track_adapter_search_failed",
+                    job_id=job.id,
+                    source=job.source,
+                    failure_domain="adapter_search",
+                    error_message=str(exc),
+                    candidate_id=None,
+                    retryable=retryable,
+                )
                 self.store.record_failure(
                     job,
-                    error_message="music_track_adapter_search_exception",
-                    retryable=False,
+                    error_message=f"music_track_adapter_search_exception:{exc}",
+                    retryable=retryable,
                     retry_delay_seconds=self.retry_delay_seconds,
                 )
                 return None
@@ -1147,14 +1325,27 @@ class DownloadWorkerEngine:
                     duration_delta_ms = abs(int(resolved_duration) - (int(duration_hint_sec) * 1000))
             except Exception:
                 duration_delta_ms = None
-        logger.info(
+        logger.debug(
             f"[MUSIC] threshold={_MUSIC_TRACK_THRESHOLD:.2f} "
             f"selected_score={selected_score if selected_score is not None else 'n/a'} "
             f"candidate={resolved_url}"
         )
-        logger.info("[MUSIC] selected_duration_delta_ms=%s", duration_delta_ms)
+        logger.debug("[MUSIC] selected_duration_delta_ms=%s", duration_delta_ms)
 
         source = resolved_source or resolve_source(resolved_url)
+        candidate_id = None
+        if isinstance(resolved, dict):
+            candidate_id = resolved.get("candidate_id")
+        logger.info(
+            '[MUSIC] acquisition recording_mbid=%s release_mbid=%s search_query="%s" source=%s candidate_id=%s duration_delta_ms=%s final_path=%s',
+            recording_mbid,
+            release_mbid,
+            search_query,
+            source,
+            candidate_id,
+            duration_delta_ms,
+            "<pending>",
+        )
         external_id = extract_video_id(resolved_url) if source in {"youtube", "youtube_music"} else None
         canonical_url = canonicalize_url(source, resolved_url, external_id)
         return replace(
@@ -1245,8 +1436,30 @@ class DownloadWorkerEngine:
                 return
             # If a cancel request came in while this job was queued, honor it immediately.
             if self._is_job_cancelled(job.id, stop_event):
-                self.store.mark_canceled(job.id, reason="Cancelled by user")
-                _log_event(logging.INFO, "job_cancelled", job_id=job.id, trace_id=job.trace_id, source=job.source)
+                try:
+                    self.store.mark_canceled(job.id, reason="Cancelled by user")
+                    _log_event(logging.INFO, "job_cancelled", job_id=job.id, trace_id=job.trace_id, source=job.source)
+                except Exception as persist_exc:
+                    logging.error(
+                        "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                        job.id,
+                        JOB_STATUS_CANCELLED,
+                        persist_exc,
+                    )
+                    try:
+                        self.store.record_failure(
+                            job,
+                            error_message=f"cancel_persistence_failed:{persist_exc}",
+                            retryable=False,
+                            retry_delay_seconds=self.retry_delay_seconds,
+                        )
+                    except Exception as fallback_exc:
+                        logging.error(
+                            "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                            job.id,
+                            JOB_STATUS_FAILED,
+                            fallback_exc,
+                        )
                 return
             _log_event(
                 logging.INFO,
@@ -1281,18 +1494,6 @@ class DownloadWorkerEngine:
                 media_intent=job.media_intent,
             )
             return
-        if self._is_job_cancelled(job.id, stop_event):
-            self.store.mark_canceled(job.id, reason="Cancelled by user")
-            _log_event(
-                logging.INFO,
-                "job_cancelled",
-                job_id=job.id,
-                trace_id=job.trace_id,
-                source=job.source,
-                origin=job.origin,
-                media_intent=job.media_intent,
-            )
-            return
         if hasattr(job, "get"):
             intent = job.get("media_intent") or job.get("payload", {}).get("media_intent")
         else:
@@ -1301,38 +1502,76 @@ class DownloadWorkerEngine:
                 payload = {}
             intent = getattr(job, "media_intent", None) or payload.get("media_intent")
 
-        if intent == "music_track":
-            logger.info(f"[WORKER] processing music_track: {job}")
-            job = self._resolve_music_track_job(job)
-            if job is None:
+        try:
+            if self._is_job_cancelled(job.id, stop_event):
+                self.store.mark_canceled(job.id, reason="Cancelled by user")
+                _log_event(
+                    logging.INFO,
+                    "job_cancelled",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    origin=job.origin,
+                    media_intent=job.media_intent,
+                )
                 return
-        adapter = self.adapters.get(job.source)
-        if not adapter:
+            if intent == "music_track":
+                logger.info(f"[WORKER] processing music_track: {job}")
+                recording_mbid, release_mbid = _extract_music_binding_ids(job)
+                if not recording_mbid or not release_mbid:
+                    self.store.record_failure(
+                        job,
+                        error_message="music_track_binding_missing",
+                        retryable=False,
+                        retry_delay_seconds=self.retry_delay_seconds,
+                    )
+                    return
+                job = self._resolve_music_track_job(job)
+                if job is None:
+                    return
+            adapter = self.adapters.get(job.source)
+            if not adapter:
+                _log_event(
+                    logging.ERROR,
+                    "adapter_missing",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                )
+                self.store.record_failure(
+                    job,
+                    error_message=f"adapter_missing:{job.source}",
+                    retryable=False,
+                    retry_delay_seconds=self.retry_delay_seconds,
+                )
+                return
+            self.store.mark_downloading(job.id)
             _log_event(
-                logging.ERROR,
-                "adapter_missing",
+                logging.INFO,
+                "job_started",
                 job_id=job.id,
                 trace_id=job.trace_id,
                 source=job.source,
+                origin=job.origin,
+                media_intent=job.media_intent,
             )
-            self.store.record_failure(
-                job,
-                error_message=f"adapter_missing:{job.source}",
-                retryable=False,
-                retry_delay_seconds=self.retry_delay_seconds,
-            )
-            return
-        self.store.mark_downloading(job.id)
-        _log_event(
-            logging.INFO,
-            "job_started",
-            job_id=job.id,
-            trace_id=job.trace_id,
-            source=job.source,
-            origin=job.origin,
-            media_intent=job.media_intent,
-        )
-        try:
+            last_progress_write = {"ts": 0.0}
+
+            def _on_progress(snapshot):
+                now = time.time()
+                # Throttle DB writes to avoid excessive sqlite contention.
+                if now - last_progress_write["ts"] < 0.4:
+                    return
+                last_progress_write["ts"] = now
+                self.store.update_download_progress(
+                    job.id,
+                    downloaded_bytes=snapshot.get("downloaded_bytes"),
+                    total_bytes=snapshot.get("total_bytes"),
+                    progress_percent=snapshot.get("progress_percent"),
+                    speed_bps=snapshot.get("speed_bps"),
+                    eta_seconds=snapshot.get("eta_seconds"),
+                )
+
             result = adapter.execute(
                 job,
                 self.config,
@@ -1342,6 +1581,7 @@ class DownloadWorkerEngine:
                 cancel_reason="Cancelled by user",
                 media_type=job.media_type,
                 media_intent=job.media_intent,
+                progress_callback=_on_progress,
             )
             if not result:
                 raise RuntimeError("adapter_execute_failed")
@@ -1380,16 +1620,38 @@ class DownloadWorkerEngine:
             )
         except Exception as exc:
             if isinstance(exc, CancelledError):
-                self.store.mark_canceled(job.id, reason=str(exc) or "Cancelled by user")
-                _log_event(
-                    logging.INFO,
-                    "job_cancelled",
-                    job_id=job.id,
-                    trace_id=job.trace_id,
-                    source=job.source,
-                    origin=job.origin,
-                    media_intent=job.media_intent,
-                )
+                try:
+                    self.store.mark_canceled(job.id, reason=str(exc) or "Cancelled by user")
+                    _log_event(
+                        logging.INFO,
+                        "job_cancelled",
+                        job_id=job.id,
+                        trace_id=job.trace_id,
+                        source=job.source,
+                        origin=job.origin,
+                        media_intent=job.media_intent,
+                    )
+                except Exception as persist_exc:
+                    logging.error(
+                        "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                        job.id,
+                        JOB_STATUS_CANCELLED,
+                        persist_exc,
+                    )
+                    try:
+                        self.store.record_failure(
+                            job,
+                            error_message=f"cancel_persistence_failed:{persist_exc}",
+                            retryable=False,
+                            retry_delay_seconds=self.retry_delay_seconds,
+                        )
+                    except Exception as fallback_exc:
+                        logging.error(
+                            "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                            job.id,
+                            JOB_STATUS_FAILED,
+                            fallback_exc,
+                        )
                 return
             if (
                 isinstance(exc, TypeError)
@@ -1406,12 +1668,29 @@ class DownloadWorkerEngine:
                 )
             error_message = f"{type(exc).__name__}: {exc}"
             retryable = is_retryable_error(exc)
-            new_status = self.store.record_failure(
-                job,
-                error_message=error_message,
-                retryable=retryable,
-                retry_delay_seconds=self.retry_delay_seconds,
-            )
+            error_text_lower = error_message.lower()
+            if "metadata_probe" in error_text_lower or "yt_dlp_metadata_probe_failed" in error_text_lower:
+                failure_domain = "metadata_probe"
+            elif "adapter" in error_text_lower or "search" in error_text_lower:
+                failure_domain = "adapter_search"
+            else:
+                failure_domain = "download_execution"
+            candidate_id = getattr(job, "external_id", None) or extract_video_id(getattr(job, "url", None))
+            try:
+                new_status = self.store.record_failure(
+                    job,
+                    error_message=error_message,
+                    retryable=retryable,
+                    retry_delay_seconds=self.retry_delay_seconds,
+                )
+            except Exception as persist_exc:
+                logging.error(
+                    "[WORKER] persistence_failed job_id=%s status=%s err=%s",
+                    job.id,
+                    JOB_STATUS_FAILED,
+                    persist_exc,
+                )
+                return
             _log_event(
                 logging.ERROR,
                 "job_failed",
@@ -1423,28 +1702,82 @@ class DownloadWorkerEngine:
                 retryable=retryable,
                 status=new_status,
                 error=error_message,
+                failure_domain=failure_domain,
+                error_message=error_message,
+                candidate_id=candidate_id,
             )
 
 
 class YouTubeAdapter:
-    def execute(self, job, config, paths, *, stop_event=None, cancel_check=None, cancel_reason=None, media_type=None, media_intent=None):
-        output_template = job.output_template or {}
+    _missing_final_format_warned = False
+
+    def execute(
+        self,
+        job,
+        config,
+        paths,
+        *,
+        stop_event=None,
+        cancel_check=None,
+        cancel_reason=None,
+        media_type=None,
+        media_intent=None,
+        progress_callback=None,
+    ):
+        output_template = job.output_template if isinstance(job.output_template, dict) else None
+        if output_template is None:
+            logger.error(
+                "[WORKER] invariant_failed job_id=%s missing_output_template",
+                getattr(job, "id", None),
+            )
+            raise RuntimeError("invariant_missing_output_template")
+        effective_media_type = media_type or getattr(job, "media_type", None)
+        if not effective_media_type:
+            logger.error(
+                "[WORKER] invariant_failed job_id=%s missing_media_type",
+                getattr(job, "id", None),
+            )
+            raise RuntimeError("invariant_missing_media_type")
         output_dir = output_template.get("output_dir") or paths.single_downloads_dir
         raw_final_format = output_template.get("final_format")
-        normalized_format = _normalize_format(raw_final_format)
-        normalized_audio_format = _normalize_audio_format(raw_final_format)
-
+        if raw_final_format is None and isinstance(config, dict):
+            raw_final_format = config.get("final_format")
+            if raw_final_format is not None:
+                output_template["final_format"] = raw_final_format
+                if not self._missing_final_format_warned:
+                    logger.warning(
+                        "[WORKER] missing final_format in job output_template; falling back to config.final_format=%s",
+                        raw_final_format,
+                    )
+                    self._missing_final_format_warned = True
         # Strict separation:
         # - music_mode controls whether we run music metadata enrichment.
         # - audio_only controls whether we download audio-only / extract audio via ffmpeg.
         # IMPORTANT: Do NOT let a global/default final_format="mp3" force *video* jobs into audio-only.
-        music_mode = is_music_media_type(job.media_type)
+        music_mode = is_music_media_type(effective_media_type)
         audio_only_requested = bool(output_template.get("audio_only")) or bool(output_template.get("audio_mode"))
-        audio_mode = bool(audio_only_requested) or (music_mode and normalized_audio_format in _AUDIO_FORMATS)
+        audio_mode = True if music_mode else bool(audio_only_requested)
 
         # If we're in audio_mode, final_format is the requested audio codec (mp3/m4a/flac).
         # Otherwise final_format is treated as a container preference (webm/mp4/mkv) or None.
-        final_format = normalized_audio_format if audio_mode else normalized_format
+        if audio_mode:
+            final_format = _resolve_target_audio_format(
+                {"final_format": raw_final_format},
+                config,
+                output_template,
+            )
+        else:
+            final_format = _resolve_target_video_container(
+                {"final_format": raw_final_format},
+                config,
+                output_template,
+            )
+        if final_format is None:
+            logger.error(
+                "[WORKER] invariant_failed job_id=%s unresolved_final_format",
+                getattr(job, "id", None),
+            )
+            raise RuntimeError("invariant_missing_final_format")
         filename_template = output_template.get("filename_template")
         audio_template = output_template.get("audio_filename_template")
 
@@ -1462,19 +1795,32 @@ class YouTubeAdapter:
                 final_format=final_format,
                 cookie_file=cookie_file,
                 stop_event=stop_event,
-                media_type=media_type,
+                media_type=effective_media_type,
                 media_intent=media_intent,
                 job_id=job.id,
                 origin=job.origin,
                 resolved_destination=job.resolved_destination,
                 cancel_check=cancel_check,
                 cancel_reason=cancel_reason,
+                output_template_meta=output_template,
+                progress_callback=progress_callback,
             )
             if not info or not local_file:
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
 
             meta = extract_meta(info, fallback_url=job.url)
+            if not audio_mode:
+                meta = _hydrate_meta_from_output_template(meta, output_template)
+                meta = _hydrate_meta_from_local_filename(
+                    meta,
+                    local_file=local_file,
+                    fallback_id=(
+                        getattr(job, "external_id", None)
+                        or extract_video_id(getattr(job, "url", None))
+                        or getattr(job, "id", None)
+                    ),
+                )
             canonical = (
                 output_template.get("canonical_metadata")
                 if isinstance(output_template.get("canonical_metadata"), dict)
@@ -1508,26 +1854,73 @@ class YouTubeAdapter:
             ).strip()
             if release_group_mbid:
                 meta["mb_release_group_id"] = release_group_mbid
+            effective_media_intent = media_intent or getattr(job, "media_intent", None)
+            if is_music_media_type(effective_media_type) and str(effective_media_intent or "").strip().lower() == "music_track":
+                pre_fields = _release_fields_from_template(output_template, canonical)
+                if not _release_fields_complete(pre_fields):
+                    _log_event(
+                        logging.WARNING,
+                        "missing_bound_release_metadata",
+                        job_id=getattr(job, "id", None),
+                        recording_mbid=recording_mbid,
+                    )
+                _ensure_release_enriched(job)
+                refreshed_template = job.output_template if isinstance(job.output_template, dict) else {}
+                refreshed_canonical = (
+                    refreshed_template.get("canonical_metadata")
+                    if isinstance(refreshed_template.get("canonical_metadata"), dict)
+                    else {}
+                )
+                # For music_track jobs, canonical path/tag fields come from bound canonical metadata only.
+                canonical_artist = refreshed_canonical.get("artist")
+                canonical_album_artist = refreshed_canonical.get("album_artist") or canonical_artist
+                canonical_track = refreshed_canonical.get("track") or refreshed_canonical.get("title")
+                if canonical_artist:
+                    meta["artist"] = canonical_artist
+                if canonical_album_artist:
+                    meta["album_artist"] = canonical_album_artist
+                if canonical_track:
+                    meta["track"] = canonical_track
+                    meta["title"] = canonical_track
+                meta["album"] = refreshed_canonical.get("album")
+                meta["release_date"] = refreshed_canonical.get("release_date")
+                meta["track_number"] = refreshed_canonical.get("track_number")
+                meta["disc_number"] = refreshed_canonical.get("disc_number")
+                meta["track_total"] = refreshed_canonical.get("track_total")
+                meta["disc_total"] = refreshed_canonical.get("disc_total")
+                meta["genre"] = refreshed_canonical.get("genre")
+                meta["artwork_url"] = (
+                    refreshed_canonical.get("artwork_url")
+                    or refreshed_template.get("artwork_url")
+                    or meta.get("artwork_url")
+                )
+                meta["mb_release_id"] = refreshed_canonical.get("mb_release_id")
+                meta["mb_release_group_id"] = refreshed_canonical.get("mb_release_group_id")
             video_id = meta.get("video_id") or job.id
-            ext = os.path.splitext(local_file)[1].lstrip(".")
-            if audio_mode:
-                ext = final_format or "mp3"
-            elif not ext:
-                ext = final_format or "mkv"
             template = audio_template if audio_mode else filename_template
-            cleaned_name = build_output_filename(meta, video_id, ext, template, audio_mode)
+            enforce_music_contract = bool(
+                audio_mode
+                and is_music_media_type(effective_media_type)
+                and str(effective_media_intent or "").strip().lower() == "music_track"
+            )
 
             if stop_event and stop_event.is_set():
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
 
-            if not audio_mode:
-                embed_metadata(local_file, meta, video_id, paths.thumbs_dir)
-
-            final_path = os.path.join(resolved_dir, cleaned_name)
-            final_path = resolve_collision_path(final_path)
-            os.makedirs(os.path.dirname(final_path), exist_ok=True)
-            atomic_move(local_file, final_path)
+            final_path, meta = finalize_download_artifact(
+                local_file=local_file,
+                meta=meta,
+                fallback_id=video_id,
+                destination_dir=resolved_dir,
+                audio_mode=audio_mode,
+                final_format=final_format,
+                template=template,
+                paths=paths,
+                config=config if isinstance(config, dict) else {},
+                enforce_music_contract=enforce_music_contract,
+                enqueue_audio_metadata=bool(music_mode),
+            )
             logger.info(f"[MUSIC] finalized file: {final_path}")
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1542,14 +1935,6 @@ class YouTubeAdapter:
                 except OSError:
                     pass
                 raise RuntimeError("empty_output_file")
-
-            # Only enqueue metadata if music_mode is True
-            if music_mode:
-                try:
-                    enqueue_media_metadata(final_path, meta, config)
-                except Exception:
-                    # Never raise or affect download success
-                    pass
 
             return final_path, meta
         except Exception:
@@ -1569,8 +1954,246 @@ def default_adapters():
     }
 
 
+def _extract_release_value(output_template, canonical, *keys):
+    for key in keys:
+        value = canonical.get(key) if isinstance(canonical, dict) else None
+        if value is None and isinstance(output_template, dict):
+            value = output_template.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+        if value in (None, ""):
+            continue
+        return value
+    return None
+
+
+def _normalize_positive_int(value):
+    parsed = normalize_track_number(value)
+    if parsed is None:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _release_fields_from_template(output_template, canonical):
+    album = _extract_release_value(output_template, canonical, "album")
+    release_date = _extract_release_value(output_template, canonical, "release_date", "date")
+    track_number = _normalize_positive_int(
+        _extract_release_value(output_template, canonical, "track_number", "track_num")
+    )
+    disc_number = _normalize_positive_int(
+        _extract_release_value(output_template, canonical, "disc_number", "disc", "disc_num")
+    )
+    mb_release_id = _extract_release_value(output_template, canonical, "mb_release_id", "release_id")
+    mb_release_group_id = _extract_release_value(
+        output_template,
+        canonical,
+        "mb_release_group_id",
+        "release_group_id",
+    )
+    return {
+        "album": album,
+        "release_date": release_date,
+        "track_number": track_number,
+        "disc_number": disc_number,
+        "mb_release_id": mb_release_id,
+        "mb_release_group_id": mb_release_group_id,
+    }
+
+
+def _release_fields_complete(fields):
+    return all(
+        fields.get(key) not in (None, "")
+        for key in (
+            "album",
+            "release_date",
+            "track_number",
+            "disc_number",
+            "mb_release_id",
+            "mb_release_group_id",
+        )
+    )
+
+
+def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str]) -> dict:
+    recording_mbid = str(recording_mbid or "").strip()
+    hint_release_id = str(release_id_hint or "").strip() or None
+    if not recording_mbid:
+        raise RuntimeError("no_valid_release_for_recording")
+
+    service = get_musicbrainz_service()
+    # recording entity valid includes: releases/artists/isrcs
+    recording_payload = service.get_recording(
+        recording_mbid,
+        includes=["releases", "artists", "isrcs"],
+    )
+    recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
+    release_list = recording_data.get("release-list", []) if isinstance(recording_data, dict) else []
+    releases = [item for item in release_list if isinstance(item, dict) and str(item.get("id") or "").strip()]
+    if not releases:
+        raise RuntimeError("no_valid_release_for_recording")
+
+    def _release_sort_key(item):
+        release_id = str(item.get("id") or "")
+        date_text = str(item.get("date") or "")
+        year = _extract_release_year(date_text)
+        date_key = year or "9999"
+        hint_rank = 0 if hint_release_id and release_id == hint_release_id else 1
+        return (hint_rank, date_key, release_id)
+
+    sorted_releases = sorted(releases, key=_release_sort_key)
+
+    selected_release = None
+    selected_release_data = None
+    selected_release_group_id = None
+    selected_date_text = None
+
+    for release_item in sorted_releases:
+        release_id = str(release_item.get("id") or "").strip()
+        if not release_id:
+            continue
+        release_payload = service.get_release(
+            release_id,
+            includes=["recordings", "release-groups", "artist-credits", "media"],
+        )
+        release_data = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
+        if not isinstance(release_data, dict):
+            continue
+        status = str(release_data.get("status") or release_item.get("status") or "").strip().lower()
+        release_group = release_data.get("release-group")
+        if not isinstance(release_group, dict):
+            release_group = release_item.get("release-group") if isinstance(release_item.get("release-group"), dict) else {}
+        primary_type = str(release_group.get("primary-type") or "").strip().lower()
+
+        # valid release filter: Official Album only
+        if status != "official":
+            continue
+        if primary_type != "album":
+            continue
+
+        selected_release = release_id
+        selected_release_data = release_data
+        selected_release_group_id = str(release_group.get("id") or "").strip() or None
+        selected_date_text = str(release_data.get("date") or release_item.get("date") or "").strip() or None
+        break
+
+    if not selected_release or not isinstance(selected_release_data, dict):
+        raise RuntimeError("no_valid_release_for_recording")
+
+    track_number = None
+    disc_number = None
+    media = selected_release_data.get("medium-list", [])
+    if not isinstance(media, list):
+        media = []
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        medium_position = _normalize_positive_int(medium.get("position"))
+        track_list = medium.get("track-list", [])
+        if not isinstance(track_list, list):
+            track_list = []
+        for track in track_list:
+            if not isinstance(track, dict):
+                continue
+            recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+            candidate_recording_mbid = str(recording.get("id") or "").strip() or None
+            if candidate_recording_mbid != recording_mbid:
+                continue
+            disc_number = medium_position
+            track_number = _normalize_positive_int(track.get("position"))
+            break
+        if track_number is not None and disc_number is not None:
+            break
+
+    if track_number is None or disc_number is None:
+        raise RuntimeError("recording_not_found_in_release")
+
+    year_only = _extract_release_year(selected_date_text)
+    enriched = {
+        "album": selected_release_data.get("title"),
+        "release_date": year_only,
+        "track_number": track_number,
+        "disc_number": disc_number,
+        "mb_release_id": selected_release,
+        "mb_release_group_id": selected_release_group_id,
+    }
+    _log_event(
+        logging.INFO,
+        "release_enrichment_applied",
+        recording_mbid=recording_mbid,
+        release_mbid=selected_release,
+        release_group_mbid=selected_release_group_id,
+        track_number=track_number,
+        disc_number=disc_number,
+        release_date=year_only,
+    )
+    return enriched
+
+
+def _ensure_release_enriched(job):
+    output_template = job.output_template if isinstance(job.output_template, dict) else {}
+    canonical = output_template.get("canonical_metadata")
+    if not isinstance(canonical, dict):
+        canonical = {}
+        output_template["canonical_metadata"] = canonical
+
+    fields = _release_fields_from_template(output_template, canonical)
+    if _release_fields_complete(fields):
+        return
+
+    recording_mbid = _extract_release_value(
+        output_template,
+        canonical,
+        "recording_mbid",
+        "mb_recording_id",
+    )
+    release_id = _extract_release_value(
+        output_template,
+        canonical,
+        "mb_release_id",
+        "release_id",
+    )
+
+    try:
+        enriched = _fetch_release_enrichment(recording_mbid, release_id)
+    except Exception:
+        _log_event(
+            logging.ERROR,
+            "release_enrichment_failed",
+            recording_mbid=recording_mbid,
+            release_id=release_id,
+        )
+        raise RuntimeError("release_enrichment_incomplete")
+
+    if isinstance(enriched, dict):
+        for key in (
+            "album",
+            "release_date",
+            "track_number",
+            "disc_number",
+            "mb_release_id",
+            "mb_release_group_id",
+        ):
+            value = enriched.get(key)
+            if value not in (None, ""):
+                canonical[key] = value
+                output_template[key] = value
+
+    fields = _release_fields_from_template(output_template, canonical)
+    if not _release_fields_complete(fields):
+        _log_event(
+            logging.ERROR,
+            "release_enrichment_failed",
+            recording_mbid=recording_mbid,
+            release_id=fields.get("mb_release_id") or release_id,
+        )
+        raise RuntimeError("release_enrichment_incomplete")
+
+
 def resolve_cookie_file(config):
-    cookie_value = (config or {}).get("yt_dlp_cookies")
+    cfg = config if isinstance(config, dict) else {}
+    cookie_value = cfg.get("yt_dlp_cookies") or cfg.get("cookiefile")
     if not cookie_value:
         return None
     try:
@@ -1582,6 +2205,80 @@ def resolve_cookie_file(config):
         logging.warning("yt-dlp cookies file not found: %s", resolved)
         return None
     return resolved
+
+
+def resolve_cookiefile_for_context(context, config):
+    ctx = context if isinstance(context, dict) else {}
+    cfg = config if isinstance(config, dict) else {}
+    if bool(ctx.get("disable_cookies")):
+        _log_event(
+            logging.INFO,
+            "cookies_missing_or_disabled",
+            reason="explicitly_disabled",
+            job_id=ctx.get("job_id"),
+            operation=ctx.get("operation"),
+            media_type=ctx.get("media_type"),
+            media_intent=ctx.get("media_intent"),
+        )
+        return None
+
+    def _as_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return None
+
+    cookiefile = None
+    explicit_cookie = ctx.get("cookie_file")
+    if explicit_cookie:
+        try:
+            cookiefile = resolve_dir(explicit_cookie, TOKENS_DIR)
+        except ValueError:
+            cookiefile = None
+        if cookiefile and not os.path.exists(cookiefile):
+            cookiefile = None
+
+    if not cookiefile:
+        cookiefile = resolve_cookie_file(cfg)
+
+    # Cookies are additive and must be explicitly enabled, or explicitly present by path.
+    # This must not alter media mode/extraction policy; it only controls cookie attachment.
+    enabled_flag = _as_bool(
+        cfg.get("cookies_enabled", cfg.get("allow_cookies", cfg.get("use_cookies")))
+    )
+    cookie_explicitly_present = bool(explicit_cookie) or bool(
+        cfg.get("yt_dlp_cookies") or cfg.get("cookiefile")
+    )
+    cookies_allowed = bool(cookie_explicitly_present) or bool(enabled_flag)
+
+    if cookiefile and cookies_allowed:
+        _log_event(
+            logging.INFO,
+            "cookies_applied",
+            cookiefile=cookiefile,
+            job_id=ctx.get("job_id"),
+            operation=ctx.get("operation"),
+            media_type=ctx.get("media_type"),
+            media_intent=ctx.get("media_intent"),
+        )
+        return cookiefile
+
+    _log_event(
+        logging.INFO,
+        "cookies_missing_or_disabled",
+        reason="missing_or_not_found" if cookies_allowed else "not_enabled",
+        job_id=ctx.get("job_id"),
+        operation=ctx.get("operation"),
+        media_type=ctx.get("media_type"),
+        media_intent=ctx.get("media_intent"),
+    )
+    return None
 
 
 def resolve_youtube_cookie_fallback_file(config):
@@ -1637,7 +2334,6 @@ def _is_youtube_access_gate(message: str | None) -> bool:
         "geo blocked",
         "country",
         "region",
-        "format not available",
         "private",
         "removed",
     ]
@@ -1702,7 +2398,20 @@ def build_output_template(config, *, playlist_entry=None, destination=None, base
             output_dir = config.get("single_download_folder") or config.get("music_download_folder") or base_dir
     output_dir = resolve_dir(output_dir, base_dir)
 
-    final_format = entry.get("final_format") or config.get("final_format")
+    final_format = (
+        entry.get("final_format")
+        or entry.get("video_final_format")
+        or config.get("final_format")
+        or config.get("video_final_format")
+        or "mkv"
+    )
+    music_final_format = (
+        entry.get("music_final_format")
+        or entry.get("audio_final_format")
+        or config.get("music_final_format")
+        or config.get("audio_final_format")
+        or "mp3"
+    )
 
     filename_template = entry.get("filename_template") or config.get("filename_template")
     audio_template = entry.get("audio_filename_template") or config.get("audio_filename_template")
@@ -1712,11 +2421,337 @@ def build_output_template(config, *, playlist_entry=None, destination=None, base
     return {
         "output_dir": output_dir,
         "final_format": final_format,
+        "music_final_format": music_final_format,
         "filename_template": filename_template,
         "audio_filename_template": audio_template,
         "remove_after_download": bool(entry.get("remove_after_download")),
         "playlist_item_id": entry.get("playlistItemId") or entry.get("playlist_item_id"),
         "source_account": entry.get("account"),
+    }
+
+
+def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference="US"):
+    if not isinstance(payload_or_intent, dict):
+        raise ValueError("music_track_requires_mapping_payload")
+
+    template = payload_or_intent.get("output_template")
+    if not isinstance(template, dict):
+        template = {}
+        payload_or_intent["output_template"] = template
+
+    canonical = template.get("canonical_metadata")
+    if not isinstance(canonical, dict):
+        canonical = {}
+        template["canonical_metadata"] = canonical
+
+    required_keys = (
+        "recording_mbid",
+        "mb_release_id",
+        "mb_release_group_id",
+        "album",
+        "release_date",
+        "track_number",
+        "disc_number",
+        "duration_ms",
+    )
+    for key in required_keys:
+        canonical.setdefault(key, None)
+
+    def _coalesce_str(*values):
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None
+
+    def _coalesce_pos_int(*values):
+        for value in values:
+            parsed = _normalize_positive_int(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _is_complete(meta):
+        for key in required_keys:
+            value = meta.get(key)
+            if key in {"track_number", "disc_number", "duration_ms"}:
+                if _normalize_positive_int(value) is None:
+                    return False
+            else:
+                if str(value or "").strip() == "":
+                    return False
+        return True
+
+    # Pull direct fields into canonical metadata for uniform validation.
+    canonical["recording_mbid"] = _coalesce_str(
+        canonical.get("recording_mbid"),
+        canonical.get("mb_recording_id"),
+        template.get("recording_mbid"),
+        template.get("mb_recording_id"),
+        payload_or_intent.get("recording_mbid"),
+        payload_or_intent.get("mb_recording_id"),
+    )
+    canonical["mb_release_id"] = _coalesce_str(
+        canonical.get("mb_release_id"),
+        canonical.get("release_id"),
+        template.get("mb_release_id"),
+        payload_or_intent.get("mb_release_id"),
+        payload_or_intent.get("release_id"),
+    )
+    canonical["mb_release_group_id"] = _coalesce_str(
+        canonical.get("mb_release_group_id"),
+        canonical.get("release_group_id"),
+        template.get("mb_release_group_id"),
+        payload_or_intent.get("mb_release_group_id"),
+        payload_or_intent.get("release_group_id"),
+    )
+    canonical["album"] = _coalesce_str(
+        canonical.get("album"),
+        template.get("album"),
+        payload_or_intent.get("album"),
+    )
+    canonical["release_date"] = _coalesce_str(
+        canonical.get("release_date"),
+        canonical.get("date"),
+        template.get("release_date"),
+        payload_or_intent.get("release_date"),
+    )
+    canonical["track_number"] = _coalesce_pos_int(
+        canonical.get("track_number"),
+        canonical.get("track_num"),
+        template.get("track_number"),
+        payload_or_intent.get("track_number"),
+    )
+    canonical["disc_number"] = _coalesce_pos_int(
+        canonical.get("disc_number"),
+        canonical.get("disc_num"),
+        template.get("disc_number"),
+        payload_or_intent.get("disc_number"),
+        1,
+    )
+    canonical["duration_ms"] = _coalesce_pos_int(
+        canonical.get("duration_ms"),
+        template.get("duration_ms"),
+        payload_or_intent.get("duration_ms"),
+    )
+
+    if not _is_complete(canonical):
+        recording_mbid = _coalesce_str(canonical.get("recording_mbid"))
+        release_hint = _coalesce_str(canonical.get("mb_release_id"))
+        if recording_mbid:
+            try:
+                enriched = _fetch_release_enrichment(
+                    recording_mbid,
+                    release_hint,
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "music_track_requires_mb_bound_metadata",
+                    [str(exc)],
+                )
+            for key in ("album", "release_date", "track_number", "disc_number", "mb_release_id", "mb_release_group_id"):
+                value = enriched.get(key) if isinstance(enriched, dict) else None
+                if value not in (None, ""):
+                    canonical[key] = value
+            try:
+                recording_payload = get_musicbrainz_service().get_recording(
+                    recording_mbid,
+                    includes=["releases", "artists", "isrcs"],
+                )
+                recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
+                canonical["duration_ms"] = _coalesce_pos_int(
+                    canonical.get("duration_ms"),
+                    recording_data.get("length"),
+                )
+            except Exception:
+                pass
+        else:
+            artist = _coalesce_str(canonical.get("artist"), template.get("artist"), payload_or_intent.get("artist"))
+            track = _coalesce_str(canonical.get("track"), canonical.get("title"), template.get("track"), payload_or_intent.get("track"))
+            album_hint = _coalesce_str(canonical.get("album"), template.get("album"), payload_or_intent.get("album"))
+            if artist and track:
+                lookup_track = _normalize_title_for_mb_lookup(track)
+                service = get_musicbrainz_service()
+                pair = resolve_best_mb_pair(
+                    service,
+                    artist=artist,
+                    track=lookup_track or track,
+                    album=album_hint,
+                    duration_ms=_coalesce_pos_int(canonical.get("duration_ms"), template.get("duration_ms"), payload_or_intent.get("duration_ms")),
+                    country_preference=country_preference,
+                    allow_non_album_fallback=bool((config or {}).get("allow_non_album_fallback")),
+                    debug=bool((config or {}).get("debug_music_scoring")),
+                    min_recording_score=float((config or {}).get("min_confidence") or 0.0),
+                    threshold=float((config or {}).get("music_mb_binding_threshold", 0.78)),
+                )
+                if isinstance(pair, dict):
+                    canonical.update(pair)
+
+    canonical["release_date"] = _extract_release_year(canonical.get("release_date")) or _coalesce_str(canonical.get("release_date"))
+    canonical["track_number"] = _coalesce_pos_int(canonical.get("track_number"))
+    canonical["disc_number"] = _coalesce_pos_int(canonical.get("disc_number"), 1)
+    canonical["duration_ms"] = _coalesce_pos_int(canonical.get("duration_ms"))
+    if not _is_complete(canonical):
+        reasons = []
+        try:
+            last = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
+            if isinstance(last, list):
+                reasons = [str(item) for item in last if str(item or "").strip()]
+        except Exception:
+            reasons = []
+        raise ValueError("music_track_requires_mb_bound_metadata", reasons)
+
+    # Keep top-level mirror fields in sync for legacy consumers.
+    for key in required_keys:
+        template[key] = canonical.get(key)
+    template["mb_recording_id"] = canonical.get("recording_mbid")
+
+    return canonical
+
+
+def build_download_job_payload(
+    *,
+    config,
+    origin,
+    origin_id,
+    media_type,
+    media_intent,
+    source,
+    url,
+    input_url=None,
+    destination=None,
+    base_dir=None,
+    playlist_entry=None,
+    final_format_override=None,
+    resolved_metadata=None,
+    output_template_overrides=None,
+    trace_id=None,
+    resolved_destination=None,
+    canonical_id=None,
+    canonical_url=None,
+    external_id=None,
+):
+    config = config if isinstance(config, dict) else {}
+    output_template = build_output_template(
+        config,
+        playlist_entry=playlist_entry,
+        destination=destination,
+        base_dir=base_dir,
+    )
+
+    canonical_metadata = resolved_metadata if isinstance(resolved_metadata, dict) else None
+    if canonical_metadata:
+        output_template["canonical_metadata"] = canonical_metadata
+        output_template.setdefault("artist", canonical_metadata.get("artist") or canonical_metadata.get("album_artist"))
+        output_template.setdefault("album_artist", canonical_metadata.get("album_artist") or canonical_metadata.get("artist"))
+        output_template.setdefault("album", canonical_metadata.get("album"))
+        output_template.setdefault("track", canonical_metadata.get("track") or canonical_metadata.get("title"))
+        output_template.setdefault("track_number", canonical_metadata.get("track_number") or canonical_metadata.get("track_num"))
+        output_template.setdefault("disc_number", canonical_metadata.get("disc_number") or canonical_metadata.get("disc_num"))
+        output_template.setdefault("track_total", canonical_metadata.get("track_total"))
+        output_template.setdefault("disc_total", canonical_metadata.get("disc_total"))
+        output_template.setdefault("release_date", canonical_metadata.get("release_date") or canonical_metadata.get("date"))
+        output_template.setdefault("artwork_url", canonical_metadata.get("artwork_url"))
+        output_template.setdefault("genre", canonical_metadata.get("genre"))
+
+    if isinstance(output_template_overrides, dict):
+        output_template.update(output_template_overrides)
+
+    # Canonical MB pair schema contract for music-track jobs.
+    # This is schema availability only (no enrichment behavior here).
+    normalized_intent = str(media_intent or "").strip().lower()
+    if normalized_intent == "music_track" or (is_music_media_type(media_type) and normalized_intent == "track"):
+        canonical = output_template.get("canonical_metadata")
+        if not isinstance(canonical, dict):
+            canonical = {}
+            output_template["canonical_metadata"] = canonical
+        for key in (
+            "recording_mbid",
+            "mb_release_id",
+            "mb_release_group_id",
+            "album",
+            "release_date",
+            "track_number",
+            "disc_number",
+        ):
+            canonical.setdefault(key, None)
+        ensure_mb_bound_music_track(
+            {
+                "media_type": media_type,
+                "media_intent": media_intent,
+                "output_template": output_template,
+                "artist": output_template.get("artist"),
+                "track": output_template.get("track"),
+                "album": output_template.get("album"),
+            },
+            config=config,
+            country_preference=str(config.get("country") or "US"),
+        )
+
+    video_container = _resolve_target_video_container(
+        {"final_format": final_format_override},
+        config,
+        output_template,
+    )
+    audio_format = _resolve_target_audio_format(
+        {"final_format": None},
+        config,
+        output_template,
+    )
+    override_audio = _normalize_audio_format(final_format_override)
+    override_video = _normalize_format(final_format_override)
+    if is_music_media_type(media_type):
+        if override_audio in _AUDIO_FORMATS:
+            audio_format = override_audio
+    else:
+        if override_video in _VIDEO_CONTAINERS:
+            video_container = override_video
+        elif override_audio in _AUDIO_FORMATS:
+            audio_format = override_audio
+    output_template["final_format"] = video_container or "mkv"
+    output_template["music_final_format"] = audio_format or "mp3"
+    if is_music_media_type(media_type):
+        output_template["audio_mode"] = True
+
+    # Canonical output-template schema: keep a stable key set across all enqueue paths.
+    for key in (
+        "canonical_metadata",
+        "artist",
+        "album",
+        "track",
+        "track_number",
+        "disc_number",
+        "release_date",
+        "audio_mode",
+        "duration_ms",
+        "artwork_url",
+        "recording_mbid",
+        "mb_recording_id",
+        "mb_release_id",
+        "mb_release_group_id",
+        "kind",
+        "source",
+        "import_batch",
+        "import_batch_id",
+        "source_index",
+    ):
+        output_template.setdefault(key, None)
+
+    computed_destination = resolved_destination or output_template.get("output_dir")
+    return {
+        "origin": origin,
+        "origin_id": origin_id,
+        "media_type": media_type,
+        "media_intent": media_intent,
+        "source": source,
+        "url": url,
+        "input_url": input_url or url,
+        "canonical_url": canonical_url,
+        "external_id": external_id,
+        "output_template": output_template,
+        "trace_id": trace_id,
+        "resolved_destination": computed_destination,
+        "canonical_id": canonical_id,
     }
 
 
@@ -1776,19 +2811,45 @@ def _is_http_url(url):
 
 def build_ytdlp_opts(context):
     operation = context.get("operation") or "download"
-    audio_mode = bool(context.get("audio_mode"))
+    media_type = context.get("media_type")
+    audio_mode = is_music_media_type(media_type)
+    context["audio_mode"] = audio_mode
     target_format = context.get("final_format")
     output_template = context.get("output_template")
+    output_template_meta = context.get("output_template_meta")
+    raw_config = context.get("config")
+    allow_empty_config = (
+        os.environ.get("RETREIVR_ALLOW_EMPTY_CONFIG", "").strip() == "1"
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
+    if (not isinstance(raw_config, dict) or not raw_config) and not allow_empty_config:
+        _log_event(
+            logging.ERROR,
+            "empty_config_passed_to_build_ytdlp_opts",
+            operation=operation,
+            media_type=context.get("media_type"),
+            media_intent=context.get("media_intent"),
+        )
+        raise RuntimeError("empty_config_passed_to_build_ytdlp_opts")
+    config = raw_config if isinstance(raw_config, dict) else {}
     overrides = context.get("overrides") or {}
     allow_chapter_outtmpl = bool(context.get("allow_chapter_outtmpl"))
 
-    normalized_audio_target = _normalize_audio_format(target_format)
-    normalized_target = _normalize_format(target_format)
+    resolved_audio_format = None
+    resolved_video_container = None
+    if audio_mode:
+        resolved_audio_format = _resolve_target_audio_format(context, config, output_template_meta)
+        normalized_audio_target = _normalize_audio_format(resolved_audio_format)
+        normalized_target = _normalize_format(resolved_audio_format)
+    else:
+        resolved_video_container = _resolve_target_video_container(context, config, output_template_meta)
+        normalized_audio_target = _normalize_audio_format(resolved_video_container)
+        normalized_target = _normalize_format(resolved_video_container)
 
     # If a video job accidentally receives an audio codec as "final_format" (e.g. global config),
     # do NOT interpret it as a yt-dlp "format" selector. That causes invalid downloads.
     # We only treat webm/mp4/mkv as container preferences for video mode here.
-    video_container_target = normalized_target if normalized_target in {"webm", "mp4", "mkv"} else None
+    video_container_target = normalized_target if normalized_target in _VIDEO_CONTAINERS else None
 
     def _url_looks_like_playlist(u: str | None) -> bool:
         if not u:
@@ -1809,18 +2870,9 @@ def build_ytdlp_opts(context):
             return False
         return False
 
-    # Playlists: let yt-dlp expand playlists itself when the run/job indicates playlist intent.
-    # This must override the previous "single item" behavior; forcing noplaylist=True breaks scheduler/watcher.
-    allow_playlist = bool(context.get("allow_playlist"))
-    if not allow_playlist:
-        if context.get("media_intent") == "playlist":
-            allow_playlist = True
-        elif context.get("origin") == "playlist":
-            allow_playlist = True
-        elif operation in {"playlist", "playlist_probe", "playlist_metadata"}:
-            allow_playlist = True
-        elif _url_looks_like_playlist(context.get("url")):
-            allow_playlist = True
+    # Keep extraction policy mode-agnostic; mode-specific logic below controls only
+    # format / merge_output_format / postprocessors.
+    allow_playlist = False
 
     if isinstance(output_template, dict) and not allow_chapter_outtmpl:
         default_template = output_template.get("default")
@@ -1832,25 +2884,16 @@ def build_ytdlp_opts(context):
     opts = {
         "quiet": True,
         "no_warnings": True,
-        # CLI parity: allow playlist expansion when requested; otherwise behave like a single-URL download.
-        "noplaylist": False if allow_playlist else True,
+        "noplaylist": True,
         "outtmpl": output_template,
         # Avoid chapter workflows unless explicitly enabled.
         # (Chapter outtmpl dicts can trigger unexpected behavior in the Python API path.)
         "no_chapters": True if not allow_chapter_outtmpl else False,
         "retries": 3,
         "fragment_retries": 3,
+        "force_overwrites": True,
         "overwrites": True,
     }
-
-    cookie_file = context.get("cookie_file")
-    # Cookies OFF by default. Only enable when explicitly allowed or when running in music mode.
-    # This prevents YouTube/SABR edge cases that produced empty/403 fragment downloads in the worker path.
-    allow_cookies = bool(context.get("allow_cookies")) or (
-        bool(context.get("audio_mode")) and is_music_media_type(context.get("media_type"))
-    )
-    if cookie_file and allow_cookies:
-        opts["cookiefile"] = cookie_file
 
     if operation == "playlist":
         opts["skip_download"] = True
@@ -1860,25 +2903,33 @@ def build_ytdlp_opts(context):
     else:
         # Only enable addmetadata, embedthumbnail, writethumbnail, and audio postprocessors
         # when both audio_mode and media_type is music/audio
-        if audio_mode and is_music_media_type(context.get("media_type")):
-            if normalized_audio_target and normalized_audio_target in _AUDIO_FORMATS:
-                opts["postprocessors"] = _build_audio_postprocessors(normalized_audio_target)
-            else:
-                opts["postprocessors"] = _build_audio_postprocessors(None)
+        if audio_mode:
+            preferred_audio_codec = _normalize_audio_format(resolved_audio_format) or "mp3"
+            opts["postprocessors"] = [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": preferred_audio_codec,
+                    "preferredquality": "0",
+                }
+            ]
             opts["format"] = _FORMAT_AUDIO
             opts["addmetadata"] = True
             opts["embedthumbnail"] = True
             opts["writethumbnail"] = True
-        elif audio_mode:
-            opts["format"] = _FORMAT_AUDIO
         else:
-            # Video mode: honor only container preferences (webm/mp4/mkv).
-            # Never treat an audio codec (mp3/m4a/flac/...) as a yt-dlp format selector.
-            if video_container_target:
-                opts["format"] = "bestvideo+bestaudio/best"
-                opts["merge_output_format"] = video_container_target
+            # Video mode strategy:
+            # - final_format=mp4: enforce QuickTime-compatible H.264 + AAC streams
+            # - otherwise: highest available quality (webm first, then mp4, then best single file)
+            if video_container_target == "mp4":
+                opts["format"] = _FORMAT_VIDEO_QT_MP4
+                opts["merge_output_format"] = "mp4"
             else:
-                opts["format"] = "best"
+                opts["format"] = "bestvideo[ext=webm]+bestaudio/bestvideo[ext=mp4]+bestaudio/best"
+                # Post-merge container policy:
+                # - mkv: force merge container
+                # - webm: keep native webm merge behavior (no forced merge_output_format)
+                if video_container_target == "mkv":
+                    opts["merge_output_format"] = "mkv"
 
     # Only lock down format-related overrides when the target_format was actually applied
     # (audio codec in audio_mode, or video container preference in video mode).
@@ -1889,9 +2940,17 @@ def build_ytdlp_opts(context):
         lock_format = True
 
     opts = _merge_overrides(opts, overrides, operation=operation, lock_format=lock_format)
+
     if operation == "download":
         for key in _YTDLP_DOWNLOAD_UNSAFE_KEYS:
             opts.pop(key, None)
+
+    if audio_mode and ("bestvideo" in str(opts.get("format") or "").lower() or opts.get("merge_output_format")):
+        raise RuntimeError("music_job_built_video_opts")
+    if not audio_mode:
+        postprocessors = opts.get("postprocessors") or []
+        if any((pp or {}).get("key") == "FFmpegExtractAudio" for pp in postprocessors if isinstance(pp, dict)):
+            raise RuntimeError("video_job_built_audio_opts")
 
     _log_event(
         logging.INFO,
@@ -1902,7 +2961,12 @@ def build_ytdlp_opts(context):
         media_type=context.get("media_type"),
         media_intent=context.get("media_intent"),
         final_format=target_format,
+        resolved_audio_format=resolved_audio_format,
+        resolved_video_container=resolved_video_container,
         postprocessors=bool(opts.get("postprocessors")),
+        postprocessors_present=bool(opts.get("postprocessors")),
+        js_runtimes_present=bool(opts.get("js_runtimes")),
+        merge_output_format=opts.get("merge_output_format"),
         addmetadata=opts.get("addmetadata"),
         embedthumbnail=opts.get("embedthumbnail"),
         writethumbnail=opts.get("writethumbnail"),
@@ -1934,18 +2998,46 @@ def build_ytdlp_invocation(job, context):
     }
 
 
-def _build_audio_postprocessors(target_format):
-    preferred = _normalize_audio_format(target_format) or "mp3"
-    if preferred not in _AUDIO_FORMATS:
-        logging.warning("Unsupported audio format %s; defaulting to mp3", preferred)
-        preferred = "mp3"
-    return [
-        {
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": preferred,
-            "preferredquality": "0",
-        }
-    ]
+def _resolve_target_audio_format(context, config, output_template):
+    global _MUSIC_AUDIO_FORMAT_WARNED
+    output_template = output_template if isinstance(output_template, dict) else {}
+    config = config if isinstance(config, dict) else {}
+    requested = (
+        output_template.get("music_final_format")
+        or output_template.get("audio_final_format")
+        or config.get("music_final_format")
+        or config.get("audio_final_format")
+        or "mp3"
+    )
+    normalized = _normalize_audio_format(requested) or "mp3"
+    if normalized in _VIDEO_CONTAINERS:
+        if not _MUSIC_AUDIO_FORMAT_WARNED:
+            logger.warning(
+                "[WORKER] invalid_music_audio_format=%s; forcing mp3",
+                normalized,
+            )
+            _MUSIC_AUDIO_FORMAT_WARNED = True
+        return "mp3"
+    return normalized
+
+
+def _resolve_target_video_container(context, config, output_template):
+    context = context if isinstance(context, dict) else {}
+    output_template = output_template if isinstance(output_template, dict) else {}
+    config = config if isinstance(config, dict) else {}
+    requested = (
+        context.get("final_format")
+        or context.get("video_final_format")
+        or output_template.get("final_format")
+        or output_template.get("video_final_format")
+        or config.get("final_format")
+        or config.get("video_final_format")
+        or "mkv"
+    )
+    normalized = _normalize_format(requested) or "mkv"
+    if normalized in _VIDEO_CONTAINERS:
+        return normalized
+    return "mkv"
 
 
 def _merge_overrides(opts, overrides, *, operation, lock_format=False):
@@ -1986,17 +3078,27 @@ def _render_ytdlp_cli_argv(opts, url):
 
     # Core selection/output
     if opts.get("format"):
-        argv.extend(["--format", str(opts["format"])])
+        argv.extend(["-f", str(opts["format"])])
     if opts.get("merge_output_format"):
         argv.extend(["--merge-output-format", str(opts["merge_output_format"])])
     if opts.get("outtmpl"):
-        argv.extend(["--output", str(opts["outtmpl"])])
+        argv.extend(["-o", str(opts["outtmpl"])])
+    if opts.get("newline"):
+        argv.append("--newline")
+    if opts.get("nocolor"):
+        argv.append("--no-color")
+    progress_template = opts.get("progress_template")
+    if progress_template:
+        argv.extend(["--progress-template", str(progress_template)])
 
     # Playlist behavior
     if opts.get("noplaylist") is True:
         argv.append("--no-playlist")
     elif opts.get("noplaylist") is False:
         argv.append("--yes-playlist")
+
+    if opts.get("overwrites") is True or opts.get("force_overwrites") is True:
+        argv.append("--force-overwrites")
 
     # Retries
     if opts.get("retries") is not None:
@@ -2008,13 +3110,61 @@ def _render_ytdlp_cli_argv(opts, url):
     if opts.get("cookiefile"):
         argv.extend(["--cookies", str(opts.get("cookiefile"))])
 
+    # JS runtimes: {"node":{"path":"/usr/bin/node"}} -> --js-runtimes node:/usr/bin/node
+    js_runtimes = opts.get("js_runtimes")
+    if isinstance(js_runtimes, dict):
+        for runtime_name, runtime_cfg in js_runtimes.items():
+            name = str(runtime_name or "").strip()
+            if not name:
+                continue
+            path = None
+            if isinstance(runtime_cfg, dict):
+                path = str(runtime_cfg.get("path") or "").strip() or None
+            token = f"{name}:{path}" if path else name
+            argv.extend(["--js-runtimes", token])
+
+    remote_components = opts.get("remote_components")
+    if isinstance(remote_components, (list, tuple, set)):
+        for component in remote_components:
+            token = str(component or "").strip()
+            if token:
+                argv.extend(["--remote-components", token])
+    elif remote_components:
+        token = str(remote_components).strip()
+        if token:
+            argv.extend(["--remote-components", token])
+
+    # Extractor args: {"youtube":{"key":"value"}} -> --extractor-args youtube:key=value
+    extractor_args = opts.get("extractor_args")
+    if isinstance(extractor_args, dict):
+        for extractor_name, extractor_cfg in extractor_args.items():
+            if not isinstance(extractor_cfg, dict):
+                continue
+            pieces = []
+            for arg_key, arg_value in extractor_cfg.items():
+                if isinstance(arg_value, (list, tuple)):
+                    value_text = ",".join(str(v).strip() for v in arg_value if str(v).strip())
+                else:
+                    value_text = str(arg_value or "").strip()
+                if not value_text:
+                    continue
+                pieces.append(f"{arg_key}={value_text}")
+            if pieces:
+                argv.extend(["--extractor-args", f"{extractor_name}:{';'.join(pieces)}"])
+
     # Audio extraction (CLI parity for FFmpegExtractAudio)
     if opts.get("postprocessors"):
         for pp in opts.get("postprocessors") or []:
             if pp.get("key") == "FFmpegExtractAudio":
-                argv.append("--extract-audio")
+                argv.append("-x")
                 if pp.get("preferredcodec"):
                     argv.extend(["--audio-format", str(pp.get("preferredcodec"))])
+                if pp.get("preferredquality"):
+                    argv.extend(["--audio-quality", str(pp.get("preferredquality"))])
+
+    # Sidecar metadata improves post-download naming/tagging resilience.
+    if opts.get("writeinfojson"):
+        argv.append("--write-info-json")
 
     argv.append(str(url))
     return argv
@@ -2033,6 +3183,55 @@ def _argv_to_redacted_cli(argv):
         redacted.append(tok)
         i += 1
     return shlex.join(redacted)
+
+
+
+def _normalized_config_key(key):
+    return str(key or "").strip().lower().replace("_", "").replace(" ", "")
+
+
+def _extract_config_js_runtime_values(cfg):
+    if not isinstance(cfg, dict):
+        return []
+    raw_value = None
+    for raw_key, candidate in cfg.items():
+        if _normalized_config_key(raw_key) in {"jsruntime", "jsruntimes"}:
+            raw_value = candidate
+            break
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, (list, tuple, set)):
+        source = list(raw_value)
+    else:
+        source = [raw_value]
+    values = []
+    seen = set()
+    for item in source:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        for part in text.split(","):
+            token = part.strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            values.append(token)
+    return values
+
+
+def _build_js_runtime_dict(values):
+    runtime_map = {}
+    for value in values:
+        runtime_name = value
+        runtime_path = None
+        if ":" in value:
+            runtime_name, runtime_path = value.split(":", 1)
+            runtime_name = runtime_name.strip()
+            runtime_path = runtime_path.strip() or None
+        if not runtime_name:
+            continue
+        runtime_map[runtime_name] = {"path": runtime_path} if runtime_path else {}
+    return runtime_map
 
 
 def _format_summary(info):
@@ -2070,6 +3269,186 @@ def _select_youtube_cookie_fallback(
     return fallback_cookie
 
 
+def _load_info_json_from_temp_dir(temp_dir, *, fallback_id=None):
+    if not temp_dir or not os.path.isdir(temp_dir):
+        return None
+    candidates = []
+    for entry in os.listdir(temp_dir):
+        lower_entry = entry.lower()
+        if not lower_entry.endswith('.info.json'):
+            continue
+        path = os.path.join(temp_dir, entry)
+        if not os.path.isfile(path):
+            continue
+        score = 0
+        if fallback_id and fallback_id in entry:
+            score += 2
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0
+        candidates.append((score, mtime, path))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    _, _, selected_path = candidates[0]
+    try:
+        with open(selected_path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _enrich_info_from_sidecar(info, *, temp_dir, url, job_id=None):
+    fallback_id = None
+    if isinstance(info, dict):
+        fallback_id = str(info.get('id') or '').strip() or None
+    if not fallback_id:
+        fallback_id = extract_video_id(url)
+
+    sidecar = _load_info_json_from_temp_dir(temp_dir, fallback_id=fallback_id)
+    if not isinstance(sidecar, dict):
+        return info
+
+    merged = dict(sidecar)
+    if isinstance(info, dict):
+        for key, value in info.items():
+            if key not in merged or merged.get(key) in (None, '', [], {}):
+                merged[key] = value
+
+    _log_event(
+        logging.INFO,
+        'ytdlp_sidecar_metadata_loaded',
+        job_id=job_id,
+        url=url,
+        sidecar_id=sidecar.get('id'),
+        has_title=bool(sidecar.get('title')),
+        has_channel=bool(sidecar.get('channel') or sidecar.get('uploader')),
+    )
+    return merged
+
+
+_PROGRESS_MARKER = "[RETREIVR_PROGRESS]"
+
+
+def _parse_int_or_none(value):
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"none", "na", "n/a", "null"}:
+        return None
+    try:
+        return int(float(raw))
+    except Exception:
+        return None
+
+
+def _parse_float_or_none(value):
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"none", "na", "n/a", "null"}:
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _parse_progress_line(line):
+    if not line or _PROGRESS_MARKER not in line:
+        return None
+    payload = line.split(_PROGRESS_MARKER, 1)[1].strip()
+    parts = [part.strip() for part in payload.split("|")]
+    if len(parts) < 6:
+        return None
+
+    downloaded_bytes = _parse_int_or_none(parts[0])
+    total_bytes = _parse_int_or_none(parts[1]) or _parse_int_or_none(parts[2])
+    speed_bps = _parse_float_or_none(parts[3])
+    eta_seconds = _parse_int_or_none(parts[4])
+
+    percent_raw = parts[5].replace("%", "").strip()
+    percent = _parse_float_or_none(percent_raw)
+    if percent is None and downloaded_bytes is not None and total_bytes and total_bytes > 0:
+        percent = (float(downloaded_bytes) / float(total_bytes)) * 100.0
+    if percent is not None:
+        percent = max(0.0, min(100.0, percent))
+
+    return {
+        "downloaded_bytes": downloaded_bytes,
+        "total_bytes": total_bytes,
+        "progress_percent": percent,
+        "speed_bps": speed_bps,
+        "eta_seconds": eta_seconds,
+    }
+
+
+def _run_ytdlp_cli(
+    cmd_argv,
+    *,
+    cancel_check=None,
+    cancel_reason=None,
+    progress_callback=None,
+):
+    stderr_lines = []
+
+    proc = subprocess.Popen(
+        cmd_argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    def _read_stderr():
+        stream = proc.stderr
+        if stream is None:
+            return
+        for raw_line in iter(stream.readline, ""):
+            stderr_lines.append(raw_line)
+            parsed = _parse_progress_line(raw_line)
+            if parsed is not None and callable(progress_callback):
+                try:
+                    progress_callback(parsed)
+                except Exception:
+                    logger.exception("job_progress_callback_failed")
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=_read_stderr, name="ytdlp-stderr-reader", daemon=True)
+    reader.start()
+
+    cancelled = False
+    while proc.poll() is None:
+        if callable(cancel_check) and cancel_check():
+            cancelled = True
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            break
+        time.sleep(0.2)
+
+    if cancelled:
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            proc.wait()
+        reader.join(timeout=1)
+        raise CancelledError(cancel_reason or "Cancelled by user")
+
+    return_code = proc.wait()
+    reader.join(timeout=1)
+    stderr_output = "".join(stderr_lines).strip()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, cmd_argv, stderr=stderr_output)
+    return stderr_output
+
+
 def download_with_ytdlp(
     url,
     temp_dir,
@@ -2086,18 +3465,26 @@ def download_with_ytdlp(
     resolved_destination=None,
     cancel_check=None,
     cancel_reason=None,
+    output_template_meta=None,
+    progress_callback=None,
 ):
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
         raise CancelledError(cancel_reason or "Cancelled by user")
-    # Use an ID-based template in temp_dir (CLI parity and avoids title/path edge cases).
-    # The final user-facing name is applied later when we move/rename the completed file.
-    output_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
+    # Temp template:
+    # - video: include title/uploader/id so finalization can recover metadata even if probe fails
+    # - music: keep id-based temp naming (final canonical MB naming is applied later)
+    if audio_mode:
+        output_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
+    else:
+        output_template = os.path.join(temp_dir, "%(title).200s - %(uploader).120s - %(id)s.%(ext)s")
     context = {
         "operation": "download",
         "url": url,
         "audio_mode": audio_mode,
         "final_format": final_format,
         "output_template": output_template,
+        "output_template_meta": output_template_meta,
+        "config": config,
         "cookie_file": cookie_file,
         "overrides": (config or {}).get("yt_dlp_opts") or {},
         "media_type": media_type,
@@ -2109,6 +3496,61 @@ def download_with_ytdlp(
         context=context,
     )
     opts = invocation["opts"]
+    resolved_cookiefile = resolve_cookiefile_for_context(context, config)
+    if resolved_cookiefile:
+        opts["cookiefile"] = resolved_cookiefile
+
+    normalized_intent = str(media_intent or "").strip().lower()
+    if audio_mode and is_music_media_type(media_type) and normalized_intent == "music_track":
+        if "format" not in opts:
+            _log_event(
+                logging.ERROR,
+                "music_track_opts_invalid",
+                job_id=job_id,
+                url=url,
+                media_type=media_type,
+                media_intent=media_intent,
+                format=None,
+                noplaylist=opts.get("noplaylist"),
+                has_extract_audio=False,
+                postprocessors=opts.get("postprocessors"),
+                error_message="music_track_missing_format",
+            )
+            raise RuntimeError("music_track_missing_format")
+        fmt = str(opts.get("format") or "").strip().lower()
+        valid_format = fmt in {"bestaudio/best", "best"}
+        postprocessors = opts.get("postprocessors") or []
+        has_extract_audio = any(
+            isinstance(pp, dict) and pp.get("key") == "FFmpegExtractAudio"
+            for pp in postprocessors
+        )
+        noplaylist_is_true = bool(opts.get("noplaylist")) is True
+        if not (valid_format and has_extract_audio and noplaylist_is_true):
+            _log_event(
+                logging.ERROR,
+                "music_track_opts_invalid",
+                job_id=job_id,
+                url=url,
+                media_type=media_type,
+                media_intent=media_intent,
+                format=opts.get("format"),
+                noplaylist=opts.get("noplaylist"),
+                has_extract_audio=has_extract_audio,
+                postprocessors=opts.get("postprocessors"),
+                error_message="music_track_invalid_audio_pipeline_opts",
+            )
+            raise RuntimeError("music_track_invalid_audio_pipeline_opts")
+        _log_event(
+            logging.INFO,
+            "music_track_opts_validated",
+            job_id=job_id,
+            url=url,
+            media_type=media_type,
+            media_intent=media_intent,
+            format=opts.get("format"),
+            noplaylist=opts.get("noplaylist"),
+            has_extract_audio=has_extract_audio,
+        )
 
     _log_event(
         logging.INFO,
@@ -2161,23 +3603,91 @@ def download_with_ytdlp(
             or "forbidden" in msg_l
         )
 
-    from subprocess import DEVNULL, CalledProcessError
+    from subprocess import CalledProcessError
     info = None
     # Always get metadata via API (for output file info, etc.)
     try:
-        opts_for_probe = dict(opts)
-        opts_for_probe["skip_download"] = True
-        with YoutubeDL(opts_for_probe) as ydl:
+        probe_opts = copy.deepcopy(opts)
+        probe_opts.pop("format", None)
+        probe_opts.pop("postprocessors", None)
+        probe_opts.pop("merge_output_format", None)
+        probe_opts.pop("final_format", None)
+        probe_opts.pop("writethumbnail", None)
+        probe_opts.pop("embedthumbnail", None)
+        probe_opts["skip_download"] = True
+        logger.info(
+            {
+                "message": "metadata_probe_invocation",
+                "job_id": job_id,
+                "url": url,
+                "format_present": "format" in probe_opts,
+                "postprocessors_present": "postprocessors" in probe_opts,
+            }
+        )
+        with YoutubeDL(probe_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as exc:
+        probe_error = str(exc)
         _log_event(
             logging.ERROR,
             "ytdlp_metadata_probe_failed",
             job_id=job_id,
             url=url,
-            error=str(exc),
+            error=probe_error,
+            failure_domain="metadata_probe",
+            error_message=probe_error,
+            candidate_id=extract_video_id(url),
         )
-        raise RuntimeError(f"yt_dlp_metadata_probe_failed: {exc}")
+        lower_probe_error = probe_error.lower()
+        should_escalate_probe_js = any(
+            marker in lower_probe_error
+            for marker in (
+                "signature solving failed",
+                "requested format is not available",
+                "n challenge solving failed",
+            )
+        )
+        if should_escalate_probe_js:
+            js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+            if js_runtime_map:
+                retry_probe_opts = copy.deepcopy(probe_opts)
+                retry_probe_opts["js_runtimes"] = js_runtime_map
+                retry_probe_opts["remote_components"] = "ejs:github"
+                _log_event(
+                    logging.WARNING,
+                    "ytdlp_metadata_probe_js_retry",
+                    job_id=job_id,
+                    url=url,
+                    media_type=media_type,
+                    media_intent=media_intent,
+                    error=probe_error,
+                )
+                try:
+                    with YoutubeDL(retry_probe_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                except Exception as retry_exc:
+                    _log_event(
+                        logging.WARNING,
+                        "ytdlp_metadata_probe_js_retry_failed",
+                        job_id=job_id,
+                        url=url,
+                        media_type=media_type,
+                        media_intent=media_intent,
+                        error=str(retry_exc),
+                    )
+                    info = None
+
+        if info is None:
+            _log_event(
+                logging.WARNING,
+                "ytdlp_metadata_probe_nonfatal_proceeding",
+                job_id=job_id,
+                url=url,
+                media_type=media_type,
+                media_intent=media_intent,
+                error=probe_error,
+            )
+            info = {"id": extract_video_id(url), "webpage_url": url}
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""
@@ -2201,17 +3711,29 @@ def download_with_ytdlp(
     # Remove progress_hooks if present
     if "progress_hooks" in opts_for_run:
         opts_for_run.pop("progress_hooks")
+    # First attempt must be clean/minimal (no cookies/js runtime).
+    configured_cookiefile = opts_for_run.pop("cookiefile", None)
+    opts_for_run.pop("js_runtimes", None)
+    opts_for_run.pop("remote_components", None)
+    # Always request sidecar metadata from successful download attempts.
+    opts_for_run["writeinfojson"] = True
+    opts_for_run["newline"] = True
+    opts_for_run["nocolor"] = True
+    opts_for_run["progress_template"] = (
+        f"download:{_PROGRESS_MARKER} "
+        "%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|"
+        "%(progress.speed)s|%(progress.eta)s|%(progress._percent_str)s"
+    )
     # Build CLI argv and run without a shell (prevents globbing of format strings like [acodec!=none])
     cmd_argv = _render_ytdlp_cli_argv(opts_for_run, url)
     cmd_log = _argv_to_redacted_cli(cmd_argv)
 
     try:
-        subprocess.run(
+        _run_ytdlp_cli(
             cmd_argv,
-            check=True,
-            stdout=DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
+            cancel_check=cancel_check,
+            cancel_reason=cancel_reason,
+            progress_callback=progress_callback,
         )
         # Log AFTER the command has been executed, per requirement.
         _log_event(
@@ -2223,6 +3745,82 @@ def download_with_ytdlp(
         )
     except CalledProcessError as exc:
         stderr_output = (exc.stderr or "").strip()
+
+        lower_error = stderr_output.lower()
+        should_escalate_js = any(
+            marker in lower_error
+            for marker in (
+                "signature solving failed",
+                "requested format is not available",
+                "n challenge solving failed",
+            )
+        )
+        should_try_cookies = any(
+            marker in lower_error
+            for marker in (
+                "sign in to confirm",
+                "age-restricted",
+                "forbidden",
+                "http error 403",
+                "private video",
+                "members-only",
+                "cookie",
+            )
+        )
+
+        retry_attempts = []
+        if should_escalate_js:
+            retry_attempts.append("js")
+        if should_try_cookies and configured_cookiefile:
+            retry_attempts.append("cookies")
+        if should_escalate_js and should_try_cookies and configured_cookiefile:
+            retry_attempts.append("js+cookies")
+
+        js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+        for attempt in retry_attempts:
+            retry_opts = dict(opts_for_run)
+            if attempt in {"js", "js+cookies"} and js_runtime_map:
+                retry_opts["js_runtimes"] = js_runtime_map
+                retry_opts["remote_components"] = "ejs:github"
+            if attempt in {"cookies", "js+cookies"} and configured_cookiefile:
+                retry_opts["cookiefile"] = configured_cookiefile
+
+            cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
+            cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
+            _log_event(
+                logging.WARNING,
+                "YTDLP_SMART_RETRY_ATTEMPT",
+                job_id=job_id,
+                url=url,
+                origin=origin,
+                media_type=media_type,
+                media_intent=media_intent,
+                strategy=attempt,
+                error=stderr_output,
+            )
+            try:
+                _run_ytdlp_cli(
+                    cmd_retry_argv,
+                    cancel_check=cancel_check,
+                    cancel_reason=cancel_reason,
+                    progress_callback=progress_callback,
+                )
+                _log_event(
+                    logging.INFO,
+                    "YTDLP_CLI_EQUIVALENT",
+                    job_id=job_id,
+                    url=url,
+                    cli=cmd_retry_log,
+                )
+                if (stop_event and stop_event.is_set()) or (
+                    callable(cancel_check) and cancel_check()
+                ):
+                    raise CancelledError(cancel_reason or "Cancelled by user")
+                info = _enrich_info_from_sidecar(info, temp_dir=temp_dir, url=url, job_id=job_id)
+                return info, _select_download_output(temp_dir, info, audio_mode)
+            except CalledProcessError as retry_exc:
+                stderr_output = (retry_exc.stderr or "").strip() or stderr_output
+
         fallback_cookie = _select_youtube_cookie_fallback(
             config=config,
             url=url,
@@ -2246,12 +3844,11 @@ def download_with_ytdlp(
             cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
             cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
             try:
-                subprocess.run(
+                _run_ytdlp_cli(
                     cmd_retry_argv,
-                    check=True,
-                    stdout=DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                    cancel_check=cancel_check,
+                    cancel_reason=cancel_reason,
+                    progress_callback=progress_callback,
                 )
                 _log_event(
                     logging.INFO,
@@ -2273,6 +3870,7 @@ def download_with_ytdlp(
                     callable(cancel_check) and cancel_check()
                 ):
                     raise CancelledError(cancel_reason or "Cancelled by user")
+                info = _enrich_info_from_sidecar(info, temp_dir=temp_dir, url=url, job_id=job_id)
                 return info, _select_download_output(temp_dir, info, audio_mode)
             except CalledProcessError as fallback_exc:
                 fallback_message = (fallback_exc.stderr or "").strip()
@@ -2287,7 +3885,7 @@ def download_with_ytdlp(
                     error=fallback_message,
                 )
                 raise CookieFallbackError(f"yt_dlp_cookie_fallback_failed: {fallback_exc}")
-        if opts.get("cookiefile"):
+        if configured_cookiefile:
             found = False
             for entry in os.listdir(temp_dir):
                 if entry.endswith((".part", ".ytdl", ".temp")):
@@ -2319,7 +3917,12 @@ def download_with_ytdlp(
                 cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
                 cmd_retry_log = _argv_to_redacted_cli(cmd_retry_argv)
                 try:
-                    subprocess.run(cmd_retry_argv, check=True, stdout=DEVNULL, stderr=DEVNULL)
+                    _run_ytdlp_cli(
+                        cmd_retry_argv,
+                        cancel_check=cancel_check,
+                        cancel_reason=cancel_reason,
+                        progress_callback=progress_callback,
+                    )
                     _log_event(
                         logging.INFO,
                         "YTDLP_CLI_EQUIVALENT",
@@ -2381,6 +3984,7 @@ def download_with_ytdlp(
 
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
         raise CancelledError(cancel_reason or "Cancelled by user")
+    info = _enrich_info_from_sidecar(info, temp_dir=temp_dir, url=url, job_id=job_id)
     return info, _select_download_output(temp_dir, info, audio_mode)
 
 
@@ -2400,7 +4004,22 @@ def _select_download_output(temp_dir, info, audio_mode):
     candidates = []
     audio_candidates = []
     for entry in os.listdir(temp_dir):
-        if entry.endswith((".part", ".ytdl", ".temp")):
+        lower_entry = entry.lower()
+        if lower_entry.endswith((".part", ".ytdl", ".temp")):
+            continue
+        if lower_entry.endswith((
+            ".info.json",
+            ".description",
+            ".json",
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".vtt",
+            ".srt",
+            ".ass",
+            ".lrc",
+        )):
             continue
         candidate = os.path.join(temp_dir, entry)
         if not os.path.isfile(candidate):
@@ -2438,30 +4057,133 @@ def _select_download_output(temp_dir, info, audio_mode):
 
 
 def preview_direct_url(url, config):
-    cookie_file = resolve_cookie_file(config or {})
+    if not isinstance(config, dict) or not config:
+        raise RuntimeError("search_missing_runtime_config")
     context = {
         "operation": "metadata",
         "url": url,
-        "audio_mode": False,
-        "final_format": None,
-        "output_template": None,
-        "cookie_file": cookie_file,
-        "overrides": (config or {}).get("yt_dlp_opts") or {},
+        "config": config,
         "media_type": "video",
         "media_intent": "episode",
     }
-    opts = build_ytdlp_opts(context)
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    meta = extract_meta(info, fallback_url=url)
-    return {
-        "title": meta.get("title"),
-        "uploader": meta.get("channel") or meta.get("artist"),
-        "thumbnail_url": meta.get("thumbnail_url"),
-        "url": meta.get("url") or url,
-        "source": resolve_source(url),
-        "duration_sec": info.get("duration") if isinstance(info, dict) else None,
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "retries": 2,
+        "fragment_retries": 2,
     }
+
+    cookie_file = resolve_cookiefile_for_context(context, config)
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+
+    def _youtube_oembed_fallback(target_url: str, video_id: str | None):
+        oembed_title = None
+        oembed_author = None
+        oembed_thumbnail = None
+        candidate_urls = []
+        if target_url:
+            candidate_urls.append(target_url)
+        if video_id:
+            watch_url = f"https://www.youtube.com/watch?v={video_id}"
+            if watch_url not in candidate_urls:
+                candidate_urls.append(watch_url)
+            short_url = f"https://youtu.be/{video_id}"
+            if short_url not in candidate_urls:
+                candidate_urls.append(short_url)
+        for candidate_url in candidate_urls:
+            try:
+                oembed_resp = requests.get(
+                    "https://www.youtube.com/oembed",
+                    params={"url": candidate_url, "format": "json"},
+                    timeout=5,
+                )
+                if not oembed_resp.ok:
+                    continue
+                oembed_data = oembed_resp.json() if oembed_resp.content else {}
+                if not isinstance(oembed_data, dict):
+                    continue
+                oembed_title = str(oembed_data.get("title") or "").strip() or oembed_title
+                oembed_author = str(oembed_data.get("author_name") or "").strip() or oembed_author
+                oembed_thumbnail = str(oembed_data.get("thumbnail_url") or "").strip() or oembed_thumbnail
+                if oembed_title and oembed_author:
+                    break
+            except Exception:
+                continue
+        return oembed_title, oembed_author, oembed_thumbnail
+
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        meta = extract_meta(info, fallback_url=url)
+        title = meta.get("title")
+        uploader = meta.get("channel") or meta.get("artist")
+        thumb = meta.get("thumbnail_url")
+        if not (title and uploader):
+            video_id = extract_video_id(url)
+            oembed_title, oembed_author, oembed_thumbnail = _youtube_oembed_fallback(url, video_id)
+            title = title or oembed_title or (f"YouTube Video ({video_id})" if video_id else "YouTube Video")
+            uploader = uploader or oembed_author or "YouTube"
+            thumb = thumb or oembed_thumbnail or (
+                f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+            )
+        return {
+            "title": title,
+            "uploader": uploader,
+            "thumbnail_url": thumb,
+            "url": meta.get("url") or url,
+            "source": resolve_source(url),
+            "duration_sec": info.get("duration") if isinstance(info, dict) else None,
+        }
+    except Exception as exc:
+        js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+        if js_runtime_map:
+            retry_opts = dict(opts)
+            retry_opts["js_runtimes"] = js_runtime_map
+            retry_opts["remote_components"] = "ejs:github"
+            try:
+                with YoutubeDL(retry_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            except Exception:
+                info = None
+            else:
+                meta = extract_meta(info, fallback_url=url)
+                return {
+                    "title": meta.get("title"),
+                    "uploader": meta.get("channel") or meta.get("artist"),
+                    "thumbnail_url": meta.get("thumbnail_url"),
+                    "url": meta.get("url") or url,
+                    "source": resolve_source(url),
+                    "duration_sec": info.get("duration") if isinstance(info, dict) else None,
+                }
+
+        video_id = extract_video_id(url)
+        oembed_title, oembed_author, oembed_thumbnail = _youtube_oembed_fallback(url, video_id)
+        fallback_title = oembed_title or (f"YouTube Video ({video_id})" if video_id else "YouTube Video")
+        fallback_uploader = oembed_author or "YouTube"
+        fallback_thumbnail = (
+            oembed_thumbnail
+            or (f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None)
+        )
+        fallback_has_core = bool(fallback_title and fallback_uploader)
+        _log_event(
+            logging.INFO if fallback_has_core else logging.WARNING,
+            "preview_direct_url_extract_failed_fallback_used" if fallback_has_core else "preview_direct_url_extract_failed",
+            url=url,
+            source=resolve_source(url),
+            error=str(exc),
+        )
+        return {
+            "title": fallback_title,
+            "uploader": fallback_uploader,
+            "thumbnail_url": fallback_thumbnail,
+            "url": url,
+            "source": resolve_source(url),
+            "duration_sec": None,
+        }
 
 
 def extract_meta(info, *, fallback_url=None):
@@ -2526,60 +4248,61 @@ def _clean_audio_artist(value):
 
 
 def normalize_track_number(value):
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    value = str(value).strip()
-    if not value:
-        return None
-    if value.isdigit():
-        return int(value)
-    match = re.match(r"(\d+)", value)
-    if match:
-        return int(match.group(1))
-    return None
+    return parse_first_positive_int(value)
 
 
 def format_track_number(value):
-    normalized = normalize_track_number(value)
-    if normalized is None:
-        return ""
-    return f"{normalized:02d}"
+    return format_zero_padded_track_number(value)
+
+
+def _normalize_nfc(value):
+    return unicodedata.normalize("NFC", str(value or ""))
+
+
+def _extract_release_year(value):
+    text = str(value or "").strip()
+    if len(text) >= 4 and text[:4].isdigit():
+        return text[:4]
+    return ""
 
 
 def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
-    artist = sanitize_for_filesystem(_clean_audio_artist(meta.get("artist") or ""))
-    album = sanitize_for_filesystem(_clean_audio_title(meta.get("album") or ""))
-    track = sanitize_for_filesystem(_clean_audio_title(meta.get("track") or meta.get("title") or ""))
-    track_number = format_track_number(meta.get("track_number"))
-    fmt = {
-        "artist": artist,
-        "album": album,
-        "track": track,
-        "track_number": track_number,
-        "ext": ext,
-        "id": "",
-    }
+    required_album = str(meta.get("album") or "").strip()
+    required_release_date = str(meta.get("release_date") or meta.get("date") or "").strip()
+    required_track_number = normalize_track_number(meta.get("track_number"))
+    required_release_group_id = str(meta.get("mb_release_group_id") or "").strip()
+    if (
+        not required_album
+        or not required_release_date
+        or required_track_number is None
+        or required_track_number <= 0
+        or not required_release_group_id
+    ):
+        raise RuntimeError("music_release_metadata_incomplete_before_path_build")
 
-    if template:
-        try:
-            rendered = template % fmt
-            rendered = rendered.strip("/\t ")
-            if rendered:
-                return rendered
-        except Exception:
-            pass
+    album_artist = sanitize_for_filesystem(
+        _normalize_nfc(_clean_audio_artist(meta.get("album_artist") or ""))
+    ) or "Unknown Artist"
+    album_title = sanitize_for_filesystem(_normalize_nfc(_clean_audio_title(meta.get("album") or ""))) or "Unknown Album"
+    track = sanitize_for_filesystem(_normalize_nfc(_clean_audio_title(meta.get("track") or meta.get("title") or "")))
+    track_number = format_track_number(meta.get("track_number")) or "00"
+    disc_number = normalize_track_number(meta.get("disc") or meta.get("disc_number"))
+    disc_total = normalize_track_number(meta.get("disc_total"))
+    release_year = _extract_release_year(meta.get("release_date") or meta.get("date"))
+    album_folder = f"{album_title} ({release_year})" if release_year else album_title
+    # Audio paths are canonical and intentionally ignore custom templates.
+    # This avoids structural drift and duplicate Disc folder segments.
+    _ = template
+    _ = fallback_id
 
-    if artist and album:
-        if track_number:
-            return f"{artist}/{album}/{track_number} - {track}.{ext}"
-        return f"{artist}/{album}/{track}.{ext}"
-    if artist:
-        if track_number:
-            return f"{artist}/{track_number} - {track}.{ext}"
-        return f"{artist}/{track}.{ext}"
-    return f"{track or 'media'}.{ext}"
+    track_label = f"{track_number} - {track or 'media'}.{ext}"
+    return build_music_relative_layout(
+        album_artist=album_artist,
+        album_folder=album_folder,
+        track_label=track_label,
+        disc_number=disc_number or 1,
+        disc_total=disc_total,
+    )
 
 
 def build_output_filename(meta, fallback_id, ext, template, audio_mode):
@@ -2595,10 +4318,154 @@ def build_output_filename(meta, fallback_id, ext, template, audio_mode):
                 "id": "",
             }
             if rendered:
+                # Guard against template artifacts when optional fields are blank
+                # (e.g. "<id> - - .mp4" or "Title - Channel - .mp4").
+                if re.search(r"\s-\s-", rendered) or re.search(r"\s-\s*\.[A-Za-z0-9]+$", rendered):
+                    return f"{pretty_filename(meta.get('title') or fallback_id, meta.get('channel'), meta.get('upload_date'))}.{ext}"
                 return rendered
         except Exception:
             pass
-    return f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}.{ext}"
+    return f"{pretty_filename(meta.get('title') or fallback_id, meta.get('channel'), meta.get('upload_date'))}.{ext}"
+
+
+def _hydrate_meta_from_output_template(meta, output_template):
+    if not isinstance(meta, dict):
+        meta = {}
+    if not isinstance(output_template, dict):
+        return meta
+
+    template_title = str(output_template.get("title") or output_template.get("track") or "").strip()
+    template_channel = str(
+        output_template.get("channel")
+        or output_template.get("uploader")
+        or output_template.get("artist")
+        or ""
+    ).strip()
+
+    if not str(meta.get("title") or "").strip() and template_title:
+        meta["title"] = template_title
+        if not str(meta.get("track") or "").strip():
+            meta["track"] = template_title
+
+    channel_present = str(meta.get("channel") or meta.get("artist") or "").strip()
+    if not channel_present and template_channel:
+        meta["channel"] = template_channel
+        if not str(meta.get("artist") or "").strip():
+            meta["artist"] = template_channel
+
+    return meta
+
+
+def _hydrate_meta_from_local_filename(meta, *, local_file, fallback_id=None):
+    if not isinstance(meta, dict):
+        meta = {}
+    filename = os.path.basename(str(local_file or "")).strip()
+    if not filename:
+        return meta
+
+    stem, _ = os.path.splitext(filename)
+    if not stem:
+        return meta
+
+    title_present = str(meta.get("title") or "").strip()
+    channel_present = str(meta.get("channel") or meta.get("artist") or "").strip()
+    if title_present and channel_present:
+        return meta
+
+    candidate_title = None
+    candidate_channel = None
+    parts = [part.strip() for part in stem.rsplit(" - ", 2)]
+    if len(parts) == 3:
+        maybe_title, maybe_channel, maybe_id = parts
+        id_hint = str(fallback_id or meta.get("video_id") or "").strip()
+        if id_hint and maybe_id and maybe_id != id_hint:
+            return meta
+        candidate_title = maybe_title
+        candidate_channel = maybe_channel
+    elif len(parts) == 2:
+        candidate_title, candidate_channel = parts
+
+    if not title_present and candidate_title:
+        meta["title"] = candidate_title
+        if not str(meta.get("track") or "").strip():
+            meta["track"] = candidate_title
+    if not channel_present and candidate_channel:
+        meta["channel"] = candidate_channel
+        if not str(meta.get("artist") or "").strip():
+            meta["artist"] = candidate_channel
+
+    return meta
+
+
+def _assert_music_canonical_metadata_contract(meta):
+    if not isinstance(meta, dict):
+        raise RuntimeError("music_track_requires_mb_bound_metadata")
+    try:
+        track_number = int(meta.get("track_number"))
+    except Exception:
+        track_number = 0
+    try:
+        disc_number = int(meta.get("disc_number") or meta.get("disc") or 0)
+    except Exception:
+        disc_number = 0
+    required_present = all(
+        str(meta.get(key) or "").strip()
+        for key in ("album", "release_date", "mb_release_id", "mb_release_group_id")
+    )
+    if not required_present or track_number <= 0 or disc_number <= 0:
+        raise RuntimeError("music_track_requires_mb_bound_metadata")
+
+
+def finalize_download_artifact(
+    *,
+    local_file,
+    meta,
+    fallback_id,
+    destination_dir,
+    audio_mode,
+    final_format,
+    template,
+    paths=None,
+    config=None,
+    enforce_music_contract=False,
+    enqueue_audio_metadata=False,
+):
+    if not local_file:
+        raise RuntimeError("missing_local_file_for_finalize")
+    meta = dict(meta or {})
+    fallback_id = str(fallback_id or "")
+    ext = os.path.splitext(local_file)[1].lstrip(".")
+    if audio_mode:
+        actual_ext = str(ext or "").strip().lower()
+        normalized_actual_ext = _normalize_audio_format(actual_ext)
+        normalized_configured_ext = _normalize_audio_format(final_format)
+        ext = normalized_actual_ext or actual_ext or normalized_configured_ext or "mp3"
+    elif not ext:
+        ext = _normalize_format(final_format) or "mkv"
+
+    cleaned_name = build_output_filename(meta, fallback_id, ext, template, audio_mode)
+    if audio_mode and enforce_music_contract:
+        _assert_music_canonical_metadata_contract(meta)
+        normalized_cleaned = str(cleaned_name or "").replace("\\", "/")
+        if not normalized_cleaned.startswith("Music/"):
+            raise RuntimeError("music_filename_contract_violation")
+
+    final_path = os.path.join(destination_dir, cleaned_name)
+    final_path = resolve_collision_path(final_path)
+    os.makedirs(os.path.dirname(final_path), exist_ok=True)
+
+    if not audio_mode and paths is not None and getattr(paths, "thumbs_dir", None):
+        embed_metadata(local_file, meta, fallback_id, paths.thumbs_dir)
+
+    atomic_move(local_file, final_path)
+
+    if audio_mode and enqueue_audio_metadata and isinstance(config, dict):
+        try:
+            enqueue_media_metadata(final_path, meta, config)
+        except Exception:
+            pass
+
+    return final_path, meta
 
 
 def resolve_collision_path(path):

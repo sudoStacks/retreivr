@@ -3,5 +3,7 @@
 *.sqlite
 *.pyc
 ._*
+.pytest_cache/
+.DS_Store
 .vscode/
 _project_management/

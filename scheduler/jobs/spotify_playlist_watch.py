@@ -32,17 +32,15 @@ SPOTIFY_USER_PLAYLISTS_PLAYLIST_ID = "__spotify_user_playlists__"
 
 @dataclass(frozen=True)
 class PlaylistRunSummary:
-    added: int = 0
+    enqueued: int = 0
+    enqueue_failed: int = 0
     skipped: int = 0
-    failed: int = 0
-    completed: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
-            "added": int(self.added),
+            "enqueued": int(self.enqueued),
+            "enqueue_failed": int(self.enqueue_failed),
             "skipped": int(self.skipped),
-            "failed": int(self.failed),
-            "completed": int(self.completed),
         }
 
 
@@ -422,20 +420,18 @@ async def spotify_playlists_watch_job(
             summary = result.get("run_summary") if isinstance(result, dict) else None
             if isinstance(summary, dict):
                 aggregate_summary = PlaylistRunSummary(
-                    added=aggregate_summary.added + int(summary.get("added") or 0),
+                    enqueued=aggregate_summary.enqueued + int(summary.get("enqueued") or 0),
+                    enqueue_failed=aggregate_summary.enqueue_failed + int(summary.get("enqueue_failed") or 0),
                     skipped=aggregate_summary.skipped + int(summary.get("skipped") or 0),
-                    failed=aggregate_summary.failed + int(summary.get("failed") or 0),
-                    completed=aggregate_summary.completed + int(summary.get("completed") or 0),
                 )
             synced += 1
         except Exception as exc:
             errors.append(f"{playlist_id}: {exc}")
             logging.exception("Scheduled Spotify playlist sync failed for playlist %s", playlist_id)
             aggregate_summary = PlaylistRunSummary(
-                added=aggregate_summary.added,
+                enqueued=aggregate_summary.enqueued,
+                enqueue_failed=aggregate_summary.enqueue_failed,
                 skipped=aggregate_summary.skipped,
-                failed=aggregate_summary.failed + 1,
-                completed=aggregate_summary.completed,
             )
 
     logging.info(
@@ -451,6 +447,12 @@ async def spotify_playlists_watch_job(
         "errors": errors,
         "run_summary": aggregate_summary.to_dict(),
     }
+    logger.info(
+        "[SCHEDULER] spotify_playlists_run_summary enqueued=%s enqueue_failed=%s skipped=%s",
+        aggregate_summary.enqueued,
+        aggregate_summary.enqueue_failed,
+        aggregate_summary.skipped,
+    )
     logger.info(
         "[SCHEDULER] spotify_playlists_watch_job duration_sec=%.3f status=%s synced=%s",
         time.monotonic() - started_at,
@@ -470,7 +472,12 @@ async def enqueue_spotify_track(queue, spotify_track: dict, search_service, play
     track_isrc = str((spotify_track or {}).get("isrc") or "").strip()
     if track_isrc and has_downloaded_isrc(playlist_id, track_isrc):
         logging.info("skip duplicate isrc=%s playlist=%s", track_isrc, playlist_id)
-        return
+        return {
+            "created": False,
+            "reason": "duplicate_isrc",
+            "playlist_id": playlist_id,
+            "spotify_track_id": (spotify_track or {}).get("spotify_track_id"),
+        }
 
     # TODO(scheduler/jobs/spotify_playlist_watch.py::enqueue_spotify_track): replace spotify.resolve.resolve_spotify_track
     # with the unified engine search resolution path (engine.search_engine SearchResolutionService adapters).
@@ -482,7 +489,10 @@ async def enqueue_spotify_track(queue, spotify_track: dict, search_service, play
         "resolved_media": resolved_media,
         "music_metadata": merged_metadata,
     }
-    queue.enqueue(payload)
+    enqueue_result = queue.enqueue(payload)
+    if enqueue_result is None:
+        return {"created": True}
+    return enqueue_result
 
 
 async def spotify_liked_songs_watch_job(
@@ -559,16 +569,19 @@ async def spotify_liked_songs_watch_job(
     diff = diff_playlist(previous_items, current_items)
     added_items = list(diff["added"])
     enqueued = 0
+    skipped = 0
     enqueue_errors: list[str] = []
     for track in added_items:
         try:
-            await enqueue_spotify_track(
+            enqueue_result = await enqueue_spotify_track(
                 queue,
                 track,
                 search_service,
                 playlist_id=SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
             )
-            enqueued += 1
+            enqueued_inc, skipped_inc = _classify_enqueue_result(enqueue_result)
+            enqueued += enqueued_inc
+            skipped += skipped_inc
         except Exception as exc:
             track_id = track.get("spotify_track_id")
             enqueue_errors.append(f"{track_id}: {exc}")
@@ -588,6 +601,7 @@ async def spotify_liked_songs_watch_job(
             "snapshot_id": current_snapshot_id,
             "error": f"snapshot_store_failed: {exc}",
             "enqueued": enqueued,
+            "skipped": skipped,
             "added_count": len(added_items),
             "removed_count": len(diff["removed"]),
             "moved_count": len(diff["moved"]),
@@ -606,6 +620,7 @@ async def spotify_liked_songs_watch_job(
         "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
         "snapshot_id": current_snapshot_id,
         "enqueued": enqueued,
+        "skipped": skipped,
         "added_count": len(added_items),
         "removed_count": len(diff["removed"]),
         "moved_count": len(diff["moved"]),
@@ -979,7 +994,7 @@ def playlist_watch_job(
             "status": "error",
             "playlist_id": pid,
             "error": f"spotify_fetch_failed: {exc}",
-            "run_summary": PlaylistRunSummary(failed=1).to_dict(),
+            "run_summary": PlaylistRunSummary().to_dict(),
         }
         logger.info(
             "[SCHEDULER] playlist_watch_job duration_sec=%.3f status=%s playlist_id=%s",
@@ -997,7 +1012,7 @@ def playlist_watch_job(
             "status": "error",
             "playlist_id": pid,
             "error": f"snapshot_read_failed: {exc}",
-            "run_summary": PlaylistRunSummary(failed=1).to_dict(),
+            "run_summary": PlaylistRunSummary().to_dict(),
         }
         logger.info(
             "[SCHEDULER] playlist_watch_job duration_sec=%.3f status=%s playlist_id=%s",
@@ -1016,7 +1031,7 @@ def playlist_watch_job(
         logger.info("Spotify playlist polling sync completed")
         unchanged_summary = PlaylistRunSummary(
             skipped=len(normalized_current_items),
-            completed=0,
+            enqueued=0,
         )
         result = {
             "status": "unchanged",
@@ -1042,8 +1057,8 @@ def playlist_watch_job(
     for item in added_items:
         try:
             enqueue_result = _enqueue_added_track(queue, item)
-            completed_inc, skipped_inc = _classify_enqueue_result(enqueue_result)
-            enqueued += completed_inc
+            enqueued_inc, skipped_inc = _classify_enqueue_result(enqueue_result)
+            enqueued += enqueued_inc
             skipped += skipped_inc
         except Exception as exc:
             track_id = item.get("spotify_track_id")
@@ -1055,10 +1070,9 @@ def playlist_watch_job(
     except Exception as exc:
         logging.exception("Snapshot store failed for playlist %s", pid)
         summary = PlaylistRunSummary(
-            added=len(added_items),
+            enqueued=enqueued,
+            enqueue_failed=len(enqueue_errors),
             skipped=skipped,
-            failed=len(enqueue_errors) + 1,
-            completed=enqueued,
         )
         result = {
             "status": "error",
@@ -1089,10 +1103,16 @@ def playlist_watch_job(
 
     logger.info("Spotify playlist polling sync completed")
     summary = PlaylistRunSummary(
-        added=len(added_items),
+        enqueued=enqueued,
+        enqueue_failed=len(enqueue_errors),
         skipped=skipped,
-        failed=len(enqueue_errors),
-        completed=enqueued,
+    )
+    logger.info(
+        "[SCHEDULER] playlist_run_summary enqueued=%s enqueue_failed=%s skipped=%s playlist_id=%s",
+        summary.enqueued,
+        summary.enqueue_failed,
+        summary.skipped,
+        pid,
     )
     result = {
         "status": "updated",

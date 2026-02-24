@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.2-homefix">
-  <script defer src="app.js?v=0.9.2-homefix"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.5-ui-2">
+  <script defer src="app.js?v=0.9.5-ui-2"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -24,92 +24,160 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
-      <button class="button ghost small nav-button" data-page="advanced" type="button">Advanced Search</button>
+      <button class="button ghost small nav-button" data-page="advanced" type="button">Info</button>
       <button class="button ghost small nav-button" data-page="status" type="button">Status</button>
       <button class="button ghost small nav-button" data-page="config" type="button">Config</button>
       <div id="nav-actions" class="nav-actions"></div>
     </nav>
     <div class="top-actions" id="top-actions">
-      <button id="refresh-all" class="button">Refresh</button>
-      <button id="toggle-theme" class="button ghost">Light mode</button>
-      <a class="button ghost" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
+      <button id="refresh-all" class="button small">Refresh</button>
+      <button id="toggle-theme" class="button ghost small">Light mode</button>
+      <a class="button ghost small" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
     </div>
   </header>
 
   <main class="layout">
     <section class="panel full page-full" id="home-panel" data-page="home">
       <div class="home-search-shell">
-        <input
-          id="home-search-input"
-          class="home-search-input"
-          type="text"
-          placeholder="Search YouTube, music, podcasts, archives…"
-          autocomplete="off"
-        />
-
-        <div class="home-advanced-row">
-          <label class="home-advanced-field">
-            <span>Music Mode (Spotify metadata, album structure, validation)</span>
-            <input id="home-music-mode" type="checkbox">
+        <div class="music-mode-toggle-row">
+          <label class="music-mode-switch" for="music-mode-toggle">
+            <input id="music-mode-toggle" type="checkbox">
+            <span class="music-mode-slider" aria-hidden="true"></span>
+            <span class="music-mode-label">Music Mode</span>
           </label>
         </div>
+        <div id="standard-search-container">
+          <input
+            id="home-search-input"
+            class="home-search-input"
+            type="text"
+            placeholder="Search YouTube, music, podcasts, archives…"
+            autocomplete="off"
+          />
 
-        <div class="home-search-toggles">
-          <div id="home-source-filters" class="home-source-filters">
+          <div class="home-search-toggles">
+            <div id="home-source-filters" class="home-source-filters">
+              <button
+                id="home-source-toggle"
+                class="home-source-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="home-source-panel"
+              >
+                Sources: All
+              </button>
+              <div id="home-source-panel" class="home-source-panel" role="menu">
+                <label class="home-source-pill"><input type="checkbox" data-source="youtube" checked> <span>YouTube</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="youtube_music" checked> <span>YouTube Music</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="soundcloud" checked> <span>SoundCloud</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="bandcamp" checked> <span>Bandcamp</span></label>
+              </div>
+            </div>
+
             <button
-              id="home-source-toggle"
-              class="home-source-toggle"
+              id="home-advanced-toggle"
+              class="button ghost small home-advanced-toggle"
               type="button"
               aria-expanded="false"
-              aria-controls="home-source-panel"
+              aria-controls="home-advanced-panel"
             >
-              Sources: All
+              Advanced options
             </button>
-            <div id="home-source-panel" class="home-source-panel" role="menu">
-              <label class="home-source-pill"><input type="checkbox" data-source="youtube" checked> <span>YouTube</span></label>
-              <label class="home-source-pill"><input type="checkbox" data-source="youtube_music" checked> <span>YouTube Music</span></label>
-              <label class="home-source-pill"><input type="checkbox" data-source="soundcloud" checked> <span>SoundCloud</span></label>
-              <label class="home-source-pill"><input type="checkbox" data-source="bandcamp" checked> <span>Bandcamp</span></label>
+          </div>
+
+          <div id="home-advanced-panel" class="home-advanced-panel hidden">
+            <div class="home-advanced-row">
+              <label class="home-advanced-field">
+                <span>Format</span>
+                <select id="home-format">
+                  <option value="">Default</option>
+                  <option value="mp3">mp3</option>
+                  <option value="mp4">mp4</option>
+                  <option value="mkv">mkv</option>
+                  <option value="webm">webm</option>
+                </select>
+              </label>
+
+              <label class="home-advanced-field">
+                <span>Delivery</span>
+                <div id="home-delivery-toggle" class="home-delivery-toggle" role="group" aria-label="Delivery mode">
+                  <button type="button" class="button ghost small active" data-mode="server">Server</button>
+                  <button type="button" class="button ghost small" data-mode="client">Client</button>
+                </div>
+                <input id="home-delivery-mode" type="hidden" value="server">
+              </label>
+
+              <label class="home-advanced-field" id="home-destination-field">
+                <span>Destination</span>
+                <div class="home-destination-row">
+                  <input id="home-destination" type="text" placeholder="downloads">
+                  <button id="home-destination-browse" class="button ghost small" type="button">Browse</button>
+                </div>
+              </label>
             </div>
           </div>
 
-          <button
-            id="home-advanced-toggle"
-            class="button ghost small home-advanced-toggle"
-            type="button"
-            aria-expanded="false"
-            aria-controls="home-advanced-panel"
-          >
-            Advanced options
-          </button>
-        </div>
-
-        <div id="home-advanced-panel" class="home-advanced-panel hidden">
-          <div class="home-advanced-row">
-            <label class="home-advanced-field">
-              <span>Format</span>
-              <select id="home-format">
-                <option value="">Default</option>
-                <option value="mp3">mp3</option>
-                <option value="mp4">mp4</option>
-                <option value="mkv">mkv</option>
-                <option value="webm">webm</option>
-              </select>
-            </label>
-
-            <label class="home-advanced-field">
-              <span>Destination</span>
-              <div class="row">
-                <input id="home-destination" type="text" placeholder="downloads">
-                <button id="home-destination-browse" class="button ghost small" type="button">Browse</button>
-              </div>
-            </label>
+          <div class="home-search-actions">
+            <button id="home-search-only" class="button primary">Search</button>
+            <button id="home-search-download" class="button ghost">Search &amp; Download</button>
           </div>
         </div>
 
-        <div class="home-search-actions">
-          <button id="home-search-only" class="button primary">Search</button>
-          <button id="home-search-download" class="button ghost">Search &amp; Download</button>
+        <div id="music-mode-console" class="hidden">
+          <section class="panel">
+            <div class="panel-title">Music Search</div>
+            <div class="stack">
+              <div class="group">
+                <div class="group-title">Create Search Request</div>
+                <div class="grid two">
+                  <label class="field medium">
+                    <span>Artist</span>
+                    <input id="search-artist" type="text" placeholder="Artist name">
+                  </label>
+                  <label class="field medium">
+                    <span>Album</span>
+                    <input id="search-album" type="text" placeholder="Optional album">
+                  </label>
+                  <label class="field medium">
+                    <span>Track</span>
+                    <input id="search-track" type="text" placeholder="Optional track">
+                  </label>
+                  <label class="field short">
+                    <span>Mode</span>
+                    <select id="music-mode-select">
+                      <option value="auto">Auto</option>
+                      <option value="artist">Artist</option>
+                      <option value="album">Album</option>
+                      <option value="track">Track</option>
+                    </select>
+                  </label>
+                  <label class="field short">
+                    <span>Max candidates (1-15)</span>
+                    <input id="search-max-candidates" type="number" min="1" max="15" value="10">
+                  </label>
+                </div>
+                <div class="row">
+                  <div class="action-group">
+                    <button id="search-create-only" class="button">Search</button>
+                  </div>
+                  <div id="search-create-message" class="notice" role="status"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+        <div id="music-results-container"></div>
+
+        <button id="import-playlist-toggle" class="button ghost small" type="button">Import Playlist</button>
+        <div id="import-playlist-panel" class="hidden">
+          <div class="home-advanced-row">
+            <label class="home-advanced-field">
+              <span>Import playlist file</span>
+              <input id="home-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
+            </label>
+            <button id="home-import-button" class="button ghost small" type="button">Import Playlist</button>
+          </div>
+          <div id="home-import-summary" class="meta"></div>
         </div>
 
         <div id="home-search-message" class="notice" role="status">
@@ -128,8 +196,39 @@
         <div id="home-results-list"></div>
       </div>
     </section>
+    <section class="panel" id="search-queue-panel" data-page="status">
+      <div class="panel-title">Download Queue</div>
+      <div class="notice">Live operations queue (completed jobs are shown in Download History).</div>
+      <div class="row">
+        <label class="field inline short">
+          <span>Limit</span>
+          <input id="search-queue-limit" type="number" min="1" max="5000" value="100">
+        </label>
+        <button id="search-queue-refresh" class="button ghost">Refresh</button>
+        <div id="search-queue-message" class="notice" role="status"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Job ID</th>
+              <th>Origin</th>
+              <th>Source</th>
+              <th>Media intent</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Attempts</th>
+              <th>Created</th>
+              <th>Last error</th>
+            </tr>
+          </thead>
+          <tbody id="search-queue-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel" id="status-panel" data-page="status">
-      <div class="panel-title">Status</div>
+      <div class="panel-title">Operations Status (Live)</div>
       <div class="stack">
         <div class="row">
           <span class="chip" id="status-running">idle</span>
@@ -237,6 +336,61 @@
             <span id="status-phase">-</span>
           </div>
         </div>
+        <div class="group">
+          <div class="group-title">Queue Activity</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">Active jobs</span>
+              <span id="status-queue-active">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Downloading</span>
+              <span id="status-queue-downloading">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Queued</span>
+              <span id="status-queue-queued">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Post-processing</span>
+              <span id="status-queue-postprocessing">0</span>
+            </div>
+          </div>
+          <div class="row">
+            <span class="meta" id="status-queue-summary">-</span>
+          </div>
+        </div>
+        <div class="group">
+          <div class="group-title">Playlist Import Activity</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">State</span>
+              <span id="status-import-state">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Active import jobs</span>
+              <span id="status-import-active-count">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Processed</span>
+              <span id="status-import-processed">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Enqueued</span>
+              <span id="status-import-enqueued">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Failed</span>
+              <span id="status-import-failed">0</span>
+            </div>
+          </div>
+          <div class="progress">
+            <div id="status-import-progress-bar" class="progress-bar"></div>
+          </div>
+          <div class="row">
+            <span class="meta" id="status-import-progress-text">-</span>
+          </div>
+        </div>
         <div class="row">
           <div class="stat">
             <span class="label">Last completed</span>
@@ -265,6 +419,17 @@
         <div class="row">
           <span class="label">Last error</span>
           <span id="status-error" class="meta">-</span>
+        </div>
+        <div class="group">
+          <div class="group-title">Music failures</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">Count</span>
+              <span id="music-failures-count">0</span>
+            </div>
+            <button id="music-failures-refresh" class="button ghost small" type="button">Refresh</button>
+          </div>
+          <div id="music-failures-list" class="stack"></div>
         </div>
         <div class="row">
           <button id="status-cancel" class="button remove small" type="button">Kill downloads in progress</button>
@@ -352,6 +517,7 @@
                 <option value="mp3">mp3</option>
               </select>
             </label>
+            <div class="notice">Final format currently applies to video output; music uses <code>music_final_format</code> from config.json.</div>
             <label class="field medium">
               <span>JS runtime</span>
               <input id="cfg-js-runtime" type="text" placeholder="node:/usr/bin/node">
@@ -485,13 +651,17 @@
         <div class="group">
           <div class="group-title">Music metadata enrichment</div>
           <div class="grid two">
+            <label class="field short">
+              <span>Music mode match threshold (%)</span>
+              <input id="cfg-music-meta-threshold" type="number" min="0" max="100" step="1">
+            </label>
             <label class="field inline short">
               <span>Enabled</span>
               <input id="cfg-music-meta-enabled" type="checkbox">
             </label>
             <label class="field short">
-              <span>Confidence threshold</span>
-              <input id="cfg-music-meta-threshold" type="number" min="0" max="100" step="1">
+              <span>Enrichment confidence threshold (%)</span>
+              <input id="cfg-music-enrich-threshold" type="number" min="0" max="100" step="1">
             </label>
             <label class="field inline short">
               <span>Use AcoustID</span>
@@ -544,6 +714,7 @@
 
         <div class="group">
           <div class="group-title">Spotify Integration</div>
+          <div class="group-subtitle">(Spotify requires Spotify Premium subscription for API connectors)</div>
           <div class="grid two">
             <label class="field full" for="spotify-client-id">
               <span>Client ID</span>
@@ -622,117 +793,8 @@
       </div>
     </section>
 
-    
-    <section class="panel" id="search-create-panel" data-page="advanced">
-      <div class="panel-title">Media Search Console</div>
-      <div class="stack">
-        <div class="group">
-          <div class="group-title">Create Search Request</div>
-          <div class="grid two">
-            <label class="field medium">
-              <span>Artist</span>
-              <input id="search-artist" type="text" placeholder="Artist name">
-            </label>
-            <label class="field medium">
-              <span>Album</span>
-              <input id="search-album" type="text" placeholder="Optional album">
-            </label>
-            <label class="field medium">
-              <span>Track</span>
-              <input id="search-track" type="text" placeholder="Optional track">
-            </label>
-            <label class="field short">
-              <span>Intent</span>
-              <select id="search-intent">
-                <option value="track">track</option>
-                <option value="album">album</option>
-              </select>
-            </label>
-            <label class="field short">
-              <span>Min match score</span>
-              <input id="search-min-score" type="number" min="0" max="1" step="0.01" value="0.92">
-            </label>
-            <label class="field short">
-              <span>Max candidates</span>
-              <input id="search-max-candidates" type="number" min="1" max="50" value="5">
-            </label>
-          </div>
-          <div class="group-title">Source priority</div>
-          <div id="search-source-list" class="stack source-priority-list">
-            <div class="row source-priority-row" data-source="bandcamp">
-              <label class="field inline">
-                <span>bandcamp</span>
-                <input class="source-enabled" type="checkbox" checked>
-              </label>
-              <div class="action-group">
-                <button class="button ghost small" type="button" data-action="up">↑</button>
-                <button class="button ghost small" type="button" data-action="down">↓</button>
-              </div>
-            </div>
-            <div class="row source-priority-row" data-source="youtube_music">
-              <label class="field inline">
-                <span>youtube_music</span>
-                <input class="source-enabled" type="checkbox" checked>
-              </label>
-              <div class="action-group">
-                <button class="button ghost small" type="button" data-action="up">↑</button>
-                <button class="button ghost small" type="button" data-action="down">↓</button>
-              </div>
-            </div>
-            <div class="row source-priority-row" data-source="soundcloud">
-              <label class="field inline">
-                <span>soundcloud</span>
-                <input class="source-enabled" type="checkbox" checked>
-              </label>
-              <div class="action-group">
-                <button class="button ghost small" type="button" data-action="up">↑</button>
-                <button class="button ghost small" type="button" data-action="down">↓</button>
-              </div>
-            </div>
-          </div>
-          <div class="row">
-            <label class="field inline">
-              <span>Include albums</span>
-              <input id="search-include-albums" type="checkbox" checked>
-            </label>
-            <label class="field inline">
-              <span>Include singles</span>
-              <input id="search-include-singles" type="checkbox" checked>
-            </label>
-            <label class="field inline">
-              <span>Lossless only</span>
-              <input id="search-lossless-only" type="checkbox">
-            </label>
-          </div>
-          <div class="row">
-            <label class="field">
-              <span>Destination override</span>
-              <div class="row">
-                <input id="search-destination" type="text" placeholder="Leave blank for default">
-                <button id="search-destination-browse" class="button ghost small" type="button">Browse</button>
-              </div>
-              <div class="meta" id="search-destination-resolved">Resolved: /downloads</div>
-            </label>
-            <div class="field">
-              <span>Default destination</span>
-              <div id="search-default-destination" class="meta">-</div>
-            </div>
-          </div>
-          <div class="row">
-            <div class="action-group">
-              <button id="search-create-download" class="button">Search &amp; Download Top Result</button>
-              <button id="search-create-only" class="button ghost">Search Only</button>
-            </div>
-            <div id="search-create-message" class="notice" role="status"></div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-
-
     <section class="panel" id="search-items-panel" data-page="advanced">
-      <div class="panel-title">Search Items & Candidates</div>
+      <div class="panel-title">Search Results (Discovery)</div>
       <div class="notice">Selected request: <span id="search-selected-request">-</span></div>
       <div class="group">
         <div class="group-title">Items</div>
@@ -777,7 +839,7 @@
 
 
     <section class="panel" id="search-requests-panel" data-page="advanced">
-      <div class="panel-title">Search Requests</div>
+      <div class="panel-title">Search History (Requests)</div>
       <div class="row">
         <button id="search-requests-refresh" class="button ghost">Refresh</button>
         <button id="search-requests-sort" class="button ghost">Sort: Newest</button>
@@ -805,37 +867,8 @@
 
     
 
-    <section class="panel" id="search-queue-panel" data-page="advanced">
-      <div class="panel-title">Unified Download Queue</div>
-      <div class="row">
-        <label class="field inline short">
-          <span>Limit</span>
-          <input id="search-queue-limit" type="number" min="1" max="5000" value="100">
-        </label>
-        <button id="search-queue-refresh" class="button ghost">Refresh</button>
-        <div id="search-queue-message" class="notice" role="status"></div>
-      </div>
-      <div class="table-wrap">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>Job ID</th>
-              <th>Origin</th>
-              <th>Source</th>
-              <th>Media intent</th>
-              <th>Status</th>
-              <th>Attempts</th>
-              <th>Created</th>
-              <th>Last error</th>
-            </tr>
-          </thead>
-          <tbody id="search-queue-body"></tbody>
-        </table>
-      </div>
-    </section>
-
     <section class="panel full page-full" id="logs-panel" data-page="status">
-      <div class="panel-title">Logs</div>
+      <div class="panel-title">System Logs (Diagnostics)</div>
       <div class="row">
         <label class="field inline short">
           <span>Lines</span>
@@ -851,7 +884,7 @@
     </section>
 
     <section class="panel full page-full" id="downloads-panel" data-page="status">
-      <div class="panel-title">Downloads</div>
+      <div class="panel-title">Library Downloads (Files)</div>
       <div class="row">
         <button id="downloads-refresh" class="button ghost">Refresh</button>
         <button id="cleanup-temp" class="button ghost">Clear temporary files</button>
@@ -890,7 +923,7 @@
     </section>
 
     <section class="panel full page-full" id="history-panel" data-page="status">
-      <div class="panel-title">History</div>
+      <div class="panel-title">Download History (Completed)</div>
       <div class="row">
         <button class="button ghost small filters-toggle" data-target="history-filters" type="button">Filters</button>
         <button id="history-refresh" class="button ghost">Refresh</button>
@@ -1005,6 +1038,49 @@
           <button id="oauth-complete" class="button">Complete OAuth</button>
           <div id="oauth-message" class="notice" role="status"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="import-progress-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="import-progress-title">
+    <div class="modal-card import-progress-card">
+      <div class="row space-between">
+        <div id="import-progress-title" class="panel-title">Playlist Import Running</div>
+        <button id="import-progress-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div id="import-progress-message" class="notice">
+        Import is running. Performance may be reduced while tracks are resolved.
+      </div>
+      <div class="progress">
+        <div id="import-progress-bar" class="progress-bar"></div>
+      </div>
+      <div class="row">
+        <div class="stat">
+          <span class="label">Status</span>
+          <span id="import-progress-state">queued</span>
+        </div>
+        <div class="stat">
+          <span class="label">Processed</span>
+          <span id="import-progress-processed">0 / 0</span>
+        </div>
+      </div>
+      <div class="row">
+        <div class="stat">
+          <span class="label">Resolved</span>
+          <span id="import-progress-resolved">0</span>
+        </div>
+        <div class="stat">
+          <span class="label">Enqueued</span>
+          <span id="import-progress-enqueued">0</span>
+        </div>
+        <div class="stat">
+          <span class="label">Failed</span>
+          <span id="import-progress-failed">0</span>
+        </div>
+      </div>
+      <div id="import-progress-error" class="notice" role="status"></div>
+      <div class="meta">
+        Please avoid starting other downloads or heavy actions until the import completes.
       </div>
     </div>
   </div>
