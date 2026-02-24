@@ -315,6 +315,66 @@ fn image_id_for(image: &str) -> Option<String> {
     .filter(|value| !value.is_empty())
 }
 
+fn parse_release_from_json(payload: &str) -> Result<GithubReleaseResponse, String> {
+    serde_json::from_str::<GithubReleaseResponse>(payload).map_err(|e| e.to_string())
+}
+
+fn fetch_latest_launcher_release() -> Result<GithubReleaseResponse, String> {
+    let curl_result = command_output({
+        let mut cmd = Command::new("curl");
+        cmd.args([
+            "-fsSL",
+            "-H",
+            "User-Agent: retreivr-launcher",
+            LAUNCHER_RELEASE_API,
+        ]);
+        cmd
+    })
+    .and_then(|json| parse_release_from_json(&json));
+
+    if curl_result.is_ok() {
+        return curl_result;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let pwsh_result = command_output({
+            let mut cmd = Command::new("powershell");
+            cmd.args([
+                "-NoProfile",
+                "-Command",
+                "$ProgressPreference='SilentlyContinue'; (Invoke-RestMethod -Uri 'https://api.github.com/repos/sudoStacks/retreivr/releases/latest' -Headers @{ 'User-Agent'='retreivr-launcher' } | ConvertTo-Json -Compress)",
+            ]);
+            cmd
+        })
+        .and_then(|json| parse_release_from_json(&json));
+
+        if pwsh_result.is_ok() {
+            return pwsh_result;
+        }
+    }
+
+    let wget_result = command_output({
+        let mut cmd = Command::new("wget");
+        cmd.args([
+            "-qO-",
+            "--header=User-Agent: retreivr-launcher",
+            LAUNCHER_RELEASE_API,
+        ]);
+        cmd
+    })
+    .and_then(|json| parse_release_from_json(&json));
+
+    if wget_result.is_ok() {
+        return wget_result;
+    }
+
+    Err(
+        "Unable to check launcher release metadata (curl/powershell/wget not available or request failed)."
+            .to_string(),
+    )
+}
+
 #[tauri::command]
 fn install_guidance() -> InstallGuidance {
     let os = std::env::consts::OS.to_string();
@@ -356,17 +416,7 @@ fn install_guidance() -> InstallGuidance {
 #[tauri::command]
 fn launcher_version_info(app: AppHandle) -> LauncherVersionInfo {
     let current_version = app.package_info().version.to_string();
-    let release = command_output({
-        let mut cmd = Command::new("curl");
-        cmd.args([
-            "-fsSL",
-            "-H",
-            "User-Agent: retreivr-launcher",
-            LAUNCHER_RELEASE_API,
-        ]);
-        cmd
-    })
-    .and_then(|json| serde_json::from_str::<GithubReleaseResponse>(&json).map_err(|e| e.to_string()));
+    let release = fetch_latest_launcher_release();
 
     match release {
         Ok(latest) => {
@@ -394,6 +444,25 @@ fn launcher_version_info(app: AppHandle) -> LauncherVersionInfo {
             release_url: Some(LAUNCHER_RELEASES_URL.to_string()),
             check_error: Some(err),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_release_tag, parse_version_triplet};
+
+    #[test]
+    fn normalize_release_tag_handles_prefixes() {
+        assert_eq!(normalize_release_tag("launcher-v1.2.3"), "1.2.3");
+        assert_eq!(normalize_release_tag("v1.2.3"), "1.2.3");
+        assert_eq!(normalize_release_tag("1.2.3"), "1.2.3");
+    }
+
+    #[test]
+    fn parse_version_triplet_parses_semver_core() {
+        assert_eq!(parse_version_triplet("launcher-v2.10.4"), Some((2, 10, 4)));
+        assert_eq!(parse_version_triplet("v0.9.6"), Some((0, 9, 6)));
+        assert_eq!(parse_version_triplet("bad"), None);
     }
 }
 
