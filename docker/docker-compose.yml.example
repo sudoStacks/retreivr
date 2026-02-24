@@ -2,7 +2,7 @@ version: "3.9"
 
 services:
   retreivr:
-    image: ghcr.io/sudoStacks/retreivr:0.9.5
+    image: ghcr.io/sudoStacks/retreivr:v0.9.5
     container_name: retreivr
     ports:
       # host:container -> access via http://<host>:8090, app listens on 8000 in-container

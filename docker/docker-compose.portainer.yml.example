@@ -3,9 +3,9 @@ version: "3.9"
 services:
   retreivr:
     # Docker Hub:
-    image: retreivr/retreivr:0.9.5
+    image: retreivr/retreivr:v0.9.5
     # Or GHCR:
-    # image: ghcr.io/sudoStacks/retreivr:0.9.5
+    # image: ghcr.io/sudoStacks/retreivr:v0.9.5
 
     container_name: retreivr
     ports:
