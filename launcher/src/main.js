@@ -59,7 +59,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   let currentWebUrl = "http://localhost:8090";
   let dockerInstallUrl = "https://www.docker.com/products/docker-desktop/";
-  let launcherReleaseUrl = "https://github.com/sudoStacks/retreivr/releases";
+  let launcherReleaseUrl = "https://github.com/sudostacks/retreivr/releases";
   let installGuide = null;
   let latestDiagnostics = null;
   let latestPreflight = null;
@@ -120,20 +120,20 @@ document.addEventListener("DOMContentLoaded", () => {
   function applyPreset(preset) {
     if (preset === "alt_port") {
       hostPortInput.value = "9000";
-      imageInput.value = "ghcr.io/sudoStacks/retreivr:latest";
+      imageInput.value = "ghcr.io/sudostacks/retreivr:latest";
       containerNameInput.value = "retreivr";
       return;
     }
 
     if (preset === "edge") {
       hostPortInput.value = "8090";
-      imageInput.value = "ghcr.io/sudoStacks/retreivr:edge";
+      imageInput.value = "ghcr.io/sudostacks/retreivr:edge";
       containerNameInput.value = "retreivr-edge";
       return;
     }
 
     hostPortInput.value = "8090";
-    imageInput.value = "ghcr.io/sudoStacks/retreivr:latest";
+    imageInput.value = "ghcr.io/sudostacks/retreivr:latest";
     containerNameInput.value = "retreivr";
   }
 

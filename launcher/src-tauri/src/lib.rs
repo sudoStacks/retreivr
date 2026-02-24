@@ -8,8 +8,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-const LAUNCHER_RELEASE_API: &str = "https://api.github.com/repos/sudoStacks/retreivr/releases/latest";
-const LAUNCHER_RELEASES_URL: &str = "https://github.com/sudoStacks/retreivr/releases";
+const LAUNCHER_RELEASE_API: &str = "https://api.github.com/repos/sudostacks/retreivr/releases/latest";
+const LAUNCHER_RELEASES_URL: &str = "https://github.com/sudostacks/retreivr/releases";
 
 fn app_support_dir(app: &AppHandle) -> PathBuf {
     app.path()
@@ -37,7 +37,7 @@ impl Default for LauncherSettings {
     fn default() -> Self {
         Self {
             host_port: 8090,
-            image: "ghcr.io/sudoStacks/retreivr:latest".to_string(),
+            image: "ghcr.io/sudostacks/retreivr:latest".to_string(),
             container_name: "retreivr".to_string(),
         }
     }
@@ -123,6 +123,10 @@ fn web_url(settings: &LauncherSettings) -> String {
     format!("http://localhost:{}", settings.host_port)
 }
 
+fn canonicalize_image_ref(image: &str) -> String {
+    image.trim().to_ascii_lowercase()
+}
+
 fn load_settings(app: &AppHandle) -> LauncherSettings {
     let path = settings_path(app);
     let content = match fs::read_to_string(path) {
@@ -130,13 +134,17 @@ fn load_settings(app: &AppHandle) -> LauncherSettings {
         Err(_) => return LauncherSettings::default(),
     };
 
-    serde_json::from_str(&content).unwrap_or_else(|_| LauncherSettings::default())
+    let mut parsed = serde_json::from_str(&content).unwrap_or_else(|_| LauncherSettings::default());
+    parsed.image = canonicalize_image_ref(&parsed.image);
+    parsed
 }
 
 fn save_settings_to_disk(app: &AppHandle, settings: &LauncherSettings) -> Result<(), String> {
     let dir = app_support_dir(app);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let payload = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    let mut normalized = settings.clone();
+    normalized.image = canonicalize_image_ref(&normalized.image);
+    let payload = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
     fs::write(settings_path(app), payload).map_err(|e| e.to_string())
 }
 
@@ -147,6 +155,10 @@ fn validate_settings(settings: &LauncherSettings) -> Result<(), String> {
 
     if settings.image.trim().is_empty() {
         return Err("image cannot be empty".to_string());
+    }
+
+    if settings.image.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err("image must be lowercase (Docker image refs are case-sensitive)".to_string());
     }
 
     if settings.container_name.trim().is_empty() {
@@ -343,7 +355,7 @@ fn fetch_latest_launcher_release() -> Result<GithubReleaseResponse, String> {
             cmd.args([
                 "-NoProfile",
                 "-Command",
-                "$ProgressPreference='SilentlyContinue'; (Invoke-RestMethod -Uri 'https://api.github.com/repos/sudoStacks/retreivr/releases/latest' -Headers @{ 'User-Agent'='retreivr-launcher' } | ConvertTo-Json -Compress)",
+                "$ProgressPreference='SilentlyContinue'; (Invoke-RestMethod -Uri 'https://api.github.com/repos/sudostacks/retreivr/releases/latest' -Headers @{ 'User-Agent'='retreivr-launcher' } | ConvertTo-Json -Compress)",
             ]);
             cmd
         })
@@ -563,9 +575,11 @@ fn save_launcher_settings(
     app: AppHandle,
     settings: LauncherSettings,
 ) -> Result<LauncherSettings, String> {
-    validate_settings(&settings)?;
-    save_settings_to_disk(&app, &settings)?;
-    Ok(settings)
+    let mut normalized = settings.clone();
+    normalized.image = canonicalize_image_ref(&normalized.image);
+    validate_settings(&normalized)?;
+    save_settings_to_disk(&app, &normalized)?;
+    Ok(normalized)
 }
 
 #[tauri::command]
