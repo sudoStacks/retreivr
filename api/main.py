@@ -138,7 +138,7 @@ from engine.import_pipeline import process_imported_tracks
 from engine.import_m3u_builder import write_import_m3u_from_batch
 
 APP_NAME = "Retreivr API"
-STATUS_SCHEMA_VERSION = 1
+STATUS_SCHEMA_VERSION = 2
 METRICS_SCHEMA_VERSION = 1
 SCHEDULE_SCHEMA_VERSION = 1
 _BASIC_AUTH_USER = os.environ.get("YT_ARCHIVER_BASIC_AUTH_USER")
@@ -252,6 +252,130 @@ def _get_playlist_import_job(job_id: str) -> dict | None:
         _trim_playlist_import_jobs_locked()
         entry = jobs.get(job_id)
         return dict(entry) if isinstance(entry, dict) else None
+
+
+def _get_playlist_import_snapshot() -> dict:
+    snapshot: dict = {
+        "active": _playlist_imports_active(),
+        "active_count": _playlist_imports_active_count(),
+        "current_job": None,
+    }
+    lock = getattr(app.state, "playlist_import_jobs_lock", None)
+    jobs = getattr(app.state, "playlist_import_jobs", None)
+    if lock is None or not isinstance(jobs, dict):
+        return snapshot
+    with lock:
+        _trim_playlist_import_jobs_locked()
+        rows = [dict(entry) for entry in jobs.values() if isinstance(entry, dict)]
+    if not rows:
+        return snapshot
+    active_rows = [
+        row
+        for row in rows
+        if str(row.get("state") or "").strip().lower() in {"queued", "parsing", "resolving"}
+    ]
+    ranked = active_rows if active_rows else rows
+    ranked.sort(key=lambda row: float(row.get("updated_ts") or 0.0), reverse=True)
+    current = ranked[0]
+    snapshot["current_job"] = {
+        "job_id": current.get("job_id"),
+        "state": current.get("state"),
+        "phase": current.get("phase"),
+        "message": current.get("message"),
+        "total_tracks": current.get("total_tracks"),
+        "processed_tracks": current.get("processed_tracks"),
+        "resolved": current.get("resolved"),
+        "unresolved": current.get("unresolved"),
+        "enqueued": current.get("enqueued"),
+        "failed": current.get("failed"),
+        "error": current.get("error"),
+        "started_at": current.get("started_at"),
+        "finished_at": current.get("finished_at"),
+        "updated_at": current.get("updated_at"),
+    }
+    return snapshot
+
+
+def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
+    summary: dict = {
+        "counts": {
+            "queued": 0,
+            "claimed": 0,
+            "downloading": 0,
+            "postprocessing": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "completed": 0,
+        },
+        "active_count": 0,
+        "active_jobs": [],
+    }
+    db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+    if not db_path:
+        return summary
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        statuses = ("queued", "claimed", "downloading", "postprocessing", "failed", "cancelled", "completed")
+        placeholders = ",".join("?" for _ in statuses)
+        cur.execute(
+            f"SELECT status, COUNT(*) AS count FROM download_jobs WHERE status IN ({placeholders}) GROUP BY status",
+            statuses,
+        )
+        for row in cur.fetchall():
+            key = str(row["status"] or "").strip().lower()
+            if key in summary["counts"]:
+                summary["counts"][key] = int(row["count"] or 0)
+
+        summary["active_count"] = int(
+            summary["counts"]["queued"]
+            + summary["counts"]["claimed"]
+            + summary["counts"]["downloading"]
+            + summary["counts"]["postprocessing"]
+        )
+
+        active_statuses = ("downloading", "postprocessing", "claimed", "queued")
+        active_placeholders = ",".join("?" for _ in active_statuses)
+        cur.execute(
+            f"""
+            SELECT id, status, source, origin, media_intent, attempts, max_attempts, created_at, updated_at, last_error
+            FROM download_jobs
+            WHERE status IN ({active_placeholders})
+            ORDER BY
+                CASE status
+                    WHEN 'downloading' THEN 0
+                    WHEN 'postprocessing' THEN 1
+                    WHEN 'claimed' THEN 2
+                    ELSE 3
+                END,
+                COALESCE(updated_at, created_at) DESC
+            LIMIT ?
+            """,
+            (*active_statuses, int(max(1, limit_active_jobs))),
+        )
+        summary["active_jobs"] = [
+            {
+                "id": row["id"],
+                "status": row["status"],
+                "source": row["source"],
+                "origin": row["origin"],
+                "media_intent": row["media_intent"],
+                "attempts": row["attempts"],
+                "max_attempts": row["max_attempts"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "last_error": row["last_error"],
+            }
+            for row in cur.fetchall()
+        ]
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            logging.exception("Failed to build download queue snapshot")
+    finally:
+        conn.close()
+    return summary
 
 
 def _run_playlist_import_job(job_id: str, filename: str, payload: bytes) -> None:
@@ -4172,10 +4296,8 @@ async def api_status():
     watcher_status = dict(getattr(app.state, "watcher_status", {}) or {})
     if not bool(getattr(app.state, "watcher_lock", None)):
         watcher_status["state"] = "disabled"
-    playlist_import = {
-        "active": _playlist_imports_active(),
-        "active_count": _playlist_imports_active_count(),
-    }
+    playlist_import = _get_playlist_import_snapshot()
+    queue_status = _get_download_queue_snapshot()
     return safe_json({
         "schema_version": STATUS_SCHEMA_VERSION,
         "server_time": datetime.now(timezone.utc).isoformat(),
@@ -4193,6 +4315,7 @@ async def api_status():
         "scheduler": {
             "enabled": bool((app.state.schedule_config or {}).get("enabled", False)),
         },
+        "queue": queue_status,
         "playlist_import": playlist_import,
         "watcher_errors": watcher_errors,
         "status": status,

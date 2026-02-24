@@ -1207,6 +1207,83 @@ async function refreshStatus() {
     $("#status-playlist").textContent = status.current_playlist_id || "-";
     $("#status-video").textContent = status.current_video_title || status.current_video_id || "-";
     $("#status-phase").textContent = status.current_phase || "-";
+
+    const queue = data.queue || {};
+    const queueCounts = queue.counts || {};
+    const queuedCount = Number.isFinite(Number(queueCounts.queued)) ? Number(queueCounts.queued) : 0;
+    const claimedCount = Number.isFinite(Number(queueCounts.claimed)) ? Number(queueCounts.claimed) : 0;
+    const downloadingCount = Number.isFinite(Number(queueCounts.downloading)) ? Number(queueCounts.downloading) : 0;
+    const postprocessingCount = Number.isFinite(Number(queueCounts.postprocessing))
+      ? Number(queueCounts.postprocessing)
+      : 0;
+    const failedCount = Number.isFinite(Number(queueCounts.failed)) ? Number(queueCounts.failed) : 0;
+    const cancelledCount = Number.isFinite(Number(queueCounts.cancelled)) ? Number(queueCounts.cancelled) : 0;
+    const activeQueueCount = Number.isFinite(Number(queue.active_count))
+      ? Number(queue.active_count)
+      : (queuedCount + claimedCount + downloadingCount + postprocessingCount);
+    $("#status-queue-active").textContent = String(activeQueueCount);
+    $("#status-queue-downloading").textContent = String(downloadingCount);
+    $("#status-queue-queued").textContent = String(queuedCount);
+    $("#status-queue-postprocessing").textContent = String(postprocessingCount);
+    const queueSummary = [];
+    if (claimedCount > 0) {
+      queueSummary.push(`${claimedCount} claimed`);
+    }
+    queueSummary.push(`${failedCount} failed backlog`);
+    queueSummary.push(`${cancelledCount} cancelled`);
+    const activeJobs = Array.isArray(queue.active_jobs) ? queue.active_jobs : [];
+    if (activeJobs.length) {
+      const topJob = activeJobs[0] || {};
+      const topJobLabel = [topJob.status, topJob.source].filter(Boolean).join(" · ");
+      if (topJobLabel) {
+        queueSummary.push(`head: ${topJobLabel}`);
+      }
+    }
+    $("#status-queue-summary").textContent = queueSummary.join(" · ");
+
+    const importState = data.playlist_import || {};
+    const importCurrent = importState.current_job || {};
+    const importActiveCount = Number.isFinite(Number(importState.active_count))
+      ? Number(importState.active_count)
+      : 0;
+    const importProcessed = Number.isFinite(Number(importCurrent.processed_tracks))
+      ? Number(importCurrent.processed_tracks)
+      : 0;
+    const importTotal = Number.isFinite(Number(importCurrent.total_tracks))
+      ? Number(importCurrent.total_tracks)
+      : 0;
+    const importEnqueued = Number.isFinite(Number(importCurrent.enqueued))
+      ? Number(importCurrent.enqueued)
+      : 0;
+    const importFailed = Number.isFinite(Number(importCurrent.failed))
+      ? Number(importCurrent.failed)
+      : 0;
+    const importResolved = Number.isFinite(Number(importCurrent.resolved))
+      ? Number(importCurrent.resolved)
+      : 0;
+    const importStateText = importCurrent.state || (importState.active ? "running" : "idle");
+    const importPercent = importTotal > 0
+      ? Math.max(0, Math.min(100, Math.round((importProcessed / importTotal) * 100)))
+      : 0;
+    $("#status-import-state").textContent = importStateText;
+    $("#status-import-active-count").textContent = String(importActiveCount);
+    $("#status-import-processed").textContent = `${importProcessed} / ${importTotal}`;
+    $("#status-import-enqueued").textContent = String(importEnqueued);
+    $("#status-import-failed").textContent = String(importFailed);
+    $("#status-import-progress-bar").style.width = `${importPercent}%`;
+    const importSummaryParts = [
+      `${importPercent}% processed`,
+      `${importResolved} resolved`,
+      `${importEnqueued} enqueued`,
+    ];
+    if (importCurrent.message) {
+      importSummaryParts.push(importCurrent.message);
+    }
+    if (importCurrent.error) {
+      importSummaryParts.push(`error: ${importCurrent.error}`);
+    }
+    $("#status-import-progress-text").textContent = importSummaryParts.join(" · ");
+
     const watcherStatus = data.watcher_status || {};
     const watcherStateMap = {
       idle: "Idle",
@@ -1305,7 +1382,6 @@ async function refreshStatus() {
         }
       };
     }
-    const importState = data.playlist_import || {};
     if (!state.playlistImportInProgress) {
       const activeImport = !!importState.active;
       setPlaylistImportControlsEnabled(!activeImport);
