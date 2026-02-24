@@ -22,6 +22,9 @@ All notable changes to this project will be documented here.
 - UI/UX fixes and updates across Home search, advanced options layout, status indicators, and delivery controls.
 - Unified visual theme across Home/Info/Status/Config and renamed the `Advanced Search` nav label to `Info` for clearer navigation semantics.
 - Client delivery was brought back on Home flows and now obeys the delivery toggle for both candidate and direct URL downloads.
+- Playlist file import now runs as a background job (`POST /api/import/playlist` returns `202` + `job_id`) with progress polling via `GET /api/import/playlist/jobs/{job_id}` to avoid blocking the request path.
+- Scheduler, watcher, and scheduled Spotify sync ticks now pause while playlist imports are active to reduce runtime contention and UX conflicts.
+- Home import UX now enforces explicit confirmation, disables import controls while running, and displays a live progress modal with status counters and errors.
 
 ### Fixed
 - MusicBrainz recording include contract errors (`InvalidIncludeError`) in binding fetch paths.

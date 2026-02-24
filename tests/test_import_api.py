@@ -25,35 +25,18 @@ def _build_client(monkeypatch) -> TestClient:
 def test_import_api_valid_upload(monkeypatch) -> None:
     client = _build_client(monkeypatch)
 
-    monkeypatch.setattr(
-        "api.main.import_playlist_file_bytes",
-        lambda file_bytes, filename: [SimpleNamespace(artist="A", title="B", album=None, raw_line="A - B", source_format="m3u")],
-    )
-    monkeypatch.setattr(
-        "api.main.process_imported_tracks",
-        lambda track_intents, config: SimpleNamespace(
-            total_tracks=1,
-            resolved_count=1,
-            unresolved_count=0,
-            enqueued_count=1,
-            failed_count=0,
-        ),
-    )
+    monkeypatch.setattr("api.main._run_playlist_import_job", lambda *_args, **_kwargs: None)
 
     response = client.post(
         "/api/import/playlist",
         files={"file": ("sample.m3u", b"#EXTM3U\n#EXTINF:123,Artist - Title\ntrack.mp3\n", "audio/x-mpegurl")},
     )
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "total_tracks": 1,
-        "resolved": 1,
-        "unresolved": 0,
-        "enqueued": 1,
-        "failed": 0,
-        "import_batch_id": "",
-    }
+    payload = response.json()
+    assert response.status_code == 202
+    assert isinstance(payload.get("job_id"), str)
+    assert payload["status"]["state"] == "queued"
+    assert payload["status"]["job_id"] == payload["job_id"]
 
 
 def test_import_api_invalid_format(monkeypatch) -> None:

@@ -984,5 +984,48 @@
       </div>
     </div>
   </div>
+
+  <div id="import-progress-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="import-progress-title">
+    <div class="modal-card import-progress-card">
+      <div class="row space-between">
+        <div id="import-progress-title" class="panel-title">Playlist Import Running</div>
+        <button id="import-progress-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div id="import-progress-message" class="notice">
+        Import is running. Performance may be reduced while tracks are resolved.
+      </div>
+      <div class="progress">
+        <div id="import-progress-bar" class="progress-bar"></div>
+      </div>
+      <div class="row">
+        <div class="stat">
+          <span class="label">Status</span>
+          <span id="import-progress-state">queued</span>
+        </div>
+        <div class="stat">
+          <span class="label">Processed</span>
+          <span id="import-progress-processed">0 / 0</span>
+        </div>
+      </div>
+      <div class="row">
+        <div class="stat">
+          <span class="label">Resolved</span>
+          <span id="import-progress-resolved">0</span>
+        </div>
+        <div class="stat">
+          <span class="label">Enqueued</span>
+          <span id="import-progress-enqueued">0</span>
+        </div>
+        <div class="stat">
+          <span class="label">Failed</span>
+          <span id="import-progress-failed">0</span>
+        </div>
+      </div>
+      <div id="import-progress-error" class="notice" role="status"></div>
+      <div class="meta">
+        Please avoid starting other downloads or heavy actions until the import completes.
+      </div>
+    </div>
+  </div>
 </body>
 </html>

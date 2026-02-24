@@ -48,6 +48,9 @@ const state = {
   homeJobSnapshot: null,
   spotifyOauthConnected: false,
   spotifyConnectedNoticeShown: false,
+  playlistImportJobId: null,
+  playlistImportPollTimer: null,
+  playlistImportInProgress: false,
 };
 const browserState = {
   open: false,
@@ -411,7 +414,8 @@ function setupNavActions() {
 }
 
 function updatePollingState() {
-  state.pollingPaused = browserState.open || oauthState.open || state.configDirty || state.inputFocused;
+  const importModalOpen = !$("#import-progress-modal")?.classList.contains("hidden");
+  state.pollingPaused = browserState.open || oauthState.open || importModalOpen || state.configDirty || state.inputFocused;
 }
 
 function withPollingGuard(fn) {
@@ -920,6 +924,146 @@ function closeOauthModal() {
   updatePollingState();
 }
 
+function setPlaylistImportControlsEnabled(enabled) {
+  const importButton = $("#home-import-button");
+  if (importButton) {
+    importButton.disabled = !enabled;
+  }
+  const importFile = $("#home-import-file");
+  if (importFile) {
+    importFile.disabled = !enabled;
+  }
+}
+
+function openImportProgressModal() {
+  const modal = $("#import-progress-modal");
+  if (!modal) return;
+  modal.classList.remove("hidden");
+  updatePollingState();
+}
+
+function closeImportProgressModal() {
+  if (state.playlistImportInProgress) {
+    return;
+  }
+  const modal = $("#import-progress-modal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  updatePollingState();
+}
+
+function renderPlaylistImportStatus(status) {
+  const safe = status || {};
+  const phase = String(safe.phase || safe.state || "queued");
+  const phaseLower = phase.toLowerCase();
+  const active = phaseLower === "queued" || phaseLower === "parsing" || phaseLower === "resolving";
+  const total = Number.isFinite(Number(safe.total_tracks)) ? Number(safe.total_tracks) : 0;
+  const processed = Number.isFinite(Number(safe.processed_tracks)) ? Number(safe.processed_tracks) : 0;
+  const resolved = Number.isFinite(Number(safe.resolved)) ? Number(safe.resolved) : 0;
+  const enqueued = Number.isFinite(Number(safe.enqueued)) ? Number(safe.enqueued) : 0;
+  const failed = Number.isFinite(Number(safe.failed)) ? Number(safe.failed) : 0;
+  const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((processed / total) * 100))) : 0;
+  const stateEl = $("#import-progress-state");
+  if (stateEl) {
+    stateEl.textContent = phase;
+  }
+  const msgEl = $("#import-progress-message");
+  if (msgEl) {
+    msgEl.textContent = safe.message || "Playlist import in progress...";
+  }
+  const processedEl = $("#import-progress-processed");
+  if (processedEl) {
+    processedEl.textContent = `${processed} / ${total}`;
+  }
+  const resolvedEl = $("#import-progress-resolved");
+  if (resolvedEl) {
+    resolvedEl.textContent = String(resolved);
+  }
+  const enqueuedEl = $("#import-progress-enqueued");
+  if (enqueuedEl) {
+    enqueuedEl.textContent = String(enqueued);
+  }
+  const failedEl = $("#import-progress-failed");
+  if (failedEl) {
+    failedEl.textContent = String(failed);
+  }
+  const progressBar = $("#import-progress-bar");
+  if (progressBar) {
+    progressBar.style.width = `${percent}%`;
+  }
+  const closeBtn = $("#import-progress-close");
+  if (closeBtn) {
+    closeBtn.disabled = active;
+  }
+  const errorEl = $("#import-progress-error");
+  if (errorEl) {
+    if (safe.error) {
+      errorEl.textContent = `Error: ${safe.error}`;
+      errorEl.style.color = "#ff7b7b";
+    } else {
+      errorEl.textContent = "";
+    }
+  }
+}
+
+function stopPlaylistImportPolling() {
+  if (state.playlistImportPollTimer) {
+    clearInterval(state.playlistImportPollTimer);
+    state.playlistImportPollTimer = null;
+  }
+}
+
+async function pollPlaylistImportStatus() {
+  const jobId = state.playlistImportJobId;
+  if (!jobId) {
+    stopPlaylistImportPolling();
+    return;
+  }
+  try {
+    const data = await fetchJson(`/api/import/playlist/jobs/${encodeURIComponent(jobId)}`);
+    const status = data.status || {};
+    renderPlaylistImportStatus(status);
+    const phase = String(status.state || "").toLowerCase();
+    const active = phase === "queued" || phase === "parsing" || phase === "resolving";
+    state.playlistImportInProgress = active;
+    setPlaylistImportControlsEnabled(!active);
+    if (!active) {
+      stopPlaylistImportPolling();
+      if (phase === "completed") {
+        setNotice($("#home-search-message"), "Playlist import completed.", false);
+        const summaryEl = $("#home-import-summary");
+        if (summaryEl) {
+          summaryEl.textContent =
+            `Total: ${status.total_tracks || 0} | Resolved: ${status.resolved || 0} | ` +
+            `Enqueued: ${status.enqueued || 0} | Unresolved: ${status.unresolved || 0}`;
+        }
+      } else {
+        setNotice($("#home-search-message"), `Import failed: ${status.error || "unknown error"}`, true);
+      }
+    }
+  } catch (err) {
+    stopPlaylistImportPolling();
+    state.playlistImportInProgress = false;
+    setPlaylistImportControlsEnabled(true);
+    setNotice($("#home-search-message"), `Import status failed: ${err.message}`, true);
+  }
+}
+
+function startPlaylistImportPolling(jobId, initialStatus = null) {
+  state.playlistImportJobId = jobId;
+  state.playlistImportInProgress = true;
+  setPlaylistImportControlsEnabled(false);
+  openImportProgressModal();
+  if (initialStatus) {
+    renderPlaylistImportStatus(initialStatus);
+  }
+  stopPlaylistImportPolling();
+  state.playlistImportPollTimer = setInterval(() => {
+    pollPlaylistImportStatus();
+  }, 1500);
+  pollPlaylistImportStatus();
+}
+
 async function startOauthForRow(row) {
   const account = row.querySelector(".account-name").value.trim();
   const clientSecret = row.querySelector(".account-client").value.trim();
@@ -1070,6 +1214,7 @@ async function refreshStatus() {
       waiting_quiet_window: "Waiting (quiet window)",
       batch_ready: "Batch ready",
       running_batch: "Running batch",
+      paused_import: "Paused (playlist import active)",
       disabled: "Disabled",
     };
     const watcherState = watcherStatus.state || (watcher.enabled ? "idle" : "disabled");
@@ -1159,6 +1304,11 @@ async function refreshStatus() {
           setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
         }
       };
+    }
+    const importState = data.playlist_import || {};
+    if (!state.playlistImportInProgress) {
+      const activeImport = !!importState.active;
+      setPlaylistImportControlsEnabled(!activeImport);
     }
 
     try {
@@ -4056,6 +4206,20 @@ async function importHomePlaylistFile() {
     setNotice(messageEl, "Select a playlist file to import.", true);
     return;
   }
+  if (state.playlistImportInProgress) {
+    setNotice(messageEl, "A playlist import is already running.", true);
+    openImportProgressModal();
+    return;
+  }
+
+  const proceed = window.confirm(
+    "Playlist import can temporarily reduce app performance.\n\n" +
+    "During import, avoid running other downloads or heavy actions until it completes.\n\n" +
+    "Start playlist import now?"
+  );
+  if (!proceed) {
+    return;
+  }
 
   const formData = new FormData();
   formData.append("file", file, file.name);
@@ -4063,27 +4227,21 @@ async function importHomePlaylistFile() {
   if (summaryEl) {
     summaryEl.textContent = "";
   }
-  setNotice(messageEl, "Importing playlist file...", false);
+  setNotice(messageEl, "Playlist import started. Tracking progress...", false);
+  setPlaylistImportControlsEnabled(false);
   try {
-    const response = await fetch("/api/import/playlist", {
+    const payload = await fetchJson("/api/import/playlist", {
       method: "POST",
       body: formData,
     });
-    let payload = {};
-    try {
-      payload = await response.json();
-    } catch (_err) {
-      payload = {};
+    const jobId = String(payload.job_id || "").trim();
+    if (!jobId) {
+      throw new Error("missing_job_id");
     }
-    if (!response.ok) {
-      const detail = payload && payload.detail ? payload.detail : `HTTP ${response.status}`;
-      throw new Error(String(detail));
-    }
-    if (summaryEl) {
-      summaryEl.textContent = `Total: ${payload.total_tracks || 0} | Resolved: ${payload.resolved || 0} | Enqueued: ${payload.enqueued || 0} | Unresolved: ${payload.unresolved || 0}`;
-    }
-    setNotice(messageEl, "Playlist import completed.", false);
+    startPlaylistImportPolling(jobId, payload.status || null);
   } catch (err) {
+    state.playlistImportInProgress = false;
+    setPlaylistImportControlsEnabled(true);
     setNotice(messageEl, `Import failed: ${err.message}`, true);
   }
 }
@@ -5891,6 +6049,18 @@ function bindEvents() {
     }
   });
   $("#oauth-complete").addEventListener("click", completeOauth);
+  const importProgressClose = $("#import-progress-close");
+  if (importProgressClose) {
+    importProgressClose.addEventListener("click", closeImportProgressModal);
+  }
+  const importProgressModal = $("#import-progress-modal");
+  if (importProgressModal) {
+    importProgressModal.addEventListener("click", (event) => {
+      if (event.target === importProgressModal) {
+        closeImportProgressModal();
+      }
+    });
+  }
   const spotifyConnectBtn = $("#spotify-connect-btn");
   if (spotifyConnectBtn) {
     spotifyConnectBtn.addEventListener("click", connectSpotify);

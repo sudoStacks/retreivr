@@ -1393,6 +1393,14 @@ a[aria-disabled="true"] {
   box-shadow: var(--shadow);
 }
 
+.import-progress-card {
+  width: min(640px, 92vw);
+}
+
+#import-progress-error {
+  min-height: 20px;
+}
+
 .browser-list {
   border: 1px solid var(--border);
   border-radius: 12px;

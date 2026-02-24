@@ -432,6 +432,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
         base_dir = config.get("base_dir") or base_dir
         destination = config.get("destination_dir")
         final_format_override = config.get("final_format")
+    progress_callback = config.get("progress_callback") if isinstance(config, dict) else None
 
     total_tracks = len(track_intents)
     resolved_count = 0
@@ -441,6 +442,21 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     resolved_mbids: list[str] = []
 
     for idx, intent in enumerate(track_intents):
+        if callable(progress_callback):
+            try:
+                progress_callback(
+                    {
+                        "total_tracks": int(total_tracks),
+                        "processed_tracks": int(idx),
+                        "resolved_count": int(resolved_count),
+                        "unresolved_count": int(unresolved_count),
+                        "enqueued_count": int(enqueued_count),
+                        "failed_count": int(failed_count),
+                        "phase": "resolving",
+                    }
+                )
+            except Exception:
+                logger.exception("import_progress_callback_failed")
         query = _build_query(intent)
         if not query:
             failed_count += 1
@@ -541,6 +557,22 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 recording_mbid_attempted=None,
                 last_query=query,
             )
+
+    if callable(progress_callback):
+        try:
+            progress_callback(
+                {
+                    "total_tracks": int(total_tracks),
+                    "processed_tracks": int(total_tracks),
+                    "resolved_count": int(resolved_count),
+                    "unresolved_count": int(unresolved_count),
+                    "enqueued_count": int(enqueued_count),
+                    "failed_count": int(failed_count),
+                    "phase": "finalizing",
+                }
+            )
+        except Exception:
+            logger.exception("import_progress_callback_failed")
 
     unresolved_count = max(unresolved_count, total_tracks - resolved_count - failed_count)
     return ImportResult(

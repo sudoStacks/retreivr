@@ -174,6 +174,7 @@ DIRECT_URL_PLAYLIST_ERROR = (
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
 MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024
 SUPPORTED_IMPORT_EXTENSIONS = {".m3u", ".m3u8", ".csv", ".xml", ".plist", ".json"}
+IMPORT_JOB_TTL_SECONDS = 6 * 60 * 60
 
 
 def _mb_service():
@@ -183,6 +184,173 @@ def _mb_service():
 def get_loaded_config() -> dict:
     cfg = getattr(app.state, "loaded_config", None) or getattr(app.state, "config", None)
     return cfg if isinstance(cfg, dict) else {}
+
+
+def _playlist_imports_active_count() -> int:
+    try:
+        value = int(getattr(app.state, "playlist_import_active_count", 0) or 0)
+    except Exception:
+        value = 0
+    return max(0, value)
+
+
+def _playlist_imports_active() -> bool:
+    return _playlist_imports_active_count() > 0
+
+
+def _trim_playlist_import_jobs_locked() -> None:
+    jobs = getattr(app.state, "playlist_import_jobs", None)
+    if not isinstance(jobs, dict):
+        return
+    now = time.time()
+    stale_ids: list[str] = []
+    for job_id, entry in jobs.items():
+        if not isinstance(entry, dict):
+            stale_ids.append(str(job_id))
+            continue
+        state = str(entry.get("state") or "").strip().lower()
+        if state not in {"completed", "failed", "cancelled"}:
+            continue
+        finished_at = str(entry.get("finished_at") or "").strip()
+        finished_ts = None
+        if finished_at:
+            parsed = _parse_iso(finished_at)
+            if parsed is not None:
+                finished_ts = parsed.timestamp()
+        if finished_ts is None:
+            finished_ts = float(entry.get("updated_ts") or 0.0)
+        if finished_ts and (now - finished_ts) > IMPORT_JOB_TTL_SECONDS:
+            stale_ids.append(str(job_id))
+    for job_id in stale_ids:
+        jobs.pop(job_id, None)
+
+
+def _update_playlist_import_job(job_id: str, **fields) -> dict | None:
+    lock = getattr(app.state, "playlist_import_jobs_lock", None)
+    jobs = getattr(app.state, "playlist_import_jobs", None)
+    if lock is None or not isinstance(jobs, dict):
+        return None
+    with lock:
+        entry = jobs.get(job_id)
+        if not isinstance(entry, dict):
+            return None
+        for key, value in fields.items():
+            entry[key] = value
+        entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+        entry["updated_ts"] = time.time()
+        jobs[job_id] = entry
+        _trim_playlist_import_jobs_locked()
+        return dict(entry)
+
+
+def _get_playlist_import_job(job_id: str) -> dict | None:
+    lock = getattr(app.state, "playlist_import_jobs_lock", None)
+    jobs = getattr(app.state, "playlist_import_jobs", None)
+    if lock is None or not isinstance(jobs, dict):
+        return None
+    with lock:
+        _trim_playlist_import_jobs_locked()
+        entry = jobs.get(job_id)
+        return dict(entry) if isinstance(entry, dict) else None
+
+
+def _run_playlist_import_job(job_id: str, filename: str, payload: bytes) -> None:
+    try:
+        _update_playlist_import_job(
+            job_id,
+            state="parsing",
+            message="Parsing playlist file...",
+        )
+        track_intents = import_playlist_file_bytes(payload, filename)
+        total_tracks = len(track_intents)
+        if total_tracks <= 0:
+            _update_playlist_import_job(
+                job_id,
+                state="failed",
+                message="Import failed",
+                error="empty_import",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return
+
+        _update_playlist_import_job(
+            job_id,
+            state="resolving",
+            message="Resolving tracks and enqueueing jobs...",
+            total_tracks=int(total_tracks),
+            processed_tracks=0,
+        )
+
+        engine = getattr(app.state, "worker_engine", None)
+        queue_store = getattr(engine, "store", None) if engine is not None else None
+        if queue_store is None:
+            _update_playlist_import_job(
+                job_id,
+                state="failed",
+                message="Import failed",
+                error="queue_store_unavailable",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return
+
+        runtime_config = _read_config_or_404()
+
+        def _progress(snapshot: dict) -> None:
+            _update_playlist_import_job(
+                job_id,
+                phase=snapshot.get("phase") or "resolving",
+                total_tracks=int(snapshot.get("total_tracks") or total_tracks),
+                processed_tracks=int(snapshot.get("processed_tracks") or 0),
+                resolved=int(snapshot.get("resolved_count") or 0),
+                unresolved=int(snapshot.get("unresolved_count") or 0),
+                enqueued=int(snapshot.get("enqueued_count") or 0),
+                failed=int(snapshot.get("failed_count") or 0),
+                message="Resolving tracks and enqueueing jobs...",
+            )
+
+        result = process_imported_tracks(
+            track_intents,
+            {
+                "queue_store": queue_store,
+                "app_config": runtime_config,
+                "base_dir": app.state.paths.single_downloads_dir,
+                "destination_dir": None,
+                "final_format": runtime_config.get("final_format"),
+                "progress_callback": _progress,
+            },
+        )
+
+        import_batch_id = str(getattr(result, "import_batch_id", "") or "").strip()
+        _update_playlist_import_job(
+            job_id,
+            state="completed",
+            message="Playlist import completed.",
+            phase="completed",
+            total_tracks=int(getattr(result, "total_tracks", total_tracks) or total_tracks),
+            processed_tracks=int(getattr(result, "total_tracks", total_tracks) or total_tracks),
+            resolved=int(getattr(result, "resolved_count", 0) or 0),
+            unresolved=int(getattr(result, "unresolved_count", 0) or 0),
+            enqueued=int(getattr(result, "enqueued_count", 0) or 0),
+            failed=int(getattr(result, "failed_count", 0) or 0),
+            import_batch_id=import_batch_id,
+            error=None,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as exc:
+        _update_playlist_import_job(
+            job_id,
+            state="failed",
+            message="Import failed",
+            error=str(exc),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+    finally:
+        lock = getattr(app.state, "playlist_import_jobs_lock", None)
+        if lock is not None:
+            with lock:
+                active_count = _playlist_imports_active_count()
+                app.state.playlist_import_active_count = max(0, active_count - 1)
+                _trim_playlist_import_jobs_locked()
 
 
 def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
@@ -1155,6 +1323,9 @@ async def startup():
         )
     app.state.spotify_playlist_importer = SpotifyPlaylistImporter()
     app.state.spotify_import_status = {}
+    app.state.playlist_import_jobs = {}
+    app.state.playlist_import_jobs_lock = threading.Lock()
+    app.state.playlist_import_active_count = 0
     app.state.music_cover_art_cache = {}
 
     app.state.worker_stop_event = threading.Event()
@@ -2684,6 +2855,10 @@ def _spotify_playlists_schedule_tick(
 
 
 async def _handle_scheduled_run():
+    if _playlist_imports_active():
+        logging.info("Scheduled run skipped; playlist import active")
+        _set_schedule_state(next_run=_get_next_run_iso())
+        return
     if app.state.running:
         logging.info("Scheduled run skipped; run already active")
         _set_schedule_state(next_run=_get_next_run_iso())
@@ -2785,6 +2960,9 @@ def _has_connected_spotify_oauth_token(db_path: str) -> bool:
 
 
 async def _handle_liked_songs_scheduled_run() -> None:
+    if _playlist_imports_active():
+        logging.info("Scheduled Spotify Liked Songs sync skipped; playlist import active")
+        return
     config = _read_config_for_scheduler()
     if not config:
         return
@@ -2815,6 +2993,9 @@ async def _handle_liked_songs_scheduled_run() -> None:
 
 
 async def _handle_saved_albums_scheduled_run() -> None:
+    if _playlist_imports_active():
+        logging.info("Scheduled Spotify Saved Albums sync skipped; playlist import active")
+        return
     config = _read_config_for_scheduler()
     if not config:
         return
@@ -2845,6 +3026,9 @@ async def _handle_saved_albums_scheduled_run() -> None:
 
 
 async def _handle_user_playlists_scheduled_run() -> None:
+    if _playlist_imports_active():
+        logging.info("Scheduled Spotify User Playlists sync skipped; playlist import active")
+        return
     config = _read_config_for_scheduler()
     if not config:
         return
@@ -2875,6 +3059,9 @@ async def _handle_user_playlists_scheduled_run() -> None:
 
 
 async def _handle_spotify_playlists_scheduled_run() -> None:
+    if _playlist_imports_active():
+        logging.info("Scheduled Spotify playlists sync skipped; playlist import active")
+        return
     config = _read_config_for_scheduler()
     if not config:
         return
@@ -3565,6 +3752,16 @@ async def _watcher_supervisor():
             _set_watcher_status("idle", next_poll_ts=None, pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
             await asyncio.sleep(60)
             continue
+        if _playlist_imports_active():
+            _set_watcher_status(
+                "paused_import",
+                next_poll_ts=None,
+                pending_playlists_count=0,
+                quiet_window_remaining_sec=None,
+                batch_active=False,
+            )
+            await asyncio.sleep(10)
+            continue
 
         policy = normalize_watch_policy(config)
         downtime = policy.get("downtime") or {}
@@ -3946,6 +4143,10 @@ async def api_status():
     watcher_status = dict(getattr(app.state, "watcher_status", {}) or {})
     if not bool(getattr(app.state, "watcher_lock", None)):
         watcher_status["state"] = "disabled"
+    playlist_import = {
+        "active": _playlist_imports_active(),
+        "active_count": _playlist_imports_active_count(),
+    }
     return safe_json({
         "schema_version": STATUS_SCHEMA_VERSION,
         "server_time": datetime.now(timezone.utc).isoformat(),
@@ -3963,6 +4164,7 @@ async def api_status():
         "scheduler": {
             "enabled": bool((app.state.schedule_config or {}).get("enabled", False)),
         },
+        "playlist_import": playlist_import,
         "watcher_errors": watcher_errors,
         "status": status,
     })
@@ -4375,43 +4577,56 @@ async def import_playlist(file: UploadFile = File(...)):
     if len(payload) > MAX_IMPORT_FILE_BYTES:
         raise HTTPException(status_code=400, detail="file_too_large")
 
-    try:
-        track_intents = import_playlist_file_bytes(payload, filename)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"parse_error: {exc}") from exc
-
-    if not track_intents:
-        raise HTTPException(status_code=400, detail="empty_import")
-
-    engine = getattr(app.state, "worker_engine", None)
-    queue_store = getattr(engine, "store", None) if engine is not None else None
-    if queue_store is None:
-        raise HTTPException(status_code=503, detail="queue_store_unavailable")
-
-    runtime_config = _read_config_or_404()
-    try:
-        result = process_imported_tracks(
-            track_intents,
-            {
-                "queue_store": queue_store,
-                "app_config": runtime_config,
-                "base_dir": app.state.paths.single_downloads_dir,
-                "destination_dir": None,
-                "final_format": runtime_config.get("final_format"),
-            },
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"import_processing_failed: {exc}") from exc
-    import_batch_id = str(getattr(result, "import_batch_id", "") or "").strip()
-
-    return {
-        "total_tracks": int(getattr(result, "total_tracks", 0)),
-        "resolved": int(getattr(result, "resolved_count", 0)),
-        "unresolved": int(getattr(result, "unresolved_count", 0)),
-        "enqueued": int(getattr(result, "enqueued_count", 0)),
-        "failed": int(getattr(result, "failed_count", 0)),
-        "import_batch_id": import_batch_id,
+    job_id = uuid4().hex
+    now_iso = datetime.now(timezone.utc).isoformat()
+    status_entry = {
+        "job_id": job_id,
+        "filename": filename,
+        "state": "queued",
+        "phase": "queued",
+        "message": "Playlist import queued.",
+        "total_tracks": 0,
+        "processed_tracks": 0,
+        "resolved": 0,
+        "unresolved": 0,
+        "enqueued": 0,
+        "failed": 0,
+        "import_batch_id": "",
+        "error": None,
+        "started_at": now_iso,
+        "finished_at": None,
+        "updated_at": now_iso,
+        "updated_ts": time.time(),
     }
+    lock = getattr(app.state, "playlist_import_jobs_lock", None)
+    jobs = getattr(app.state, "playlist_import_jobs", None)
+    if lock is None or not isinstance(jobs, dict):
+        raise HTTPException(status_code=503, detail="import_state_unavailable")
+    with lock:
+        jobs[job_id] = status_entry
+        app.state.playlist_import_active_count = _playlist_imports_active_count() + 1
+        _trim_playlist_import_jobs_locked()
+
+    thread = threading.Thread(
+        target=_run_playlist_import_job,
+        args=(job_id, filename, payload),
+        name=f"playlist-import-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return JSONResponse(status_code=202, content={"job_id": job_id, "status": status_entry})
+
+
+@app.get("/api/import/playlist/jobs/{job_id}")
+async def get_import_playlist_job(job_id: str):
+    normalized = str(job_id or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="job_id_required")
+    status_entry = _get_playlist_import_job(normalized)
+    if not status_entry:
+        raise HTTPException(status_code=404, detail="import_job_not_found")
+    status_entry["active"] = bool(status_entry.get("state") in {"queued", "parsing", "resolving"})
+    return {"job_id": normalized, "status": status_entry}
 
 
 @app.post("/api/import/playlist/{batch_id}/finalize")
