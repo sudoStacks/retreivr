@@ -1704,9 +1704,11 @@ function updateHomeMusicModeUI() {
   if (musicModeConsole) {
     musicModeConsole.classList.toggle("hidden", !state.homeMusicMode);
   }
-  const badge = ensureHomeMusicModeBadge();
+  // Keep this badge strictly tied to active Music Mode + visible legacy results panel.
+  const badge = $("#home-music-mode-badge");
   if (badge) {
-    badge.classList.toggle("hidden", !state.homeMusicMode);
+    const resultsVisible = !$("#home-results")?.classList.contains("hidden");
+    badge.classList.toggle("hidden", !state.homeMusicMode || !resultsVisible);
   }
 }
 
@@ -2260,6 +2262,15 @@ function clearLegacyHomeSearchState() {
   state.homeBestScores = {};
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
+  const resultsList = $("#home-results-list");
+  if (resultsList) {
+    resultsList.textContent = "";
+  }
+  showHomeResults(false);
+  setHomeSearchActive(false);
+  setHomeResultsState({ hasResults: false, terminal: false });
+  setHomeResultsStatus("Ready to discover media");
+  setHomeResultsDetail("", false);
   updateHomeViewAdvancedLink();
 }
 
@@ -2626,7 +2637,8 @@ function buildHomeResultsStatusInfo(requestId) {
     return { text: fallback, detail: "", isError: false, status: requestStatus };
   }
 
-  if (hasQueued || requestStatus === "completed_with_skips") {
+  const shouldShowQueuedSummary = hasQueued || (requestStatus === "completed_with_skips" && allowQueued);
+  if (shouldShowQueuedSummary) {
     const detail =
       hasQueued && requestStatus === "completed_with_skips"
         ? "Some matches were skipped because they already exist."
@@ -2634,7 +2646,7 @@ function buildHomeResultsStatusInfo(requestId) {
         ? "Matches were skipped, but the request resolved successfully."
         : "Items have been scheduled for download.";
     return {
-      text: "Results queued",
+      text: "Downloads queued",
       detail,
       isError: false,
       status: requestStatus,
@@ -2685,7 +2697,9 @@ function formatHomeRequestStatus(status) {
   if (!status) return "Searching for media…";
   if (status === "resolving" || status === "pending") return "Searching for media…";
   if (status === "completed") return "Results found";
-  if (status === "completed_with_skips") return "Results queued";
+  if (status === "completed_with_skips") {
+    return state.homeSearchMode === "searchOnly" ? "Results found" : "Downloads queued";
+  }
   if (status === "failed") return "Search failed";
   return status[0]?.toUpperCase() + status.slice(1);
 }
