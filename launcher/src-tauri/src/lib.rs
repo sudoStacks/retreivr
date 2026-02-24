@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-const LAUNCHER_RELEASE_API: &str = "https://api.github.com/repos/sudostacks/retreivr/releases/latest";
+const LAUNCHER_TAGS_API: &str = "https://api.github.com/repos/sudostacks/retreivr/tags?per_page=100";
 const LAUNCHER_RELEASES_URL: &str = "https://github.com/sudostacks/retreivr/releases";
 const DEFAULT_CONFIG_JSON: &str = include_str!("../../../config/config_sample.json");
 
@@ -167,7 +167,12 @@ struct ImageUpdateStatus {
 }
 
 #[derive(Debug, Deserialize)]
-struct GithubReleaseResponse {
+struct GithubTagResponse {
+    name: String,
+}
+
+#[derive(Debug)]
+struct LauncherTagInfo {
     tag_name: String,
     html_url: String,
 }
@@ -549,25 +554,45 @@ fn image_id_for(image: &str) -> Option<String> {
     .filter(|value| !value.is_empty())
 }
 
-fn parse_release_from_json(payload: &str) -> Result<GithubReleaseResponse, String> {
-    serde_json::from_str::<GithubReleaseResponse>(payload).map_err(|e| e.to_string())
+fn parse_tags_from_json(payload: &str) -> Result<Vec<GithubTagResponse>, String> {
+    serde_json::from_str::<Vec<GithubTagResponse>>(payload).map_err(|e| e.to_string())
 }
 
-fn fetch_latest_launcher_release() -> Result<GithubReleaseResponse, String> {
+fn pick_latest_launcher_tag(tags: &[GithubTagResponse]) -> Option<String> {
+    let mut parsed: Vec<((u64, u64, u64), String)> = tags
+        .iter()
+        .filter(|tag| tag.name.starts_with("launcher-v"))
+        .filter_map(|tag| parse_version_triplet(&tag.name).map(|sem| (sem, tag.name.clone())))
+        .collect();
+
+    if parsed.is_empty() {
+        return None;
+    }
+
+    parsed.sort_by(|a, b| a.0.cmp(&b.0));
+    parsed.last().map(|value| value.1.clone())
+}
+
+fn fetch_latest_launcher_release() -> Result<Option<LauncherTagInfo>, String> {
     let curl_result = command_output({
         let mut cmd = Command::new("curl");
         cmd.args([
             "-fsSL",
             "-H",
             "User-Agent: retreivr-launcher",
-            LAUNCHER_RELEASE_API,
+            LAUNCHER_TAGS_API,
         ]);
         cmd
     })
-    .and_then(|json| parse_release_from_json(&json));
+    .and_then(|json| parse_tags_from_json(&json));
 
     if curl_result.is_ok() {
-        return curl_result;
+        let tags = curl_result?;
+        let latest = pick_latest_launcher_tag(&tags).map(|tag_name| LauncherTagInfo {
+            html_url: format!("https://github.com/sudostacks/retreivr/releases/tag/{tag_name}"),
+            tag_name,
+        });
+        return Ok(latest);
     }
 
     #[cfg(target_os = "windows")]
@@ -577,14 +602,19 @@ fn fetch_latest_launcher_release() -> Result<GithubReleaseResponse, String> {
             cmd.args([
                 "-NoProfile",
                 "-Command",
-                "$ProgressPreference='SilentlyContinue'; (Invoke-RestMethod -Uri 'https://api.github.com/repos/sudostacks/retreivr/releases/latest' -Headers @{ 'User-Agent'='retreivr-launcher' } | ConvertTo-Json -Compress)",
+                "$ProgressPreference='SilentlyContinue'; (Invoke-RestMethod -Uri 'https://api.github.com/repos/sudostacks/retreivr/tags?per_page=100' -Headers @{ 'User-Agent'='retreivr-launcher' } | ConvertTo-Json -Compress)",
             ]);
             cmd
         })
-        .and_then(|json| parse_release_from_json(&json));
+        .and_then(|json| parse_tags_from_json(&json));
 
         if pwsh_result.is_ok() {
-            return pwsh_result;
+            let tags = pwsh_result?;
+            let latest = pick_latest_launcher_tag(&tags).map(|tag_name| LauncherTagInfo {
+                html_url: format!("https://github.com/sudostacks/retreivr/releases/tag/{tag_name}"),
+                tag_name,
+            });
+            return Ok(latest);
         }
     }
 
@@ -593,18 +623,23 @@ fn fetch_latest_launcher_release() -> Result<GithubReleaseResponse, String> {
         cmd.args([
             "-qO-",
             "--header=User-Agent: retreivr-launcher",
-            LAUNCHER_RELEASE_API,
+            LAUNCHER_TAGS_API,
         ]);
         cmd
     })
-    .and_then(|json| parse_release_from_json(&json));
+    .and_then(|json| parse_tags_from_json(&json));
 
     if wget_result.is_ok() {
-        return wget_result;
+        let tags = wget_result?;
+        let latest = pick_latest_launcher_tag(&tags).map(|tag_name| LauncherTagInfo {
+            html_url: format!("https://github.com/sudostacks/retreivr/releases/tag/{tag_name}"),
+            tag_name,
+        });
+        return Ok(latest);
     }
 
     Err(
-        "Unable to check launcher release metadata (curl/powershell/wget not available or request failed)."
+        "Unable to check launcher tag metadata (curl/powershell/wget not available or request failed)."
             .to_string(),
     )
 }
@@ -653,7 +688,7 @@ fn launcher_version_info(app: AppHandle) -> LauncherVersionInfo {
     let release = fetch_latest_launcher_release();
 
     match release {
-        Ok(latest) => {
+        Ok(Some(latest)) => {
             let latest_clean = normalize_release_tag(&latest.tag_name);
             let update_available = match (
                 parse_version_triplet(&current_version),
@@ -671,6 +706,13 @@ fn launcher_version_info(app: AppHandle) -> LauncherVersionInfo {
                 check_error: None,
             }
         }
+        Ok(None) => LauncherVersionInfo {
+            current_version,
+            latest_version: None,
+            update_available: false,
+            release_url: Some(LAUNCHER_RELEASES_URL.to_string()),
+            check_error: None,
+        },
         Err(err) => LauncherVersionInfo {
             current_version,
             latest_version: None,
