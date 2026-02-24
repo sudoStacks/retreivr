@@ -685,7 +685,7 @@ def _ensure_music_failures_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 def notify_run_summary(config, *, run_type: str, status, started_at, finished_at):
-    if run_type not in {"scheduled", "watcher"}:
+    if run_type not in {"scheduled", "watcher", "api"}:
         return
 
     TELEGRAM_MAX_MESSAGE_CHARS = 4096
