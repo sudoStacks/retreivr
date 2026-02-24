@@ -1709,3 +1709,46 @@ body.home-page #home-advanced-panel {
 body.home-page .home-search-actions {
   margin-top: 10px;
 }
+
+/* ===== HOME LIGHT MODE CONTRAST PATCH ===== */
+:root[data-theme="light"] body.home-page .home-results {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+:root[data-theme="light"] body.home-page .home-result-card {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+:root[data-theme="light"] body.home-page .home-candidate-row:hover,
+:root[data-theme="light"] body.home-page .home-result-card:hover {
+  background: #f8fafc;
+}
+
+:root[data-theme="light"] body.home-page .home-source-toggle {
+  color: #1f2937 !important;
+  background: #ffffff !important;
+  border-color: rgba(15, 23, 42, 0.2) !important;
+}
+
+:root[data-theme="light"] body.home-page .home-source-panel {
+  background: #ffffff !important;
+  border-color: rgba(15, 23, 42, 0.18) !important;
+}
+
+:root[data-theme="light"] body.home-page .home-source-panel label,
+:root[data-theme="light"] body.home-page .home-source-panel span {
+  color: #111827 !important;
+}
+
+:root[data-theme="light"] body.home-page .home-source-panel .home-source-pill {
+  background: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.16);
+}
+
+:root[data-theme="light"] body.home-page .home-source-panel .home-source-pill.selected {
+  color: #111827;
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.45);
+}
