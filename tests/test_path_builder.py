@@ -24,7 +24,7 @@ def _metadata(**overrides) -> MusicMetadata:
 def test_single_disc_album_with_year() -> None:
     path = build_music_path(Path("/library"), _metadata(), "mp3")
 
-    assert path == Path("/library/Music/Artist Name/Album Name (2024)/Disc 1/01 - Track Title.mp3")
+    assert path == Path("/library/Music/Artist Name/Album Name (2024)/01 - Track Title.mp3")
 
 
 def test_multi_disc_album() -> None:
@@ -39,7 +39,7 @@ def test_missing_year_omits_parentheses() -> None:
 
     path = build_music_path(Path("/library"), metadata, "m4a")
 
-    assert path == Path("/library/Music/Artist Name/Album Name/Disc 1/01 - Track Title.m4a")
+    assert path == Path("/library/Music/Artist Name/Album Name/01 - Track Title.m4a")
 
 
 def test_missing_disc_num_defaults_to_disc_1() -> None:
@@ -48,7 +48,7 @@ def test_missing_disc_num_defaults_to_disc_1() -> None:
 
     path = build_music_path(Path("/library"), metadata, "mp3")
 
-    assert path == Path("/library/Music/Artist Name/Album Name (2024)/Disc 1/01 - Track Title.mp3")
+    assert path == Path("/library/Music/Artist Name/Album Name (2024)/01 - Track Title.mp3")
 
 
 def test_missing_track_num_defaults_to_00() -> None:
@@ -57,7 +57,7 @@ def test_missing_track_num_defaults_to_00() -> None:
 
     path = build_music_path(Path("/library"), metadata, "mp3")
 
-    assert path == Path("/library/Music/Artist Name/Album Name (2024)/Disc 1/00 - Track Title.mp3")
+    assert path == Path("/library/Music/Artist Name/Album Name (2024)/00 - Track Title.mp3")
 
 
 def test_unicode_characters_are_preserved() -> None:
@@ -69,7 +69,7 @@ def test_unicode_characters_are_preserved() -> None:
 
     path = build_music_path(Path("/library"), metadata, "mp3")
 
-    assert path == Path("/library/Music/Beyoncé/Été (2024)/Disc 1/01 - Café del Mar.mp3")
+    assert path == Path("/library/Music/Beyoncé/Été (2024)/01 - Café del Mar.mp3")
 
 
 def test_invalid_filesystem_characters_are_removed() -> None:
@@ -81,4 +81,14 @@ def test_invalid_filesystem_characters_are_removed() -> None:
 
     path = build_music_path(Path("/library"), metadata, "mp3")
 
-    assert path == Path("/library/Music/Artist/Album (2024)/Disc 1/01 - Title.mp3")
+    assert path == Path("/library/Music/Artist/Album (2024)/01 - Title.mp3")
+
+
+def test_multi_disc_album_first_disc_includes_disc_folder_when_disc_total_present() -> None:
+    metadata = _metadata()
+    metadata.disc_num = 1
+    metadata.disc_total = 2  # type: ignore[attr-defined]
+
+    path = build_music_path(Path("/library"), metadata, "mp3")
+
+    assert path == Path("/library/Music/Artist Name/Album Name (2024)/Disc 1/01 - Track Title.mp3")

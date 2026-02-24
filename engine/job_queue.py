@@ -26,6 +26,7 @@ from yt_dlp.utils import DownloadError, ExtractorError
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
+from media.path_builder import build_music_relative_layout
 from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
 from metadata.services.musicbrainz_service import get_musicbrainz_service
@@ -4074,10 +4075,13 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
     _ = fallback_id
 
     track_label = f"{track_number} - {track or 'media'}.{ext}"
-    if disc_total and disc_total > 1:
-        disc_folder = sanitize_for_filesystem(_normalize_nfc(f"Disc {disc_number or 1}"))
-        return f"Music/{album_artist}/{album_folder}/{disc_folder}/{track_label}"
-    return f"Music/{album_artist}/{album_folder}/{track_label}"
+    return build_music_relative_layout(
+        album_artist=album_artist,
+        album_folder=album_folder,
+        track_label=track_label,
+        disc_number=disc_number or 1,
+        disc_total=disc_total,
+    )
 
 
 def build_output_filename(meta, fallback_id, ext, template, audio_mode):

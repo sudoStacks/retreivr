@@ -13,6 +13,29 @@ def sanitize_for_filesystem(value: str) -> str:
     return sanitize_component(value)
 
 
+def build_music_relative_layout(
+    *,
+    album_artist: str,
+    album_folder: str,
+    track_label: str,
+    disc_number: int | None = None,
+    disc_total: int | None = None,
+) -> str:
+    """Build the canonical relative music layout from normalized components."""
+    safe_album_artist = sanitize_for_filesystem(album_artist or "") or "Unknown Artist"
+    safe_album_folder = sanitize_for_filesystem(album_folder or "") or "Unknown Album"
+    safe_track_label = str(track_label or "").strip() or "00 - media"
+    safe_disc_number = int(disc_number) if isinstance(disc_number, int) and disc_number > 0 else 1
+    safe_disc_total = int(disc_total) if isinstance(disc_total, int) and disc_total > 0 else None
+
+    segments = ["Music", safe_album_artist, safe_album_folder]
+    include_disc_folder = bool((safe_disc_total and safe_disc_total > 1) or safe_disc_number > 1)
+    if include_disc_folder:
+        segments.append(f"Disc {safe_disc_number}")
+    segments.append(safe_track_label)
+    return "/".join(segments)
+
+
 def build_music_path(root: Path, metadata: CanonicalMetadata, ext: str) -> Path:
     """Build and return a canonical music path without creating directories.
 
@@ -20,7 +43,7 @@ def build_music_path(root: Path, metadata: CanonicalMetadata, ext: str) -> Path:
         Music/
           {album_artist}/
             {album} ({year})/
-              Disc {disc_num}/
+              [Disc {disc_num}/ only when multi-disc]
                 {track_num:02d} - {title}.{ext}
     """
     album_artist = sanitize_for_filesystem(metadata.album_artist or metadata.artist or "Unknown Artist")
@@ -28,6 +51,8 @@ def build_music_path(root: Path, metadata: CanonicalMetadata, ext: str) -> Path:
 
     disc_num_raw = getattr(metadata, "disc_num", None)
     disc_num = int(disc_num_raw) if isinstance(disc_num_raw, int) and disc_num_raw > 0 else 1
+    disc_total_raw = getattr(metadata, "disc_total", None)
+    disc_total = int(disc_total_raw) if isinstance(disc_total_raw, int) and disc_total_raw > 0 else None
 
     extension = str(ext or "").lstrip(".")
     filename = build_track_filename(
@@ -38,7 +63,14 @@ def build_music_path(root: Path, metadata: CanonicalMetadata, ext: str) -> Path:
         }
     )
 
-    return root / "Music" / album_artist / album_folder / f"Disc {disc_num}" / filename
+    relative_layout = build_music_relative_layout(
+        album_artist=album_artist,
+        album_folder=album_folder,
+        track_label=filename,
+        disc_number=disc_num,
+        disc_total=disc_total,
+    )
+    return root / Path(relative_layout)
 
 
 def ensure_parent_dir(path: Path) -> None:

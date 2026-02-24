@@ -11,8 +11,9 @@ from typing import Any, Optional, Protocol
 from config.settings import ENABLE_DURATION_VALIDATION, SPOTIFY_DURATION_TOLERANCE_SECONDS
 from db.downloaded_tracks import record_downloaded_track
 from media.ffprobe import get_media_duration
-from media.path_builder import build_music_path, ensure_parent_dir
+from media.path_builder import build_music_relative_layout, ensure_parent_dir
 from media.validation import validate_duration
+from metadata.naming import build_album_directory, build_track_filename
 from metadata.normalize import normalize_music_metadata
 from metadata.tagging_service import tag_file
 from metadata.types import CanonicalMetadata
@@ -96,7 +97,24 @@ class DownloadWorker:
                     temp_path = Path(file_path)
                     ext = temp_path.suffix.lstrip(".")
                     root_path = self._resolve_music_root(payload)
-                    canonical_path = build_music_path(root_path, normalized_metadata, ext)
+                    album_folder = build_album_directory(normalized_metadata)
+                    filename = build_track_filename(
+                        {
+                            "title": normalized_metadata.title,
+                            "track_num": normalized_metadata.track_num,
+                            "ext": ext,
+                        }
+                    )
+                    disc_total_raw = getattr(normalized_metadata, "disc_total", None)
+                    disc_total = int(disc_total_raw) if isinstance(disc_total_raw, int) and disc_total_raw > 0 else None
+                    relative_layout = build_music_relative_layout(
+                        album_artist=normalized_metadata.album_artist or normalized_metadata.artist,
+                        album_folder=album_folder,
+                        track_label=filename,
+                        disc_number=normalized_metadata.disc_num,
+                        disc_total=disc_total,
+                    )
+                    canonical_path = root_path / Path(relative_layout)
                     ensure_parent_dir(canonical_path)
                     try:
                         shutil.move(str(temp_path), str(canonical_path))
