@@ -472,7 +472,12 @@ async def enqueue_spotify_track(queue, spotify_track: dict, search_service, play
     track_isrc = str((spotify_track or {}).get("isrc") or "").strip()
     if track_isrc and has_downloaded_isrc(playlist_id, track_isrc):
         logging.info("skip duplicate isrc=%s playlist=%s", track_isrc, playlist_id)
-        return
+        return {
+            "created": False,
+            "reason": "duplicate_isrc",
+            "playlist_id": playlist_id,
+            "spotify_track_id": (spotify_track or {}).get("spotify_track_id"),
+        }
 
     # TODO(scheduler/jobs/spotify_playlist_watch.py::enqueue_spotify_track): replace spotify.resolve.resolve_spotify_track
     # with the unified engine search resolution path (engine.search_engine SearchResolutionService adapters).
@@ -484,7 +489,10 @@ async def enqueue_spotify_track(queue, spotify_track: dict, search_service, play
         "resolved_media": resolved_media,
         "music_metadata": merged_metadata,
     }
-    queue.enqueue(payload)
+    enqueue_result = queue.enqueue(payload)
+    if enqueue_result is None:
+        return {"created": True}
+    return enqueue_result
 
 
 async def spotify_liked_songs_watch_job(
@@ -561,16 +569,19 @@ async def spotify_liked_songs_watch_job(
     diff = diff_playlist(previous_items, current_items)
     added_items = list(diff["added"])
     enqueued = 0
+    skipped = 0
     enqueue_errors: list[str] = []
     for track in added_items:
         try:
-            await enqueue_spotify_track(
+            enqueue_result = await enqueue_spotify_track(
                 queue,
                 track,
                 search_service,
                 playlist_id=SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
             )
-            enqueued += 1
+            enqueued_inc, skipped_inc = _classify_enqueue_result(enqueue_result)
+            enqueued += enqueued_inc
+            skipped += skipped_inc
         except Exception as exc:
             track_id = track.get("spotify_track_id")
             enqueue_errors.append(f"{track_id}: {exc}")
@@ -590,6 +601,7 @@ async def spotify_liked_songs_watch_job(
             "snapshot_id": current_snapshot_id,
             "error": f"snapshot_store_failed: {exc}",
             "enqueued": enqueued,
+            "skipped": skipped,
             "added_count": len(added_items),
             "removed_count": len(diff["removed"]),
             "moved_count": len(diff["moved"]),
@@ -608,6 +620,7 @@ async def spotify_liked_songs_watch_job(
         "playlist_id": SPOTIFY_LIKED_SONGS_PLAYLIST_ID,
         "snapshot_id": current_snapshot_id,
         "enqueued": enqueued,
+        "skipped": skipped,
         "added_count": len(added_items),
         "removed_count": len(diff["removed"]),
         "moved_count": len(diff["moved"]),
