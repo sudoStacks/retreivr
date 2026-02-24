@@ -42,7 +42,7 @@ body {
   border: 1px solid #cbd5e1;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.85);
-  padding: 16px;
+  padding: 18px;
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
 }
 
@@ -59,14 +59,14 @@ h2 {
 .diag-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(210px, 1fr));
-  gap: 8px 14px;
-  margin-bottom: 12px;
+  gap: 10px 16px;
+  margin-bottom: 14px;
 }
 
 .form-grid {
   display: grid;
   grid-template-columns: 140px 1fr;
-  gap: 10px 12px;
+  gap: 12px 14px;
   align-items: center;
 }
 
@@ -75,6 +75,7 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  align-items: center;
 }
 
 .form-grid .actions-row {
@@ -122,6 +123,15 @@ p:last-child {
   margin-bottom: 0;
 }
 
+.guide-steps {
+  margin: 0 0 14px;
+  padding-left: 22px;
+}
+
+.guide-steps li {
+  margin-bottom: 6px;
+}
+
 label {
   font-weight: 600;
   color: #1e293b;
@@ -138,6 +148,10 @@ strong.warn {
 .diag-error {
   margin: 0 0 12px;
   font-weight: 600;
+}
+
+.hidden {
+  display: none;
 }
 
 @media (max-width: 720px) {

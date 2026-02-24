@@ -6,11 +6,13 @@ document.addEventListener("DOMContentLoaded", () => {
   const statusEl = document.getElementById("status");
 
   const refreshBtn = document.getElementById("refreshBtn");
+  const recheckDockerBtn = document.getElementById("recheckDocker");
   const saveBtn = document.getElementById("saveBtn");
   const resetBtn = document.getElementById("resetBtn");
   const installBtn = document.getElementById("installBtn");
   const stopBtn = document.getElementById("stopBtn");
   const openBtn = document.getElementById("openUI");
+  const openDockerInstallBtn = document.getElementById("openDockerInstall");
 
   const hostPortInput = document.getElementById("hostPort");
   const imageInput = document.getElementById("image");
@@ -26,18 +28,26 @@ document.addEventListener("DOMContentLoaded", () => {
   const diagErrorEl = document.getElementById("diagError");
   const composePathEl = document.getElementById("composePath");
   const runtimeDirEl = document.getElementById("runtimeDir");
+  const dockerGuideCard = document.getElementById("dockerGuideCard");
+  const guideTitleEl = document.getElementById("guideTitle");
+  const guideSummaryEl = document.getElementById("guideSummary");
+  const guideStepsEl = document.getElementById("guideSteps");
 
   let currentWebUrl = "http://localhost:8090";
+  let dockerInstallUrl = "https://www.docker.com/products/docker-desktop/";
+  let installGuide = null;
   let busy = false;
 
   function setBusy(nextBusy) {
     busy = nextBusy;
     refreshBtn.disabled = nextBusy;
+    recheckDockerBtn.disabled = nextBusy;
     saveBtn.disabled = nextBusy;
     resetBtn.disabled = nextBusy;
     installBtn.disabled = nextBusy;
     stopBtn.disabled = nextBusy;
     openBtn.disabled = nextBusy;
+    openDockerInstallBtn.disabled = nextBusy;
   }
 
   function renderBool(el, value) {
@@ -59,6 +69,32 @@ document.addEventListener("DOMContentLoaded", () => {
     containerNameInput.value = settings.container_name;
   }
 
+  function renderInstallGuidance(diagnostics) {
+    const needsInstall = !diagnostics.docker_installed;
+    const needsStart = diagnostics.docker_installed && !diagnostics.docker_running;
+    const showGuidance = needsInstall || needsStart;
+
+    dockerGuideCard.classList.toggle("hidden", !showGuidance);
+    if (!showGuidance || !installGuide) {
+      return;
+    }
+
+    guideTitleEl.textContent = needsInstall
+      ? "Step 1.5: Install Docker"
+      : "Step 1.5: Start Docker Desktop";
+
+    guideSummaryEl.textContent = needsInstall
+      ? `Docker is not installed (${installGuide.os}). Install it, then recheck.`
+      : "Docker is installed but not running. Start Docker Desktop, then recheck.";
+
+    guideStepsEl.innerHTML = "";
+    installGuide.steps.forEach((step) => {
+      const li = document.createElement("li");
+      li.textContent = step;
+      guideStepsEl.appendChild(li);
+    });
+  }
+
   async function refreshDiagnostics() {
     const diagnostics = await invoke("docker_diagnostics");
     currentWebUrl = diagnostics.web_url || currentWebUrl;
@@ -77,6 +113,7 @@ document.addEventListener("DOMContentLoaded", () => {
       `Web URL: ${currentWebUrl} | Compose file: ${diagnostics.compose_exists ? "Present" : "Missing"}`;
     composePathEl.textContent = `Compose path: ${diagnostics.compose_path}`;
     runtimeDirEl.textContent = `Runtime dir: ${diagnostics.runtime_dir}`;
+    renderInstallGuidance(diagnostics);
 
     installBtn.disabled = busy || !diagnostics.docker_running || !diagnostics.compose_available;
     stopBtn.disabled = busy || !diagnostics.container_running;
@@ -88,6 +125,8 @@ document.addEventListener("DOMContentLoaded", () => {
     statusEl.textContent = "Refreshing launcher state...";
 
     try {
+      installGuide = await invoke("install_guidance");
+      dockerInstallUrl = installGuide.install_url || dockerInstallUrl;
       const settings = await invoke("get_launcher_settings");
       applySettingsToForm(settings);
       await refreshDiagnostics();
@@ -142,6 +181,17 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshBtn.addEventListener("click", async () => {
     if (busy) return;
     await refreshAll();
+  });
+
+  recheckDockerBtn.addEventListener("click", async () => {
+    if (busy) return;
+    await refreshAll();
+  });
+
+  openDockerInstallBtn.addEventListener("click", async () => {
+    if (typeof openWeb === "function") {
+      await openWeb(dockerInstallUrl);
+    }
   });
 
   installBtn.addEventListener("click", async () => {

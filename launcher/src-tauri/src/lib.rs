@@ -53,6 +53,14 @@ struct DockerDiagnostics {
     last_error: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct InstallGuidance {
+    os: String,
+    install_url: String,
+    install_cta: String,
+    steps: Vec<String>,
+}
+
 fn web_url(settings: &LauncherSettings) -> String {
     format!("http://localhost:{}", settings.host_port)
 }
@@ -178,6 +186,44 @@ fn diagnostics_failure_message(
         return Some("Retreivr service is not reachable on configured host port.".to_string());
     }
     None
+}
+
+#[tauri::command]
+fn install_guidance() -> InstallGuidance {
+    let os = std::env::consts::OS.to_string();
+
+    match os.as_str() {
+        "macos" => InstallGuidance {
+            os,
+            install_url: "https://www.docker.com/products/docker-desktop/".to_string(),
+            install_cta: "Download Docker Desktop for Mac".to_string(),
+            steps: vec![
+                "Install Docker Desktop and launch it.".to_string(),
+                "Wait until Docker Desktop shows it is running.".to_string(),
+                "Return to this launcher and click Recheck Docker.".to_string(),
+            ],
+        },
+        "windows" => InstallGuidance {
+            os,
+            install_url: "https://www.docker.com/products/docker-desktop/".to_string(),
+            install_cta: "Download Docker Desktop for Windows".to_string(),
+            steps: vec![
+                "Install Docker Desktop and enable required virtualization features.".to_string(),
+                "Launch Docker Desktop and wait for engine startup.".to_string(),
+                "Return to this launcher and click Recheck Docker.".to_string(),
+            ],
+        },
+        _ => InstallGuidance {
+            os,
+            install_url: "https://docs.docker.com/engine/install/".to_string(),
+            install_cta: "Open Docker Engine Install Docs".to_string(),
+            steps: vec![
+                "Install Docker Engine using your distribution guide.".to_string(),
+                "Start the Docker daemon and verify `docker info` works.".to_string(),
+                "Return to this launcher and click Recheck Docker.".to_string(),
+            ],
+        },
+    }
 }
 
 #[tauri::command]
@@ -342,6 +388,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             docker_available,
             compose_exists,
+            install_guidance,
             get_launcher_settings,
             save_launcher_settings,
             reset_launcher_settings,
