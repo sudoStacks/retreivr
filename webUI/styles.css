@@ -127,33 +127,23 @@ html, body {
 
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
   color: var(--text);
   line-height: 1.5;
-  background: radial-gradient(circle at 15% 20%, rgba(35, 62, 92, 0.35), transparent 55%),
-              radial-gradient(circle at 70% 10%, rgba(43, 92, 133, 0.25), transparent 45%),
-              linear-gradient(135deg, var(--bg-1), var(--bg-2));
+  background: #0b0f14;
   overflow-x: hidden;
 }
 
 :root[data-theme="light"] body {
-  background: radial-gradient(circle at 15% 20%, rgba(100, 141, 204, 0.18), transparent 55%),
-              radial-gradient(circle at 70% 10%, rgba(120, 170, 210, 0.14), transparent 45%),
-              linear-gradient(135deg, var(--bg-1), var(--bg-2));
+  background: #f5f7fb;
 }
 
 .backdrop {
-  position: fixed;
-  inset: 0;
-  background: radial-gradient(circle at 20% 20%, rgba(48, 92, 134, 0.3), transparent 45%),
-              radial-gradient(circle at 80% 0%, rgba(26, 55, 86, 0.4), transparent 40%);
-  pointer-events: none;
-  z-index: 0;
+  display: none;
 }
 
 :root[data-theme="light"] .backdrop {
-  background: radial-gradient(circle at 20% 20%, rgba(110, 150, 210, 0.18), transparent 45%),
-              radial-gradient(circle at 80% 0%, rgba(120, 160, 210, 0.16), transparent 40%);
+  display: none;
 }
 
 /* ===== HOME PAGE LAYOUT OVERRIDE ===== */

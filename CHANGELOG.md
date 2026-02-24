@@ -20,6 +20,7 @@ All notable changes to this project will be documented here.
 - Aligned direct URL and worker paths on canonical yt-dlp option/CLI building with controlled retry escalation and safer non-fatal metadata probing.
 - Stabilized Music Mode UX into a metadata-first Home flow with toggle gating, stale-response protection, and a single authoritative track enqueue path.
 - UI/UX fixes and updates across Home search, advanced options layout, status indicators, and delivery controls.
+- Unified visual theme across Home/Info/Status/Config and renamed the `Advanced Search` nav label to `Info` for clearer navigation semantics.
 - Client delivery was brought back on Home flows and now obeys the delivery toggle for both candidate and direct URL downloads.
 
 ### Fixed
