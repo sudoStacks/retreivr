@@ -1212,6 +1212,11 @@ a[aria-disabled="true"] {
   overflow-y: auto;
 }
 
+#search-items-panel .group .table-wrap {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
 #search-queue-panel .table-wrap {
   flex: 1;
   min-height: 0;
@@ -1280,10 +1285,10 @@ a[aria-disabled="true"] {
   flex: 1;
   min-height: 0;
   max-height: none;
-  width: 100%;
-  max-width: 920px;
-  margin-left: auto;
-  margin-right: auto;
+  width: auto;
+  max-width: none;
+  margin-left: 25px;
+  margin-right: 25px;
 }
 
 @media (min-width: 981px) {
@@ -1293,8 +1298,8 @@ a[aria-disabled="true"] {
   }
 
   #search-requests-panel {
-    grid-column: 2;
-    grid-row: 2;
+    grid-column: 1;
+    grid-row: 1;
   }
 }
 
