@@ -27,6 +27,11 @@ def _load_search_modules():
     _load_module("engine.paths", _ROOT / "engine" / "paths.py")
     _load_module("engine.search_scoring", _ROOT / "engine" / "search_scoring.py")
     _load_module("engine.search_adapters", _ROOT / "engine" / "search_adapters.py")
+    if "engine.musicbrainz_binding" not in sys.modules:
+        binding_module = types.ModuleType("engine.musicbrainz_binding")
+        binding_module.resolve_best_mb_pair = lambda *args, **kwargs: None
+        binding_module._normalize_title_for_mb_lookup = lambda value, **kwargs: str(value or "")
+        sys.modules["engine.musicbrainz_binding"] = binding_module
     if "metadata.services" not in sys.modules:
         metadata_services_pkg = types.ModuleType("metadata.services")
         metadata_services_pkg.__path__ = []  # type: ignore[attr-defined]
@@ -55,6 +60,21 @@ class _StubAdapter:
 
     def search_music_track(self, query, limit=6):
         return [dict(c) for c in self._candidates[:limit]]
+
+    def source_modifier(self, candidate):
+        return 1.0
+
+
+class _QueryAwareAdapter:
+    def __init__(self, source, query_map):
+        self.source = source
+        self.query_map = {str(k): [dict(c) for c in (v or [])] for k, v in (query_map or {}).items()}
+        self.calls = []
+
+    def search_music_track(self, query, limit=6):
+        q = str(query or "")
+        self.calls.append(q)
+        return [dict(c) for c in self.query_map.get(q, [])[:limit]]
 
     def source_modifier(self, candidate):
         return 1.0
@@ -393,6 +413,70 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         strong_score = self.scoring.score_candidate(expected, strong_topic, source_modifier=1.0)
         weak_score = self.scoring.score_candidate(expected, weak_topic, source_modifier=1.0)
         self.assertGreater(float(strong_score["final_score"]), float(weak_score["final_score"]))
+
+    def test_query_ladder_progresses_until_viable_rung(self):
+        rung_1 = '"Artist" "Song" "Album"'
+        rung_2 = '"Artist" "Song"'
+        rung_3 = '"Artist - Song"'
+        rung_4 = "Artist Song official audio"
+        adapter = _QueryAwareAdapter(
+            "youtube_music",
+            {
+                rung_3: [
+                    _candidate(
+                        source="youtube_music",
+                        candidate_id="r3-match",
+                        title="Artist - Song",
+                        uploader="Artist - Topic",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=200,
+                    )
+                ]
+            },
+        )
+        service = self.se.SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"youtube_music": adapter},
+            config={},
+            paths=None,
+            canonical_resolver=_StubCanonicalResolver(),
+        )
+        best = service.search_music_track_best_match("Artist", "Song", album="Album", duration_ms=200000, limit=6)
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "r3-match")
+        self.assertEqual(adapter.calls, [rung_1, rung_2, rung_3])
+        self.assertNotIn(rung_4, adapter.calls)
+
+    def test_pass_b_accepts_high_similarity_authority_match_with_expanded_duration(self):
+        service = self._service(
+            {
+                "youtube_music": [
+                    _candidate(
+                        source="youtube_music",
+                        candidate_id="expanded-ok",
+                        title="Artist - Song",
+                        uploader="Artist - Topic",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=230,  # +30s (fails strict pass A; eligible for pass B)
+                    )
+                ]
+            }
+        )
+        best = service.search_music_track_best_match("Artist", "Song", album="Album", duration_ms=200000, limit=6)
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "expanded-ok")
+        self.assertGreater(int(best.get("duration_delta_ms") or 0), 12000)
+        self.assertLessEqual(int(best.get("duration_delta_ms") or 0), 35000)
+        self.assertTrue(bool(best.get("authority_channel_match")))
+        self.assertGreaterEqual(float(best.get("score_track") or 0.0), 0.92)
+        self.assertGreaterEqual(float(best.get("score_artist") or 0.0), 0.92)
+        search_meta = getattr(service, "last_music_track_search", {}) or {}
+        self.assertEqual(search_meta.get("selected_pass"), "expanded")
 
 
 if __name__ == "__main__":

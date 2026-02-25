@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import sys
 import types
 from pathlib import Path
@@ -157,3 +158,109 @@ def test_metadata_probe_fallback_fails_after_second_probe(tmp_path, monkeypatch)
     except RuntimeError as exc:
         assert "yt_dlp_metadata_probe_failed" in str(exc)
 
+
+def test_music_retry_escalates_query_rung_and_records_duration_filtered(monkeypatch) -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+
+        class _FakeSearchService:
+            def __init__(self):
+                self.calls = []
+                self.last_music_track_search = {"failure_reason": "duration_filtered"}
+
+            def search_music_track_best_match(self, artist, track, album=None, duration_ms=None, limit=6, *, start_rung=0):
+                self.calls.append(
+                    {
+                        "artist": artist,
+                        "track": track,
+                        "album": album,
+                        "duration_ms": duration_ms,
+                        "limit": limit,
+                        "start_rung": start_rung,
+                    }
+                )
+                return None
+
+        fake_search = _FakeSearchService()
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={},
+            paths=paths,
+            adapters={},
+            search_service=fake_search,
+        )
+
+        captured = {}
+
+        def _capture_record_failure(job, *, error_message, retryable, retry_delay_seconds):
+            captured["error_message"] = error_message
+            captured["retryable"] = retryable
+            captured["retry_delay_seconds"] = retry_delay_seconds
+            captured["job_id"] = job.id
+            return jq.JOB_STATUS_QUEUED if retryable else jq.JOB_STATUS_FAILED
+
+        monkeypatch.setattr(engine.store, "record_failure", _capture_record_failure)
+
+        job = jq.DownloadJob(
+            id="job-escalate-1",
+            origin="intent",
+            origin_id="manual",
+            media_type="music",
+            media_intent="music_track",
+            source="youtube_music",
+            url="musicbrainz://recording/rec-1",
+            input_url="musicbrainz://recording/rec-1",
+            canonical_url="musicbrainz://recording/rec-1",
+            external_id=None,
+            status=jq.JOB_STATUS_QUEUED,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=2,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error="no_candidate_above_threshold",
+            trace_id="trace-escalate-1",
+            output_template={
+                "artist": "Artist",
+                "track": "Song",
+                "album": "Album",
+                "recording_mbid": "rec-1",
+                "mb_release_id": "rel-1",
+                "duration_ms": 200000,
+                "canonical_metadata": {
+                    "artist": "Artist",
+                    "track": "Song",
+                    "album": "Album",
+                    "recording_mbid": "rec-1",
+                    "mb_release_id": "rel-1",
+                    "duration_ms": 200000,
+                },
+            },
+            resolved_destination=tmp,
+            canonical_id="music_track:rec-1:rel-1:disc-1",
+            file_path=None,
+        )
+
+        resolved = engine._resolve_music_track_job(job)
+        assert resolved is None
+        assert len(fake_search.calls) == 1
+        assert fake_search.calls[0]["start_rung"] == 2
+        assert captured["job_id"] == "job-escalate-1"
+        assert captured["error_message"] == "duration_filtered"
+        assert captured["retryable"] is True
