@@ -69,6 +69,28 @@ class SearchScoringTests(unittest.TestCase):
         boosted = score_candidate(expected, candidate, source_modifier=1.0)
         self.assertGreater(boosted["final_score"], base["final_score"])
 
+    def test_music_track_scoring_uses_relaxed_parenthetical_overlap(self):
+        expected = {
+            "artist": "Artist",
+            "track": "Song (Deluxe Edition)",
+            "album": "Album",
+            "duration_hint_sec": 200,
+            "media_intent": "music_track",
+            "query": '"Artist" "Song (Deluxe Edition)" "Album"',
+        }
+        candidate = {
+            "source": "youtube_music",
+            "title": "Artist - Song",
+            "uploader": "Artist - Topic",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "album_detected": "Album",
+            "duration_sec": 200,
+            "official": True,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertGreater(float(scored.get("score_track_relaxed") or 0.0), float(scored.get("score_track") or 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

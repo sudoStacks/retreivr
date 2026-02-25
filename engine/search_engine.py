@@ -72,6 +72,7 @@ from engine.paths import DATA_DIR
 from engine.search_adapters import default_adapters
 from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
 from engine.musicbrainz_binding import _normalize_title_for_mb_lookup
+from engine.music_title_normalization import has_live_intent, relaxed_search_title
 from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
 from metadata.canonical import CanonicalMetadataResolver
 
@@ -964,6 +965,7 @@ class SearchResolutionService:
         artist_v = str(artist or "").strip()
         track_v = str(track or "").strip()
         album_v = str(album or "").strip()
+        relaxed_track = relaxed_search_title(track_v) or track_v
         ladder = [
             {
                 "rung": 0,
@@ -981,13 +983,13 @@ class SearchResolutionService:
             },
             {
                 "rung": 2,
-                "label": "artist_dash_track",
-                "query": f'"{artist_v} - {track_v}"'.strip(),
+                "label": "relaxed_no_album",
+                "query": " ".join(part for part in [f'"{artist_v}"', f'"{relaxed_track}"'] if part).strip(),
             },
             {
                 "rung": 3,
                 "label": "official_audio_fallback",
-                "query": " ".join(part for part in [artist_v, track_v, "official audio"] if part).strip(),
+                "query": " ".join(part for part in [artist_v, relaxed_track, "official audio"] if part).strip(),
             },
         ]
         seen = set()
@@ -1001,8 +1003,7 @@ class SearchResolutionService:
         return unique_ladder
 
     def _music_track_is_live(self, artist, track, album):
-        combined = " ".join([str(artist or ""), str(track or ""), str(album or "")]).lower()
-        return " live " in f" {combined} "
+        return has_live_intent(artist, track, album)
 
     def search_music_track_candidates(self, query: str, limit: int = 6, *, query_label: str | None = None) -> list[dict]:
         candidates = []
@@ -1080,6 +1081,7 @@ class SearchResolutionService:
                 "media_intent": "music_track",
                 "duration_hint_sec": expected_duration_hint_sec,
                 "duration_hard_cap_ms": _MUSIC_DURATION_HARD_CAP_MS,
+                "variant_allow_tokens": {"live"} if self._music_track_is_live(artist, track, album) else set(),
             }
             candidates = self.search_music_track_candidates(query, limit=limit, query_label=query_label)
             rung_meta = {

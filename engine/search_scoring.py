@@ -1,6 +1,8 @@
 import re
 import unicodedata
 
+from engine.music_title_normalization import relaxed_search_title
+
 _WEIGHTS = {
     "artist": 0.30,
     "track": 0.35,
@@ -120,6 +122,9 @@ def _music_source_authority_points(expected, candidate):
 
 def _music_reject_reason(expected, candidate):
     query_flags = _music_query_variant_flags(expected.get("query"))
+    explicit_flags = expected.get("variant_allow_tokens")
+    if isinstance(explicit_flags, (set, list, tuple)):
+        query_flags = set(query_flags) | {str(token).strip().lower() for token in explicit_flags if str(token or "").strip()}
     title = str(candidate.get("title") or "")
     uploader = str(candidate.get("uploader") or candidate.get("artist_detected") or "")
     haystack = f"{title} {uploader}".strip()
@@ -270,6 +275,12 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
 
         artist_overlap = token_overlap_score(expected_artist, candidate_artist)
         track_overlap = token_overlap_score(expected_track, candidate_track)
+        relaxed_expected_track = tokenize(relaxed_search_title(expected.get("track")))
+        relaxed_candidate_track = tokenize(
+            relaxed_search_title(candidate.get("track_detected") or candidate.get("title"))
+        )
+        relaxed_track_overlap = token_overlap_score(relaxed_expected_track, relaxed_candidate_track)
+        effective_track_overlap = max(track_overlap, min(relaxed_track_overlap * 0.90, 1.0))
         album_overlap = token_overlap_score(expected_album, candidate_album) if expected_album else 0.0
 
         rejection_reason = _music_reject_reason(expected, candidate)
@@ -293,11 +304,11 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             rejection_reason = duration_reject_reason
 
         if expected_album:
-            track_pts = 30.0 * track_overlap
+            track_pts = 30.0 * effective_track_overlap
             artist_pts = 24.0 * artist_overlap
             album_pts = 18.0 * album_overlap
         else:
-            track_pts = 39.0 * track_overlap
+            track_pts = 39.0 * effective_track_overlap
             artist_pts = 33.0 * artist_overlap
             album_pts = 0.0
 
@@ -357,6 +368,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
         return {
             "score_artist": artist_overlap,
             "score_track": track_overlap,
+            "score_track_relaxed": relaxed_track_overlap,
             "score_album": album_overlap if expected_album else 0.0,
             "score_duration": (duration_pts / 20.0) if duration_pts > 0 else 0.0,
             "source_modifier": source_modifier,

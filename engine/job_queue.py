@@ -24,6 +24,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
+from engine.music_title_normalization import has_live_intent, relaxed_search_title
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
 from media.music_contract import format_zero_padded_track_number, parse_first_positive_int
@@ -1217,8 +1218,7 @@ class DownloadWorkerEngine:
         return _WORD_TOKEN_RE.findall(str(value or "").lower())
 
     def _music_track_is_live(self, artist, track, album):
-        combined = " ".join([str(artist or ""), str(track or ""), str(album or "")]).lower()
-        return " live " in f" {combined} "
+        return has_live_intent(artist, track, album)
 
     def _normalize_score_100(self, candidate):
         raw_score = candidate.get("adapter_score")
@@ -1249,11 +1249,12 @@ class DownloadWorkerEngine:
         artist_v = str(artist or "").strip()
         track_v = str(track or "").strip()
         album_v = str(album or "").strip()
+        relaxed_track = relaxed_search_title(track_v) or track_v
         ladder = [
             {"rung": 0, "label": "canonical_full", "query": " ".join(part for part in [f'"{artist_v}"', f'"{track_v}"', f'"{album_v}"' if album_v else ""] if part).strip()},
             {"rung": 1, "label": "canonical_no_album", "query": " ".join(part for part in [f'"{artist_v}"', f'"{track_v}"'] if part).strip()},
-            {"rung": 2, "label": "artist_dash_track", "query": f'"{artist_v} - {track_v}"'.strip()},
-            {"rung": 3, "label": "official_audio_fallback", "query": " ".join(part for part in [artist_v, track_v, "official audio"] if part).strip()},
+            {"rung": 2, "label": "relaxed_no_album", "query": " ".join(part for part in [f'"{artist_v}"', f'"{relaxed_track}"'] if part).strip()},
+            {"rung": 3, "label": "official_audio_fallback", "query": " ".join(part for part in [artist_v, relaxed_track, "official audio"] if part).strip()},
         ]
         seen = set()
         unique_ladder = []
@@ -3839,22 +3840,22 @@ def download_with_ytdlp(
             info = ydl.extract_info(url, download=False)
     except Exception as exc:
         probe_error = str(exc)
+        lower_probe_error = probe_error.lower()
+        format_unavailable_probe = "requested format is not available" in lower_probe_error
         _log_event(
-            logging.ERROR,
+            logging.WARNING if format_unavailable_probe else logging.ERROR,
             "ytdlp_metadata_probe_failed",
             job_id=job_id,
             url=url,
             error=probe_error,
-            failure_domain="metadata_probe",
+            failure_domain="metadata_probe_format" if format_unavailable_probe else "metadata_probe",
             error_message=probe_error,
             candidate_id=extract_video_id(url),
         )
-        lower_probe_error = probe_error.lower()
         should_escalate_probe_js = any(
             marker in lower_probe_error
             for marker in (
                 "signature solving failed",
-                "requested format is not available",
                 "n challenge solving failed",
             )
         )

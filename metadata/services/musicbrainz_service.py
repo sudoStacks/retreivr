@@ -20,6 +20,8 @@ _DEFAULT_MAX_CACHE_ENTRIES = 512
 _DEFAULT_CACHE_TTL_SECONDS = 6 * 60 * 60
 _DEFAULT_COVER_CACHE_TTL_SECONDS = 24 * 60 * 60
 _DEFAULT_MIN_INTERVAL_SECONDS = 1.0
+_DEFAULT_RETRY_CAP_SECONDS = 8.0
+_RETRY_JITTER_FACTORS = (1.00, 1.15, 0.95, 1.25, 1.05, 1.20)
 _SEARCH_TTL_SECONDS = 24 * 60 * 60
 _RELEASE_GROUP_TTL_SECONDS = 24 * 60 * 60
 _RELEASE_TRACKS_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -204,22 +206,61 @@ class MusicBrainzService:
                 continue
         return None
 
+    def _classify_retry_error(self, exc):
+        text = str(exc or "").lower()
+        if any(marker in text for marker in ("ssl", "tls")) and "eof" in text:
+            return "ssl_eof", True
+        if "ssl" in text or "tls" in text:
+            return "ssl", True
+        if "eof" in text:
+            return "eof", True
+        if any(marker in text for marker in ("timed out", "timeout")):
+            return "timeout", True
+        if any(marker in text for marker in ("temporary failure", "connection reset", "connection aborted", "connection refused", "remote disconnected")):
+            return "connection", True
+        if any(marker in text for marker in ("service unavailable", "503", "502", "504")):
+            return "upstream_unavailable", True
+        return "non_transient", False
+
+    def _retry_delay_seconds(self, *, base_delay, attempt):
+        safe_base = max(float(base_delay or 0.3), 0.1)
+        factor = _RETRY_JITTER_FACTORS[(max(int(attempt), 1) - 1) % len(_RETRY_JITTER_FACTORS)]
+        delay = safe_base * (2 ** (max(int(attempt), 1) - 1)) * factor
+        return min(delay, _DEFAULT_RETRY_CAP_SECONDS)
+
     def _call_with_retry(self, fn, *, attempts=3, base_delay=0.3):
         self._ensure_initialized()
+        effective_attempts = max(int(attempts or 1), 1)
+
         last_error = None
-        for attempt in range(1, attempts + 1):
+        attempt = 1
+        while attempt <= effective_attempts:
             try:
                 self._respect_rate_limit()
                 self._inc_metric("total_requests")
                 return fn()
             except Exception as exc:
                 last_error = exc
-                if attempt >= attempts:
+                error_class, transient = self._classify_retry_error(exc)
+                if transient and effective_attempts < 5:
+                    effective_attempts = 5
+                if attempt >= effective_attempts:
                     break
                 self._inc_metric("retries")
-                delay = base_delay * (2 ** (attempt - 1))
-                self._debug_log("[MUSICBRAINZ] retry attempt=%s delay=%.3fs error=%s", attempt, delay, exc)
-                time.sleep(base_delay * (2 ** (attempt - 1)))
+                delay = self._retry_delay_seconds(base_delay=base_delay, attempt=attempt)
+                self._debug_log(
+                    "[MUSICBRAINZ] retry attempt=%s/%s delay=%.3fs transient=%s error_class=%s error=%s",
+                    attempt,
+                    effective_attempts,
+                    delay,
+                    transient,
+                    error_class,
+                    exc,
+                )
+                time.sleep(delay)
+                attempt += 1
+                continue
+            attempt += 1
         if last_error:
             raise last_error
         return None

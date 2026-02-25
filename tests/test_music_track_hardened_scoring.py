@@ -415,9 +415,9 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         self.assertGreater(float(strong_score["final_score"]), float(weak_score["final_score"]))
 
     def test_query_ladder_progresses_until_viable_rung(self):
-        rung_1 = '"Artist" "Song" "Album"'
-        rung_2 = '"Artist" "Song"'
-        rung_3 = '"Artist - Song"'
+        rung_1 = '"Artist" "Song (Live)" "Album"'
+        rung_2 = '"Artist" "Song (Live)"'
+        rung_3 = '"Artist" "Song"'
         rung_4 = "Artist Song official audio"
         adapter = _QueryAwareAdapter(
             "youtube_music",
@@ -426,10 +426,10 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
                     _candidate(
                         source="youtube_music",
                         candidate_id="r3-match",
-                        title="Artist - Song",
+                        title="Artist - Song (Live)",
                         uploader="Artist - Topic",
                         artist="Artist",
-                        track="Song",
+                        track="Song Live",
                         album="Album",
                         duration_sec=200,
                     )
@@ -444,7 +444,7 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
             paths=None,
             canonical_resolver=_StubCanonicalResolver(),
         )
-        best = service.search_music_track_best_match("Artist", "Song", album="Album", duration_ms=200000, limit=6)
+        best = service.search_music_track_best_match("Artist", "Song (Live)", album="Album", duration_ms=200000, limit=6)
         self.assertIsNotNone(best)
         self.assertEqual(best.get("candidate_id"), "r3-match")
         self.assertEqual(adapter.calls, [rung_1, rung_2, rung_3])
@@ -477,6 +477,29 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         self.assertGreaterEqual(float(best.get("score_artist") or 0.0), 0.92)
         search_meta = getattr(service, "last_music_track_search", {}) or {}
         self.assertEqual(search_meta.get("selected_pass"), "expanded")
+
+    def test_live_canonical_track_can_pass_when_expected_track_is_live(self):
+        service = self._service(
+            {
+                "youtube_music": [
+                    _candidate(
+                        source="youtube_music",
+                        candidate_id="live-ok",
+                        title="Artist - Song (Live)",
+                        uploader="Artist - Topic",
+                        artist="Artist",
+                        track="Song Live",
+                        album="Album",
+                        duration_sec=200,
+                    )
+                ]
+            }
+        )
+        best = service.search_music_track_best_match(
+            "Artist", "Song (Live)", album="Album", duration_ms=200000, limit=6
+        )
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "live-ok")
 
 
 if __name__ == "__main__":
