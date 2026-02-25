@@ -25,6 +25,9 @@ All notable changes to this project will be documented here.
   - launcher version visibility with latest release check
   - Retreivr image update detection and guided update/restart path
 - Launcher release workflow and packaging support for macOS/Windows artifacts in CI.
+- Added tag-driven GitHub release workflow for runtime distribution:
+  - builds/pushes versioned GHCR image (`ghcr.io/<owner>/retreivr:<tag>`, plus `latest` on non-prerelease tags)
+  - creates and attaches minimal runtime bundle zip assets (`retreivr-runtime-<tag>.zip`) containing compose/env/config example + `README-runtime.md`
 - Info-page project links panel (repository, organization, and X links) and README social link near the top.
 
 ### Changed
