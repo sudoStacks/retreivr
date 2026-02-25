@@ -75,3 +75,26 @@ def test_music_cli_translation_parity_includes_runtime_cookie_and_audio_flags() 
     assert "--extractor-args" not in argv
     assert "-x" in argv
     assert "--audio-format" in argv and argv[argv.index("--audio-format") + 1] == "mp3"
+
+
+def test_video_mp4_cli_translation_includes_recode_video() -> None:
+    jq = _load_job_queue()
+    context = {
+        "operation": "download",
+        "url": "https://www.youtube.com/watch?v=abc123xyz00",
+        "media_type": "video",
+        "media_intent": "episode",
+        "final_format": "mp4",
+        "output_template": "%(id)s.%(ext)s",
+        "output_template_meta": {"final_format": "mp4"},
+        "config": {
+            "final_format": "mp4",
+        },
+        "overrides": {},
+    }
+
+    opts = jq.build_ytdlp_opts(context)
+    argv = jq._render_ytdlp_cli_argv(opts, context["url"])
+
+    assert "--merge-output-format" in argv and argv[argv.index("--merge-output-format") + 1] == "mp4"
+    assert "--recode-video" in argv and argv[argv.index("--recode-video") + 1] == "mp4"

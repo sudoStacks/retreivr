@@ -39,7 +39,7 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
             self.assertNotIn(key, opts)
         self.assertEqual(opts.get("socket_timeout"), 10)
 
-    def test_video_mp4_target_sets_container_only_not_strict_selector(self):
+    def test_video_mp4_target_sets_postprocess_conversion(self):
         context = {
             "operation": "download",
             "audio_mode": False,
@@ -52,6 +52,7 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
         }
         opts = build_ytdlp_opts(context)
         self.assertEqual(opts.get("merge_output_format"), "mp4")
+        self.assertEqual(opts.get("recodevideo"), "mp4")
         self.assertNotIn("vcodec^=avc1", str(opts.get("format") or ""))
 
     def test_video_mkv_and_mp4_targets_share_same_download_selector(self):
@@ -69,3 +70,5 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
         mkv_opts = build_ytdlp_opts(mkv_context)
         mp4_opts = build_ytdlp_opts(mp4_context)
         self.assertEqual(mkv_opts.get("format"), mp4_opts.get("format"))
+        self.assertIsNone(mkv_opts.get("recodevideo"))
+        self.assertEqual(mp4_opts.get("recodevideo"), "mp4")

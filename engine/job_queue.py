@@ -2915,6 +2915,10 @@ def build_ytdlp_opts(context):
             opts["format"] = _FORMAT_VIDEO
             if video_container_target in {"mp4", "mkv"}:
                 opts["merge_output_format"] = video_container_target
+            # mp4 requires codec-compatible post-conversion. Without this, merged mp4 can
+            # still contain opus audio when source streams are webm/opus.
+            if video_container_target == "mp4":
+                opts["recodevideo"] = "mp4"
 
     # Only lock down format-related overrides when the target_format was actually applied
     # (audio codec in audio_mode, or video container preference in video mode).
@@ -3036,7 +3040,7 @@ def _merge_overrides(opts, overrides, *, operation, lock_format=False):
             continue
         if operation == "download" and key not in _YTDLP_DOWNLOAD_ALLOWLIST:
             continue
-        if lock_format and key in {"format", "merge_output_format"}:
+        if lock_format and key in {"format", "merge_output_format", "recodevideo"}:
             continue
         opts[key] = value
     return opts
@@ -3066,6 +3070,8 @@ def _render_ytdlp_cli_argv(opts, url):
         argv.extend(["-f", str(opts["format"])])
     if opts.get("merge_output_format"):
         argv.extend(["--merge-output-format", str(opts["merge_output_format"])])
+    if opts.get("recodevideo"):
+        argv.extend(["--recode-video", str(opts["recodevideo"])])
     if opts.get("outtmpl"):
         argv.extend(["-o", str(opts["outtmpl"])])
     if opts.get("newline"):
@@ -3550,6 +3556,7 @@ def download_with_ytdlp(
         final_format=final_format,
         format=opts.get("format"),
         merge_output_format=opts.get("merge_output_format"),
+        recodevideo=opts.get("recodevideo"),
         outtmpl=opts.get("outtmpl"),
         noplaylist=opts.get("noplaylist"),
         postprocessors=opts.get("postprocessors"),
@@ -3596,6 +3603,7 @@ def download_with_ytdlp(
         probe_opts.pop("format", None)
         probe_opts.pop("postprocessors", None)
         probe_opts.pop("merge_output_format", None)
+        probe_opts.pop("recodevideo", None)
         probe_opts.pop("final_format", None)
         probe_opts.pop("writethumbnail", None)
         probe_opts.pop("embedthumbnail", None)
