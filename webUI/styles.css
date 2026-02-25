@@ -403,6 +403,15 @@ body.home-page .home-results {
     left: 50%;
     transform: translateX(-50%);
   }
+
+  .top-actions {
+    margin-left: auto;
+    justify-content: flex-end;
+  }
+
+  .header-sponsor {
+    margin-left: 0;
+  }
 }
 
 body.home-page .home-search-actions {
