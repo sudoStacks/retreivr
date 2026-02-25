@@ -1242,11 +1242,28 @@ class DownloadWorkerEngine:
             return 0.0
 
     def _build_music_track_query(self, artist, track, album=None, *, is_live=False):
-        search_terms = [f'"{artist}"', f'"{track}"']
-        if album:
-            search_terms.append(f'"{album}"')
-        search_terms.extend(["audio", "official", "topic"])
-        return " ".join(part for part in search_terms if part).strip()
+        ladder = self._build_music_track_query_ladder(artist, track, album)
+        return ladder[0]["query"] if ladder else ""
+
+    def _build_music_track_query_ladder(self, artist, track, album=None):
+        artist_v = str(artist or "").strip()
+        track_v = str(track or "").strip()
+        album_v = str(album or "").strip()
+        ladder = [
+            {"rung": 0, "label": "canonical_full", "query": " ".join(part for part in [f'"{artist_v}"', f'"{track_v}"', f'"{album_v}"' if album_v else ""] if part).strip()},
+            {"rung": 1, "label": "canonical_no_album", "query": " ".join(part for part in [f'"{artist_v}"', f'"{track_v}"'] if part).strip()},
+            {"rung": 2, "label": "artist_dash_track", "query": f'"{artist_v} - {track_v}"'.strip()},
+            {"rung": 3, "label": "official_audio_fallback", "query": " ".join(part for part in [artist_v, track_v, "official audio"] if part).strip()},
+        ]
+        seen = set()
+        unique_ladder = []
+        for entry in ladder:
+            query = str(entry.get("query") or "").strip()
+            if not query or query in seen:
+                continue
+            seen.add(query)
+            unique_ladder.append(entry)
+        return unique_ladder
 
     def _music_track_adjust_score(self, expected, candidate, *, allow_live=False):
         title = str(candidate.get("title") or "")
@@ -1342,16 +1359,21 @@ class DownloadWorkerEngine:
         scored = []
         source_priority = [name for name in _MUSIC_TRACK_SOURCE_PRIORITY if name in self.adapters]
         source_priority.extend([name for name in self.adapters.keys() if name not in source_priority])
+        query_ladder = self._build_music_track_query_ladder(artist, track, album)
         for source in source_priority:
             adapter = self.adapters.get(source)
             if not adapter:
                 continue
-            query = self._build_music_track_query(artist, track, album, is_live=allow_live)
-            try:
-                candidates = adapter.search_music_track(query, 6)
-            except Exception:
-                logging.exception("Music track search adapter failed source=%s", source)
-                continue
+            candidates = []
+            for ladder_entry in query_ladder:
+                query = str(ladder_entry.get("query") or "").strip()
+                try:
+                    candidates = adapter.search_music_track(query, 6)
+                except Exception:
+                    logging.exception("Music track search adapter failed source=%s query=%s", source, query)
+                    candidates = []
+                if candidates:
+                    break
             for candidate in candidates or []:
                 url = candidate.get("url") if isinstance(candidate, dict) else None
                 if not _is_http_url(url):
@@ -1447,6 +1469,15 @@ class DownloadWorkerEngine:
         search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
         logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
         resolved = None
+        retry_start_rung = 0
+        if isinstance(job.last_error, str) and (
+            "no_candidate_above_threshold" in job.last_error
+            or "duration_filtered" in job.last_error
+        ):
+            try:
+                retry_start_rung = max(0, min(int(job.attempts or 0), 3))
+            except Exception:
+                retry_start_rung = 0
         # Music-track acquisition must go through SearchService for deterministic orchestration/logging.
         if self.search_service:
             try:
@@ -1456,6 +1487,7 @@ class DownloadWorkerEngine:
                     album=album,
                     duration_ms=(duration_hint_sec * 1000) if duration_hint_sec else None,
                     limit=6,
+                    start_rung=retry_start_rung,
                 )
             except Exception as exc:
                 logging.exception("Music track search service failed query=%s", search_query)
@@ -1480,11 +1512,14 @@ class DownloadWorkerEngine:
 
         resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
         if not _is_http_url(resolved_url):
+            search_meta = getattr(self.search_service, "last_music_track_search", {}) if self.search_service else {}
+            failure_reason = str((search_meta or {}).get("failure_reason") or "no_candidate_above_threshold").strip() or "no_candidate_above_threshold"
+            retryable_no_candidate = failure_reason in {"duration_filtered", "no_candidate_above_threshold"}
             logging.error("Music track search failed")
             self.store.record_failure(
                 job,
-                error_message="no_candidate_above_threshold",
-                retryable=False,
+                error_message=failure_reason,
+                retryable=retryable_no_candidate,
                 retry_delay_seconds=self.retry_delay_seconds,
             )
             return None

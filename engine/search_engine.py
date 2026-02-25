@@ -93,6 +93,11 @@ MUSIC_TRACK_PENALIZE_TOKENS = ("live", "cover", "karaoke", "remix", "reaction", 
 DEFAULT_MATCH_THRESHOLD = 0.92
 MUSIC_TRACK_THRESHOLD = 0.78
 WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_MUSIC_DURATION_STRICT_MAX_DELTA_MS = 12000
+_MUSIC_DURATION_EXPANDED_MAX_DELTA_MS = 35000
+_MUSIC_DURATION_HARD_CAP_MS = 35000
+_MUSIC_PASS_B_MIN_TITLE_SIMILARITY = 0.92
+_MUSIC_PASS_B_MIN_ARTIST_SIMILARITY = 0.92
 
 
 @dataclass(frozen=True)
@@ -952,23 +957,67 @@ class SearchResolutionService:
         return adjustment, reasons
 
     def _build_music_track_query(self, artist, track, album=None):
-        search_terms = [f'"{artist}"', f'"{track}"']
-        if album:
-            search_terms.append(f'"{album}"')
-        search_terms.extend(["audio", "official", "topic"])
-        return " ".join(part for part in search_terms if part).strip()
+        ladder = self._build_music_track_query_ladder(artist, track, album)
+        return ladder[0]["query"] if ladder else ""
+
+    def _build_music_track_query_ladder(self, artist, track, album=None):
+        artist_v = str(artist or "").strip()
+        track_v = str(track or "").strip()
+        album_v = str(album or "").strip()
+        ladder = [
+            {
+                "rung": 0,
+                "label": "canonical_full",
+                "query": " ".join(
+                    part
+                    for part in [f'"{artist_v}"', f'"{track_v}"', f'"{album_v}"' if album_v else ""]
+                    if part
+                ).strip(),
+            },
+            {
+                "rung": 1,
+                "label": "canonical_no_album",
+                "query": " ".join(part for part in [f'"{artist_v}"', f'"{track_v}"'] if part).strip(),
+            },
+            {
+                "rung": 2,
+                "label": "artist_dash_track",
+                "query": f'"{artist_v} - {track_v}"'.strip(),
+            },
+            {
+                "rung": 3,
+                "label": "official_audio_fallback",
+                "query": " ".join(part for part in [artist_v, track_v, "official audio"] if part).strip(),
+            },
+        ]
+        seen = set()
+        unique_ladder = []
+        for entry in ladder:
+            query = str(entry.get("query") or "").strip()
+            if not query or query in seen:
+                continue
+            seen.add(query)
+            unique_ladder.append(entry)
+        return unique_ladder
 
     def _music_track_is_live(self, artist, track, album):
         combined = " ".join([str(artist or ""), str(track or ""), str(album or "")]).lower()
         return " live " in f" {combined} "
 
-    def search_music_track_candidates(self, query: str, limit: int = 6) -> list[dict]:
+    def search_music_track_candidates(self, query: str, limit: int = 6, *, query_label: str | None = None) -> list[dict]:
         candidates = []
         for source in MUSIC_TRACK_SOURCE_PRIORITY:
             adapter = self.adapters.get(source)
             if not adapter:
                 continue
-            _log_event(logging.INFO, "adapter_search_started", source=source, mode="music_track", query=query)
+            _log_event(
+                logging.INFO,
+                "adapter_search_started",
+                source=source,
+                mode="music_track",
+                query=query,
+                query_label=query_label,
+            )
             try:
                 adapter_candidates = adapter.search_music_track(query, limit)
             except Exception:
@@ -981,6 +1030,7 @@ class SearchResolutionService:
                 source=source,
                 mode="music_track",
                 query=query,
+                query_label=query_label,
                 candidates=len(adapter_candidates),
             )
             for candidate in adapter_candidates:
@@ -992,40 +1042,178 @@ class SearchResolutionService:
             logging.INFO,
             "music_track_candidates_total",
             query=query,
+            query_label=query_label,
             candidates_total=len(candidates),
         )
         return candidates
 
-    def search_music_track_best_match(self, artist, track, album=None, duration_ms=None, limit=6):
-        query = self._build_music_track_query(artist, track, album)
-        expected = {
-            "artist": artist,
-            "track": track,
-            "album": album,
-            "query": query,
-            "media_intent": "music_track",
-            "duration_hint_sec": (int(duration_ms) // 1000) if duration_ms is not None else None,
-        }
-        scored = []
-        for candidate in self.search_music_track_candidates(query, limit=limit):
-            source = candidate.get("source")
-            adapter = self.adapters.get(source)
-            source_modifier = adapter.source_modifier(candidate) if adapter else 1.0
-            candidate.update(score_candidate(expected, candidate, source_modifier=source_modifier))
-            breakdown = candidate.get("score_breakdown") if isinstance(candidate.get("score_breakdown"), dict) else {}
-            candidate["base_score"] = breakdown.get("raw_score_100")
-            candidate["final_score_100"] = breakdown.get("final_score_100")
-            duration_delta_ms = candidate.get("duration_delta_ms")
-            scored.append(candidate)
-        if not scored:
+    def search_music_track_best_match(self, artist, track, album=None, duration_ms=None, limit=6, *, start_rung=0):
+        expected_duration_hint_sec = (int(duration_ms) // 1000) if duration_ms is not None else None
+        ladder = self._build_music_track_query_ladder(artist, track, album)
+        if not ladder:
+            self.last_music_track_search = {
+                "attempted": [],
+                "start_rung": 0,
+                "selected_rung": None,
+                "selected_pass": None,
+                "failure_reason": "no_candidates",
+            }
             return None
-        ranked = rank_candidates(scored, source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY))
-        eligible = [c for c in ranked if not c.get("rejection_reason")]
-        selected = select_best_candidate(
-            eligible,
-            self.music_source_match_threshold,
-            source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY),
-        )
+        first_rung = max(0, min(int(start_rung or 0), len(ladder) - 1))
+        attempted = []
+        selected = None
+        selected_ranked = []
+        selected_query = None
+        selected_rung = None
+        selected_pass = None
+        failure_reason = "no_candidates"
+
+        for ladder_entry in ladder[first_rung:]:
+            query = str(ladder_entry.get("query") or "").strip()
+            rung = int(ladder_entry.get("rung") or 0)
+            query_label = str(ladder_entry.get("label") or f"rung_{rung}")
+            expected_base = {
+                "artist": artist,
+                "track": track,
+                "album": album,
+                "query": query,
+                "media_intent": "music_track",
+                "duration_hint_sec": expected_duration_hint_sec,
+                "duration_hard_cap_ms": _MUSIC_DURATION_HARD_CAP_MS,
+            }
+            candidates = self.search_music_track_candidates(query, limit=limit, query_label=query_label)
+            rung_meta = {
+                "rung": rung,
+                "query_label": query_label,
+                "query": query,
+                "candidates": len(candidates),
+                "selected_pass": None,
+            }
+            if not candidates:
+                rung_meta["failure_reason"] = "no_candidates"
+                attempted.append(rung_meta)
+                _log_event(
+                    logging.INFO,
+                    "music_query_rung_evaluated",
+                    rung=rung,
+                    query_label=query_label,
+                    query=query,
+                    candidates=0,
+                    selected_pass=None,
+                    failure_reason="no_candidates",
+                )
+                continue
+
+            def _score_for_pass(duration_max_delta_ms):
+                scored = []
+                expected = dict(expected_base)
+                expected["duration_max_delta_ms"] = int(duration_max_delta_ms)
+                for candidate in candidates:
+                    source = candidate.get("source")
+                    adapter = self.adapters.get(source)
+                    source_modifier = adapter.source_modifier(candidate) if adapter else 1.0
+                    item = dict(candidate)
+                    item.update(score_candidate(expected, item, source_modifier=source_modifier))
+                    breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+                    item["base_score"] = breakdown.get("raw_score_100")
+                    item["final_score_100"] = breakdown.get("final_score_100")
+                    scored.append(item)
+                return rank_candidates(scored, source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY))
+
+            ranked_a = _score_for_pass(_MUSIC_DURATION_STRICT_MAX_DELTA_MS)
+            eligible_a = [
+                c for c in ranked_a
+                if not c.get("rejection_reason")
+                and float(c.get("final_score", 0.0)) >= float(self.music_source_match_threshold)
+            ]
+            selected_a = eligible_a[0] if eligible_a else None
+            if selected_a is not None:
+                selected = selected_a
+                selected_ranked = ranked_a
+                selected_query = query
+                selected_rung = rung
+                selected_pass = "strict"
+                rung_meta["selected_pass"] = "strict"
+                attempted.append(rung_meta)
+                _log_event(
+                    logging.INFO,
+                    "music_query_rung_evaluated",
+                    rung=rung,
+                    query_label=query_label,
+                    query=query,
+                    candidates=len(candidates),
+                    selected_pass="strict",
+                    failure_reason=None,
+                )
+                break
+
+            ranked_b = _score_for_pass(_MUSIC_DURATION_EXPANDED_MAX_DELTA_MS)
+            eligible_b = []
+            for candidate in ranked_b:
+                if candidate.get("rejection_reason"):
+                    continue
+                if float(candidate.get("final_score", 0.0)) < float(self.music_source_match_threshold):
+                    continue
+                try:
+                    delta_ok = candidate.get("duration_delta_ms") is not None and int(candidate.get("duration_delta_ms")) <= _MUSIC_DURATION_EXPANDED_MAX_DELTA_MS
+                except Exception:
+                    delta_ok = False
+                if not delta_ok:
+                    continue
+                if float(candidate.get("score_track", 0.0)) < _MUSIC_PASS_B_MIN_TITLE_SIMILARITY:
+                    continue
+                if float(candidate.get("score_artist", 0.0)) < _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY:
+                    continue
+                if not bool(candidate.get("authority_channel_match")):
+                    continue
+                eligible_b.append(candidate)
+            selected_b = eligible_b[0] if eligible_b else None
+            if selected_b is not None:
+                selected = selected_b
+                selected_ranked = ranked_b
+                selected_query = query
+                selected_rung = rung
+                selected_pass = "expanded"
+                rung_meta["selected_pass"] = "expanded"
+                attempted.append(rung_meta)
+                _log_event(
+                    logging.INFO,
+                    "music_query_rung_evaluated",
+                    rung=rung,
+                    query_label=query_label,
+                    query=query,
+                    candidates=len(candidates),
+                    selected_pass="expanded",
+                    failure_reason=None,
+                )
+                break
+
+            pass_a_reasons = {str(c.get("rejection_reason") or "") for c in ranked_a if c.get("rejection_reason")}
+            if "duration_out_of_bounds" in pass_a_reasons or "duration_over_hard_cap" in pass_a_reasons:
+                failure_reason = "duration_filtered"
+            else:
+                failure_reason = "no_candidate_above_threshold"
+            rung_meta["failure_reason"] = failure_reason
+            attempted.append(rung_meta)
+            _log_event(
+                logging.INFO,
+                "music_query_rung_evaluated",
+                rung=rung,
+                query_label=query_label,
+                query=query,
+                candidates=len(candidates),
+                selected_pass=None,
+                failure_reason=failure_reason,
+            )
+
+        self.last_music_track_search = {
+            "attempted": attempted,
+            "start_rung": first_rung,
+            "selected_rung": selected_rung,
+            "selected_pass": selected_pass,
+            "failure_reason": None if selected is not None else failure_reason,
+        }
+        ranked = selected_ranked
         if self.debug_music_scoring:
             selected_id = selected.get("candidate_id") if isinstance(selected, dict) else None
             for candidate in ranked:
@@ -1040,6 +1228,9 @@ class SearchResolutionService:
                 _log_event(
                     logging.DEBUG,
                     "music_track_candidate_scored",
+                    query=selected_query,
+                    selected_rung=selected_rung,
+                    selected_pass=selected_pass,
                     source=candidate.get("source"),
                     title=candidate.get("title"),
                     duration=candidate.get("duration_sec"),

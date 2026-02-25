@@ -10,9 +10,13 @@ _WEIGHTS = {
 }
 
 _BRACKET_JUNK_RE = re.compile(
-    r"[\(\[\{][^\)\]\}]*?(official|lyrics|audio|video|visualizer)[^\)\]\}]*?[\)\]\}]",
+    r"[\(\[\{][^\)\]\}]*?"
+    r"(official|official\s+audio|official\s+music\s+video|official\s+video|"
+    r"lyrics?|lyric\s+video|audio|video|visualizer|hd|4k|topic)"
+    r"[^\)\]\}]*?[\)\]\}]",
     re.IGNORECASE,
 )
+_TOPIC_SUFFIX_RE = re.compile(r"\s*-\s*topic\s*$", re.IGNORECASE)
 _FEAT_RE = re.compile(r"\b(feat\.?|ft\.?|featuring)\b", re.IGNORECASE)
 
 _BANNED_TOKENS = {"cover", "tribute", "karaoke", "reaction", "8d", "nightcore", "slowed"}
@@ -25,8 +29,16 @@ _MUSIC_SOURCE_MULTIPLIERS = {
 }
 
 _MUSIC_REJECT_PATTERNS = (
-    ("disallowed_variant", re.compile(r"\b(live|acoustic|stripped|radio edit|karaoke|instrumental)\b", re.IGNORECASE)),
-    ("video_variant", re.compile(r"\b(official\s+video|music\s+video|visualizer|lyric\s+video)\b", re.IGNORECASE)),
+    (
+        "disallowed_variant",
+        re.compile(
+            r"\b("
+            r"live|acoustic|instrumental|karaoke|cover|tribute|remix|extended\s+mix|"
+            r"sped\s*up|slowed(?:\s+down)?|nightcore|stripped|radio\s+edit"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
     ("preview_variant", re.compile(r"\b(preview|snippet|teaser|short\s+version)\b", re.IGNORECASE)),
     ("session_variant", re.compile(r"\b(cmt\s*\d+\s*sessions?)\b", re.IGNORECASE)),
 )
@@ -45,7 +57,7 @@ def _music_query_variant_flags(query):
     return {term for term in _MUSIC_VARIANT_TERMS if term in query_lower}
 
 
-def _music_duration_points(expected_sec, candidate_sec):
+def _music_duration_points(expected_sec, candidate_sec, *, max_delta_ms=12000, hard_cap_ms=35000):
     if expected_sec is None or candidate_sec is None:
         return 0.0, "duration_missing", None
     try:
@@ -56,7 +68,9 @@ def _music_duration_points(expected_sec, candidate_sec):
     delta_ms = abs(candidate_ms - expected_ms)
     if candidate_ms < max(45000, int(expected_ms * 0.45)):
         return 0.0, "preview_duration", delta_ms
-    if delta_ms > 12000:
+    if delta_ms > int(hard_cap_ms):
+        return 0.0, "duration_over_hard_cap", delta_ms
+    if delta_ms > int(max_delta_ms):
         return 0.0, "duration_out_of_bounds", delta_ms
     if delta_ms <= 2000:
         return 20.0, None, delta_ms
@@ -134,6 +148,7 @@ def normalize_text(value):
     text = unicodedata.normalize("NFKD", str(value))
     text = text.lower().strip()
     text = _FEAT_RE.sub("feat", text)
+    text = _TOPIC_SUFFIX_RE.sub("", text)
     text = _BRACKET_JUNK_RE.sub(" ", text)
     text = re.sub(r"[^\w\s/&]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -258,14 +273,23 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
         album_overlap = token_overlap_score(expected_album, candidate_album) if expected_album else 0.0
 
         rejection_reason = _music_reject_reason(expected, candidate)
+        duration_max_delta_ms = expected.get("duration_max_delta_ms")
+        if duration_max_delta_ms is None:
+            duration_max_delta_ms = 12000
+        duration_hard_cap_ms = expected.get("duration_hard_cap_ms")
+        if duration_hard_cap_ms is None:
+            duration_hard_cap_ms = 35000
         duration_pts, duration_reject_reason, duration_delta_ms = _music_duration_points(
-            expected.get("duration_hint_sec"), candidate.get("duration_sec")
+            expected.get("duration_hint_sec"),
+            candidate.get("duration_sec"),
+            max_delta_ms=duration_max_delta_ms,
+            hard_cap_ms=duration_hard_cap_ms,
         )
         if duration_reject_reason == "duration_missing":
             duration_penalty = 12.0
         else:
             duration_penalty = 0.0
-        if duration_reject_reason in {"preview_duration", "duration_out_of_bounds"}:
+        if duration_reject_reason in {"preview_duration", "duration_out_of_bounds", "duration_over_hard_cap"}:
             rejection_reason = duration_reject_reason
 
         if expected_album:
@@ -278,6 +302,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             album_pts = 0.0
 
         source_authority_pts = _music_source_authority_points(expected, candidate)
+        authority_channel_match = source_authority_pts >= 8.0
 
         noise_penalty = 0.0
         penalty_reasons = []
@@ -339,6 +364,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             "final_score": final_score,
             "duration_delta_ms": duration_delta_ms,
             "rejection_reason": rejection_reason,
+            "authority_channel_match": authority_channel_match,
             "title_noise_score": noise_penalty,
             "score_breakdown": {
                 "track_pts": track_pts,
