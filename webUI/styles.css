@@ -1213,8 +1213,16 @@ a[aria-disabled="true"] {
 }
 
 #search-queue-panel .table-wrap {
-  max-height: 360px;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
+}
+
+#search-queue-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 #search-queue-panel .table {
@@ -1228,6 +1236,18 @@ a[aria-disabled="true"] {
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+#search-queue-panel .table td:last-child {
+  line-height: 1.35;
+  max-height: 4.1em;
+  white-space: normal;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 
 .source-priority-list {
@@ -1295,6 +1315,17 @@ a[aria-disabled="true"] {
   background: #0f1724;
 }
 
+#search-items-panel .table thead th,
+#search-requests-panel .table thead th,
+#search-queue-panel .table thead th,
+#downloads-panel .table thead th,
+#history-panel .table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #0f1724;
+}
+
 .table tbody tr:nth-child(even) {
   background: #111927;
 }
@@ -1319,6 +1350,14 @@ a[aria-disabled="true"] {
 }
 
 :root[data-theme="light"] .table thead {
+  background: #f1f5f9;
+}
+
+:root[data-theme="light"] #search-items-panel .table thead th,
+:root[data-theme="light"] #search-requests-panel .table thead th,
+:root[data-theme="light"] #search-queue-panel .table thead th,
+:root[data-theme="light"] #downloads-panel .table thead th,
+:root[data-theme="light"] #history-panel .table thead th {
   background: #f1f5f9;
 }
 
