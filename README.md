@@ -139,3 +139,8 @@ Retreivr does not:
 - Stream media
 - Replace Plex/Jellyfin players
 - Bypass DRM/protected content
+
+## License
+
+Retreivr is licensed under the GNU Affero General Public License v3.0 (AGPLv3).
+See the LICENSE file for full details.
