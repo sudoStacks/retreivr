@@ -351,6 +351,7 @@ body.home-page .home-results {
   max-width: 180px;
   object-fit: contain;
   display: block;
+  border-radius: 10px;
 }
 
 .top-actions {
