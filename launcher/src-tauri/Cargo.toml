@@ -1,6 +1,6 @@
 [package]
 name = "retreivr-launcher"
-version = "0.1.0"
+version = "0.9.6"
 description = "GUI launcher for Retreivr"
 authors = ["github.com/Retreivr"]
 edition = "2021"
