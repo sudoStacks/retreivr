@@ -32,3 +32,35 @@ tests/**
 _project_management/
 _project_management/**
 
+# Python virtual envs / tooling
+.venv
+venv
+env
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Local env + secrets
+.env
+.env.*
+!.env.example
+
+# Logs / temp
+*.log
+logs/
+tmp/
+*.tmp
+
+# Local runtime/data artifacts
+retreivr.sqlite3
+data/
+downloads/
+tokens/
+config/config.json
+
+# Editor/OS junk
+.vscode
+.idea
+*.swp

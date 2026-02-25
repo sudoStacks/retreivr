@@ -339,6 +339,20 @@ body.home-page .home-results {
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
 }
 
+.header-sponsor {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.sudostacks-logo {
+  height: 36px;
+  width: auto;
+  max-width: 180px;
+  object-fit: contain;
+  display: block;
+}
+
 .top-actions {
   display: flex;
   flex-wrap: wrap;
@@ -816,6 +830,22 @@ body.home-page .home-candidate-source-tag {
   font-size: 16px;
   font-weight: 600;
   margin-bottom: 12px;
+}
+
+.panel-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel-header-row .panel-title {
+  margin-bottom: 0;
+}
+
+.panel-header-row .button {
+  width: auto;
 }
 
 #metrics-panel {
@@ -1463,6 +1493,11 @@ a[aria-disabled="true"] {
   .top-nav,
   .top-actions {
     width: 100%;
+  }
+
+  .header-sponsor {
+    align-self: flex-end;
+    margin-left: 0;
   }
 }
 

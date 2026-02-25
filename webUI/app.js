@@ -5810,16 +5810,6 @@ function bindEvents() {
     });
   });
 
-  $("#refresh-all").addEventListener("click", async () => {
-    await refreshStatus();
-    await refreshSchedule();
-    await refreshMetrics();
-    await refreshSearchQueue();
-    await refreshLogs();
-    await refreshHistory();
-    await refreshDownloads();
-  });
-
   $("#logs-refresh").addEventListener("click", refreshLogs);
   $("#logs-auto").addEventListener("change", () => {
     if ($("#logs-auto").checked) {
