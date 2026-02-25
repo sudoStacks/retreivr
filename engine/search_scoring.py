@@ -71,7 +71,7 @@ def _music_source_multiplier(source):
     return _MUSIC_SOURCE_MULTIPLIERS.get(str(source or "").lower(), 1.0)
 
 
-def _music_source_authority_points(candidate):
+def _music_source_authority_points(expected, candidate):
     source = str(candidate.get("source") or "").lower()
     title_lower = str(candidate.get("title") or "").lower()
     uploader_lower = str(candidate.get("uploader") or candidate.get("artist_detected") or "").lower()
@@ -85,7 +85,23 @@ def _music_source_authority_points(candidate):
         signal = 0.35
     elif source == "soundcloud":
         signal = 0.30
-    return 8.0 * signal
+    authority_points = 8.0 * signal
+
+    expected_artist_tokens = tokenize(expected.get("artist"))
+    uploader_tokens = tokenize(candidate.get("uploader") or candidate.get("artist_detected"))
+    uploader_artist_overlap = token_overlap_score(expected_artist_tokens, uploader_tokens)
+
+    channel_authority_bonus = 0.0
+    if source in {"youtube", "youtube_music"}:
+        strong_artist_match = uploader_artist_overlap >= 0.80
+        topic_channel = "topic" in uploader_lower
+        official_channel = official or ("official artist channel" in uploader_lower)
+        if strong_artist_match and (topic_channel or official_channel):
+            channel_authority_bonus = 4.0
+        elif uploader_artist_overlap >= 0.65 and official_channel:
+            channel_authority_bonus = 2.0
+
+    return min(12.0, authority_points + channel_authority_bonus)
 
 
 def _music_reject_reason(expected, candidate):
@@ -261,7 +277,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             artist_pts = 33.0 * artist_overlap
             album_pts = 0.0
 
-        source_authority_pts = _music_source_authority_points(candidate)
+        source_authority_pts = _music_source_authority_points(expected, candidate)
 
         noise_penalty = 0.0
         penalty_reasons = []

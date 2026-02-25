@@ -25,16 +25,27 @@ All notable changes to this project will be documented here.
   - launcher version visibility with latest release check
   - Retreivr image update detection and guided update/restart path
 - Launcher release workflow and packaging support for macOS/Windows artifacts in CI.
+- Info-page project links panel (repository, organization, and X links) and README social link near the top.
 
 ### Changed
 - Launcher Docker command execution hardened for desktop environments, including improved macOS PATH handling for Docker CLI discovery.
 - Launcher now normalizes Docker image references to lowercase to prevent invalid image reference failures.
 - Launcher defaults aligned around local-first runtime behavior and documented default host port `8090`.
+- Launcher metadata/version alignment updated to `0.9.6` across Tauri/Cargo/package manifests.
+- Music discovery scoring refined with source-aware confidence boosting for high-confidence YouTube/YouTube Music authority channels when uploader↔artist overlap is strong.
+- MusicBrainz binding variant policy hardened with explicit disallowed token/phrase matching and neutral suffix stripping before title similarity scoring.
+- Status/Info table UX refinements:
+  - sticky table headers during scroll
+  - better bounded scrolling behavior for long lists
+  - improved Info-page panel layout balance for results/history views
 
 ### Fixed
 - Resolved launcher startup/runtime issues that could surface as blank or non-responsive windows in early builds.
 - Fixed false-negative Docker readiness cases on macOS when Docker existed outside minimal app PATH contexts.
 - Fixed image pull failures caused by mixed-case image references.
+- Fixed album download MusicBrainz include-contract failures by removing invalid `genres` includes from release-group/release fetch paths.
+- Fixed mp4 output regression where final mp4 artifacts could still carry incompatible audio streams by enforcing post-processing recode in the canonical yt-dlp contract.
+- Fixed web header branding text and topbar control placement consistency after nav/action refinements.
 
 ## v0.9.5 — Music Mode Hardening + Playlist File Import
 

@@ -360,6 +360,40 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         self.assertIsNotNone(best)
         self.assertEqual(best.get("candidate_id"), "c4")
 
+    def test_topic_channel_with_strong_artist_overlap_gets_authority_bonus(self):
+        expected = {
+            "artist": "Kenny Chesney",
+            "track": "Young",
+            "album": "No Shoes No Shirt No Problems",
+            "duration_hint_sec": 235,
+            "media_intent": "music_track",
+            "query": '"Kenny Chesney" "Young" "No Shoes No Shirt No Problems" audio official topic',
+        }
+        strong_topic = _candidate(
+            source="youtube",
+            candidate_id="topic-strong",
+            title="Kenny Chesney - Young (Official Video)",
+            uploader="Kenny Chesney - Topic",
+            artist="Kenny Chesney",
+            track="Young",
+            album="No Shoes No Shirt No Problems",
+            duration_sec=235,
+        )
+        weak_topic = _candidate(
+            source="youtube",
+            candidate_id="topic-weak",
+            title="Kenny Chesney - Young (Official Video)",
+            uploader="Random Uploads - Topic",
+            artist="Kenny Chesney",
+            track="Young",
+            album="No Shoes No Shirt No Problems",
+            duration_sec=235,
+        )
+
+        strong_score = self.scoring.score_candidate(expected, strong_topic, source_modifier=1.0)
+        weak_score = self.scoring.score_candidate(expected, weak_topic, source_modifier=1.0)
+        self.assertGreater(float(strong_score["final_score"]), float(weak_score["final_score"]))
+
 
 if __name__ == "__main__":
     unittest.main()
