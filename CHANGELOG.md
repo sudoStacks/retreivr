@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.6 — Desktop Launcher Foundation + Reliability Hardening
+
+### Added
+- Cross-platform desktop launcher foundation (Tauri) for local workstation use on macOS and Windows.
+- Guided launcher setup flow for local Retreivr runtime configuration:
+  - host port (default `8090`)
+  - image/container settings
+  - configurable local folders for downloads/config/tokens/logs/data
+- Runtime bootstrap from launcher-managed workspace:
+  - generated `compose.yaml`
+  - auto-seeded `config.json` from embedded `config/config_sample.json`
+- Reliability/safety tooling in launcher:
+  - preflight checks (config, compose generation, Docker/Compose availability, port checks, compose validation)
+  - actionable error panels with suggested fixes
+  - diagnostics copy and quick log viewing
+- Onboarding completeness in launcher:
+  - first-run checklist (Docker readiness, saved config, container state, UI reachability)
+  - shortcuts to open compose/data folders
+  - quick presets for common local setups
+- Version/update awareness in launcher:
+  - launcher version visibility with latest release check
+  - Retreivr image update detection and guided update/restart path
+- Launcher release workflow and packaging support for macOS/Windows artifacts in CI.
+
+### Changed
+- Launcher Docker command execution hardened for desktop environments, including improved macOS PATH handling for Docker CLI discovery.
+- Launcher now normalizes Docker image references to lowercase to prevent invalid image reference failures.
+- Launcher defaults aligned around local-first runtime behavior and documented default host port `8090`.
+
+### Fixed
+- Resolved launcher startup/runtime issues that could surface as blank or non-responsive windows in early builds.
+- Fixed false-negative Docker readiness cases on macOS when Docker existed outside minimal app PATH contexts.
+- Fixed image pull failures caused by mixed-case image references.
+
 ## v0.9.5 — Music Mode Hardening + Playlist File Import
 
 ### Added

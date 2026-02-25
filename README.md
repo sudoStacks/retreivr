@@ -25,35 +25,51 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Web UI and API for control and automation
 - Optional Telegram summaries
 
-## 0.9.5 Highlights
-- Background playlist import with progress tracking
-- Queue/status UI refresh with richer live progress signals
-- Album-mode consistency improvements (path/tag/artwork behavior)
-- Scheduler/watcher safeguards during import activity
-- Better short-term UX guardrails for heavy operations
+## 0.9.6 Highlights
+- Desktop launcher foundation for local macOS/Windows installs
+- Guided Docker/runtime setup with preflight checks and onboarding checklist
+- Launcher-managed compose/config bootstrap for faster first run
+- Improved diagnostics, error guidance, and update awareness in launcher
 
 ---
 
-## Quick Start (Docker Recommended)
+## Quick Start (Local Workstation)
 
-### 1) Prepare files
+### Option A) Desktop Launcher (Recommended for non-server local installs)
+- Download the launcher for your OS from Releases:
+  - macOS (`.dmg` / `.app`)
+  - Windows (installer package)
+- Open the launcher and follow the wizard:
+  - verify Docker Desktop is installed/running
+  - choose folders and settings
+  - generate compose + start Retreivr
+- Open Web UI:
+```text
+http://localhost:8090
+```
+
+The launcher is intended for local machine use and does not require manually cloning/copying compose/config files for normal setup.
+
+### Option B) Docker Compose (Manual)
+
+#### 1) Prepare files
 ```bash
 cp docker/docker-compose.yml.example docker/docker-compose.yml
 cp .env.example .env
 ```
 
-### 2) Start Retreivr
+#### 2) Start Retreivr
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-### 3) Open Web UI
+#### 3) Open Web UI
 ```text
 http://localhost:8090
 ```
 Default mapping is `8090:8000` (`host:container`).
 
-### 4) Initial setup in UI
+#### 4) Initial setup in UI
 - Open `Config` page
 - Add your playlist/search settings
 - Set destination folders (under `/downloads` in container)
@@ -103,7 +119,7 @@ http://localhost:8000
 ---
 
 ## Upgrade Notes
-If you are upgrading to `0.9.5`, pull latest image and restart:
+If you are upgrading to `0.9.6`, pull latest image and restart:
 ```bash
 docker compose -f docker/docker-compose.yml pull
 docker compose -f docker/docker-compose.yml up -d
