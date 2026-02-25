@@ -397,6 +397,14 @@ body.home-page .home-results {
   border-color: var(--accent);
 }
 
+@media (min-width: 901px) {
+  .top-nav {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+  }
+}
+
 body.home-page .home-search-actions {
   justify-content: center;
   gap: 10px;
