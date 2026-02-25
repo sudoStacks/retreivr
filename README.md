@@ -8,6 +8,10 @@
   Self-hosted media acquisition that stays deterministic, tidy, and boring in the best way.
 </p>
 
+<p align="center">
+  Follow us on X: <a href="https://x.com/sudoStacks">https://x.com/sudoStacks</a>
+</p>
+
 ---
 
 ## What Is Retreivr?

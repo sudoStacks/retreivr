@@ -5039,7 +5039,8 @@ def download_full_album(data: dict):
         release_group_payload = mb._call_with_retry(  # noqa: SLF001
             lambda: musicbrainzngs.get_release_group_by_id(
                 release_group_mbid,
-                includes=["releases", "tags", "genres"],
+                # release-group does not accept "genres" include in musicbrainzngs.
+                includes=["releases", "tags"],
             )
         )
     except Exception:
@@ -5068,7 +5069,8 @@ def download_full_album(data: dict):
         release_payload = mb._call_with_retry(  # noqa: SLF001
             lambda: musicbrainzngs.get_release_by_id(
                 release_mbid,
-                includes=["recordings", "media", "artists", "tags", "genres"],
+                # Keep include list contract-safe; use tags fallback for genre best-effort.
+                includes=["recordings", "media", "artists", "tags"],
             )
         )
     except Exception:

@@ -910,6 +910,23 @@ body.home-page .home-candidate-source-tag {
   margin-bottom: 12px;
 }
 
+.info-footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.info-footer-links a {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.info-footer-links a:hover {
+  text-decoration: underline;
+}
+
 .grid {
   display: grid;
   gap: 12px;
