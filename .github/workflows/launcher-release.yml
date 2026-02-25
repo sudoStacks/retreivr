@@ -19,6 +19,8 @@ jobs:
             platform: macos
           - os: windows-latest
             platform: windows
+          - os: ubuntu-latest
+            platform: linux
 
     runs-on: ${{ matrix.os }}
 
@@ -35,6 +37,18 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
 
       - name: Install launcher dependencies
         working-directory: launcher
@@ -74,7 +88,13 @@ jobs:
           [System.IO.File]::WriteAllBytes($certPath, [System.Convert]::FromBase64String("${{ secrets.WINDOWS_CERTIFICATE }}"))
           "WINDOWS_CERTIFICATE=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build signed launcher bundles
+      - name: Build launcher bundles (Linux)
+        if: matrix.platform == 'linux'
+        working-directory: launcher
+        run: npm run tauri build -- --bundles appimage,deb
+
+      - name: Build signed launcher bundles (macOS/Windows)
+        if: matrix.platform != 'linux'
         working-directory: launcher
         run: npm run tauri build
         env:
@@ -101,6 +121,13 @@ jobs:
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item -Path "launcher/src-tauri/target/release/bundle/*" -Destination "dist" -Recurse -Force
 
+      - name: Collect bundle artifacts (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp -R launcher/src-tauri/target/release/bundle/. dist/
+
       - name: Build checksums (macOS)
         if: matrix.platform == 'macos'
         shell: bash
@@ -122,6 +149,15 @@ jobs:
             $relative = Resolve-Path -Relative $_.FullName
             "$hash  $relative" | Out-File -FilePath $out -Encoding utf8 -Append
           }
+
+      - name: Build checksums (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          cd dist
+          find . -type f \
+            ! -name "*.sig" \
+            -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS-${{ matrix.platform }}.txt
 
       - name: Upload launcher artifacts
         uses: actions/upload-artifact@v4
