@@ -23,10 +23,6 @@ BUCKET_MULTIPLIERS: dict[str, float] = {
 }
 
 _WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
-_DISALLOWED_VARIANT_RE = re.compile(
-    r"\b(live|acoustic|stripped|cover|karaoke|instrumental|radio\s*edit)\b",
-    re.IGNORECASE,
-)
 _PREVIEW_RE = re.compile(r"\b(preview|snippet|teaser)\b", re.IGNORECASE)
 _BRACKETED_SEGMENT_RE = re.compile(r"\([^)]*\)|\[[^\]]*\]")
 _TRANSPORT_TOKEN_RE = re.compile(
@@ -39,6 +35,53 @@ _TRANSPORT_TOKEN_RE = re.compile(
 _TRAILING_HYPHEN_SUFFIX_RE = re.compile(
     r"\s*-\s*(official video|topic)\s*$",
     re.IGNORECASE,
+)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+_DISALLOWED_VARIANT_TOKENS = {
+    "live",
+    "acoustic",
+    "instrumental",
+    "karaoke",
+    "cover",
+    "tribute",
+    "remix",
+    "nightcore",
+    "stripped",
+}
+_DISALLOWED_VARIANT_PHRASES = (
+    "radio edit",
+    "extended mix",
+    "sped up",
+    "slowed",
+)
+_NEUTRAL_TITLE_PHRASES = (
+    "official video",
+    "official music video",
+    "official audio",
+    "lyric video",
+    "music video",
+    "visualizer",
+    "hd",
+    "4k",
+    "remastered",
+    "remaster",
+)
+_NEUTRAL_SEGMENT_TOKEN_ALLOWLIST = {
+    "official",
+    "video",
+    "music",
+    "audio",
+    "lyric",
+    "visualizer",
+    "hd",
+    "4k",
+    "remastered",
+    "remaster",
+}
+_NEUTRAL_TITLE_PHRASE_RES = tuple(
+    re.compile(rf"\b{re.escape(phrase)}\b", re.IGNORECASE)
+    for phrase in _NEUTRAL_TITLE_PHRASES
 )
 
 
@@ -60,6 +103,50 @@ def _safe_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _normalize_for_matching(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).lower()
+    text = _NON_ALNUM_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_variant_triggers(value: Any) -> list[str]:
+    normalized = _normalize_for_matching(value)
+    if not normalized:
+        return []
+    padded = f" {normalized} "
+    tokens = set(normalized.split())
+    triggers: set[str] = set()
+    triggers.update(token for token in tokens if token in _DISALLOWED_VARIANT_TOKENS)
+    for phrase in _DISALLOWED_VARIANT_PHRASES:
+        if f" {phrase} " in padded:
+            triggers.add(phrase)
+    return sorted(triggers)
+
+
+def _strip_neutral_title_phrases(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).lower()
+
+    def _strip_neutral_bracketed_segment(match: re.Match[str]) -> str:
+        segment = match.group(0)
+        inner = segment[1:-1].strip()
+        if not inner:
+            return " "
+        normalized_inner = _normalize_for_matching(inner)
+        if not normalized_inner:
+            return " "
+        inner_tokens = normalized_inner.split()
+        if inner_tokens and all(token.isdigit() or token in _NEUTRAL_SEGMENT_TOKEN_ALLOWLIST for token in inner_tokens):
+            return " "
+        return f" {inner} "
+
+    text = _BRACKETED_SEGMENT_RE.sub(_strip_neutral_bracketed_segment, text)
+    for pattern in _NEUTRAL_TITLE_PHRASE_RES:
+        text = pattern.sub(" ", text)
+    text = _TRAILING_HYPHEN_SUFFIX_RE.sub(" ", text)
+    text = _NON_ALNUM_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _normalize_title_for_mb_lookup(raw_title: str, *, query_flags: dict | None = None) -> str:
@@ -374,7 +461,7 @@ def _collect_isrc(recording: dict[str, Any]) -> bool:
 
 def _is_variant_explicitly_requested(track: str, album: str | None) -> bool:
     combined = f"{track} {album or ''}".strip()
-    return bool(_DISALLOWED_VARIANT_RE.search(combined))
+    return bool(_extract_variant_triggers(combined))
 
 
 def resolve_best_mb_pair(
@@ -416,6 +503,7 @@ def resolve_best_mb_pair(
     expected_artist = str(artist or "").strip()
     expected_track_raw = str(track or "").strip()
     expected_track_lookup = _normalize_title_for_mb_lookup(expected_track_raw)
+    expected_track_for_score = _strip_neutral_title_phrases(expected_track_raw) or expected_track_raw
     expected_track = expected_track_raw
     expected_album = str(album or "").strip() or None
     prefer_country = str(country_preference or "").strip().upper() or None
@@ -430,6 +518,7 @@ def resolve_best_mb_pair(
                 "message": "mb_title_normalized",
                 "original": expected_track_raw,
                 "normalized": expected_track_lookup,
+                "scoring_normalized": expected_track_for_score,
             }
         )
 
@@ -472,6 +561,7 @@ def resolve_best_mb_pair(
             _add_failure("recording_missing_mbid")
             continue
         recording_title = str(recording.get("title") or "").strip()
+        recording_title_for_score = _strip_neutral_title_phrases(recording_title) or recording_title
         recording_artist = _artist_credit_string(recording.get("artist-credit"))
         recording_duration_ms = _safe_int(recording.get("length"))
 
@@ -536,40 +626,35 @@ def resolve_best_mb_pair(
             release_group_id = str(release_group.get("id") or "").strip() or None
             country = str(release.get("country") or release_item.get("country") or "").strip().upper() or None
 
-            if _DISALLOWED_VARIANT_RE.search(recording_title) and not variant_allowed:
+            variant_triggers = _extract_variant_triggers(recording_title)
+            if variant_triggers and not variant_allowed:
                 _add_failure("disallowed_variant")
+                logger.info(
+                    {
+                        "message": "mb_pair_rejected",
+                        "recording_mbid": recording_mbid,
+                        "release_mbid": release_id,
+                        "reason": "disallowed_variant",
+                        "variant_triggers": variant_triggers,
+                        "normalized_title_for_scoring": recording_title_for_score,
+                    }
+                )
                 if debug:
-                    logger.debug({"message": "mb_pair_rejected", "recording_mbid": recording_mbid, "release_mbid": release_id, "reason": "disallowed_variant"})
+                    logger.debug(
+                        {
+                            "message": "mb_pair_rejected",
+                            "recording_mbid": recording_mbid,
+                            "release_mbid": release_id,
+                            "reason": "disallowed_variant",
+                            "variant_triggers": variant_triggers,
+                            "normalized_title_for_scoring": recording_title_for_score,
+                        }
+                    )
                 continue
 
             duration_delta_ms = None
             if duration_ms is not None and recording_duration_ms is not None:
                 duration_delta_ms = abs(int(duration_ms) - int(recording_duration_ms))
-                if duration_delta_ms > duration_delta_limit_ms:
-                    _add_failure("duration_delta_gt_limit")
-                    if log_duration_reject_detail:
-                        logger.info(
-                            {
-                                "message": "duration_reject_detail",
-                                "recording_mbid": recording_mbid,
-                                "mb_duration_ms": duration_ms,
-                                "candidate_duration_ms": recording_duration_ms,
-                                "delta_ms": duration_delta_ms,
-                                "limit_ms": duration_delta_limit_ms,
-                            }
-                        )
-                    if debug:
-                        logger.debug(
-                            {
-                                "message": "mb_pair_rejected",
-                                "recording_mbid": recording_mbid,
-                                "release_mbid": release_id,
-                                "reason": "duration_delta_gt_limit",
-                                "duration_delta_ms": duration_delta_ms,
-                                "duration_delta_limit_ms": duration_delta_limit_ms,
-                            }
-                        )
-                    continue
             if recording_duration_ms is not None and recording_duration_ms < PREVIEW_REJECT_MS:
                 if duration_ms is None or int(duration_ms) >= 60000:
                     _add_failure("preview_duration")
@@ -590,7 +675,7 @@ def resolve_best_mb_pair(
                     artist_similarity = max(0.6, recording_score)
             else:
                 artist_similarity = 1.0
-            title_similarity = _token_similarity(expected_track, recording_title or expected_track)
+            title_similarity = _token_similarity(expected_track_for_score, recording_title_for_score or expected_track_for_score)
             album_similarity = _token_similarity(expected_album, release_title) if expected_album else 0.0
             if expected_album and bucket == "compilation" and album_similarity < 0.40:
                 _add_failure("compilation_album_mismatch")
@@ -641,6 +726,33 @@ def resolve_best_mb_pair(
             country_bonus = 6.0 if (prefer_country and country == prefer_country) else 0.0
             total = correctness * CORRECTNESS_WEIGHT + completeness * COMPLETENESS_WEIGHT + country_bonus
 
+            if duration_delta_ms is not None and duration_delta_ms > duration_delta_limit_ms:
+                _add_failure("duration_delta_gt_limit")
+                if log_duration_reject_detail:
+                    logger.info(
+                        {
+                            "message": "duration_reject_detail",
+                            "recording_mbid": recording_mbid,
+                            "mb_duration_ms": duration_ms,
+                            "candidate_duration_ms": recording_duration_ms,
+                            "delta_ms": duration_delta_ms,
+                            "limit_ms": duration_delta_limit_ms,
+                        }
+                    )
+                if debug:
+                    logger.debug(
+                        {
+                            "message": "mb_pair_rejected",
+                            "recording_mbid": recording_mbid,
+                            "release_mbid": release_id,
+                            "reason": "duration_delta_gt_limit",
+                            "duration_delta_ms": duration_delta_ms,
+                            "duration_delta_limit_ms": duration_delta_limit_ms,
+                            "normalized_title_for_scoring": recording_title_for_score,
+                        }
+                    )
+                continue
+
             candidate = {
                 "recording_mbid": recording_mbid,
                 "mb_release_id": release_id,
@@ -673,6 +785,8 @@ def resolve_best_mb_pair(
                         "duration_delta_ms": duration_delta_ms,
                         "country": country,
                         "album": release_title,
+                        "expected_track_scoring_normalized": expected_track_for_score,
+                        "candidate_track_scoring_normalized": recording_title_for_score,
                     }
                 )
             all_candidates.append(candidate)

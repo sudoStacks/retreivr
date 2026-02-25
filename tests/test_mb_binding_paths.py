@@ -579,6 +579,103 @@ def test_live_variant_without_intent_fails_binding():
     assert selected is None
 
 
+def test_official_video_suffix_is_neutral_for_mb_binding():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "official-rec",
+                    "title": "Young (Official Music Video)",
+                    "ext:score": "99",
+                    "length": "236000",
+                    "artist-credit": [{"name": "Kenny Chesney"}],
+                }
+            ]
+        },
+        recording_payloads={
+            "official-rec": {
+                "recording": {
+                    "id": "official-rec",
+                    "length": "236000",
+                    "release-list": [{"id": "official-rel", "date": "2002-01-01"}],
+                }
+            }
+        },
+        release_payloads={
+            "official-rel": _release_payload(
+                "official-rel",
+                title="No Shoes, No Shirt, No Problems",
+                recording_mbid="official-rec",
+                release_group_id="official-rg",
+                date="2002-01-01",
+                country="US",
+                status="Official",
+                primary_type="Album",
+            ),
+        },
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="Kenny Chesney",
+        track="Young",
+        album="No Shoes, No Shirt, No Problems",
+        duration_ms=235000,
+        country_preference="US",
+    )
+    assert selected is not None
+    assert selected["recording_mbid"] == "official-rec"
+
+
+def test_extended_mix_variant_is_rejected_without_intent():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "mix-rec",
+                    "title": "Song (Extended Mix)",
+                    "ext:score": "99",
+                    "length": "210000",
+                    "artist-credit": [{"name": "Artist"}],
+                }
+            ]
+        },
+        recording_payloads={
+            "mix-rec": {
+                "recording": {
+                    "id": "mix-rec",
+                    "length": "210000",
+                    "release-list": [{"id": "mix-rel", "date": "2015-01-01"}],
+                }
+            }
+        },
+        release_payloads={
+            "mix-rel": _release_payload(
+                "mix-rel",
+                title="Album",
+                recording_mbid="mix-rec",
+                release_group_id="mix-rg",
+                date="2015-01-01",
+                country="US",
+                status="Official",
+                primary_type="Album",
+            ),
+        },
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="Artist",
+        track="Song",
+        album="Album",
+        duration_ms=210000,
+        country_preference="US",
+    )
+    assert selected is None
+    reasons = getattr(binding.resolve_best_mb_pair, "last_failure_reasons", [])
+    assert "disallowed_variant" in reasons
+
+
 def test_album_beats_compilation_when_both_pass():
     binding = _load_binding_module()
     mb = _FakeMBService(
