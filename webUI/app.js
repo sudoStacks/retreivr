@@ -2280,6 +2280,7 @@ function normalizeMusicSearchResults(rawResults) {
 }
 
 async function enqueueAlbum(releaseGroupMbid) {
+  const forceRedownload = !!document.getElementById("music-force-redownload")?.checked;
   return fetchJson("/api/music/album/download", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2288,6 +2289,7 @@ async function enqueueAlbum(releaseGroupMbid) {
       destination: $("#home-destination")?.value.trim() || null,
       final_format: $("#home-format")?.value.trim() || null,
       music_mode: true,
+      force_redownload: forceRedownload,
     }),
   });
 }
@@ -2335,6 +2337,7 @@ function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
 }
 
 async function enqueueMusicTrack(payload = {}) {
+  const forceRedownload = !!document.getElementById("music-force-redownload")?.checked;
   return fetchJson("/api/music/enqueue", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2352,6 +2355,7 @@ async function enqueueMusicTrack(payload = {}) {
       destination: String(payload.destination || payload.destination_dir || "").trim() || null,
       final_format: String(payload.final_format || "").trim() || null,
       music_mode: true,
+      force_redownload: forceRedownload,
     }),
   });
 }
@@ -2838,6 +2842,7 @@ function renderHomeAlbumCandidates(candidates, query = "") {
         destination: $("#home-destination")?.value.trim() || null,
         final_format: $("#home-format")?.value.trim() || null,
         music_mode: true,
+        force_redownload: !!document.getElementById("music-force-redownload")?.checked,
       };
       homeMusicDebugLog("[MUSIC UI] queue album", payload);
       const result = await fetchJson("/api/music/album/download", {

@@ -582,6 +582,99 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def _is_requeueable_duplicate(self, job):
+        if not job:
+            return False
+        if job.status in {JOB_STATUS_FAILED, JOB_STATUS_CANCELLED, JOB_STATUS_SKIPPED_DUPLICATE}:
+            return True
+        if job.status == JOB_STATUS_COMPLETED and not self._row_has_valid_output(job.__dict__):
+            return True
+        return False
+
+    def _requeue_existing_job(
+        self,
+        *,
+        job_id,
+        origin,
+        origin_id,
+        media_type,
+        media_intent,
+        source,
+        url,
+        input_url,
+        canonical_url,
+        external_id,
+        max_attempts,
+        output_template_json,
+        destination,
+        canonical_id,
+    ):
+        now = utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                """
+                UPDATE download_jobs
+                SET origin=?,
+                    origin_id=?,
+                    media_type=?,
+                    media_intent=?,
+                    source=?,
+                    url=?,
+                    input_url=?,
+                    canonical_url=?,
+                    external_id=?,
+                    status=?,
+                    queued=?,
+                    claimed=NULL,
+                    downloading=NULL,
+                    postprocessing=NULL,
+                    completed=NULL,
+                    failed=NULL,
+                    canceled=NULL,
+                    attempts=0,
+                    max_attempts=?,
+                    updated_at=?,
+                    last_error=NULL,
+                    output_template=?,
+                    resolved_destination=?,
+                    canonical_id=?,
+                    file_path=NULL,
+                    progress_downloaded_bytes=NULL,
+                    progress_total_bytes=NULL,
+                    progress_percent=NULL,
+                    progress_speed_bps=NULL,
+                    progress_eta_seconds=NULL,
+                    progress_updated_at=NULL
+                WHERE id=?
+                """,
+                (
+                    origin,
+                    origin_id,
+                    media_type,
+                    media_intent,
+                    source,
+                    url,
+                    input_url,
+                    canonical_url,
+                    external_id,
+                    JOB_STATUS_QUEUED,
+                    now,
+                    max_attempts,
+                    now,
+                    output_template_json,
+                    destination,
+                    canonical_id,
+                    job_id,
+                ),
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        finally:
+            conn.close()
+
     def claim_job_by_id(self, job_id, *, now=None):
         now = now or utc_now()
         conn = self._connect()
@@ -634,6 +727,7 @@ class DownloadJobStore:
         resolved_destination=None,
         canonical_id=None,
         log_duplicate_event=True,
+        force_requeue=False,
     ):
         origin_id = origin_id or ""
         destination = resolved_destination
@@ -645,6 +739,63 @@ class DownloadJobStore:
             external_id = extract_video_id(url)
         if canonical_url is None:
             canonical_url = canonicalize_url(source, input_url, external_id)
+
+        if force_requeue and canonical_id:
+            duplicate_job = self.get_job_by_canonical_id(canonical_id)
+            if duplicate_job:
+                if duplicate_job.status in {
+                    JOB_STATUS_QUEUED,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                }:
+                    if log_duplicate_event:
+                        _log_event(
+                            logging.INFO,
+                            "job_skipped_duplicate",
+                            job_id=duplicate_job.id,
+                            trace_id=duplicate_job.trace_id,
+                            origin=origin,
+                            origin_id=origin_id,
+                            source=source,
+                            url=url,
+                            destination=destination,
+                            canonical_id=canonical_id,
+                            status=duplicate_job.status,
+                        )
+                    return duplicate_job.id, False, "duplicate"
+
+                requeued = self._requeue_existing_job(
+                    job_id=duplicate_job.id,
+                    origin=origin,
+                    origin_id=origin_id,
+                    media_type=media_type,
+                    media_intent=media_intent,
+                    source=source,
+                    url=url,
+                    input_url=input_url,
+                    canonical_url=canonical_url,
+                    external_id=external_id,
+                    max_attempts=max_attempts,
+                    output_template_json=safe_json_dumps(output_template) if output_template else None,
+                    destination=destination,
+                    canonical_id=canonical_id,
+                )
+                if requeued:
+                    _log_event(
+                        logging.INFO,
+                        "job_forced_requeue",
+                        job_id=duplicate_job.id,
+                        trace_id=duplicate_job.trace_id,
+                        origin=origin,
+                        origin_id=origin_id,
+                        source=source,
+                        url=url,
+                        destination=destination,
+                        canonical_id=canonical_id,
+                        previous_status=duplicate_job.status,
+                    )
+                    return duplicate_job.id, True, "requeued"
 
         duplicate = self.find_duplicate_job(
             canonical_id=canonical_id,
@@ -728,6 +879,38 @@ class DownloadJobStore:
                     if canonical_id and "canonical_id" in err:
                         duplicate_job = self.get_job_by_canonical_id(canonical_id)
                         if duplicate_job:
+                            if self._is_requeueable_duplicate(duplicate_job):
+                                requeued = self._requeue_existing_job(
+                                    job_id=duplicate_job.id,
+                                    origin=origin,
+                                    origin_id=origin_id,
+                                    media_type=media_type,
+                                    media_intent=media_intent,
+                                    source=source,
+                                    url=url,
+                                    input_url=input_url,
+                                    canonical_url=canonical_url,
+                                    external_id=external_id,
+                                    max_attempts=max_attempts,
+                                    output_template_json=output_template_json,
+                                    destination=destination,
+                                    canonical_id=canonical_id,
+                                )
+                                if requeued:
+                                    _log_event(
+                                        logging.INFO,
+                                        "job_requeued_from_terminal_duplicate",
+                                        job_id=duplicate_job.id,
+                                        trace_id=duplicate_job.trace_id,
+                                        origin=origin,
+                                        origin_id=origin_id,
+                                        source=source,
+                                        url=url,
+                                        destination=destination,
+                                        canonical_id=canonical_id,
+                                        previous_status=duplicate_job.status,
+                                    )
+                                    return duplicate_job.id, True, "requeued"
                             if log_duplicate_event:
                                 _log_event(
                                     logging.INFO,

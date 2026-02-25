@@ -1198,6 +1198,7 @@ class _IntentQueueAdapter:
         origin_id = str(payload.get("playlist_id") or payload.get("spotify_track_id") or "manual")
         destination = str(payload.get("destination") or "").strip() or None
         final_format = str(payload.get("final_format") or "").strip() or None
+        force_redownload = bool(payload.get("force_redownload"))
         canonical_metadata = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
         # Heuristic for Music Mode-origin payloads:
         # explicit music flags OR MusicBrainz identifiers already present in payload/canonical metadata.
@@ -1342,7 +1343,10 @@ class _IntentQueueAdapter:
                 },
                 canonical_id=canonical_id,
             )
-            store.enqueue_job(**enqueue_payload)
+            store.enqueue_job(
+                **enqueue_payload,
+                force_requeue=force_redownload,
+            )
             logging.info(
                 "Intent payload queued playlist_id=%s spotify_track_id=%s",
                 payload.get("playlist_id"),
@@ -1412,7 +1416,10 @@ class _IntentQueueAdapter:
             },
             canonical_id=canonical_id,
         )
-        store.enqueue_job(**enqueue_payload)
+        store.enqueue_job(
+            **enqueue_payload,
+            force_requeue=force_redownload,
+        )
         logging.info(
             "Intent payload queued playlist_id=%s spotify_track_id=%s",
             payload.get("playlist_id"),
@@ -5023,6 +5030,7 @@ def download_full_album(data: dict):
     release_group_mbid = str((data or {}).get("release_group_mbid") or "").strip()
     if not release_group_mbid:
         raise HTTPException(status_code=400, detail="release_group_mbid required")
+    force_redownload = bool((data or {}).get("force_redownload"))
 
     cfg = _read_config_or_404()
     threshold_raw = (cfg or {}).get("music_mb_binding_threshold", 0.78)
@@ -5237,6 +5245,7 @@ def download_full_album(data: dict):
 
                 payload = {
                     "media_intent": "music_track",
+                    "force_redownload": force_redownload,
                     "artist": resolved.get("artist") or artist,
                     "album": release_title,
                     "album_artist": album_artist or (resolved.get("album_artist") or resolved.get("artist") or artist),
@@ -5453,6 +5462,7 @@ def enqueue_music_track(data: dict = Body(...)):
 
     destination = str(payload.get("destination") or payload.get("destination_dir") or "").strip() or None
     final_format_override = str(payload.get("final_format") or "").strip() or None
+    force_redownload = bool(payload.get("force_redownload"))
     runtime_config = _read_config_or_404()
     engine = getattr(app.state, "worker_engine", None)
     queue_store = getattr(engine, "store", None) if engine is not None else None
@@ -5511,7 +5521,10 @@ def enqueue_music_track(data: dict = Body(...)):
                 },
             )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    job_id, created, dedupe_reason = queue_store.enqueue_job(**enqueue_payload)
+    job_id, created, dedupe_reason = queue_store.enqueue_job(
+        **enqueue_payload,
+        force_requeue=force_redownload,
+    )
     return {
         "status": "ok",
         "job_id": job_id,
