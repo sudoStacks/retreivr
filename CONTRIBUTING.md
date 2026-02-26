@@ -26,6 +26,7 @@ Thanks for taking the time to contribute.
 - Any PR that changes search ladder/scoring behavior or matching thresholds must pass `music-search-benchmark` CI.
 - The benchmark gate is mandatory for those PRs: no completion/precision regression beyond configured tolerance.
 - The PR must include the benchmark delta output published by CI (artifact + job summary markdown).
+- Threshold/gate changes are allowed only with explicit gate-config + baseline updates in the same PR.
 - The CI run publishes two artifacts for review:
   - `music_search_benchmark_results.json` (raw summary)
   - `music_search_benchmark_report.md` (before/after delta summary vs baseline)

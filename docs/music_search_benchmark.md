@@ -163,4 +163,14 @@ Default behavior:
 - CI publishes:
   - `music_search_benchmark_results.json`
   - `music_search_benchmark_report.md`
+- CI also runs a runtime smoke contract test for album `run_summary.json` schema stability.
 - Always runnable manually via `workflow_dispatch`.
+
+## Governance
+
+- Search scoring logic is benchmark-gated.
+- Threshold or hard-gate changes must include all of:
+  - explicit gate-config update (`benchmarks/music_search_benchmark_gate.json`)
+  - updated benchmark baseline values
+  - changelog note summarizing precision/completion impact
+- Dataset-only tuning that effectively relaxes acceptance behavior is not allowed.

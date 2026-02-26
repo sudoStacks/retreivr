@@ -57,6 +57,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pytest
 
       - name: Run benchmark with gate
         run: |
@@ -72,6 +73,10 @@ jobs:
             --summary benchmarks/music_search_benchmark_results.json \
             --gate-config benchmarks/music_search_benchmark_gate.json \
             --output-md benchmarks/music_search_benchmark_report.md
+
+      - name: Run runtime summary contract smoke test
+        run: |
+          pytest -q tests/test_music_album_run_summary_artifact.py
 
       - name: Publish benchmark summary in job
         run: |
