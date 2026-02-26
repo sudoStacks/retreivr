@@ -14,6 +14,7 @@
 
 ---
 
+
 ## What Is Retreivr?
 Retreivr is a self-hosted download engine for building and maintaining a clean local media archive.
 
@@ -27,6 +28,7 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - MusicBrainz-first metadata authority for music workflows
 - Unified queue + scheduler + watcher flows
 - Web UI and API for control and automation
+- Used for intentional media consumption... avoid getting sucked into the algorithms
 - Optional Telegram summaries
 
 ## 0.9.6 Highlights
