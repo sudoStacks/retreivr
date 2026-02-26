@@ -341,6 +341,10 @@ def _enqueue_music_track_job(
     track_number: int | None,
     disc_number: int | None,
     duration_ms: int | None,
+    track_aliases: list[str] | None = None,
+    track_disambiguation: str | None = None,
+    mb_recording_title: str | None = None,
+    mb_youtube_urls: list[str] | None = None,
 ) -> bool:
     canonical_id = build_music_track_canonical_id(
         artist,
@@ -364,6 +368,10 @@ def _enqueue_music_track_job(
         "mb_recording_id": recording_mbid,
         "mb_release_id": release_mbid,
         "mb_release_group_id": release_group_mbid,
+        "track_aliases": list(track_aliases or []),
+        "track_disambiguation": track_disambiguation,
+        "mb_recording_title": mb_recording_title,
+        "mb_youtube_urls": list(mb_youtube_urls or []),
     }
     placeholder_url = f"musicbrainz://recording/{recording_mbid}"
     enqueue_payload = job_payload_builder(
@@ -393,6 +401,10 @@ def _enqueue_music_track_job(
             "mb_recording_id": recording_mbid,
             "mb_release_id": release_mbid,
             "mb_release_group_id": release_group_mbid,
+            "track_aliases": list(track_aliases or []),
+            "track_disambiguation": track_disambiguation,
+            "mb_recording_title": mb_recording_title,
+            "mb_youtube_urls": list(mb_youtube_urls or []),
         },
         canonical_id=canonical_id,
     )
@@ -522,6 +534,18 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
             track_number = _safe_int(selected_pair.get("track_number"))
             disc_number = _safe_int(selected_pair.get("disc_number")) or 1
             resolved_duration_ms = _safe_int(selected_pair.get("duration_ms"))
+            selected_track_aliases = selected_pair.get("track_aliases")
+            if isinstance(selected_track_aliases, (list, tuple, set)):
+                normalized_aliases = [str(value).strip() for value in selected_track_aliases if str(value or "").strip()]
+            else:
+                normalized_aliases = []
+            selected_track_disambiguation = str(selected_pair.get("track_disambiguation") or "").strip() or None
+            selected_recording_title = str(selected_pair.get("mb_recording_title") or "").strip() or None
+            selected_mb_youtube_urls = selected_pair.get("mb_youtube_urls")
+            if isinstance(selected_mb_youtube_urls, (list, tuple, set)):
+                normalized_mb_youtube_urls = [str(value).strip() for value in selected_mb_youtube_urls if str(value or "").strip()]
+            else:
+                normalized_mb_youtube_urls = []
             created = _enqueue_music_track_job(
                 queue_store,
                 job_payload_builder,
@@ -541,6 +565,10 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 track_number=track_number,
                 disc_number=disc_number,
                 duration_ms=resolved_duration_ms,
+                track_aliases=normalized_aliases,
+                track_disambiguation=selected_track_disambiguation,
+                mb_recording_title=selected_recording_title,
+                mb_youtube_urls=normalized_mb_youtube_urls,
             )
             resolved_count += 1
             resolved_mbids.append(recording_mbid)

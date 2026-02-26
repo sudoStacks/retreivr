@@ -1,0 +1,86 @@
+name: music-search-benchmark
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "benchmarks/**"
+      - "engine/search_engine.py"
+      - "engine/search_scoring.py"
+      - "engine/music_title_normalization.py"
+      - "engine/musicbrainz_binding.py"
+      - "engine/job_queue.py"
+      - "engine/search_adapters.py"
+      - "scripts/music_search_benchmark.py"
+      - "docs/music_search_benchmark.md"
+      - "CONTRIBUTING.md"
+      - ".github/workflows/music-search-benchmark.yml"
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Enforce changelog policy for search/scoring PRs
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.sha }}"
+          CHANGED_FILES="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")"
+          echo "Changed files:"
+          echo "${CHANGED_FILES}"
+
+          SEARCH_TOUCH_REGEX='^(engine/search_engine\.py|engine/search_scoring\.py|engine/music_title_normalization\.py|engine/musicbrainz_binding\.py|engine/job_queue\.py|engine/search_adapters\.py)$'
+          if echo "${CHANGED_FILES}" | grep -Eq "${SEARCH_TOUCH_REGEX}"; then
+            if ! echo "${CHANGED_FILES}" | grep -Eq '^CHANGELOG\.md$'; then
+              echo "Search/scoring files changed but CHANGELOG.md was not updated."
+              echo "Policy: search ladder/scoring changes must include a changelog note."
+              exit 1
+            fi
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run benchmark with gate
+        run: |
+          python -m benchmarks.music_search_benchmark_runner \
+            --dataset benchmarks/music_search_album_dataset.json \
+            --output-json benchmarks/music_search_benchmark_results.json \
+            --gate-config benchmarks/music_search_benchmark_gate.json \
+            --enforce-gate
+
+      - name: Generate benchmark delta markdown
+        run: |
+          python -m benchmarks.music_search_benchmark_report \
+            --summary benchmarks/music_search_benchmark_results.json \
+            --gate-config benchmarks/music_search_benchmark_gate.json \
+            --output-md benchmarks/music_search_benchmark_report.md
+
+      - name: Publish benchmark summary in job
+        run: |
+          cat benchmarks/music_search_benchmark_report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: music-search-benchmark-results
+          path: |
+            benchmarks/music_search_benchmark_results.json
+            benchmarks/music_search_benchmark_report.md

@@ -59,6 +59,34 @@ def _music_query_variant_flags(query):
     return {term for term in _MUSIC_VARIANT_TERMS if term in query_lower}
 
 
+def _expected_track_variants(expected):
+    variants = []
+    seen = set()
+
+    def _append(value):
+        text = str(value or "").strip()
+        if not text:
+            return
+        key = normalize_text(text)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        variants.append(text)
+
+    _append(expected.get("track"))
+    aliases = expected.get("track_aliases")
+    if isinstance(aliases, (list, tuple, set)):
+        for alias in aliases:
+            _append(alias)
+    disambiguation = str(expected.get("track_disambiguation") or "").strip()
+    if disambiguation:
+        canonical_track = str(expected.get("track") or "").strip()
+        if canonical_track:
+            _append(f"{canonical_track} {disambiguation}")
+        _append(disambiguation)
+    return variants
+
+
 def _music_duration_points(expected_sec, candidate_sec, *, max_delta_ms=12000, hard_cap_ms=35000):
     if expected_sec is None or candidate_sec is None:
         return 0.0, "duration_missing", None
@@ -266,7 +294,10 @@ def _canonical_bonus(expected, candidate):
 def score_candidate(expected, candidate, *, source_modifier=1.0):
     if str(expected.get("media_intent") or "").strip().lower() == "music_track":
         expected_artist = tokenize(expected.get("artist"))
-        expected_track = tokenize(expected.get("track"))
+        expected_track_variants = _expected_track_variants(expected)
+        if not expected_track_variants:
+            expected_track_variants = [str(expected.get("track") or "")]
+        expected_track = tokenize(expected_track_variants[0])
         expected_album = tokenize(expected.get("album"))
 
         candidate_artist = tokenize(candidate.get("artist_detected") or candidate.get("uploader"))
@@ -274,12 +305,25 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
         candidate_album = tokenize(candidate.get("album_detected"))
 
         artist_overlap = token_overlap_score(expected_artist, candidate_artist)
-        track_overlap = token_overlap_score(expected_track, candidate_track)
-        relaxed_expected_track = tokenize(relaxed_search_title(expected.get("track")))
-        relaxed_candidate_track = tokenize(
-            relaxed_search_title(candidate.get("track_detected") or candidate.get("title"))
-        )
-        relaxed_track_overlap = token_overlap_score(relaxed_expected_track, relaxed_candidate_track)
+        track_overlap = 0.0
+        relaxed_track_overlap = 0.0
+        track_variant_used = expected_track_variants[0] if expected_track_variants else str(expected.get("track") or "")
+        relaxed_candidate_track = tokenize(relaxed_search_title(candidate.get("track_detected") or candidate.get("title")))
+        for variant in expected_track_variants:
+            variant_tokens = tokenize(variant)
+            variant_track_overlap = token_overlap_score(variant_tokens, candidate_track)
+            relaxed_expected_track = tokenize(relaxed_search_title(variant))
+            variant_relaxed_overlap = token_overlap_score(relaxed_expected_track, relaxed_candidate_track)
+            if (
+                variant_track_overlap > track_overlap
+                or (
+                    variant_track_overlap == track_overlap
+                    and variant_relaxed_overlap > relaxed_track_overlap
+                )
+            ):
+                track_overlap = variant_track_overlap
+                relaxed_track_overlap = variant_relaxed_overlap
+                track_variant_used = variant
         effective_track_overlap = max(track_overlap, min(relaxed_track_overlap * 0.90, 1.0))
         album_overlap = token_overlap_score(expected_album, candidate_album) if expected_album else 0.0
 
@@ -350,7 +394,14 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             or (bool(expected_album) and album_pts < 8.0)
         )
         if floor_failed and not rejection_reason:
-            rejection_reason = "floor_check_failed"
+            if track_pts < 20.0:
+                rejection_reason = "low_title_similarity"
+            elif artist_pts < 15.0:
+                rejection_reason = "low_artist_similarity"
+            elif bool(expected_album) and album_pts < 8.0:
+                rejection_reason = "low_album_similarity"
+            else:
+                rejection_reason = "floor_check_failed"
 
         raw_score_100 = (
             track_pts
@@ -369,6 +420,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             "score_artist": artist_overlap,
             "score_track": track_overlap,
             "score_track_relaxed": relaxed_track_overlap,
+            "score_track_variant_used": track_variant_used,
             "score_album": album_overlap if expected_album else 0.0,
             "score_duration": (duration_pts / 20.0) if duration_pts > 0 else 0.0,
             "source_modifier": source_modifier,

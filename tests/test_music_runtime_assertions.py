@@ -5,7 +5,7 @@ import tempfile
 import sys
 import types
 from pathlib import Path
-from types import SimpleNamespace
+from subprocess import CalledProcessError
 
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -100,7 +100,7 @@ def test_metadata_probe_fallback_retries_with_best(tmp_path, monkeypatch) -> Non
             return {"id": "vid-1", "title": "Song", "requested_downloads": [{"filepath": str(fake_output)}]}
 
     monkeypatch.setattr(jq, "YoutubeDL", _FakeYDL)
-    monkeypatch.setattr(jq.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr(jq, "_run_ytdlp_cli", lambda *args, **kwargs: None)
     monkeypatch.setattr(jq, "_select_download_output", lambda *_args, **_kwargs: str(fake_output))
 
     info, local_file = jq.download_with_ytdlp(
@@ -117,7 +117,7 @@ def test_metadata_probe_fallback_retries_with_best(tmp_path, monkeypatch) -> Non
 
     assert info is not None
     assert local_file == str(fake_output)
-    assert seen_probe_formats[:2] == ["bestaudio/best", "best"]
+    assert seen_probe_formats == [""]
 
 
 def test_metadata_probe_fallback_fails_after_second_probe(tmp_path, monkeypatch) -> None:
@@ -140,7 +140,12 @@ def test_metadata_probe_fallback_fails_after_second_probe(tmp_path, monkeypatch)
             raise RuntimeError("probe_failed")
 
     monkeypatch.setattr(jq, "YoutubeDL", _AlwaysFailYDL)
-    monkeypatch.setattr(jq.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr=""))
+
+    def _fail_download(*args, **kwargs):
+        _ = args, kwargs
+        raise CalledProcessError(1, ["yt-dlp"], stderr="ERROR: download failed")
+
+    monkeypatch.setattr(jq, "_run_ytdlp_cli", _fail_download)
 
     try:
         jq.download_with_ytdlp(
@@ -156,7 +161,59 @@ def test_metadata_probe_fallback_fails_after_second_probe(tmp_path, monkeypatch)
         )
         assert False, "expected RuntimeError from probe failure after retry"
     except RuntimeError as exc:
-        assert "yt_dlp_metadata_probe_failed" in str(exc)
+        assert "yt_dlp_download_failed" in str(exc)
+
+
+def test_ytdlp_unavailability_classifier_maps_known_signals() -> None:
+    jq = _load_job_queue()
+    assert jq._classify_ytdlp_unavailability("Video unavailable. This video has been removed by the uploader") == "removed_or_deleted"
+    assert jq._classify_ytdlp_unavailability("ERROR: Requested format is not available") == "format_unavailable"
+    assert jq._classify_ytdlp_unavailability("Sign in to confirm your age") == "age_restricted"
+    assert jq._classify_ytdlp_unavailability("The uploader has not made this video available in your country") == "region_restricted"
+    assert jq._classify_ytdlp_unavailability("network error: timed out") is None
+
+
+def test_download_with_ytdlp_marks_known_unavailability(tmp_path, monkeypatch) -> None:
+    jq = _load_job_queue()
+    temp_dir = tmp_path / "tmp-unavailable"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    class _ProbeOkYDL:
+        def __init__(self, opts):
+            self.opts = dict(opts or {})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            _ = url, download, self.opts
+            return {"id": "vid-unavail", "webpage_url": "https://www.youtube.com/watch?v=vid-unavail"}
+
+    def _raise_unavailable(*args, **kwargs):
+        _ = args, kwargs
+        raise CalledProcessError(1, ["yt-dlp"], stderr="ERROR: [youtube] abc: Video unavailable. This video has been removed by the uploader")
+
+    monkeypatch.setattr(jq, "YoutubeDL", _ProbeOkYDL)
+    monkeypatch.setattr(jq, "_run_ytdlp_cli", _raise_unavailable)
+
+    try:
+        jq.download_with_ytdlp(
+            "https://www.youtube.com/watch?v=abc123xyz00",
+            str(temp_dir),
+            {},
+            audio_mode=False,
+            final_format="mkv",
+            media_type="video",
+            media_intent="playlist",
+            job_id="job-unavail-1",
+            origin="test",
+        )
+        assert False, "expected unavailable runtime error"
+    except RuntimeError as exc:
+        assert "yt_dlp_source_unavailable:removed_or_deleted" in str(exc)
 
 
 def test_music_retry_escalates_query_rung_and_records_duration_filtered(monkeypatch) -> None:
@@ -178,7 +235,21 @@ def test_music_retry_escalates_query_rung_and_records_duration_filtered(monkeypa
                 self.calls = []
                 self.last_music_track_search = {"failure_reason": "duration_filtered"}
 
-            def search_music_track_best_match(self, artist, track, album=None, duration_ms=None, limit=6, *, start_rung=0):
+            def search_music_track_best_match(
+                self,
+                artist,
+                track,
+                album=None,
+                duration_ms=None,
+                limit=6,
+                *,
+                start_rung=0,
+                coherence_context=None,
+                track_aliases=None,
+                track_disambiguation=None,
+                mb_youtube_urls=None,
+                recording_mbid=None,
+            ):
                 self.calls.append(
                     {
                         "artist": artist,
@@ -187,6 +258,11 @@ def test_music_retry_escalates_query_rung_and_records_duration_filtered(monkeypa
                         "duration_ms": duration_ms,
                         "limit": limit,
                         "start_rung": start_rung,
+                        "coherence_context": coherence_context,
+                        "track_aliases": track_aliases,
+                        "track_disambiguation": track_disambiguation,
+                        "mb_youtube_urls": mb_youtube_urls,
+                        "recording_mbid": recording_mbid,
                     }
                 )
                 return None

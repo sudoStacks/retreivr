@@ -56,6 +56,16 @@ def _install_google_stubs():
 
 
 def _install_engine_base_stubs():
+    if "musicbrainzngs" not in sys.modules:
+        sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
+    if "metadata.services" not in sys.modules:
+        services_pkg = types.ModuleType("metadata.services")
+        services_pkg.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["metadata.services"] = services_pkg
+    if "metadata.services.musicbrainz_service" not in sys.modules:
+        mb_module = types.ModuleType("metadata.services.musicbrainz_service")
+        mb_module.get_musicbrainz_service = lambda: None
+        sys.modules["metadata.services.musicbrainz_service"] = mb_module
     if "engine" not in sys.modules:
         engine_pkg = types.ModuleType("engine")
         engine_pkg.__path__ = [str(_ROOT / "engine")]  # type: ignore[attr-defined]
@@ -63,6 +73,8 @@ def _install_engine_base_stubs():
     _load_module("engine.json_utils", _ROOT / "engine" / "json_utils.py")
     _load_module("engine.paths", _ROOT / "engine" / "paths.py")
     _load_module("engine.search_scoring", _ROOT / "engine" / "search_scoring.py")
+    # Force real module load in case another test injected a stub into sys.modules.
+    _load_module("engine.musicbrainz_binding", _ROOT / "engine" / "musicbrainz_binding.py")
     if "metadata.queue" not in sys.modules:
         metadata_queue = types.ModuleType("metadata.queue")
         metadata_queue.enqueue_metadata = lambda file_path, meta, config: None
@@ -1075,3 +1087,69 @@ def test_direct_url_enqueue_logs_mb_pair_selected_before_job_enqueued(tmp_path: 
     selected_idx = next(i for i, line in enumerate(lines) if "mb_pair_selected" in line)
     enqueued_idx = next(i for i, line in enumerate(lines) if "job_enqueued" in line)
     assert selected_idx < enqueued_idx
+
+
+def test_mb_binding_returns_title_aliases_and_disambiguation():
+    binding = _load_binding_module()
+    mb = _FakeMBService(
+        recordings_payload={
+            "recording-list": [
+                {
+                    "id": "rec-alias",
+                    "title": "The Great Gig in the Sky",
+                    "ext:score": "99",
+                    "artist-credit": [{"name": "Pink Floyd"}],
+                }
+            ]
+        },
+        recording_payloads={
+            "rec-alias": {
+                "recording": {
+                    "id": "rec-alias",
+                    "title": "The Great Gig in the Sky",
+                    "disambiguation": "Studio",
+                    "alias-list": [{"name": "Great Gig"}],
+                    "release-list": [{"id": "rel-alias", "date": "1973-03-01"}],
+                }
+            }
+        },
+        release_payloads={
+            "rel-alias": {
+                "release": {
+                    "id": "rel-alias",
+                    "title": "The Dark Side of the Moon",
+                    "date": "1973-03-01",
+                    "status": "Official",
+                    "country": "US",
+                    "release-group": {"id": "rg-alias", "primary-type": "Album"},
+                    "medium-list": [
+                        {
+                            "position": "1",
+                            "track-list": [
+                                {
+                                    "position": "4",
+                                    "title": "Great Gig",
+                                    "disambiguation": "Album Track",
+                                    "recording": {"id": "rec-alias", "length": "276000"},
+                                }
+                            ],
+                        }
+                    ],
+                    "label-info-list": [{"label": {"name": "Harvest"}}],
+                    "barcode": "0123456789012",
+                }
+            }
+        },
+    )
+    selected = binding.resolve_best_mb_pair(
+        mb,
+        artist="Pink Floyd",
+        track="The Great Gig in the Sky",
+        album="The Dark Side of the Moon",
+        duration_ms=276000,
+    )
+    assert selected is not None
+    aliases = selected.get("track_aliases") or []
+    assert "Great Gig" in aliases
+    assert selected.get("track_disambiguation")
+    assert selected.get("mb_recording_title") == "The Great Gig in the Sky"

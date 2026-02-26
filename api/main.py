@@ -1279,6 +1279,11 @@ class _IntentQueueAdapter:
             normalized_release_date = str(payload.get("release_date") or "").strip() or None
             normalized_artwork_url = str(payload.get("artwork_url") or "").strip() or None
             normalized_genre = str(payload.get("genre") or "").strip() or None
+            normalized_mb_youtube_urls = (
+                list(payload.get("mb_youtube_urls"))
+                if isinstance(payload.get("mb_youtube_urls"), (list, tuple, set))
+                else []
+            )
             if not normalized_artist or not normalized_track:
                 logging.warning("Intent enqueue skipped: music query missing artist/track")
                 return
@@ -1301,6 +1306,7 @@ class _IntentQueueAdapter:
                 "mb_recording_id": normalized_recording_mbid,
                 "mb_release_id": normalized_release_mbid,
                 "mb_release_group_id": normalized_release_group_mbid,
+                "mb_youtube_urls": normalized_mb_youtube_urls,
             }
             canonical_id = _build_music_track_canonical_id(
                 normalized_artist,
@@ -1340,6 +1346,7 @@ class _IntentQueueAdapter:
                     "mb_recording_id": normalized_recording_mbid,
                     "mb_release_id": normalized_release_mbid,
                     "mb_release_group_id": normalized_release_group_mbid,
+                    "mb_youtube_urls": normalized_mb_youtube_urls,
                 },
                 canonical_id=canonical_id,
             )
@@ -5264,6 +5271,10 @@ def download_full_album(data: dict):
                     "artwork_url": album_artwork_url,
                     "genre": album_genre or (resolved.get("genre") if isinstance(resolved, dict) else None),
                     "duration_ms": resolved.get("duration_ms") or duration_ms_int,
+                    "track_aliases": resolved.get("track_aliases") if isinstance(resolved, dict) else None,
+                    "track_disambiguation": resolved.get("track_disambiguation") if isinstance(resolved, dict) else None,
+                    "mb_recording_title": resolved.get("mb_recording_title") if isinstance(resolved, dict) else None,
+                    "mb_youtube_urls": resolved.get("mb_youtube_urls") if isinstance(resolved, dict) else None,
                 }
                 canonical_id = _build_music_track_canonical_id(
                     payload.get("artist"),
@@ -5458,6 +5469,10 @@ def enqueue_music_track(data: dict = Body(...)):
         "mb_recording_id": recording_mbid,
         "mb_release_id": mb_release_id,
         "mb_release_group_id": mb_release_group_id,
+        "track_aliases": payload.get("track_aliases"),
+        "track_disambiguation": payload.get("track_disambiguation"),
+        "mb_recording_title": payload.get("mb_recording_title"),
+        "mb_youtube_urls": payload.get("mb_youtube_urls"),
     }
 
     destination = str(payload.get("destination") or payload.get("destination_dir") or "").strip() or None
@@ -5504,6 +5519,10 @@ def enqueue_music_track(data: dict = Body(...)):
                 "disc_number": disc_number,
                 "release_date": canonical_metadata["release_date"],
                 "duration_ms": duration_ms,
+                "track_aliases": canonical_metadata.get("track_aliases"),
+                "track_disambiguation": canonical_metadata.get("track_disambiguation"),
+                "mb_recording_title": canonical_metadata.get("mb_recording_title"),
+                "mb_youtube_urls": canonical_metadata.get("mb_youtube_urls"),
             },
             canonical_id=canonical_id,
         )

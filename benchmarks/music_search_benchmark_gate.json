@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "completion_percent": 97.50,
+    "wrong_variant_flags": 0
+  },
+  "tolerance": {
+    "max_completion_drop_pct_points": 1.0,
+    "max_wrong_variant_increase": 0
+  }
+}

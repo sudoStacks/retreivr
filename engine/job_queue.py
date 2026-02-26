@@ -121,6 +121,79 @@ _YTDLP_DOWNLOAD_ALLOWLIST = {
     "user_agent",
 }
 
+# Deterministic mapping of known yt-dlp unavailability signals to classes.
+# NOTE: Transient network failures are explicitly excluded from classification.
+_YTDLP_UNAVAILABLE_SIGNAL_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "removed_or_deleted",
+        (
+            "video unavailable. this video has been removed by the uploader",
+            "has been removed by the uploader",
+            "video has been removed",
+            "this video is unavailable",
+        ),
+    ),
+    (
+        "private_or_members_only",
+        (
+            "private video",
+            "members-only",
+            "members only",
+            "join this channel",
+            "this video is private",
+        ),
+    ),
+    (
+        "age_restricted",
+        (
+            "sign in to confirm your age",
+            "age-restricted",
+            "age restricted",
+            "age restriction",
+        ),
+    ),
+    (
+        "region_restricted",
+        (
+            "not available in your country",
+            "video unavailable in your country",
+            "geo-restricted",
+            "geoblocked",
+            "geo blocked",
+            "the uploader has not made this video available in your country",
+        ),
+    ),
+    (
+        "format_unavailable",
+        (
+            "requested format is not available",
+            "requested format not available",
+            "requested format is unavailable",
+        ),
+    ),
+    (
+        "drm_protected",
+        (
+            "this video is drm protected",
+            "drm protected",
+            "drm",
+        ),
+    ),
+)
+
+_YTDLP_TRANSIENT_ERROR_MARKERS: tuple[str, ...] = (
+    "timed out",
+    "timeout",
+    "connection reset",
+    "temporary failure",
+    "network error",
+    "unable to download webpage",
+    "couldn't download webpage",
+    "http error 5",
+    "service unavailable",
+    "too many requests",
+)
+
 _MUSIC_TRACK_SOURCE_PRIORITY = ("youtube_music", "youtube", "soundcloud", "bandcamp")
 _DEFAULT_MATCH_THRESHOLD = 0.92
 _MUSIC_TRACK_THRESHOLD = min(_DEFAULT_MATCH_THRESHOLD * 0.8, 0.70)
@@ -1255,6 +1328,8 @@ class DownloadWorkerEngine:
             {"rung": 1, "label": "canonical_no_album", "query": " ".join(part for part in [f'"{artist_v}"', f'"{track_v}"'] if part).strip()},
             {"rung": 2, "label": "relaxed_no_album", "query": " ".join(part for part in [f'"{artist_v}"', f'"{relaxed_track}"'] if part).strip()},
             {"rung": 3, "label": "official_audio_fallback", "query": " ".join(part for part in [artist_v, relaxed_track, "official audio"] if part).strip()},
+            {"rung": 4, "label": "legacy_topic_fallback", "query": " ".join(part for part in [artist_v, "-", track_v, "topic"] if part).strip()},
+            {"rung": 5, "label": "legacy_audio_fallback", "query": " ".join(part for part in [artist_v, "-", track_v, "audio"] if part).strip()},
         ]
         seen = set()
         unique_ladder = []
@@ -1435,6 +1510,62 @@ class DownloadWorkerEngine:
             duration_ms_raw = payload.get("duration_ms")
         if duration_ms_raw is None:
             duration_ms_raw = canonical.get("duration")
+        track_aliases_raw = (
+            canonical.get("track_aliases")
+            or canonical.get("title_aliases")
+            or payload.get("track_aliases")
+            or payload.get("title_aliases")
+        )
+        track_aliases = []
+        if isinstance(track_aliases_raw, (list, tuple, set)):
+            for value in track_aliases_raw:
+                text = str(value or "").strip()
+                if text:
+                    track_aliases.append(text)
+        track_disambiguation = str(
+            canonical.get("track_disambiguation")
+            or payload.get("track_disambiguation")
+            or ""
+        ).strip() or None
+        mb_youtube_urls_raw = (
+            canonical.get("mb_youtube_urls")
+            or payload.get("mb_youtube_urls")
+        )
+        mb_youtube_urls = []
+        if isinstance(mb_youtube_urls_raw, (list, tuple, set)):
+            seen_urls = set()
+            for value in mb_youtube_urls_raw:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                lowered = text.lower()
+                if lowered in seen_urls:
+                    continue
+                seen_urls.add(lowered)
+                mb_youtube_urls.append(text)
+        if not mb_youtube_urls and recording_mbid:
+            try:
+                rels = get_musicbrainz_service().fetch_youtube_relationship_urls(
+                    recording_mbid,
+                    release_id=release_mbid,
+                    limit=3,
+                )
+            except Exception:
+                rels = []
+            if isinstance(rels, list):
+                seen_urls = set()
+                for rel in rels:
+                    if isinstance(rel, dict):
+                        text = str(rel.get("url") or "").strip()
+                    else:
+                        text = str(rel or "").strip()
+                    if not text:
+                        continue
+                    lowered = text.lower()
+                    if lowered in seen_urls:
+                        continue
+                    seen_urls.add(lowered)
+                    mb_youtube_urls.append(text)
         duration_hint_sec = None
         try:
             if duration_ms_raw is not None:
@@ -1471,6 +1602,27 @@ class DownloadWorkerEngine:
         logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
         resolved = None
         retry_start_rung = 0
+        track_total_value = None
+        for candidate_total in (
+            payload.get("track_total"),
+            canonical.get("track_total"),
+            payload.get("total_tracks"),
+        ):
+            try:
+                if candidate_total is not None:
+                    parsed_total = int(candidate_total)
+                    if parsed_total > 0:
+                        track_total_value = parsed_total
+                        break
+            except Exception:
+                continue
+        coherence_context = None
+        if release_mbid and track_total_value and track_total_value > 1:
+            coherence_context = {
+                "mb_release_id": release_mbid,
+                "mb_release_group_id": release_group_mbid,
+                "track_total": track_total_value,
+            }
         if isinstance(job.last_error, str) and (
             "no_candidate_above_threshold" in job.last_error
             or "duration_filtered" in job.last_error
@@ -1489,6 +1641,11 @@ class DownloadWorkerEngine:
                     duration_ms=(duration_hint_sec * 1000) if duration_hint_sec else None,
                     limit=6,
                     start_rung=retry_start_rung,
+                    coherence_context=coherence_context,
+                    track_aliases=track_aliases,
+                    track_disambiguation=track_disambiguation,
+                    mb_youtube_urls=mb_youtube_urls,
+                    recording_mbid=recording_mbid,
                 )
             except Exception as exc:
                 logging.exception("Music track search service failed query=%s", search_query)
@@ -1512,9 +1669,31 @@ class DownloadWorkerEngine:
                 return None
 
         resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
+        search_meta = getattr(self.search_service, "last_music_track_search", {}) if self.search_service else {}
+        if isinstance(search_meta, dict):
+            injected_rejections = search_meta.get("mb_injected_rejections")
+            injected_selected = bool(search_meta.get("mb_injected_selected"))
+            injected_candidates = int(search_meta.get("mb_injected_candidates") or 0)
+            album_success_count = int(search_meta.get("mb_injected_album_success_count") or 0)
+            if injected_candidates > 0 or injected_selected or injected_rejections:
+                _log_event(
+                    logging.INFO,
+                    "music_track_mb_injected_outcome",
+                    job_id=job.id,
+                    recording_mbid=recording_mbid,
+                    release_mbid=release_mbid,
+                    injected_candidates=injected_candidates,
+                    injected_selected=injected_selected,
+                    injected_rejections=injected_rejections or {},
+                    album_run_success_count=album_success_count,
+                )
         if not _is_http_url(resolved_url):
-            search_meta = getattr(self.search_service, "last_music_track_search", {}) if self.search_service else {}
-            failure_reason = str((search_meta or {}).get("failure_reason") or "no_candidate_above_threshold").strip() or "no_candidate_above_threshold"
+            failure_reason = str((search_meta or {}).get("failure_reason") or "").strip()
+            if not failure_reason and isinstance(job.last_error, str):
+                unavailable_class = _classify_ytdlp_unavailability(job.last_error)
+                if "yt_dlp_source_unavailable:" in job.last_error.lower() and unavailable_class:
+                    failure_reason = f"source_unavailable:{unavailable_class}"
+            failure_reason = failure_reason or "no_candidate_above_threshold"
             retryable_no_candidate = failure_reason in {"duration_filtered", "no_candidate_above_threshold"}
             logging.error("Music track search failed")
             self.store.record_failure(
@@ -1544,6 +1723,8 @@ class DownloadWorkerEngine:
         logger.debug("[MUSIC] selected_duration_delta_ms=%s", duration_delta_ms)
 
         source = resolved_source or resolve_source(resolved_url)
+        if str(source or "").strip().lower() == "mb_relationship":
+            source = resolve_source(resolved_url)
         candidate_id = None
         if isinstance(resolved, dict):
             candidate_id = resolved.get("candidate_id")
@@ -1880,7 +2061,10 @@ class DownloadWorkerEngine:
             error_message = f"{type(exc).__name__}: {exc}"
             retryable = is_retryable_error(exc)
             error_text_lower = error_message.lower()
-            if "metadata_probe" in error_text_lower or "yt_dlp_metadata_probe_failed" in error_text_lower:
+            unavailable_class = _classify_ytdlp_unavailability(error_message)
+            if "yt_dlp_source_unavailable:" in error_text_lower or unavailable_class:
+                failure_domain = "source_unavailable"
+            elif "metadata_probe" in error_text_lower or "yt_dlp_metadata_probe_failed" in error_text_lower:
                 failure_domain = "metadata_probe"
             elif "adapter" in error_text_lower or "search" in error_text_lower:
                 failure_domain = "adapter_search"
@@ -1916,6 +2100,7 @@ class DownloadWorkerEngine:
                 failure_domain=failure_domain,
                 error_message=error_message,
                 candidate_id=candidate_id,
+                unavailable_class=unavailable_class,
             )
 
 
@@ -2234,10 +2419,45 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
         raise RuntimeError("no_valid_release_for_recording")
 
     service = get_musicbrainz_service()
+    def _collect_aliases(*values):
+        aliases = []
+        seen = set()
+
+        def _append(value):
+            text = str(value or "").strip()
+            if not text:
+                return
+            key = text.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            aliases.append(text)
+
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, str):
+                _append(value)
+                continue
+            if isinstance(value, dict):
+                _append(value.get("name"))
+                _append(value.get("sort-name"))
+                _append(value.get("alias"))
+                continue
+            if isinstance(value, list):
+                for entry in value:
+                    if isinstance(entry, dict):
+                        _append(entry.get("name"))
+                        _append(entry.get("sort-name"))
+                        _append(entry.get("alias"))
+                    else:
+                        _append(entry)
+        return aliases
+
     # recording entity valid includes: releases/artists/isrcs
     recording_payload = service.get_recording(
         recording_mbid,
-        includes=["releases", "artists", "isrcs"],
+        includes=["releases", "artists", "isrcs", "aliases"],
     )
     recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
     release_list = recording_data.get("release-list", []) if isinstance(recording_data, dict) else []
@@ -2266,7 +2486,7 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
             continue
         release_payload = service.get_release(
             release_id,
-            includes=["recordings", "release-groups", "artist-credits", "media"],
+            includes=["recordings", "release-groups", "artist-credits", "media", "aliases"],
         )
         release_data = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
         if not isinstance(release_data, dict):
@@ -2294,6 +2514,7 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
 
     track_number = None
     disc_number = None
+    matched_track = {}
     media = selected_release_data.get("medium-list", [])
     if not isinstance(media, list):
         media = []
@@ -2313,6 +2534,7 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
                 continue
             disc_number = medium_position
             track_number = _normalize_positive_int(track.get("position"))
+            matched_track = track
             break
         if track_number is not None and disc_number is not None:
             break
@@ -2321,6 +2543,26 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
         raise RuntimeError("recording_not_found_in_release")
 
     year_only = _extract_release_year(selected_date_text)
+    recording_disambiguation = str(recording_data.get("disambiguation") or "").strip() or None
+    track_disambiguation = str(matched_track.get("disambiguation") or "").strip() or None
+    title_aliases = _collect_aliases(
+        recording_data.get("title"),
+        recording_data.get("alias-list"),
+        recording_data.get("aliases"),
+        matched_track.get("title"),
+        matched_track.get("alias-list"),
+        matched_track.get("aliases"),
+        selected_release_data.get("title"),
+        selected_release_data.get("alias-list"),
+        selected_release_data.get("aliases"),
+    )
+    if recording_disambiguation:
+        title_aliases = _collect_aliases(title_aliases, recording_disambiguation)
+    if track_disambiguation and matched_track.get("title"):
+        title_aliases = _collect_aliases(
+            title_aliases,
+            f"{matched_track.get('title')} {track_disambiguation}",
+        )
     enriched = {
         "album": selected_release_data.get("title"),
         "release_date": year_only,
@@ -2328,6 +2570,9 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
         "disc_number": disc_number,
         "mb_release_id": selected_release,
         "mb_release_group_id": selected_release_group_id,
+        "track_aliases": title_aliases,
+        "track_disambiguation": recording_disambiguation or track_disambiguation,
+        "mb_recording_title": recording_data.get("title"),
     }
     _log_event(
         logging.INFO,
@@ -2385,6 +2630,9 @@ def _ensure_release_enriched(job):
             "disc_number",
             "mb_release_id",
             "mb_release_group_id",
+            "track_aliases",
+            "track_disambiguation",
+            "mb_recording_title",
         ):
             value = enriched.get(key)
             if value not in (None, ""):
@@ -2554,6 +2802,18 @@ def _is_youtube_access_gate(message: str | None) -> bool:
         return False
     return True
 
+
+def _classify_ytdlp_unavailability(message: str | None) -> str | None:
+    if not message:
+        return None
+    lower_msg = str(message).lower()
+    if any(marker in lower_msg for marker in _YTDLP_TRANSIENT_ERROR_MARKERS):
+        return None
+    for unavailable_class, markers in _YTDLP_UNAVAILABLE_SIGNAL_MAP:
+        if any(marker in lower_msg for marker in markers):
+            return unavailable_class
+    return None
+
 def resolve_media_type(config, *, playlist_entry=None, url=None):
     media_type = None
     if isinstance(playlist_entry, dict):
@@ -2682,6 +2942,44 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
                 return parsed
         return None
 
+    def _coalesce_aliases(*values):
+        aliases = []
+        seen = set()
+        for value in values:
+            if isinstance(value, str):
+                value = [value]
+            if not isinstance(value, (list, tuple, set)):
+                continue
+            for entry in value:
+                text = str(entry or "").strip()
+                if not text:
+                    continue
+                key = text.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                aliases.append(text)
+        return aliases
+
+    def _coalesce_urls(*values):
+        urls = []
+        seen = set()
+        for value in values:
+            if isinstance(value, str):
+                value = [value]
+            if not isinstance(value, (list, tuple, set)):
+                continue
+            for entry in value:
+                text = str(entry or "").strip()
+                if not text:
+                    continue
+                key = text.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                urls.append(text)
+        return urls
+
     def _is_complete(meta):
         for key in required_keys:
             value = meta.get(key)
@@ -2745,6 +3043,29 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
         template.get("duration_ms"),
         payload_or_intent.get("duration_ms"),
     )
+    canonical["track_aliases"] = _coalesce_aliases(
+        canonical.get("track_aliases"),
+        canonical.get("title_aliases"),
+        template.get("track_aliases"),
+        template.get("title_aliases"),
+        payload_or_intent.get("track_aliases"),
+        payload_or_intent.get("title_aliases"),
+    )
+    canonical["track_disambiguation"] = _coalesce_str(
+        canonical.get("track_disambiguation"),
+        template.get("track_disambiguation"),
+        payload_or_intent.get("track_disambiguation"),
+    )
+    canonical["mb_recording_title"] = _coalesce_str(
+        canonical.get("mb_recording_title"),
+        template.get("mb_recording_title"),
+        payload_or_intent.get("mb_recording_title"),
+    )
+    canonical["mb_youtube_urls"] = _coalesce_urls(
+        canonical.get("mb_youtube_urls"),
+        template.get("mb_youtube_urls"),
+        payload_or_intent.get("mb_youtube_urls"),
+    )
 
     if not _is_complete(canonical):
         recording_mbid = _coalesce_str(canonical.get("recording_mbid"))
@@ -2767,7 +3088,7 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
             try:
                 recording_payload = get_musicbrainz_service().get_recording(
                     recording_mbid,
-                    includes=["releases", "artists", "isrcs"],
+                    includes=["releases", "artists", "isrcs", "aliases"],
                 )
                 recording_data = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
                 canonical["duration_ms"] = _coalesce_pos_int(
@@ -2798,6 +3119,13 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
                 if isinstance(pair, dict):
                     canonical.update(pair)
 
+    canonical["track_aliases"] = _coalesce_aliases(
+        canonical.get("track_aliases"),
+        canonical.get("title_aliases"),
+    )
+    canonical["title_aliases"] = list(canonical.get("track_aliases") or [])
+    canonical["mb_youtube_urls"] = _coalesce_urls(canonical.get("mb_youtube_urls"))
+
     canonical["release_date"] = _extract_release_year(canonical.get("release_date")) or _coalesce_str(canonical.get("release_date"))
     canonical["track_number"] = _coalesce_pos_int(canonical.get("track_number"))
     canonical["disc_number"] = _coalesce_pos_int(canonical.get("disc_number"), 1)
@@ -2816,6 +3144,11 @@ def ensure_mb_bound_music_track(payload_or_intent, *, config, country_preference
     for key in required_keys:
         template[key] = canonical.get(key)
     template["mb_recording_id"] = canonical.get("recording_mbid")
+    template["track_aliases"] = canonical.get("track_aliases")
+    template["title_aliases"] = canonical.get("track_aliases")
+    template["track_disambiguation"] = canonical.get("track_disambiguation")
+    template["mb_recording_title"] = canonical.get("mb_recording_title")
+    template["mb_youtube_urls"] = canonical.get("mb_youtube_urls")
 
     return canonical
 
@@ -2864,6 +3197,11 @@ def build_download_job_payload(
         output_template.setdefault("release_date", canonical_metadata.get("release_date") or canonical_metadata.get("date"))
         output_template.setdefault("artwork_url", canonical_metadata.get("artwork_url"))
         output_template.setdefault("genre", canonical_metadata.get("genre"))
+        output_template.setdefault("track_aliases", canonical_metadata.get("track_aliases") or canonical_metadata.get("title_aliases"))
+        output_template.setdefault("title_aliases", canonical_metadata.get("track_aliases") or canonical_metadata.get("title_aliases"))
+        output_template.setdefault("track_disambiguation", canonical_metadata.get("track_disambiguation"))
+        output_template.setdefault("mb_recording_title", canonical_metadata.get("mb_recording_title"))
+        output_template.setdefault("mb_youtube_urls", canonical_metadata.get("mb_youtube_urls"))
 
     if isinstance(output_template_overrides, dict):
         output_template.update(output_template_overrides)
@@ -2945,6 +3283,7 @@ def build_download_job_payload(
         "import_batch",
         "import_batch_id",
         "source_index",
+        "mb_youtube_urls",
     ):
         output_template.setdefault(key, None)
 
@@ -3842,15 +4181,21 @@ def download_with_ytdlp(
         probe_error = str(exc)
         lower_probe_error = probe_error.lower()
         format_unavailable_probe = "requested format is not available" in lower_probe_error
+        unavailable_class = _classify_ytdlp_unavailability(probe_error)
         _log_event(
             logging.WARNING if format_unavailable_probe else logging.ERROR,
             "ytdlp_metadata_probe_failed",
             job_id=job_id,
             url=url,
             error=probe_error,
-            failure_domain="metadata_probe_format" if format_unavailable_probe else "metadata_probe",
+            failure_domain=(
+                "metadata_probe_unavailable"
+                if unavailable_class
+                else ("metadata_probe_format" if format_unavailable_probe else "metadata_probe")
+            ),
             error_message=probe_error,
             candidate_id=extract_video_id(url),
+            unavailable_class=unavailable_class,
         )
         should_escalate_probe_js = any(
             marker in lower_probe_error
@@ -3898,6 +4243,7 @@ def download_with_ytdlp(
                 media_type=media_type,
                 media_intent=media_intent,
                 error=probe_error,
+                unavailable_class=unavailable_class,
             )
             info = {"id": extract_video_id(url), "webpage_url": url}
 
@@ -3957,6 +4303,7 @@ def download_with_ytdlp(
         )
     except CalledProcessError as exc:
         stderr_output = (exc.stderr or "").strip()
+        unavailable_class = _classify_ytdlp_unavailability(stderr_output or str(exc))
 
         lower_error = stderr_output.lower()
         should_escalate_js = any(
@@ -4155,7 +4502,10 @@ def download_with_ytdlp(
                         final_format=final_format,
                         error=str(retry_exc),
                         opts=_redact_ytdlp_opts(retry_opts),
+                        unavailable_class=unavailable_class,
                     )
+                    if unavailable_class:
+                        raise RuntimeError(f"yt_dlp_source_unavailable:{unavailable_class}: {retry_exc}")
                     raise RuntimeError(f"yt_dlp_download_failed: {retry_exc}")
             else:
                 _log_event(
@@ -4173,7 +4523,10 @@ def download_with_ytdlp(
                     outtmpl=opts.get("outtmpl"),
                     noplaylist=opts.get("noplaylist"),
                     error=str(exc),
+                    unavailable_class=unavailable_class,
                 )
+                if unavailable_class:
+                    raise RuntimeError(f"yt_dlp_source_unavailable:{unavailable_class}: {exc}")
                 raise RuntimeError(f"yt_dlp_download_failed: {exc}")
         else:
             _log_event(
@@ -4191,7 +4544,10 @@ def download_with_ytdlp(
                 outtmpl=opts.get("outtmpl"),
                 noplaylist=opts.get("noplaylist"),
                 error=str(exc),
+                unavailable_class=unavailable_class,
             )
+            if unavailable_class:
+                raise RuntimeError(f"yt_dlp_source_unavailable:{unavailable_class}: {exc}")
             raise RuntimeError(f"yt_dlp_download_failed: {exc}")
 
     if (stop_event and stop_event.is_set()) or (callable(cancel_check) and cancel_check()):
@@ -5008,6 +5364,8 @@ def is_retryable_error(error):
     else:
         message = str(error).lower()
     if "postprocessing" in message or "postprocessor" in message or "ffmpeg" in message:
+        return False
+    if "yt_dlp_source_unavailable:" in message:
         return False
     if "json serializable" in message or "not json" in message:
         return False

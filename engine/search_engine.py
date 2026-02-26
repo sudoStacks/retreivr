@@ -50,15 +50,18 @@ def _run_adapter_search(adapter, item, max_candidates, canonical_payload):
 
     return out
 import json
+import hashlib
 import logging
 import os
 import re
 import sqlite3
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
+from yt_dlp import YoutubeDL
 
 from engine.job_queue import (
     DownloadJobStore,
@@ -66,6 +69,7 @@ from engine.job_queue import (
     build_download_job_payload,
     ensure_download_jobs_table,
     canonicalize_url,
+    extract_video_id,
 )
 from engine.json_utils import safe_json_dumps
 from engine.paths import DATA_DIR
@@ -90,6 +94,7 @@ ITEM_STATUSES = {
 
 DEFAULT_SOURCE_PRIORITY = ["bandcamp", "youtube_music", "soundcloud"]
 MUSIC_TRACK_SOURCE_PRIORITY = ("youtube_music", "youtube", "soundcloud", "bandcamp")
+MUSIC_TRACK_SOURCE_PRIORITY_WITH_MB = ("mb_relationship",) + MUSIC_TRACK_SOURCE_PRIORITY
 MUSIC_TRACK_PENALIZE_TOKENS = ("live", "cover", "karaoke", "remix", "reaction", "ft.", "feat.", "instrumental")
 DEFAULT_MATCH_THRESHOLD = 0.92
 MUSIC_TRACK_THRESHOLD = 0.78
@@ -99,6 +104,9 @@ _MUSIC_DURATION_EXPANDED_MAX_DELTA_MS = 35000
 _MUSIC_DURATION_HARD_CAP_MS = 35000
 _MUSIC_PASS_B_MIN_TITLE_SIMILARITY = 0.92
 _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY = 0.92
+_ALBUM_COHERENCE_MAX_BOOST = 0.03
+_ALBUM_COHERENCE_TIE_WINDOW = 0.03
+_MB_INJECTED_MAX_URLS = 3
 
 
 @dataclass(frozen=True)
@@ -828,6 +836,11 @@ class SearchResolutionService:
         self.queue_store = DownloadJobStore(queue_db_path)
         self._ensure_queue_schema()
         self.canonical_resolver = canonical_resolver or CanonicalMetadataResolver(config=self.config)
+        self._album_coherence_families = {}
+        self._album_mb_injection_success = {}
+        self._album_coherence_lock = threading.Lock()
+        self._mb_injected_probe_cache = {}
+        self._mb_injected_probe_lock = threading.Lock()
 
     def _as_bool(self, value):
         if isinstance(value, bool):
@@ -848,6 +861,262 @@ class SearchResolutionService:
 
     def _music_tokens(self, value):
         return WORD_TOKEN_RE.findall(str(value or "").lower())
+
+    def _parse_raw_meta(self, value):
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str) or not value.strip():
+            return {}
+        try:
+            loaded = json.loads(value)
+        except Exception:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _candidate_authority_family(self, candidate):
+        if not isinstance(candidate, dict):
+            return None
+        source = str(candidate.get("source") or "").strip().lower() or "unknown"
+        direct_values = (
+            candidate.get("channel_id"),
+            candidate.get("uploader_id"),
+            candidate.get("channel_url"),
+            candidate.get("uploader_url"),
+        )
+        for value in direct_values:
+            normalized = str(value or "").strip()
+            if normalized:
+                return f"{source}:{normalized.lower()}"
+
+        raw_meta = self._parse_raw_meta(candidate.get("raw_meta_json"))
+        for key in ("channel_id", "uploader_id", "channel_url", "uploader_url"):
+            value = str(raw_meta.get(key) or "").strip()
+            if value:
+                return f"{source}:{value.lower()}"
+
+        uploader = str(candidate.get("uploader") or candidate.get("artist_detected") or "").strip().lower()
+        if source in {"youtube", "youtube_music"} and uploader.endswith("- topic"):
+            return f"{source}:topic"
+        return None
+
+    def _coherence_context_key(self, coherence_context):
+        if not isinstance(coherence_context, dict):
+            return None
+        release_id = str(coherence_context.get("mb_release_id") or "").strip().lower()
+        if not release_id:
+            return None
+        track_total = coherence_context.get("track_total")
+        try:
+            track_total_value = int(track_total) if track_total is not None else None
+        except Exception:
+            track_total_value = None
+        if track_total_value is not None and track_total_value <= 1:
+            return None
+        return release_id
+
+    def _normalize_mb_youtube_urls(self, mb_youtube_urls):
+        urls = []
+        seen = set()
+        source_values = mb_youtube_urls if isinstance(mb_youtube_urls, (list, tuple, set)) else []
+        for value in source_values:
+            raw = str(value or "").strip()
+            if not raw:
+                continue
+            video_id = extract_video_id(raw)
+            if not video_id:
+                parsed = urllib.parse.urlparse(raw)
+                host = (parsed.netloc or "").lower()
+                parts = [part for part in (parsed.path or "").split("/") if part]
+                if "youtube.com" in host and len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
+                    video_id = parts[1]
+            if not video_id:
+                continue
+            canonical = canonicalize_url("youtube", raw, video_id)
+            if not canonical:
+                continue
+            key = canonical.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            urls.append(canonical)
+            if len(urls) >= _MB_INJECTED_MAX_URLS:
+                break
+        return urls
+
+    def _probe_mb_relationship_candidate(self, url, *, artist, track, album):
+        cache_key = str(url or "").strip().lower()
+        if cache_key:
+            with self._mb_injected_probe_lock:
+                cached = self._mb_injected_probe_cache.get(cache_key, "__missing__")
+            if cached != "__missing__":
+                return dict(cached) if isinstance(cached, dict) else None
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "cachedir": False,
+            "socket_timeout": 8,
+        }
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "mb_youtube_injected_probe_failed",
+                url=url,
+                error=str(exc),
+            )
+            if cache_key:
+                with self._mb_injected_probe_lock:
+                    self._mb_injected_probe_cache[cache_key] = None
+            return None
+        if not isinstance(info, dict):
+            if cache_key:
+                with self._mb_injected_probe_lock:
+                    self._mb_injected_probe_cache[cache_key] = None
+            return None
+        resolved_url = str(info.get("webpage_url") or info.get("original_url") or url).strip() or url
+        video_id = extract_video_id(resolved_url) or extract_video_id(url)
+        canonical_url = canonicalize_url("youtube", resolved_url, video_id) or resolved_url
+        title = str(info.get("title") or track or "").strip()
+        uploader = str(info.get("uploader") or info.get("channel") or artist or "").strip()
+        duration_sec = info.get("duration")
+        try:
+            duration_sec = int(duration_sec) if duration_sec is not None else None
+        except Exception:
+            duration_sec = None
+        candidate_id = str(info.get("id") or video_id or "").strip()
+        if not candidate_id:
+            candidate_id = hashlib.sha1(canonical_url.encode("utf-8")).hexdigest()[:16]
+        candidate = {
+            "source": "mb_relationship",
+            "candidate_id": candidate_id,
+            "url": canonical_url,
+            "title": title,
+            "uploader": uploader,
+            "artist_detected": str(info.get("artist") or uploader or artist or "").strip(),
+            "album_detected": str(info.get("album") or album or "").strip() or None,
+            "track_detected": str(info.get("track") or title or track or "").strip() or None,
+            "duration_sec": duration_sec,
+            "official": bool(info.get("is_official")),
+            "raw_meta_json": safe_json_dumps(info),
+            "mb_injected": True,
+            "mb_relationship_url": canonical_url,
+        }
+        if cache_key:
+            with self._mb_injected_probe_lock:
+                self._mb_injected_probe_cache[cache_key] = dict(candidate)
+        return candidate
+
+    def _resolve_mb_relationship_candidates(self, *, mb_youtube_urls, artist, track, album, recording_mbid=None):
+        urls = self._normalize_mb_youtube_urls(mb_youtube_urls)
+        injected = []
+        for url in urls:
+            candidate = self._probe_mb_relationship_candidate(url, artist=artist, track=track, album=album)
+            if not isinstance(candidate, dict):
+                continue
+            injected.append(candidate)
+            _log_event(
+                logging.INFO,
+                "mb_youtube_injected",
+                recording_mbid=str(recording_mbid or "").strip() or None,
+                url=url,
+                candidate_id=candidate.get("candidate_id"),
+            )
+        return injected
+
+    def _classify_mb_injected_rejection(self, reason):
+        value = str(reason or "").strip().lower()
+        if not value:
+            return "mb_injected_failed_unknown"
+        if value in {"duration_out_of_bounds", "duration_over_hard_cap", "preview_duration"}:
+            return "mb_injected_failed_duration"
+        if value in {"disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
+            return "mb_injected_failed_variant"
+        if value in {"low_title_similarity"}:
+            return "mb_injected_failed_title"
+        if value in {"low_artist_similarity"}:
+            return "mb_injected_failed_artist"
+        return f"mb_injected_failed_{value}"
+
+    def _apply_album_coherence_tiebreak(self, ranked, *, coherence_key, pass_name, query_label):
+        if not ranked:
+            return ranked, 0
+        with self._album_coherence_lock:
+            family_counts = dict(self._album_coherence_families.get(coherence_key) or {})
+        if not family_counts:
+            return ranked, 0
+
+        top_non_rejected = [
+            float(item.get("final_score") or 0.0)
+            for item in ranked
+            if not item.get("rejection_reason")
+        ]
+        if not top_non_rejected:
+            return ranked, 0
+        top_score = max(top_non_rejected)
+        max_family_count = max(family_counts.values()) if family_counts else 0
+        if max_family_count <= 0:
+            return ranked, 0
+
+        boosted = []
+        applied = 0
+        for item in ranked:
+            candidate = dict(item)
+            candidate["coherence_delta"] = float(candidate.get("coherence_delta") or 0.0)
+            base_score = float(candidate.get("final_score") or 0.0)
+            candidate["base_final_score"] = base_score
+            if candidate.get("rejection_reason"):
+                boosted.append(candidate)
+                continue
+            if (top_score - base_score) > _ALBUM_COHERENCE_TIE_WINDOW:
+                boosted.append(candidate)
+                continue
+            family = self._candidate_authority_family(candidate)
+            if not family:
+                boosted.append(candidate)
+                continue
+            count = int(family_counts.get(family) or 0)
+            if count <= 0:
+                boosted.append(candidate)
+                continue
+            family_strength = count / float(max_family_count)
+            delta = min(_ALBUM_COHERENCE_MAX_BOOST, _ALBUM_COHERENCE_MAX_BOOST * family_strength)
+            if delta <= 0:
+                boosted.append(candidate)
+                continue
+            candidate["coherence_family"] = family
+            candidate["coherence_delta"] = delta
+            candidate["final_score"] = min(1.0, base_score + delta)
+            applied += 1
+            _log_event(
+                logging.DEBUG,
+                "music_album_coherence_boost_applied",
+                coherence_key=coherence_key,
+                query_label=query_label,
+                selected_pass=pass_name,
+                candidate_id=candidate.get("candidate_id"),
+                coherence_family=family,
+                coherence_delta=delta,
+                base_final_score=base_score,
+                boosted_final_score=candidate.get("final_score"),
+            )
+            boosted.append(candidate)
+        if applied <= 0:
+            return ranked, 0
+        return rank_candidates(boosted, source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY_WITH_MB)), applied
+
+    def _record_album_coherence_family(self, coherence_key, selected_candidate):
+        if not coherence_key or not isinstance(selected_candidate, dict):
+            return
+        family = self._candidate_authority_family(selected_candidate)
+        if not family:
+            return
+        with self._album_coherence_lock:
+            bucket = self._album_coherence_families.setdefault(coherence_key, {})
+            bucket[family] = int(bucket.get(family) or 0) + 1
 
     def _normalize_score_100(self, candidate):
         raw_score = candidate.get("adapter_score")
@@ -991,6 +1260,16 @@ class SearchResolutionService:
                 "label": "official_audio_fallback",
                 "query": " ".join(part for part in [artist_v, relaxed_track, "official audio"] if part).strip(),
             },
+            {
+                "rung": 4,
+                "label": "legacy_topic_fallback",
+                "query": " ".join(part for part in [artist_v, "-", track_v, "topic"] if part).strip(),
+            },
+            {
+                "rung": 5,
+                "label": "legacy_audio_fallback",
+                "query": " ".join(part for part in [artist_v, "-", track_v, "audio"] if part).strip(),
+            },
         ]
         seen = set()
         unique_ladder = []
@@ -1048,9 +1327,37 @@ class SearchResolutionService:
         )
         return candidates
 
-    def search_music_track_best_match(self, artist, track, album=None, duration_ms=None, limit=6, *, start_rung=0):
+    def search_music_track_best_match(
+        self,
+        artist,
+        track,
+        album=None,
+        duration_ms=None,
+        limit=6,
+        *,
+        start_rung=0,
+        coherence_context=None,
+        track_aliases=None,
+        track_disambiguation=None,
+        mb_youtube_urls=None,
+        recording_mbid=None,
+    ):
         expected_duration_hint_sec = (int(duration_ms) // 1000) if duration_ms is not None else None
         ladder = self._build_music_track_query_ladder(artist, track, album)
+        coherence_key = self._coherence_context_key(coherence_context)
+        normalized_aliases = []
+        if isinstance(track_aliases, (list, tuple, set)):
+            seen_aliases = set()
+            for value in track_aliases:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                lowered = text.lower()
+                if lowered in seen_aliases:
+                    continue
+                seen_aliases.add(lowered)
+                normalized_aliases.append(text)
+        normalized_disambiguation = str(track_disambiguation or "").strip() or None
         if not ladder:
             self.last_music_track_search = {
                 "attempted": [],
@@ -1058,6 +1365,8 @@ class SearchResolutionService:
                 "selected_rung": None,
                 "selected_pass": None,
                 "failure_reason": "no_candidates",
+                "coherence_key": coherence_key,
+                "coherence_boost_applied": 0,
             }
             return None
         first_rung = max(0, min(int(start_rung or 0), len(ladder) - 1))
@@ -1068,6 +1377,16 @@ class SearchResolutionService:
         selected_rung = None
         selected_pass = None
         failure_reason = "no_candidates"
+        coherence_boost_applied = 0
+        mb_injected_candidates = self._resolve_mb_relationship_candidates(
+            mb_youtube_urls=mb_youtube_urls,
+            artist=artist,
+            track=track,
+            album=album,
+            recording_mbid=recording_mbid,
+        )
+        mb_injected_rejections = {}
+        mb_injected_selected = False
 
         for ladder_entry in ladder[first_rung:]:
             query = str(ladder_entry.get("query") or "").strip()
@@ -1082,8 +1401,23 @@ class SearchResolutionService:
                 "duration_hint_sec": expected_duration_hint_sec,
                 "duration_hard_cap_ms": _MUSIC_DURATION_HARD_CAP_MS,
                 "variant_allow_tokens": {"live"} if self._music_track_is_live(artist, track, album) else set(),
+                "track_aliases": normalized_aliases,
+                "track_disambiguation": normalized_disambiguation,
             }
             candidates = self.search_music_track_candidates(query, limit=limit, query_label=query_label)
+            if rung == first_rung and mb_injected_candidates:
+                deduped = []
+                seen_urls = set()
+                for candidate in list(mb_injected_candidates) + list(candidates):
+                    if not isinstance(candidate, dict):
+                        continue
+                    url_key = str(candidate.get("url") or "").strip().lower()
+                    if url_key and url_key in seen_urls:
+                        continue
+                    if url_key:
+                        seen_urls.add(url_key)
+                    deduped.append(candidate)
+                candidates = deduped
             rung_meta = {
                 "rung": rung,
                 "query_label": query_label,
@@ -1120,9 +1454,36 @@ class SearchResolutionService:
                     item["base_score"] = breakdown.get("raw_score_100")
                     item["final_score_100"] = breakdown.get("final_score_100")
                     scored.append(item)
-                return rank_candidates(scored, source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY))
+                return rank_candidates(scored, source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY_WITH_MB))
 
             ranked_a = _score_for_pass(_MUSIC_DURATION_STRICT_MAX_DELTA_MS)
+            if coherence_key:
+                ranked_a, applied = self._apply_album_coherence_tiebreak(
+                    ranked_a,
+                    coherence_key=coherence_key,
+                    pass_name="strict",
+                    query_label=query_label,
+                )
+                coherence_boost_applied += applied
+            for scored in ranked_a:
+                if str(scored.get("source") or "").strip().lower() != "mb_relationship":
+                    continue
+                reason = scored.get("rejection_reason")
+                if not reason:
+                    continue
+                key = self._classify_mb_injected_rejection(reason)
+                mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                _log_event(
+                    logging.INFO,
+                    "mb_youtube_injected_rejected",
+                    recording_mbid=str(recording_mbid or "").strip() or None,
+                    candidate_id=scored.get("candidate_id"),
+                    url=scored.get("url"),
+                    rejection_reason=reason,
+                    classified_reason=key,
+                    selected_rung=rung,
+                    query_label=query_label,
+                )
             eligible_a = [
                 c for c in ranked_a
                 if not c.get("rejection_reason")
@@ -1135,6 +1496,7 @@ class SearchResolutionService:
                 selected_query = query
                 selected_rung = rung
                 selected_pass = "strict"
+                mb_injected_selected = str(selected_a.get("source") or "").strip().lower() == "mb_relationship"
                 rung_meta["selected_pass"] = "strict"
                 attempted.append(rung_meta)
                 _log_event(
@@ -1147,9 +1509,19 @@ class SearchResolutionService:
                     selected_pass="strict",
                     failure_reason=None,
                 )
+                if coherence_key:
+                    self._record_album_coherence_family(coherence_key, selected_a)
                 break
 
             ranked_b = _score_for_pass(_MUSIC_DURATION_EXPANDED_MAX_DELTA_MS)
+            if coherence_key:
+                ranked_b, applied = self._apply_album_coherence_tiebreak(
+                    ranked_b,
+                    coherence_key=coherence_key,
+                    pass_name="expanded",
+                    query_label=query_label,
+                )
+                coherence_boost_applied += applied
             eligible_b = []
             for candidate in ranked_b:
                 if candidate.get("rejection_reason"):
@@ -1163,10 +1535,19 @@ class SearchResolutionService:
                 if not delta_ok:
                     continue
                 if float(candidate.get("score_track", 0.0)) < _MUSIC_PASS_B_MIN_TITLE_SIMILARITY:
+                    if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
+                        key = "mb_injected_failed_title"
+                        mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
                     continue
                 if float(candidate.get("score_artist", 0.0)) < _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY:
+                    if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
+                        key = "mb_injected_failed_artist"
+                        mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
                     continue
                 if not bool(candidate.get("authority_channel_match")):
+                    if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
+                        key = "mb_injected_failed_authority"
+                        mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
                     continue
                 eligible_b.append(candidate)
             selected_b = eligible_b[0] if eligible_b else None
@@ -1176,6 +1557,7 @@ class SearchResolutionService:
                 selected_query = query
                 selected_rung = rung
                 selected_pass = "expanded"
+                mb_injected_selected = str(selected_b.get("source") or "").strip().lower() == "mb_relationship"
                 rung_meta["selected_pass"] = "expanded"
                 attempted.append(rung_meta)
                 _log_event(
@@ -1188,6 +1570,8 @@ class SearchResolutionService:
                     selected_pass="expanded",
                     failure_reason=None,
                 )
+                if coherence_key:
+                    self._record_album_coherence_family(coherence_key, selected_b)
                 break
 
             pass_a_reasons = {str(c.get("rejection_reason") or "") for c in ranked_a if c.get("rejection_reason")}
@@ -1207,13 +1591,32 @@ class SearchResolutionService:
                 selected_pass=None,
                 failure_reason=failure_reason,
             )
-
+        mb_injected_album_success_count = 0
+        if mb_injected_selected and coherence_key:
+            with self._album_coherence_lock:
+                current = int(self._album_mb_injection_success.get(coherence_key) or 0) + 1
+                self._album_mb_injection_success[coherence_key] = current
+            mb_injected_album_success_count = current
+            _log_event(
+                logging.INFO,
+                "mb_youtube_injected_selected",
+                coherence_key=coherence_key,
+                selected_rung=selected_rung,
+                selected_pass=selected_pass,
+                count_for_album_run=current,
+            )
         self.last_music_track_search = {
             "attempted": attempted,
             "start_rung": first_rung,
             "selected_rung": selected_rung,
             "selected_pass": selected_pass,
             "failure_reason": None if selected is not None else failure_reason,
+            "coherence_key": coherence_key,
+            "coherence_boost_applied": coherence_boost_applied,
+            "mb_injected_candidates": len(mb_injected_candidates),
+            "mb_injected_selected": mb_injected_selected,
+            "mb_injected_rejections": mb_injected_rejections,
+            "mb_injected_album_success_count": mb_injected_album_success_count,
         }
         ranked = selected_ranked
         if self.debug_music_scoring:

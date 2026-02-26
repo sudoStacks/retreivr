@@ -1,0 +1,881 @@
+{
+  "schema_version": 1,
+  "dataset_name": "music-search-album-benchmark-v1",
+  "notes": "Deterministic fixture benchmark for Music Mode search quality. No network/download calls.",
+  "fixtures": {
+    "direct_strict_match": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "ok-main",
+      "rungs": [
+        [
+          {
+            "candidate_id": "ok-main",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}"
+          },
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "{{track}} (Live)",
+            "uploader": "Fan Uploads",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://www.youtube.com/watch?v={{recording_mbid}}live"
+          }
+        ],
+        [],
+        [],
+        []
+      ]
+    },
+    "rung1_recovery": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "ok-r1",
+      "rungs": [
+        [],
+        [
+          {
+            "candidate_id": "ok-r1",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}r1"
+          }
+        ],
+        [],
+        []
+      ]
+    },
+    "rung2_relaxed_recovery": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "ok-r2",
+      "rungs": [
+        [],
+        [],
+        [
+          {
+            "candidate_id": "ok-r2",
+            "source": "youtube_music",
+            "title": "{{track}} (Official Audio)",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}r2"
+          }
+        ],
+        []
+      ]
+    },
+    "expanded_duration_match": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "ok-expanded",
+      "rungs": [
+        [
+          {
+            "candidate_id": "ok-expanded",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 240,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}exp"
+          }
+        ],
+        [],
+        [],
+        []
+      ]
+    },
+    "variant_only_fail": {
+      "expect_match": false,
+      "rungs": [
+        [
+          {
+            "candidate_id": "bad-remix",
+            "source": "youtube",
+            "title": "{{track}} (Remix)",
+            "uploader": "Mix Channel",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://www.youtube.com/watch?v={{recording_mbid}}bad1"
+          },
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "{{track}} (Live)",
+            "uploader": "Concert Clips",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://www.youtube.com/watch?v={{recording_mbid}}bad2"
+          }
+        ],
+        [],
+        [],
+        []
+      ]
+    },
+    "duration_filtered_fail": {
+      "expect_match": false,
+      "rungs": [
+        [
+          {
+            "candidate_id": "bad-duration",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 320,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}dur"
+          }
+        ],
+        [],
+        [],
+        []
+      ]
+    },
+    "legacy_topic_rung_recovery": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "ok-legacy-topic",
+      "rungs": [
+        [],
+        [],
+        [],
+        [],
+        [
+          {
+            "candidate_id": "ok-legacy-topic",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}legacytopic"
+          }
+        ],
+        []
+      ]
+    },
+    "coherence_seed": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "seed-a",
+      "rungs": [
+        [
+          {
+            "candidate_id": "seed-a",
+            "source": "youtube",
+            "title": "{{track}}",
+            "uploader": "{{artist}} Official",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 200,
+            "channel_id": "chan-a",
+            "url": "https://youtube.com/watch?v={{recording_mbid}}seed"
+          }
+        ],
+        [],
+        [],
+        []
+      ]
+    },
+    "coherence_near_threshold": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "family-a",
+      "rungs": [
+        [
+          {
+            "candidate_id": "family-a",
+            "source": "youtube",
+            "title": "{{track}} (Official Video)",
+            "uploader": "Archive Channel",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 208,
+            "channel_id": "chan-a",
+            "url": "https://youtube.com/watch?v={{recording_mbid}}a",
+            "official": false
+          },
+          {
+            "candidate_id": "family-b",
+            "source": "youtube",
+            "title": "{{track}} (Official Video)",
+            "uploader": "Mirror Channel",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 208,
+            "channel_id": "chan-b",
+            "url": "https://youtube.com/watch?v={{recording_mbid}}b",
+            "official": false
+          }
+        ],
+        [],
+        [],
+        []
+      ]
+    },
+    "alias_title_recovery": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "alias-r0",
+      "rungs": [
+        [
+          {
+            "candidate_id": "alias-r0",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "Song Pt 2",
+            "album_detected": "{{album}}",
+            "duration_sec": 200,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}alias"
+          }
+        ],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "alias_title_recovery_mb": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "alias-hit",
+      "rungs": [
+        [
+          {
+            "candidate_id": "alias-hit",
+            "source": "youtube_music",
+            "title": "Great Gig",
+            "uploader": "Pink Floyd - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "Great Gig",
+            "album_detected": "{{album}}",
+            "duration_sec": 276,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}aliasmb"
+          }
+        ],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "mb_relationship_recovery": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "mb-rel-ok",
+      "mb_injected_candidates": [
+        {
+          "candidate_id": "mb-rel-ok",
+          "source": "mb_relationship",
+          "title": "{{track}}",
+          "uploader": "{{artist}} - Official",
+          "artist_detected": "{{artist}}",
+          "track_detected": "{{track}}",
+          "album_detected": "{{album}}",
+          "duration_sec": 210,
+          "url": "https://www.youtube.com/watch?v={{recording_mbid}}mb"
+        }
+      ],
+      "rungs": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "albums": [
+    {
+      "album_id": "brooks-dunn-greatest-hits",
+      "artist": "Brooks & Dunn",
+      "title": "The Greatest Hits Collection",
+      "release_group_mbid": "11111111-1111-4111-8111-111111111111",
+      "notes": "Legacy country hits compilation; include Red Dirt Road case sensitivity in catalog style.",
+      "tracks": [
+        {
+          "recording_mbid": "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Red Dirt Road",
+          "duration_ms": 210000,
+          "fixture": "mb_relationship_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "brooks-dunn-reboot",
+      "artist": "Brooks & Dunn",
+      "title": "Reboot",
+      "release_group_mbid": "11111111-1111-4111-8111-222222222222",
+      "tracks": [
+        {
+          "recording_mbid": "22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Believe",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "george-strait-50-number-ones",
+      "artist": "George Strait",
+      "title": "50 Number Ones",
+      "release_group_mbid": "11111111-1111-4111-8111-333333333333",
+      "tracks": [
+        {
+          "recording_mbid": "33333333-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Amarillo by Morning",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "alan-jackson-greatest-hits",
+      "artist": "Alan Jackson",
+      "title": "Greatest Hits Volume II",
+      "release_group_mbid": "11111111-1111-4111-8111-444444444444",
+      "tracks": [
+        {
+          "recording_mbid": "44444444-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Chattahoochee",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "tim-mcgraw-greatest-hits",
+      "artist": "Tim McGraw",
+      "title": "Greatest Hits",
+      "release_group_mbid": "11111111-1111-4111-8111-555555555555",
+      "tracks": [
+        {
+          "recording_mbid": "55555555-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Live Like You Were Dying",
+          "duration_ms": 210000,
+          "fixture": "expanded_duration_match"
+        }
+      ]
+    },
+    {
+      "album_id": "shania-twain-come-on-over",
+      "artist": "Shania Twain",
+      "title": "Come On Over",
+      "release_group_mbid": "11111111-1111-4111-8111-666666666666",
+      "tracks": [
+        {
+          "recording_mbid": "66666666-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Man! I Feel Like a Woman!",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "faith-hill-breathe",
+      "artist": "Faith Hill",
+      "title": "Breathe",
+      "release_group_mbid": "11111111-1111-4111-8111-777777777777",
+      "tracks": [
+        {
+          "recording_mbid": "77777777-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Breathe",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "garth-brooks-no-fences",
+      "artist": "Garth Brooks",
+      "title": "No Fences",
+      "release_group_mbid": "11111111-1111-4111-8111-888888888888",
+      "tracks": [
+        {
+          "recording_mbid": "88888888-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Friends in Low Places",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "reba-greatest-hits",
+      "artist": "Reba McEntire",
+      "title": "Greatest Hits",
+      "release_group_mbid": "11111111-1111-4111-8111-999999999999",
+      "tracks": [
+        {
+          "recording_mbid": "99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Fancy",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "kenny-chesney-no-shoes",
+      "artist": "Kenny Chesney",
+      "title": "No Shoes, No Shirt, No Problems",
+      "release_group_mbid": "22222222-1111-4111-8111-111111111111",
+      "tracks": [
+        {
+          "recording_mbid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "The Good Stuff",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "taylor-swift-1989",
+      "artist": "Taylor Swift",
+      "title": "1989",
+      "release_group_mbid": "22222222-1111-4111-8111-222222222222",
+      "tracks": [
+        {
+          "recording_mbid": "bbbbbbbb-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Blank Space",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "olivia-rodrigo-sour",
+      "artist": "Olivia Rodrigo",
+      "title": "SOUR",
+      "release_group_mbid": "22222222-1111-4111-8111-333333333333",
+      "tracks": [
+        {
+          "recording_mbid": "cccccccc-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "drivers license",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "dua-lipa-future-nostalgia",
+      "artist": "Dua Lipa",
+      "title": "Future Nostalgia",
+      "release_group_mbid": "22222222-1111-4111-8111-444444444444",
+      "tracks": [
+        {
+          "recording_mbid": "dddddddd-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Levitating",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "weeknd-after-hours",
+      "artist": "The Weeknd",
+      "title": "After Hours",
+      "release_group_mbid": "22222222-1111-4111-8111-555555555555",
+      "tracks": [
+        {
+          "recording_mbid": "eeeeeeee-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Blinding Lights",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "billie-eilish-happier-than-ever",
+      "artist": "Billie Eilish",
+      "title": "Happier Than Ever",
+      "release_group_mbid": "22222222-1111-4111-8111-666666666666",
+      "tracks": [
+        {
+          "recording_mbid": "ffffffff-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Happier Than Ever",
+          "duration_ms": 210000,
+          "fixture": "expanded_duration_match"
+        }
+      ]
+    },
+    {
+      "album_id": "adele-30",
+      "artist": "Adele",
+      "title": "30",
+      "release_group_mbid": "22222222-1111-4111-8111-777777777777",
+      "tracks": [
+        {
+          "recording_mbid": "12121212-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Easy On Me",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "ed-sheeran-equals",
+      "artist": "Ed Sheeran",
+      "title": "=",
+      "release_group_mbid": "22222222-1111-4111-8111-888888888888",
+      "tracks": [
+        {
+          "recording_mbid": "13131313-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Shivers",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "post-malone-hollywoods-bleeding",
+      "artist": "Post Malone",
+      "title": "Hollywood's Bleeding",
+      "release_group_mbid": "22222222-1111-4111-8111-999999999999",
+      "tracks": [
+        {
+          "recording_mbid": "14141414-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Circles",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "drake-certified-lover-boy",
+      "artist": "Drake",
+      "title": "Certified Lover Boy",
+      "release_group_mbid": "33333333-1111-4111-8111-111111111111",
+      "tracks": [
+        {
+          "recording_mbid": "15151515-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Way 2 Sexy",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "kendrick-mr-morale",
+      "artist": "Kendrick Lamar",
+      "title": "Mr. Morale & the Big Steppers",
+      "release_group_mbid": "33333333-1111-4111-8111-222222222222",
+      "tracks": [
+        {
+          "recording_mbid": "16161616-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "N95",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "sza-sos",
+      "artist": "SZA",
+      "title": "SOS",
+      "release_group_mbid": "33333333-1111-4111-8111-333333333333",
+      "tracks": [
+        {
+          "recording_mbid": "17171717-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Kill Bill",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "morgan-wallen-dangerous",
+      "artist": "Morgan Wallen",
+      "title": "Dangerous: The Double Album",
+      "release_group_mbid": "33333333-1111-4111-8111-444444444444",
+      "tracks": [
+        {
+          "recording_mbid": "18181818-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Sand in My Boots",
+          "duration_ms": 210000,
+          "fixture": "expanded_duration_match"
+        }
+      ]
+    },
+    {
+      "album_id": "zach-bryan-american-heartbreak",
+      "artist": "Zach Bryan",
+      "title": "American Heartbreak",
+      "release_group_mbid": "33333333-1111-4111-8111-555555555555",
+      "tracks": [
+        {
+          "recording_mbid": "19191919-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Something in the Orange",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "luke-combs-growin-up",
+      "artist": "Luke Combs",
+      "title": "Growin' Up",
+      "release_group_mbid": "33333333-1111-4111-8111-666666666666",
+      "tracks": [
+        {
+          "recording_mbid": "20202020-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "The Kind of Love We Make",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "lainey-bell-bottom-country",
+      "artist": "Lainey Wilson",
+      "title": "Bell Bottom Country",
+      "release_group_mbid": "33333333-1111-4111-8111-777777777777",
+      "tracks": [
+        {
+          "recording_mbid": "21212121-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Heart Like a Truck",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "fleetwood-mac-rumours",
+      "artist": "Fleetwood Mac",
+      "title": "Rumours",
+      "release_group_mbid": "33333333-1111-4111-8111-888888888888",
+      "tracks": [
+        {
+          "recording_mbid": "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "track": "Dreams",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "eagles-hotel-california",
+      "artist": "Eagles",
+      "title": "Hotel California",
+      "release_group_mbid": "33333333-1111-4111-8111-999999999999",
+      "tracks": [
+        {
+          "recording_mbid": "23232323-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Hotel California",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "journey-greatest-hits",
+      "artist": "Journey",
+      "title": "Greatest Hits",
+      "release_group_mbid": "44444444-1111-4111-8111-111111111111",
+      "tracks": [
+        {
+          "recording_mbid": "24242424-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Don't Stop Believin'",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "bon-jovi-slippery",
+      "artist": "Bon Jovi",
+      "title": "Slippery When Wet",
+      "release_group_mbid": "44444444-1111-4111-8111-222222222222",
+      "tracks": [
+        {
+          "recording_mbid": "25252525-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Livin' on a Prayer",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "acdc-back-in-black",
+      "artist": "AC/DC",
+      "title": "Back in Black",
+      "release_group_mbid": "44444444-1111-4111-8111-333333333333",
+      "tracks": [
+        {
+          "recording_mbid": "26262626-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Back in Black",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "queen-platinum-collection",
+      "artist": "Queen",
+      "title": "The Platinum Collection",
+      "release_group_mbid": "44444444-1111-4111-8111-444444444444",
+      "tracks": [
+        {
+          "recording_mbid": "27272727-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Bohemian Rhapsody",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "michael-jackson-thriller",
+      "artist": "Michael Jackson",
+      "title": "Thriller",
+      "release_group_mbid": "44444444-1111-4111-8111-555555555555",
+      "tracks": [
+        {
+          "recording_mbid": "28282828-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Billie Jean",
+          "duration_ms": 210000,
+          "fixture": "expanded_duration_match"
+        }
+      ]
+    },
+    {
+      "album_id": "abba-gold",
+      "artist": "ABBA",
+      "title": "Gold: Greatest Hits",
+      "release_group_mbid": "44444444-1111-4111-8111-666666666666",
+      "tracks": [
+        {
+          "recording_mbid": "29292929-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Dancing Queen",
+          "duration_ms": 210000,
+          "fixture": "rung1_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "u2-joshua-tree",
+      "artist": "U2",
+      "title": "The Joshua Tree",
+      "release_group_mbid": "44444444-1111-4111-8111-777777777777",
+      "tracks": [
+        {
+          "recording_mbid": "30303030-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "With or Without You",
+          "duration_ms": 210000,
+          "fixture": "direct_strict_match"
+        }
+      ]
+    },
+    {
+      "album_id": "coldplay-a-head-full-of-dreams",
+      "artist": "Coldplay",
+      "title": "A Head Full of Dreams",
+      "release_group_mbid": "44444444-1111-4111-8111-888888888888",
+      "tracks": [
+        {
+          "recording_mbid": "31313131-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Adventure of a Lifetime",
+          "duration_ms": 210000,
+          "fixture": "legacy_topic_rung_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "imagine-dragons-evolve",
+      "artist": "Imagine Dragons",
+      "title": "Evolve",
+      "release_group_mbid": "44444444-1111-4111-8111-999999999999",
+      "tracks": [
+        {
+          "recording_mbid": "32323232-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "track": "Believer",
+          "duration_ms": 210000,
+          "fixture": "duration_filtered_fail"
+        }
+      ]
+    },
+    {
+      "album_id": "coherence-benchmark-album",
+      "artist": "Coherence Artist",
+      "title": "Coherence Album",
+      "release_group_mbid": "90000000-0000-4000-8000-000000000001",
+      "notes": "Synthetic near-threshold album-run coherence scenario",
+      "tracks": [
+        {
+          "recording_mbid": "90000000-0000-4000-8000-000000000101",
+          "track": "Seed Song",
+          "duration_ms": 200000,
+          "fixture": "coherence_seed"
+        },
+        {
+          "recording_mbid": "90000000-0000-4000-8000-000000000102",
+          "track": "Deep Cut",
+          "duration_ms": 200000,
+          "fixture": "coherence_near_threshold"
+        }
+      ]
+    },
+    {
+      "album_id": "pink-floyd-dark-side-alias",
+      "artist": "Pink Floyd",
+      "title": "The Dark Side of the Moon",
+      "release_group_mbid": "91000000-0000-4000-8000-000000000001",
+      "notes": "Alias-aware title variance benchmark case",
+      "tracks": [
+        {
+          "recording_mbid": "91000000-0000-4000-8000-000000000101",
+          "track": "The Great Gig in the Sky",
+          "track_aliases": [
+            "Great Gig"
+          ],
+          "duration_ms": 276000,
+          "fixture": "alias_title_recovery_mb"
+        }
+      ]
+    },
+    {
+      "album_id": "alias-benchmark-album",
+      "artist": "Alias Artist",
+      "title": "Alias Album",
+      "release_group_mbid": "90000000-0000-4000-8000-000000000002",
+      "notes": "Synthetic MB alias title-variance scenario",
+      "tracks": [
+        {
+          "recording_mbid": "90000000-0000-4000-8000-000000000201",
+          "track": "Song Part II",
+          "track_aliases": [
+            "Song Pt 2"
+          ],
+          "track_disambiguation": "Album Version",
+          "duration_ms": 200000,
+          "fixture": "alias_title_recovery"
+        }
+      ]
+    }
+  ]
+}
