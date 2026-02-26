@@ -14,6 +14,7 @@ import threading
 import time
 import urllib.parse
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -534,6 +535,36 @@ class DownloadJobStore:
             cur.execute("SELECT status FROM download_jobs WHERE id=?", (job_id,))
             row = cur.fetchone()
             return row[0] if row else None
+        finally:
+            conn.close()
+
+    def merge_output_template_fields(self, job_id, updates):
+        if not isinstance(updates, dict) or not updates:
+            return
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute("SELECT output_template FROM download_jobs WHERE id=? LIMIT 1", (job_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.commit()
+                return
+            existing = {}
+            raw = row[0]
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    loaded = json.loads(raw)
+                    if isinstance(loaded, dict):
+                        existing = loaded
+                except Exception:
+                    existing = {}
+            existing.update(updates)
+            cur.execute(
+                "UPDATE download_jobs SET output_template=?, updated_at=? WHERE id=?",
+                (safe_json_dumps(existing), utc_now(), job_id),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -1676,6 +1707,22 @@ class DownloadWorkerEngine:
             injected_candidates = int(search_meta.get("mb_injected_candidates") or 0)
             album_success_count = int(search_meta.get("mb_injected_album_success_count") or 0)
             if injected_candidates > 0 or injected_selected or injected_rejections:
+                try:
+                    self.store.merge_output_template_fields(
+                        job.id,
+                        {
+                            "runtime_search_meta": {
+                                "failure_reason": search_meta.get("failure_reason"),
+                                "mb_injected_candidates": injected_candidates,
+                                "mb_injected_selected": injected_selected,
+                                "mb_injected_rejections": injected_rejections or {},
+                                "mb_injected_album_success_count": album_success_count,
+                            }
+                        },
+                    )
+                except Exception:
+                    logger.exception("[MUSIC] failed to persist runtime_search_meta job_id=%s", job.id)
+            if injected_candidates > 0 or injected_selected or injected_rejections:
                 _log_event(
                     logging.INFO,
                     "music_track_mb_injected_outcome",
@@ -1866,6 +1913,26 @@ class DownloadWorkerEngine:
         finally:
             lock.release()
 
+    def _write_album_run_summary_artifact(self, job, *, final_path=None):
+        try:
+            if str(getattr(job, "origin", "") or "").strip().lower() != "music_album":
+                return
+            if str(getattr(job, "media_intent", "") or "").strip().lower() != "music_track":
+                return
+            album_run_id = str(getattr(job, "origin_id", "") or "").strip()
+            if not album_run_id:
+                return
+            explicit_output_dir = _album_output_dir_from_track_path(final_path)
+            if not explicit_output_dir:
+                explicit_output_dir = _album_output_dir_from_job(job)
+            write_music_album_run_summary(
+                self.db_path,
+                album_run_id,
+                output_dir=explicit_output_dir,
+            )
+        except Exception:
+            logger.exception("[MUSIC] album run summary write failed job_id=%s", getattr(job, "id", None))
+
     def _execute_job(self, job, *, stop_event=None):
         if hasattr(job, "keys"):
             job_keys = list(job.keys())
@@ -1897,6 +1964,7 @@ class DownloadWorkerEngine:
         try:
             if self._is_job_cancelled(job.id, stop_event):
                 self.store.mark_canceled(job.id, reason="Cancelled by user")
+                self._write_album_run_summary_artifact(job)
                 _log_event(
                     logging.INFO,
                     "job_cancelled",
@@ -1917,9 +1985,12 @@ class DownloadWorkerEngine:
                         retryable=False,
                         retry_delay_seconds=self.retry_delay_seconds,
                     )
+                    self._write_album_run_summary_artifact(job)
                     return
+                unresolved_job = job
                 job = self._resolve_music_track_job(job)
                 if job is None:
+                    self._write_album_run_summary_artifact(unresolved_job)
                     return
             adapter = self.adapters.get(job.source)
             if not adapter:
@@ -1936,6 +2007,7 @@ class DownloadWorkerEngine:
                     retryable=False,
                     retry_delay_seconds=self.retry_delay_seconds,
                 )
+                self._write_album_run_summary_artifact(job)
                 return
             self.store.mark_downloading(job.id)
             _log_event(
@@ -1982,6 +2054,7 @@ class DownloadWorkerEngine:
                 return
             if self._is_job_cancelled(job.id, stop_event):
                 self.store.mark_canceled(job.id, reason="Cancelled by user")
+                self._write_album_run_summary_artifact(job)
                 _log_event(
                     logging.INFO,
                     "job_cancelled",
@@ -2000,6 +2073,7 @@ class DownloadWorkerEngine:
                 meta=meta,
             )
             self.store.mark_completed(job.id, file_path=final_path)
+            self._write_album_run_summary_artifact(job, final_path=final_path)
             _log_event(
                 logging.INFO,
                 "job_completed",
@@ -2014,6 +2088,7 @@ class DownloadWorkerEngine:
             if isinstance(exc, CancelledError):
                 try:
                     self.store.mark_canceled(job.id, reason=str(exc) or "Cancelled by user")
+                    self._write_album_run_summary_artifact(job)
                     _log_event(
                         logging.INFO,
                         "job_cancelled",
@@ -2078,6 +2153,7 @@ class DownloadWorkerEngine:
                     retryable=retryable,
                     retry_delay_seconds=self.retry_delay_seconds,
                 )
+                self._write_album_run_summary_artifact(job)
             except Exception as persist_exc:
                 logging.error(
                     "[WORKER] persistence_failed job_id=%s status=%s err=%s",
@@ -5276,6 +5352,218 @@ def enqueue_media_metadata(file_path, meta, config):
         enqueue_metadata(file_path, meta, config)
     except Exception:
         logging.exception("Metadata enqueue failed for %s", file_path)
+
+
+def _album_output_dir_from_track_path(file_path):
+    path = str(file_path or "").strip()
+    if not path:
+        return None
+    try:
+        parent = os.path.dirname(path)
+        leaf = os.path.basename(parent).strip().lower()
+        if leaf.startswith("disc "):
+            return os.path.dirname(parent)
+        return parent
+    except Exception:
+        return None
+
+
+def _album_output_dir_from_job(job):
+    output_template = getattr(job, "output_template", None)
+    if not isinstance(output_template, dict):
+        return None
+    base_dir = str(
+        output_template.get("output_dir")
+        or getattr(job, "resolved_destination", None)
+        or ""
+    ).strip()
+    if not base_dir:
+        return None
+    canonical = output_template.get("canonical_metadata") if isinstance(output_template.get("canonical_metadata"), dict) else {}
+    album_artist = str(
+        output_template.get("album_artist")
+        or canonical.get("album_artist")
+        or output_template.get("artist")
+        or canonical.get("artist")
+        or ""
+    ).strip()
+    album = str(
+        output_template.get("album")
+        or canonical.get("album")
+        or ""
+    ).strip()
+    if not album_artist or not album:
+        return None
+    release_date = str(
+        output_template.get("release_date")
+        or canonical.get("release_date")
+        or canonical.get("date")
+        or ""
+    ).strip()
+    year = release_date[:4] if len(release_date) >= 4 and release_date[:4].isdigit() else ""
+    album_folder = sanitize_component(album)
+    if year:
+        album_folder = f"{album_folder} ({year})"
+    return os.path.join(base_dir, "Music", sanitize_component(album_artist), album_folder)
+
+
+def _normalize_runtime_failure_reason(last_error, output_template):
+    runtime_search_meta = output_template.get("runtime_search_meta") if isinstance(output_template.get("runtime_search_meta"), dict) else {}
+    runtime_reason = str(runtime_search_meta.get("failure_reason") or "").strip().lower()
+    if runtime_reason:
+        return runtime_reason
+    text = str(last_error or "").strip().lower()
+    if not text:
+        return "unknown"
+    marker = "yt_dlp_source_unavailable:"
+    if marker in text:
+        tail = text.split(marker, 1)[1]
+        unavailable_class = tail.split(":", 1)[0].strip() or "unknown"
+        return f"source_unavailable:{unavailable_class}"
+    if "source_unavailable:" in text:
+        tail = text.split("source_unavailable:", 1)[1]
+        unavailable_class = tail.split(":", 1)[0].strip() or "unknown"
+        return f"source_unavailable:{unavailable_class}"
+    if "duration_filtered" in text:
+        return "duration_filtered"
+    if "no_candidate_above_threshold" in text:
+        return "no_candidate_above_threshold"
+    if "no_candidates" in text:
+        return "no_candidates"
+    return "unknown"
+
+
+def _classify_runtime_missing_hint(failure_reason):
+    reason = str(failure_reason or "").strip().lower()
+    if reason.startswith("source_unavailable:"):
+        return ("unavailable", "Unavailable (blocked/removed)")
+    if reason == "duration_filtered":
+        return (
+            "likely_wrong_mb_recording_length",
+            "Likely wrong MB recording length (duration mismatch persistent across many candidates)",
+        )
+    return ("recoverable_ladder_extension", "Recoverable by ladder extension (no candidates)")
+
+
+def build_music_album_run_summary(db_path, album_run_id):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, status, last_error, output_template, file_path
+            FROM download_jobs
+            WHERE origin=? AND origin_id=? AND media_intent=?
+            ORDER BY created_at ASC, id ASC
+            """,
+            ("music_album", str(album_run_id or ""), "music_track"),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    tracks_total = len(rows)
+    tracks_resolved = 0
+    wrong_variant_count = 0
+    rejection_mix = Counter()
+    source_unavailable = 0
+    why_missing_counts = Counter()
+    why_missing_tracks = []
+    per_track = []
+    candidate_album_dirs = Counter()
+
+    for row in rows:
+        status = str(row["status"] or "").strip().lower()
+        output_template = {}
+        raw_template = row["output_template"]
+        if isinstance(raw_template, str) and raw_template.strip():
+            try:
+                loaded = json.loads(raw_template)
+                if isinstance(loaded, dict):
+                    output_template = loaded
+            except Exception:
+                output_template = {}
+        canonical = output_template.get("canonical_metadata") if isinstance(output_template.get("canonical_metadata"), dict) else {}
+        track_id = str(canonical.get("recording_mbid") or output_template.get("recording_mbid") or row["id"]).strip()
+        runtime_search_meta = output_template.get("runtime_search_meta") if isinstance(output_template.get("runtime_search_meta"), dict) else {}
+        if bool(runtime_search_meta.get("wrong_variant_flag")):
+            wrong_variant_count += 1
+
+        album_dir = _album_output_dir_from_track_path(row["file_path"])
+        if album_dir:
+            candidate_album_dirs[album_dir] += 1
+
+        resolved = status == JOB_STATUS_COMPLETED
+        failure_reason = None
+        if resolved:
+            tracks_resolved += 1
+        else:
+            failure_reason = _normalize_runtime_failure_reason(row["last_error"], output_template)
+            if status in {JOB_STATUS_FAILED, JOB_STATUS_CANCELLED, JOB_STATUS_SKIPPED_DUPLICATE}:
+                rejection_mix[failure_reason] += 1
+                if failure_reason.startswith("source_unavailable:"):
+                    source_unavailable += 1
+                hint_code, hint_label = _classify_runtime_missing_hint(failure_reason)
+                why_missing_counts[hint_label] += 1
+                why_missing_tracks.append(
+                    {
+                        "album_id": str(canonical.get("mb_release_group_id") or output_template.get("mb_release_group_id") or "").strip(),
+                        "track_id": track_id,
+                        "hint_code": hint_code,
+                        "hint_label": hint_label,
+                        "evidence": {"failure_reason": failure_reason},
+                    }
+                )
+
+        per_track.append(
+            {
+                "track_id": track_id,
+                "resolved": resolved,
+                "failure_reason": failure_reason,
+            }
+        )
+
+    unresolved_terminal = sum(1 for item in per_track if (not item.get("resolved")) and str(item.get("failure_reason") or "").strip())
+    no_viable = max(0, unresolved_terminal - source_unavailable)
+    completion_percent = (tracks_resolved / tracks_total * 100.0) if tracks_total else 0.0
+    selected_album_dir = None
+    if candidate_album_dirs:
+        selected_album_dir = sorted(candidate_album_dirs.items(), key=lambda item: (-int(item[1]), item[0]))[0][0]
+
+    summary = {
+        "schema_version": 2,
+        "run_type": "music_album",
+        "album_run_id": str(album_run_id or ""),
+        "tracks_total": tracks_total,
+        "tracks_resolved": tracks_resolved,
+        "completion_percent": completion_percent,
+        "wrong_variant_flags": wrong_variant_count,
+        "rejection_mix": dict(sorted(rejection_mix.items(), key=lambda item: (-int(item[1]), item[0]))),
+        "unresolved_classification": {
+            "source_unavailable": source_unavailable,
+            "no_viable_match": no_viable,
+        },
+        "why_missing": {
+            "hint_counts": dict(sorted(why_missing_counts.items(), key=lambda item: (-int(item[1]), item[0]))),
+            "tracks": sorted(why_missing_tracks, key=lambda item: (str(item.get("album_id") or ""), str(item.get("track_id") or ""))),
+        },
+        "per_track": sorted(per_track, key=lambda item: str(item.get("track_id") or "")),
+    }
+    return summary, selected_album_dir
+
+
+def write_music_album_run_summary(db_path, album_run_id, *, output_dir=None):
+    summary, inferred_album_dir = build_music_album_run_summary(db_path, album_run_id)
+    target_dir = str(output_dir or inferred_album_dir or "").strip()
+    if not target_dir:
+        return None
+    os.makedirs(target_dir, exist_ok=True)
+    output_path = os.path.join(target_dir, "run_summary.json")
+    with open(output_path, "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, ensure_ascii=False, sort_keys=True)
+        handle.write("\n")
+    return output_path
 
 
 def record_download_history(db_path, job, filepath, *, meta=None):

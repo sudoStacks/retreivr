@@ -80,6 +80,10 @@ from engine.music_title_normalization import has_live_intent, relaxed_search_tit
 from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
 from metadata.canonical import CanonicalMetadataResolver
 
+# Search scoring logic is benchmark-gated.
+# Changes require benchmark pass + no precision regression.
+# Do not alter thresholds without updating gate config and benchmark baseline.
+
 REQUEST_STATUSES = {"pending", "resolving", "completed", "completed_with_skips", "failed"}
 ITEM_STATUSES = {
     "queued",
@@ -962,21 +966,23 @@ class SearchResolutionService:
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
         except Exception as exc:
+            failure_kind = self._classify_mb_injected_probe_failure(str(exc))
             _log_event(
                 logging.WARNING,
                 "mb_youtube_injected_probe_failed",
                 url=url,
                 error=str(exc),
+                classified_reason=failure_kind,
             )
             if cache_key:
                 with self._mb_injected_probe_lock:
                     self._mb_injected_probe_cache[cache_key] = None
-            return None
+            return None, failure_kind
         if not isinstance(info, dict):
             if cache_key:
                 with self._mb_injected_probe_lock:
                     self._mb_injected_probe_cache[cache_key] = None
-            return None
+            return None, "mb_injected_failed_unavailable"
         resolved_url = str(info.get("webpage_url") or info.get("original_url") or url).strip() or url
         video_id = extract_video_id(resolved_url) or extract_video_id(url)
         canonical_url = canonicalize_url("youtube", resolved_url, video_id) or resolved_url
@@ -1008,14 +1014,17 @@ class SearchResolutionService:
         if cache_key:
             with self._mb_injected_probe_lock:
                 self._mb_injected_probe_cache[cache_key] = dict(candidate)
-        return candidate
+        return candidate, None
 
     def _resolve_mb_relationship_candidates(self, *, mb_youtube_urls, artist, track, album, recording_mbid=None):
         urls = self._normalize_mb_youtube_urls(mb_youtube_urls)
         injected = []
+        rejection_counts = {}
         for url in urls:
-            candidate = self._probe_mb_relationship_candidate(url, artist=artist, track=track, album=album)
+            candidate, probe_failure = self._probe_mb_relationship_candidate(url, artist=artist, track=track, album=album)
             if not isinstance(candidate, dict):
+                if probe_failure:
+                    rejection_counts[probe_failure] = int(rejection_counts.get(probe_failure) or 0) + 1
                 continue
             injected.append(candidate)
             _log_event(
@@ -1025,7 +1034,27 @@ class SearchResolutionService:
                 url=url,
                 candidate_id=candidate.get("candidate_id"),
             )
-        return injected
+        return injected, rejection_counts
+
+    def _classify_mb_injected_probe_failure(self, error_text):
+        value = str(error_text or "").strip().lower()
+        if not value:
+            return "mb_injected_failed_unavailable"
+        unavailable_markers = (
+            "not available in your country",
+            "video unavailable in your country",
+            "geo-restricted",
+            "geoblocked",
+            "private video",
+            "members-only",
+            "this video is unavailable",
+            "video has been removed",
+            "sign in to confirm your age",
+            "age-restricted",
+        )
+        if any(marker in value for marker in unavailable_markers):
+            return "mb_injected_failed_unavailable"
+        return "mb_injected_failed_unavailable"
 
     def _classify_mb_injected_rejection(self, reason):
         value = str(reason or "").strip().lower()
@@ -1378,14 +1407,18 @@ class SearchResolutionService:
         selected_pass = None
         failure_reason = "no_candidates"
         coherence_boost_applied = 0
-        mb_injected_candidates = self._resolve_mb_relationship_candidates(
+        resolved_injected = self._resolve_mb_relationship_candidates(
             mb_youtube_urls=mb_youtube_urls,
             artist=artist,
             track=track,
             album=album,
             recording_mbid=recording_mbid,
         )
-        mb_injected_rejections = {}
+        if isinstance(resolved_injected, tuple) and len(resolved_injected) == 2:
+            mb_injected_candidates, mb_probe_rejections = resolved_injected
+        else:
+            mb_injected_candidates, mb_probe_rejections = resolved_injected, {}
+        mb_injected_rejections = dict(mb_probe_rejections or {})
         mb_injected_selected = False
 
         for ladder_entry in ladder[first_rung:]:

@@ -1,4 +1,5 @@
 import os
+import random
 import tempfile
 import unittest
 import importlib.util
@@ -383,6 +384,88 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         )
         self.assertIsNotNone(best)
         self.assertEqual(best.get("candidate_id"), "c4")
+
+    def test_search_engine_candidate_order_invariance_across_shuffles(self):
+        base_candidates = [
+            _candidate(
+                source="youtube_music",
+                candidate_id="best-canonical",
+                title="Artist - Song",
+                uploader="Artist - Topic",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube_music",
+                candidate_id="variant-live",
+                title="Artist - Song (Live)",
+                uploader="Artist - Topic",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube",
+                candidate_id="wrong-artist",
+                title="Artist - Song",
+                uploader="Other Artist Official",
+                artist="Other Artist",
+                track="Song",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube",
+                candidate_id="bad-duration",
+                title="Artist - Song",
+                uploader="Artist Archive",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=320,
+            ),
+        ]
+
+        expected_selected_id = None
+        expected_accepted = None
+        expected_failure_reason = None
+        expected_score = None
+
+        for seed in range(10):
+            shuffled = [dict(c) for c in base_candidates]
+            random.Random(seed).shuffle(shuffled)
+            service = self._service({"youtube_music": shuffled})
+            best = service.search_music_track_best_match(
+                "Artist",
+                "Song",
+                album="Album",
+                duration_ms=200000,
+                limit=6,
+            )
+            meta = getattr(service, "last_music_track_search", {}) or {}
+            selected_id = best.get("candidate_id") if isinstance(best, dict) else None
+            accepted = best is not None
+            failure_reason = str(meta.get("failure_reason") or "") or None
+            final_score = float(best.get("final_score") or 0.0) if isinstance(best, dict) else None
+
+            if seed == 0:
+                expected_selected_id = selected_id
+                expected_accepted = accepted
+                expected_failure_reason = failure_reason
+                expected_score = final_score
+                continue
+
+            self.assertEqual(selected_id, expected_selected_id)
+            self.assertEqual(accepted, expected_accepted)
+            self.assertEqual(failure_reason, expected_failure_reason)
+            if expected_score is None:
+                self.assertIsNone(final_score)
+            else:
+                self.assertIsNotNone(final_score)
+                self.assertAlmostEqual(float(final_score), float(expected_score), places=12)
 
     def test_topic_channel_with_strong_artist_overlap_gets_authority_bonus(self):
         expected = {
@@ -1084,6 +1167,41 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         meta = service.last_music_track_search or {}
         rejections = meta.get("mb_injected_rejections") or {}
         self.assertGreaterEqual(int(rejections.get("mb_injected_failed_variant") or 0), 1)
+
+    def test_mb_relationship_region_blocked_probe_is_classified_unavailable(self):
+        service = self._service(
+            {
+                "youtube_music": [
+                    _candidate(
+                        source="youtube_music",
+                        candidate_id="ladder-ok-region",
+                        title="Artist - Song",
+                        uploader="Artist - Topic",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=200,
+                    )
+                ]
+            }
+        )
+        service._resolve_mb_relationship_candidates = (  # type: ignore[attr-defined]
+            lambda **kwargs: ([], {"mb_injected_failed_unavailable": 1})
+        )
+        best = service.search_music_track_best_match(
+            "Artist",
+            "Song",
+            album="Album",
+            duration_ms=200000,
+            limit=6,
+            mb_youtube_urls=["https://www.youtube.com/watch?v=region00block"],
+            recording_mbid="rec-region-1",
+        )
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "ladder-ok-region")
+        meta = service.last_music_track_search or {}
+        rejections = meta.get("mb_injected_rejections") or {}
+        self.assertGreaterEqual(int(rejections.get("mb_injected_failed_unavailable") or 0), 1)
 
 
 if __name__ == "__main__":

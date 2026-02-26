@@ -5,6 +5,9 @@ import json
 import random
 from pathlib import Path
 
+import pytest
+import benchmarks.music_search_benchmark_runner as benchmark_runner
+
 from benchmarks.music_search_benchmark_runner import (
     TrackRunResult,
     _classify_missing_hint,
@@ -931,3 +934,377 @@ def test_fixture_candidates_do_not_embed_precomputed_score_fields() -> None:
                     continue
                 leaked = forbidden.intersection(candidate.keys())
                 assert not leaked, f"fixture {fixture_name} candidate leaks precomputed fields: {sorted(leaked)}"
+
+
+def test_variant_collision_fixture_selects_only_canonical_audio() -> None:
+    dataset = {
+        "dataset_name": "variant-collision-unit",
+        "fixtures": {
+            "variant-collision": {
+                "expect_match": True,
+                "expect_selected_candidate_id": "vc-official-audio",
+                "rungs": [
+                    [
+                        {
+                            "candidate_id": "vc-official-audio",
+                            "source": "youtube_music",
+                            "title": "{{track}}",
+                            "uploader": "{{artist}} - Topic",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}vc0",
+                        },
+                        {
+                            "candidate_id": "vc-lyric-video",
+                            "source": "youtube",
+                            "title": "{{track}} (Official Lyric Video)",
+                            "uploader": "{{artist}} Official",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}}",
+                            "album_detected": "Lyric Singles",
+                            "duration_sec": 210,
+                            "url": "https://www.youtube.com/watch?v={{recording_mbid}}vc1",
+                        },
+                        {
+                            "candidate_id": "vc-remastered",
+                            "source": "youtube_music",
+                            "title": "{{track}} (Remastered 2021)",
+                            "uploader": "{{artist}} - Topic",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}} Remastered 2021",
+                            "album_detected": "Greatest Hits Remastered",
+                            "duration_sec": 210,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}vc2",
+                        },
+                        {
+                            "candidate_id": "vc-live",
+                            "source": "youtube",
+                            "title": "{{track}} (Live at Wembley)",
+                            "uploader": "{{artist}} Live",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://www.youtube.com/watch?v={{recording_mbid}}vc3",
+                        },
+                        {
+                            "candidate_id": "vc-duration-intro",
+                            "source": "youtube",
+                            "title": "{{track}} (Official Audio)",
+                            "uploader": "{{artist}} Archive",
+                            "artist_detected": "Drive Collective",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 217,
+                            "url": "https://www.youtube.com/watch?v={{recording_mbid}}vc4",
+                        },
+                        {
+                            "candidate_id": "vc-wrong-artist",
+                            "source": "youtube_music",
+                            "title": "{{track}}",
+                            "uploader": "Nightshift Echo - Topic",
+                            "artist_detected": "Nightshift Echo",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}vc5",
+                        },
+                    ],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                ],
+            }
+        },
+        "albums": [
+            {
+                "album_id": "variant-a1",
+                "artist": "Night Drive",
+                "title": "Midnight Static",
+                "release_group_mbid": "92000000-0000-4000-8000-000000000001",
+                "tracks": [
+                    {
+                        "recording_mbid": "92000000-0000-4000-8000-000000000101",
+                        "track": "City Lights",
+                        "duration_ms": 210000,
+                        "fixture": "variant-collision",
+                    }
+                ],
+            }
+        ],
+    }
+    summary = run_benchmark(dataset)
+    assert summary["tracks_resolved"] == 1
+    per_track = summary["per_track"][0]
+    assert per_track["selected_candidate_id"] == "vc-official-audio"
+    rejection_mix = summary.get("rejection_mix") or {}
+    assert int(rejection_mix.get("disallowed_variant") or 0) >= 1
+    assert int(rejection_mix.get("low_album_similarity") or 0) >= 1
+    assert int(rejection_mix.get("low_artist_similarity") or 0) >= 1
+
+
+def test_wrong_artist_authority_collision_prefers_correct_artist_candidate() -> None:
+    dataset = {
+        "dataset_name": "wrong-artist-authority-unit",
+        "fixtures": {
+            "collision": {
+                "expect_match": True,
+                "expect_selected_candidate_id": "waac-correct-lower-authority",
+                "rungs": [
+                    [
+                        {
+                            "candidate_id": "waac-wrong-high-authority",
+                            "source": "youtube_music",
+                            "title": "{{track}}",
+                            "uploader": "The Metro - Topic",
+                            "artist_detected": "The Metro",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}waac0",
+                        },
+                        {
+                            "candidate_id": "waac-correct-lower-authority",
+                            "source": "youtube",
+                            "title": "{{track}}",
+                            "uploader": "Aurora Avenue Archive",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://www.youtube.com/watch?v={{recording_mbid}}waac1",
+                        },
+                    ],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                ],
+            }
+        },
+        "albums": [
+            {
+                "album_id": "collision-a1",
+                "artist": "Aurora Avenue",
+                "title": "Neon Skyline",
+                "release_group_mbid": "92000000-0000-4000-8000-000000000002",
+                "tracks": [
+                    {
+                        "recording_mbid": "92000000-0000-4000-8000-000000000201",
+                        "track": "Afterglow",
+                        "duration_ms": 210000,
+                        "fixture": "collision",
+                    }
+                ],
+            }
+        ],
+    }
+    summary = run_benchmark(dataset)
+    assert summary["tracks_resolved"] == 1
+    per_track = summary["per_track"][0]
+    assert per_track["selected_candidate_id"] == "waac-correct-lower-authority"
+    rejection_mix = summary.get("rejection_mix") or {}
+    assert int(rejection_mix.get("low_artist_similarity") or 0) >= 1
+
+
+def test_mb_injected_duration_failure_falls_back_to_ladder_and_reports_bucket() -> None:
+    dataset = {
+        "dataset_name": "mb-injected-duration-fallback",
+        "fixtures": {
+            "case": {
+                "expect_match": True,
+                "expect_selected_candidate_id": "ladder-ok",
+                "mb_injected_candidates": [
+                    {
+                        "candidate_id": "mb-bad-dur",
+                        "source": "mb_relationship",
+                        "title": "{{track}}",
+                        "uploader": "{{artist}} - Topic",
+                        "artist_detected": "{{artist}}",
+                        "track_detected": "{{track}}",
+                        "album_detected": "{{album}}",
+                        "duration_sec": 320,
+                        "url": "https://www.youtube.com/watch?v={{recording_mbid}}mbdur",
+                    }
+                ],
+                "rungs": [
+                    [
+                        {
+                            "candidate_id": "ladder-ok",
+                            "source": "youtube_music",
+                            "title": "{{track}}",
+                            "uploader": "{{artist}} - Topic",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}ok",
+                        }
+                    ],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                ],
+            }
+        },
+        "albums": [
+            {
+                "album_id": "inj-a1",
+                "artist": "Artist",
+                "title": "Album",
+                "release_group_mbid": "93000000-0000-4000-8000-000000000001",
+                "tracks": [
+                    {
+                        "recording_mbid": "93000000-0000-4000-8000-000000000101",
+                        "track": "Song",
+                        "duration_ms": 210000,
+                        "fixture": "case",
+                    }
+                ],
+            }
+        ],
+    }
+    summary = run_benchmark(dataset)
+    assert summary["tracks_resolved"] == 1
+    assert summary["per_track"][0]["selected_candidate_id"] == "ladder-ok"
+    assert int((summary.get("mb_injected_rejection_mix") or {}).get("duration_fail") or 0) >= 1
+    per_album = summary.get("per_album") or {}
+    assert int(((per_album.get("inj-a1") or {}).get("injected_rejection_mix") or {}).get("duration_fail") or 0) >= 1
+
+
+def test_mb_injected_variant_failure_falls_back_to_ladder_and_reports_bucket() -> None:
+    dataset = {
+        "dataset_name": "mb-injected-variant-fallback",
+        "fixtures": {
+            "case": {
+                "expect_match": True,
+                "expect_selected_candidate_id": "ladder-ok",
+                "mb_injected_candidates": [
+                    {
+                        "candidate_id": "mb-live",
+                        "source": "mb_relationship",
+                        "title": "{{track}} (Live)",
+                        "uploader": "{{artist}} - Topic",
+                        "artist_detected": "{{artist}}",
+                        "track_detected": "{{track}}",
+                        "album_detected": "{{album}}",
+                        "duration_sec": 210,
+                        "url": "https://www.youtube.com/watch?v={{recording_mbid}}mblive",
+                    }
+                ],
+                "rungs": [
+                    [
+                        {
+                            "candidate_id": "ladder-ok",
+                            "source": "youtube_music",
+                            "title": "{{track}}",
+                            "uploader": "{{artist}} - Topic",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}ok",
+                        }
+                    ],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                ],
+            }
+        },
+        "albums": [
+            {
+                "album_id": "inj-a2",
+                "artist": "Artist",
+                "title": "Album",
+                "release_group_mbid": "93000000-0000-4000-8000-000000000002",
+                "tracks": [
+                    {
+                        "recording_mbid": "93000000-0000-4000-8000-000000000201",
+                        "track": "Song",
+                        "duration_ms": 210000,
+                        "fixture": "case",
+                    }
+                ],
+            }
+        ],
+    }
+    summary = run_benchmark(dataset)
+    assert summary["tracks_resolved"] == 1
+    assert summary["per_track"][0]["selected_candidate_id"] == "ladder-ok"
+    assert int((summary.get("mb_injected_rejection_mix") or {}).get("variant_blocked") or 0) >= 1
+    per_album = summary.get("per_album") or {}
+    assert int(((per_album.get("inj-a2") or {}).get("injected_rejection_mix") or {}).get("variant_blocked") or 0) >= 1
+
+
+def test_mb_injected_unavailable_is_classified_as_unavailable_bucket() -> None:
+    dataset = {
+        "dataset_name": "mb-injected-unavailable",
+        "fixtures": {
+            "case": {
+                "expect_match": False,
+                "failure_reason_override": "source_unavailable:region_restricted",
+                "mb_injected_candidates": [
+                    {
+                        "candidate_id": "mb-region-blocked",
+                        "source": "mb_relationship",
+                        "title": "{{track}}",
+                        "uploader": "{{artist}} - Topic",
+                        "artist_detected": "{{artist}}",
+                        "track_detected": "{{track}}",
+                        "album_detected": "{{album}}",
+                        "duration_sec": 320,
+                        "url": "https://www.youtube.com/watch?v={{recording_mbid}}region",
+                    }
+                ],
+                "rungs": [[], [], [], [], [], []],
+            }
+        },
+        "albums": [
+            {
+                "album_id": "inj-a3",
+                "artist": "Artist",
+                "title": "Album",
+                "release_group_mbid": "93000000-0000-4000-8000-000000000003",
+                "tracks": [
+                    {
+                        "recording_mbid": "93000000-0000-4000-8000-000000000301",
+                        "track": "Song",
+                        "duration_ms": 210000,
+                        "fixture": "case",
+                    }
+                ],
+            }
+        ],
+    }
+    summary = run_benchmark(dataset)
+    assert summary["tracks_resolved"] == 0
+    assert int((summary.get("mb_injected_rejection_mix") or {}).get("unavailable") or 0) >= 1
+    per_album = summary.get("per_album") or {}
+    assert int(((per_album.get("inj-a3") or {}).get("injected_rejection_mix") or {}).get("unavailable") or 0) >= 1
+
+
+def _assert_threshold_contract() -> None:
+    assert float(benchmark_runner.PASS_B_MIN_TITLE) == 0.92, (
+        "PASS_B_MIN_TITLE changed. Explicitly update benchmark gate/config contract before merging."
+    )
+
+
+def test_relaxing_title_similarity_threshold_trips_contract_guard(monkeypatch) -> None:
+    _assert_threshold_contract()
+    monkeypatch.setattr(
+        benchmark_runner,
+        "PASS_B_MIN_TITLE",
+        float(benchmark_runner.PASS_B_MIN_TITLE) - 0.01,
+    )
+    with pytest.raises(AssertionError, match="PASS_B_MIN_TITLE changed"):
+        _assert_threshold_contract()

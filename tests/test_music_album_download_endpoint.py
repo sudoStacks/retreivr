@@ -477,7 +477,16 @@ def test_music_album_run_summary_endpoint_writes_artifact_and_classifies_failure
                 "music_track",
                 "failed",
                 "source_unavailable:removed_or_deleted",
-                json.dumps({"canonical_metadata": {"recording_mbid": "rec-missing-1", "mb_release_group_id": "rg-1"}}),
+                json.dumps(
+                    {
+                        "canonical_metadata": {"recording_mbid": "rec-missing-1", "mb_release_group_id": "rg-1"},
+                        "runtime_search_meta": {
+                            "mb_injected_rejections": {
+                                "mb_injected_failed_unavailable": 1,
+                            }
+                        },
+                    }
+                ),
                 "2026-02-26T00:00:02+00:00",
             ),
             (
@@ -487,7 +496,17 @@ def test_music_album_run_summary_endpoint_writes_artifact_and_classifies_failure
                 "music_track",
                 "failed",
                 "duration_filtered",
-                json.dumps({"canonical_metadata": {"recording_mbid": "rec-missing-2", "mb_release_group_id": "rg-1"}}),
+                json.dumps(
+                    {
+                        "canonical_metadata": {"recording_mbid": "rec-missing-2", "mb_release_group_id": "rg-1"},
+                        "runtime_search_meta": {
+                            "mb_injected_rejections": {
+                                "mb_injected_failed_duration": 1,
+                                "mb_injected_failed_variant": 1,
+                            }
+                        },
+                    }
+                ),
                 "2026-02-26T00:00:03+00:00",
             ),
         ]
@@ -512,6 +531,11 @@ def test_music_album_run_summary_endpoint_writes_artifact_and_classifies_failure
     hint_counts = payload["why_missing"]["hint_counts"]
     assert hint_counts["Unavailable (blocked/removed)"] == 1
     assert hint_counts["Likely wrong MB recording length (duration mismatch persistent across many candidates)"] == 1
+    injected_mix = payload["mb_injected_rejection_mix"]
+    assert injected_mix["duration_fail"] == 1
+    assert injected_mix["variant_blocked"] == 1
+    assert injected_mix["unavailable"] == 1
+    assert payload["per_album"]["rg-1"]["injected_rejection_mix"]["duration_fail"] == 1
 
     summary_path = tmp_path / "run_summaries" / "music_album" / "album-run-1" / "run_summary.json"
     assert summary_path.exists()

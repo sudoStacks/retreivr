@@ -3,6 +3,10 @@ import unicodedata
 
 from engine.music_title_normalization import relaxed_search_title
 
+# Search scoring logic is benchmark-gated.
+# Changes require benchmark pass + no precision regression.
+# Do not alter thresholds without updating gate config and benchmark baseline.
+
 _WEIGHTS = {
     "artist": 0.30,
     "track": 0.35,

@@ -5085,6 +5085,44 @@ def _classify_runtime_missing_hint(failure_reason: str) -> tuple[str, str]:
     )
 
 
+def _empty_injected_rejection_mix() -> dict[str, int]:
+    return {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0,
+    }
+
+
+def _normalize_injected_rejection_mix(value: object) -> dict[str, int]:
+    mix = _empty_injected_rejection_mix()
+    if not isinstance(value, dict):
+        return mix
+    for key, raw_count in value.items():
+        try:
+            count = int(raw_count or 0)
+        except Exception:
+            count = 0
+        normalized_key = str(key or "").strip().lower()
+        bucket = None
+        if normalized_key in mix:
+            bucket = normalized_key
+        elif normalized_key in {"mb_injected_failed_duration", "pass_b_duration"}:
+            bucket = "duration_fail"
+        elif normalized_key in {"mb_injected_failed_title", "low_title_similarity", "floor_check_failed", "low_album_similarity"}:
+            bucket = "title_similarity_fail"
+        elif normalized_key in {"mb_injected_failed_artist", "mb_injected_failed_authority", "low_artist_similarity"}:
+            bucket = "artist_similarity_fail"
+        elif normalized_key in {"mb_injected_failed_variant", "disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
+            bucket = "variant_blocked"
+        elif normalized_key in {"mb_injected_failed_unavailable", "source_unavailable", "unavailable"}:
+            bucket = "unavailable"
+        if bucket:
+            mix[bucket] = int(mix.get(bucket) or 0) + count
+    return mix
+
+
 def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_group_mbid: str | None = None) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -5109,6 +5147,7 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
     why_missing_tracks = []
     why_missing_counts = {}
     source_unavailable = 0
+    injected_rejection_mix = _empty_injected_rejection_mix()
 
     for row in rows:
         status = str(row["status"] or "").strip().lower()
@@ -5132,6 +5171,10 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
                     parsed = loaded
             except Exception:
                 parsed = {}
+        runtime_search_meta = parsed.get("runtime_search_meta") if isinstance(parsed.get("runtime_search_meta"), dict) else {}
+        normalized_rejections = _normalize_injected_rejection_mix(runtime_search_meta.get("mb_injected_rejections"))
+        for key, count in normalized_rejections.items():
+            injected_rejection_mix[key] = int(injected_rejection_mix.get(key) or 0) + int(count or 0)
         canonical = parsed.get("canonical_metadata") if isinstance(parsed.get("canonical_metadata"), dict) else {}
         track_id = str(
             canonical.get("recording_mbid")
@@ -5159,6 +5202,7 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
 
     no_viable = max(0, len(unresolved) - source_unavailable)
     completion_percent = (tracks_resolved / tracks_total * 100.0) if tracks_total else 0.0
+    per_album_id = str(release_group_mbid or "").strip() or album_run_id
     return {
         "schema_version": 1,
         "run_type": "music_album",
@@ -5174,6 +5218,12 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
         "why_missing": {
             "hint_counts": dict(sorted(why_missing_counts.items(), key=lambda item: (-int(item[1]), item[0]))),
             "tracks": why_missing_tracks,
+        },
+        "mb_injected_rejection_mix": injected_rejection_mix,
+        "per_album": {
+            per_album_id: {
+                "injected_rejection_mix": injected_rejection_mix,
+            }
         },
     }
 
@@ -5485,6 +5535,12 @@ def download_full_album(data: dict):
         "why_missing": {
             "hint_counts": {},
             "tracks": [],
+        },
+        "mb_injected_rejection_mix": _empty_injected_rejection_mix(),
+        "per_album": {
+            str(release_group_mbid or "").strip() or album_run_id: {
+                "injected_rejection_mix": _empty_injected_rejection_mix(),
+            }
         },
     }
     summary_path = _write_music_album_run_summary(initial_summary)

@@ -311,6 +311,120 @@
         [],
         []
       ]
+    },
+    "variant_collision_set": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "vc-official-audio",
+      "rungs": [
+        [
+          {
+            "candidate_id": "vc-official-audio",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}vc0"
+          },
+          {
+            "candidate_id": "vc-lyric-video",
+            "source": "youtube",
+            "title": "{{track}} (Official Lyric Video)",
+            "uploader": "{{artist}} Official",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "Lyric Singles",
+            "duration_sec": 210,
+            "url": "https://www.youtube.com/watch?v={{recording_mbid}}vc1"
+          },
+          {
+            "candidate_id": "vc-remastered",
+            "source": "youtube_music",
+            "title": "{{track}} (Remastered 2021)",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}} Remastered 2021",
+            "album_detected": "Greatest Hits Remastered",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}vc2"
+          },
+          {
+            "candidate_id": "vc-live",
+            "source": "youtube",
+            "title": "{{track}} (Live at Wembley)",
+            "uploader": "{{artist}} Live",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://www.youtube.com/watch?v={{recording_mbid}}vc3"
+          },
+          {
+            "candidate_id": "vc-duration-intro",
+            "source": "youtube",
+            "title": "{{track}} (Official Audio)",
+            "uploader": "{{artist}} Archive",
+            "artist_detected": "Drive Collective",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 217,
+            "url": "https://www.youtube.com/watch?v={{recording_mbid}}vc4"
+          },
+          {
+            "candidate_id": "vc-wrong-artist",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "Nightshift Echo - Topic",
+            "artist_detected": "Nightshift Echo",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}vc5"
+          }
+        ],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "wrong_artist_authority_collision": {
+      "expect_match": true,
+      "expect_selected_candidate_id": "waac-correct-lower-authority",
+      "rungs": [
+        [
+          {
+            "candidate_id": "waac-wrong-high-authority",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "The Metro - Topic",
+            "artist_detected": "The Metro",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}waac0"
+          },
+          {
+            "candidate_id": "waac-correct-lower-authority",
+            "source": "youtube",
+            "title": "{{track}}",
+            "uploader": "Aurora Avenue Archive",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://www.youtube.com/watch?v={{recording_mbid}}waac1"
+          }
+        ],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
     }
   },
   "albums": [
@@ -874,6 +988,36 @@
           "track_disambiguation": "Album Version",
           "duration_ms": 200000,
           "fixture": "alias_title_recovery"
+        }
+      ]
+    },
+    {
+      "album_id": "variant-collision-benchmark-album",
+      "artist": "Night Drive",
+      "title": "Midnight Static",
+      "release_group_mbid": "92000000-0000-4000-8000-000000000001",
+      "notes": "Realism-heavy variant collision fixture with lyric/remaster/live/duration/wrong-artist decoys.",
+      "tracks": [
+        {
+          "recording_mbid": "92000000-0000-4000-8000-000000000101",
+          "track": "City Lights",
+          "duration_ms": 210000,
+          "fixture": "variant_collision_set"
+        }
+      ]
+    },
+    {
+      "album_id": "wrong-artist-authority-collision-benchmark-album",
+      "artist": "Aurora Avenue",
+      "title": "Neon Skyline",
+      "release_group_mbid": "92000000-0000-4000-8000-000000000002",
+      "notes": "Shared-title wrong-artist authority collision; artist similarity must dominate channel authority.",
+      "tracks": [
+        {
+          "recording_mbid": "92000000-0000-4000-8000-000000000201",
+          "track": "Afterglow",
+          "duration_ms": 210000,
+          "fixture": "wrong_artist_authority_collision"
         }
       ]
     }

@@ -51,6 +51,33 @@ DISALLOWED_VARIANT_RE = re.compile(
     re.IGNORECASE,
 )
 
+INJECTED_REJECTION_KEYS = (
+    "duration_fail",
+    "title_similarity_fail",
+    "artist_similarity_fail",
+    "variant_blocked",
+    "unavailable",
+)
+
+
+def _classify_injected_rejection_bucket(reason: str | None) -> str:
+    value = str(reason or "").strip().lower()
+    if value in {"duration_out_of_bounds", "duration_over_hard_cap", "preview_duration", "pass_b_duration"}:
+        return "duration_fail"
+    if value in {"disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
+        return "variant_blocked"
+    if value in {"low_artist_similarity", "pass_b_artist_similarity", "pass_b_authority"}:
+        return "artist_similarity_fail"
+    if value in {"low_title_similarity", "floor_check_failed", "low_album_similarity", "pass_b_track_similarity"}:
+        return "title_similarity_fail"
+    if value.startswith("source_unavailable") or value.startswith("unavailable"):
+        return "unavailable"
+    return "title_similarity_fail"
+
+
+def _empty_injected_rejection_mix() -> Counter[str]:
+    return Counter({key: 0 for key in INJECTED_REJECTION_KEYS})
+
 
 def _has_wrong_variant(title: str, *, allowed_tokens: set[str]) -> bool:
     for match in DISALLOWED_VARIANT_RE.finditer(str(title or "")):
@@ -289,7 +316,7 @@ def _evaluate_track(
     coherence_boost_applied = 0
     coherence_near_miss = False
     mb_injected_selected = False
-    mb_injected_rejection_counts: Counter[str] = Counter()
+    mb_injected_rejection_counts: Counter[str] = _empty_injected_rejection_mix()
 
     injected_candidates = []
     if enable_mb_relationship_injection:
@@ -338,17 +365,8 @@ def _evaluate_track(
                 rejection_counts[reason] += 1
                 if reason == "floor_check_failed" and float(c.get("score_track") or 0.0) < 0.70:
                     rejection_counts["low_title_similarity"] += 1
-                if str(c.get("source") or "").strip().lower() == "mb_relationship":
-                    if reason in {"duration_out_of_bounds", "duration_over_hard_cap", "preview_duration"}:
-                        mb_injected_rejection_counts["mb_injected_failed_duration"] += 1
-                    elif reason in {"disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
-                        mb_injected_rejection_counts["mb_injected_failed_variant"] += 1
-                    elif reason == "low_title_similarity":
-                        mb_injected_rejection_counts["mb_injected_failed_title"] += 1
-                    elif reason == "low_artist_similarity":
-                        mb_injected_rejection_counts["mb_injected_failed_artist"] += 1
-                    else:
-                        mb_injected_rejection_counts[f"mb_injected_failed_{reason}"] += 1
+            if reason and str(c.get("source") or "").strip().lower() == "mb_relationship":
+                mb_injected_rejection_counts[_classify_injected_rejection_bucket(reason)] += 1
             if (
                 not reason
                 and (MUSIC_TRACK_THRESHOLD - ALBUM_COHERENCE_MAX_BOOST)
@@ -393,22 +411,22 @@ def _evaluate_track(
             if not delta_ok:
                 rejection_counts["pass_b_duration"] += 1
                 if str(c.get("source") or "").strip().lower() == "mb_relationship":
-                    mb_injected_rejection_counts["mb_injected_failed_duration"] += 1
+                    mb_injected_rejection_counts[_classify_injected_rejection_bucket("pass_b_duration")] += 1
                 continue
             if float(c.get("score_track", 0.0)) < PASS_B_MIN_TITLE:
                 rejection_counts["pass_b_track_similarity"] += 1
                 if str(c.get("source") or "").strip().lower() == "mb_relationship":
-                    mb_injected_rejection_counts["mb_injected_failed_title"] += 1
+                    mb_injected_rejection_counts[_classify_injected_rejection_bucket("pass_b_track_similarity")] += 1
                 continue
             if float(c.get("score_artist", 0.0)) < PASS_B_MIN_ARTIST:
                 rejection_counts["pass_b_artist_similarity"] += 1
                 if str(c.get("source") or "").strip().lower() == "mb_relationship":
-                    mb_injected_rejection_counts["mb_injected_failed_artist"] += 1
+                    mb_injected_rejection_counts[_classify_injected_rejection_bucket("pass_b_artist_similarity")] += 1
                 continue
             if not bool(c.get("authority_channel_match")):
                 rejection_counts["pass_b_authority"] += 1
                 if str(c.get("source") or "").strip().lower() == "mb_relationship":
-                    mb_injected_rejection_counts["mb_injected_failed_authority"] += 1
+                    mb_injected_rejection_counts[_classify_injected_rejection_bucket("pass_b_authority")] += 1
                 continue
             eligible_b.append(c)
 
@@ -439,6 +457,13 @@ def _evaluate_track(
     coherence_selected_delta = float((selected or {}).get("coherence_delta") or 0.0) if isinstance(selected, dict) else 0.0
     resolved = selected is not None
     final_failure_reason = None if resolved else (failure_reason_override or failure_reason)
+    if (
+        not resolved
+        and injected_candidates
+        and isinstance(final_failure_reason, str)
+        and final_failure_reason.startswith("source_unavailable")
+    ):
+        mb_injected_rejection_counts[_classify_injected_rejection_bucket(final_failure_reason)] += 1
 
     return TrackRunResult(
         album_id=album_id,
@@ -459,7 +484,7 @@ def _evaluate_track(
         coherence_selected_delta=coherence_selected_delta,
         coherence_near_miss=coherence_near_miss,
         mb_injected_selected=mb_injected_selected,
-        mb_injected_rejection_counts=dict(mb_injected_rejection_counts),
+        mb_injected_rejection_counts=dict((key, int(mb_injected_rejection_counts.get(key) or 0)) for key in INJECTED_REJECTION_KEYS),
     )
 
 
@@ -535,7 +560,7 @@ def run_benchmark(
     rejection_totals: Counter[str] = Counter()
     coherence_boost_events = 0
     coherence_selected_tracks = 0
-    mb_injected_rejection_totals: Counter[str] = Counter()
+    mb_injected_rejection_totals: Counter[str] = _empty_injected_rejection_mix()
 
     for album in albums:
         if not isinstance(album, dict):
@@ -550,6 +575,7 @@ def run_benchmark(
         album_total = 0
         album_resolved = 0
         album_mb_injected_success = 0
+        album_mb_injected_rejections: Counter[str] = _empty_injected_rejection_mix()
         for track in tracks:
             if not isinstance(track, dict):
                 continue
@@ -576,6 +602,7 @@ def run_benchmark(
                 coherence_selected_tracks += 1
             rejection_totals.update(result.rejection_counts)
             mb_injected_rejection_totals.update(result.mb_injected_rejection_counts)
+            album_mb_injected_rejections.update(result.mb_injected_rejection_counts)
             if result.mb_injected_selected:
                 album_mb_injected_success += 1
         per_album[album_id] = {
@@ -586,6 +613,10 @@ def run_benchmark(
             "tracks_resolved": album_resolved,
             "completion_percent": (album_resolved / album_total * 100.0) if album_total else 0.0,
             "mb_injected_success": album_mb_injected_success,
+            "injected_rejection_mix": dict(
+                (key, int(album_mb_injected_rejections.get(key) or 0))
+                for key in INJECTED_REJECTION_KEYS
+            ),
         }
 
     total_tracks = len(track_results)
@@ -636,7 +667,10 @@ def run_benchmark(
         "coherence_boost_events": coherence_boost_events,
         "coherence_selected_tracks": coherence_selected_tracks,
         "rejection_mix": dict(rejection_totals),
-        "mb_injected_rejection_mix": dict(mb_injected_rejection_totals),
+        "mb_injected_rejection_mix": dict(
+            (key, int(mb_injected_rejection_totals.get(key) or 0))
+            for key in INJECTED_REJECTION_KEYS
+        ),
         "mb_injected_success_total": sum(int(v.get("mb_injected_success") or 0) for v in per_album.values()),
         "unresolved_failure_reasons": dict(unresolved_reasons),
         "unresolved_classification": {

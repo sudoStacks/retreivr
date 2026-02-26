@@ -1,21 +1,29 @@
 {
   "schema_version": 2,
   "dataset_name": "music-search-album-benchmark-v1",
-  "albums_total": 39,
-  "tracks_total": 40,
-  "tracks_resolved": 39,
-  "completion_percent": 97.5,
+  "albums_total": 41,
+  "tracks_total": 42,
+  "tracks_resolved": 41,
+  "completion_percent": 97.61904761904762,
   "wrong_variant_flags": 0,
-  "avg_selected_score": 0.9802974358974357,
-  "avg_candidate_score": 0.9596249999999996,
+  "avg_selected_score": 0.9797951219512193,
+  "avg_candidate_score": 0.9529087301587298,
   "coherence_boost_events": 1,
   "coherence_selected_tracks": 1,
   "rejection_mix": {
-    "disallowed_variant": 17,
+    "disallowed_variant": 18,
     "duration_out_of_bounds": 4,
-    "duration_over_hard_cap": 1
+    "duration_over_hard_cap": 1,
+    "low_artist_similarity": 3,
+    "low_album_similarity": 2
   },
-  "mb_injected_rejection_mix": {},
+  "mb_injected_rejection_mix": {
+    "duration_fail": 0,
+    "title_similarity_fail": 0,
+    "artist_similarity_fail": 0,
+    "variant_blocked": 0,
+    "unavailable": 0
+  },
   "mb_injected_success_total": 1,
   "unresolved_failure_reasons": {
     "duration_filtered": 1
@@ -49,7 +57,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 1
+      "mb_injected_success": 1,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "brooks-dunn-reboot": {
       "artist": "Brooks & Dunn",
@@ -58,7 +73,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "george-strait-50-number-ones": {
       "artist": "George Strait",
@@ -67,7 +89,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "alan-jackson-greatest-hits": {
       "artist": "Alan Jackson",
@@ -76,7 +105,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "tim-mcgraw-greatest-hits": {
       "artist": "Tim McGraw",
@@ -85,7 +121,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "shania-twain-come-on-over": {
       "artist": "Shania Twain",
@@ -94,7 +137,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "faith-hill-breathe": {
       "artist": "Faith Hill",
@@ -103,7 +153,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "garth-brooks-no-fences": {
       "artist": "Garth Brooks",
@@ -112,7 +169,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "reba-greatest-hits": {
       "artist": "Reba McEntire",
@@ -121,7 +185,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "kenny-chesney-no-shoes": {
       "artist": "Kenny Chesney",
@@ -130,7 +201,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "taylor-swift-1989": {
       "artist": "Taylor Swift",
@@ -139,7 +217,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "olivia-rodrigo-sour": {
       "artist": "Olivia Rodrigo",
@@ -148,7 +233,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "dua-lipa-future-nostalgia": {
       "artist": "Dua Lipa",
@@ -157,7 +249,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "weeknd-after-hours": {
       "artist": "The Weeknd",
@@ -166,7 +265,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "billie-eilish-happier-than-ever": {
       "artist": "Billie Eilish",
@@ -175,7 +281,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "adele-30": {
       "artist": "Adele",
@@ -184,7 +297,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "ed-sheeran-equals": {
       "artist": "Ed Sheeran",
@@ -193,7 +313,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "post-malone-hollywoods-bleeding": {
       "artist": "Post Malone",
@@ -202,7 +329,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "drake-certified-lover-boy": {
       "artist": "Drake",
@@ -211,7 +345,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "kendrick-mr-morale": {
       "artist": "Kendrick Lamar",
@@ -220,7 +361,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "sza-sos": {
       "artist": "SZA",
@@ -229,7 +377,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "morgan-wallen-dangerous": {
       "artist": "Morgan Wallen",
@@ -238,7 +393,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "zach-bryan-american-heartbreak": {
       "artist": "Zach Bryan",
@@ -247,7 +409,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "luke-combs-growin-up": {
       "artist": "Luke Combs",
@@ -256,7 +425,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "lainey-bell-bottom-country": {
       "artist": "Lainey Wilson",
@@ -265,7 +441,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "fleetwood-mac-rumours": {
       "artist": "Fleetwood Mac",
@@ -274,7 +457,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "eagles-hotel-california": {
       "artist": "Eagles",
@@ -283,7 +473,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "journey-greatest-hits": {
       "artist": "Journey",
@@ -292,7 +489,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "bon-jovi-slippery": {
       "artist": "Bon Jovi",
@@ -301,7 +505,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "acdc-back-in-black": {
       "artist": "AC/DC",
@@ -310,7 +521,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "queen-platinum-collection": {
       "artist": "Queen",
@@ -319,7 +537,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "michael-jackson-thriller": {
       "artist": "Michael Jackson",
@@ -328,7 +553,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "abba-gold": {
       "artist": "ABBA",
@@ -337,7 +569,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "u2-joshua-tree": {
       "artist": "U2",
@@ -346,7 +585,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "coldplay-a-head-full-of-dreams": {
       "artist": "Coldplay",
@@ -355,7 +601,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "imagine-dragons-evolve": {
       "artist": "Imagine Dragons",
@@ -364,7 +617,14 @@
       "tracks_total": 1,
       "tracks_resolved": 0,
       "completion_percent": 0.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "coherence-benchmark-album": {
       "artist": "Coherence Artist",
@@ -373,7 +633,14 @@
       "tracks_total": 2,
       "tracks_resolved": 2,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "pink-floyd-dark-side-alias": {
       "artist": "Pink Floyd",
@@ -382,7 +649,14 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     "alias-benchmark-album": {
       "artist": "Alias Artist",
@@ -391,7 +665,46 @@
       "tracks_total": 1,
       "tracks_resolved": 1,
       "completion_percent": 100.0,
-      "mb_injected_success": 0
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
+    },
+    "variant-collision-benchmark-album": {
+      "artist": "Night Drive",
+      "title": "Midnight Static",
+      "release_group_mbid": "92000000-0000-4000-8000-000000000001",
+      "tracks_total": 1,
+      "tracks_resolved": 1,
+      "completion_percent": 100.0,
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
+    },
+    "wrong-artist-authority-collision-benchmark-album": {
+      "artist": "Aurora Avenue",
+      "title": "Neon Skyline",
+      "release_group_mbid": "92000000-0000-4000-8000-000000000002",
+      "tracks_total": 1,
+      "tracks_resolved": 1,
+      "completion_percent": 100.0,
+      "mb_injected_success": 0,
+      "injected_rejection_mix": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     }
   },
   "per_track": [
@@ -414,7 +727,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": true,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "brooks-dunn-reboot",
@@ -437,7 +756,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "george-strait-50-number-ones",
@@ -458,7 +783,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "alan-jackson-greatest-hits",
@@ -481,7 +812,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "tim-mcgraw-greatest-hits",
@@ -504,7 +841,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "shania-twain-come-on-over",
@@ -527,7 +870,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "faith-hill-breathe",
@@ -548,7 +897,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "garth-brooks-no-fences",
@@ -571,7 +926,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "reba-greatest-hits",
@@ -592,7 +953,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "kenny-chesney-no-shoes",
@@ -615,7 +982,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "taylor-swift-1989",
@@ -638,7 +1011,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "olivia-rodrigo-sour",
@@ -661,7 +1040,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "dua-lipa-future-nostalgia",
@@ -682,7 +1067,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "weeknd-after-hours",
@@ -703,7 +1094,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "billie-eilish-happier-than-ever",
@@ -726,7 +1123,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "adele-30",
@@ -749,7 +1152,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "ed-sheeran-equals",
@@ -770,7 +1179,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "post-malone-hollywoods-bleeding",
@@ -793,7 +1208,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "drake-certified-lover-boy",
@@ -814,7 +1235,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "kendrick-mr-morale",
@@ -837,7 +1264,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "sza-sos",
@@ -860,7 +1293,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "morgan-wallen-dangerous",
@@ -883,7 +1322,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "zach-bryan-american-heartbreak",
@@ -904,7 +1349,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "luke-combs-growin-up",
@@ -927,7 +1378,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "lainey-bell-bottom-country",
@@ -948,7 +1405,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "fleetwood-mac-rumours",
@@ -971,7 +1434,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "eagles-hotel-california",
@@ -994,7 +1463,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "journey-greatest-hits",
@@ -1015,7 +1490,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "bon-jovi-slippery",
@@ -1036,7 +1517,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "acdc-back-in-black",
@@ -1059,7 +1546,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "queen-platinum-collection",
@@ -1082,7 +1575,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "michael-jackson-thriller",
@@ -1105,7 +1604,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "abba-gold",
@@ -1126,7 +1631,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "u2-joshua-tree",
@@ -1149,7 +1660,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "coldplay-a-head-full-of-dreams",
@@ -1170,7 +1687,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "imagine-dragons-evolve",
@@ -1193,7 +1716,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "coherence-benchmark-album",
@@ -1214,7 +1743,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "coherence-benchmark-album",
@@ -1235,7 +1770,13 @@
       "coherence_selected_delta": 0.03,
       "coherence_near_miss": true,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "pink-floyd-dark-side-alias",
@@ -1256,7 +1797,13 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     },
     {
       "album_id": "alias-benchmark-album",
@@ -1277,7 +1824,73 @@
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
       "mb_injected_selected": false,
-      "mb_injected_rejection_counts": {}
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
+    },
+    {
+      "album_id": "variant-collision-benchmark-album",
+      "track_id": "92000000-0000-4000-8000-000000000101",
+      "resolved": true,
+      "selected_pass": "strict",
+      "selected_rung": 0,
+      "selected_candidate_id": "vc-official-audio",
+      "selected_score": 1.0,
+      "wrong_variant_flag": false,
+      "failure_reason": null,
+      "rejection_counts": {
+        "disallowed_variant": 1,
+        "low_artist_similarity": 2,
+        "low_album_similarity": 2
+      },
+      "avg_candidate_score": 0.7855666666666666,
+      "candidate_count": 6,
+      "expected_selected_candidate_id": "vc-official-audio",
+      "expected_match": true,
+      "coherence_boost_applied": 0,
+      "coherence_selected_delta": 0.0,
+      "coherence_near_miss": false,
+      "mb_injected_selected": false,
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
+    },
+    {
+      "album_id": "wrong-artist-authority-collision-benchmark-album",
+      "track_id": "92000000-0000-4000-8000-000000000201",
+      "resolved": true,
+      "selected_pass": "strict",
+      "selected_rung": 0,
+      "selected_candidate_id": "waac-correct-lower-authority",
+      "selected_score": 0.94,
+      "wrong_variant_flag": false,
+      "failure_reason": null,
+      "rejection_counts": {
+        "low_artist_similarity": 1
+      },
+      "avg_candidate_score": 0.8516,
+      "candidate_count": 2,
+      "expected_selected_candidate_id": "waac-correct-lower-authority",
+      "expected_match": true,
+      "coherence_boost_applied": 0,
+      "coherence_selected_delta": 0.0,
+      "coherence_near_miss": false,
+      "mb_injected_selected": false,
+      "mb_injected_rejection_counts": {
+        "duration_fail": 0,
+        "title_similarity_fail": 0,
+        "artist_similarity_fail": 0,
+        "variant_blocked": 0,
+        "unavailable": 0
+      }
     }
   ]
 }
