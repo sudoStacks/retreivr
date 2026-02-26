@@ -30,31 +30,15 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Optional Telegram summaries
 
 ## 0.9.6 Highlights
-- Desktop launcher foundation for local macOS/Windows installs
-- Guided Docker/runtime setup with preflight checks and onboarding checklist
-- Launcher-managed compose/config bootstrap for faster first run
-- Improved diagnostics, error guidance, and update awareness in launcher
+- Runtime release workflow for versioned GHCR publishing
+- Minimal runtime bundle zip assets for simplified Docker deployment
+- Music matching robustness improvements across discovery/scoring/retry paths
 
 ---
 
 ## Quick Start (Local Workstation)
 
-### Option A) Desktop Launcher (Recommended for non-server local installs)
-- Download the launcher for your OS from Releases:
-  - macOS (`.dmg` / `.app`)
-  - Windows (installer package)
-- Open the launcher and follow the wizard:
-  - verify Docker Desktop is installed/running
-  - choose folders and settings
-  - generate compose + start Retreivr
-- Open Web UI:
-```text
-http://localhost:8090
-```
-
-The launcher is intended for local machine use and does not require manually cloning/copying compose/config files for normal setup.
-
-### Option B) Docker Compose (Manual)
+### Option A) Docker Compose (Manual)
 
 #### 1) Prepare files
 ```bash

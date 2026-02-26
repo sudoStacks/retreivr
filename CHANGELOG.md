@@ -2,50 +2,25 @@
 
 All notable changes to this project will be documented here.
 
-## v0.9.6 — Desktop Launcher Foundation + Reliability Hardening
+## v0.9.6 — Runtime Distribution + Music Match Robustness
 
 ### Added
-- Cross-platform desktop launcher foundation (Tauri) for local workstation use on macOS and Windows.
-- Guided launcher setup flow for local Retreivr runtime configuration:
-  - host port (default `8090`)
-  - image/container settings
-  - configurable local folders for downloads/config/tokens/logs/data
-- Runtime bootstrap from launcher-managed workspace:
-  - generated `compose.yaml`
-  - auto-seeded `config.json` from embedded `config/config_sample.json`
-- Reliability/safety tooling in launcher:
-  - preflight checks (config, compose generation, Docker/Compose availability, port checks, compose validation)
-  - actionable error panels with suggested fixes
-  - diagnostics copy and quick log viewing
-- Onboarding completeness in launcher:
-  - first-run checklist (Docker readiness, saved config, container state, UI reachability)
-  - shortcuts to open compose/data folders
-  - quick presets for common local setups
-- Version/update awareness in launcher:
-  - launcher version visibility with latest release check
-  - Retreivr image update detection and guided update/restart path
-- Launcher release workflow and packaging support for macOS/Windows artifacts in CI.
 - Added tag-driven GitHub release workflow for runtime distribution:
   - builds/pushes versioned GHCR image (`ghcr.io/<owner>/retreivr:<tag>`, plus `latest` on non-prerelease tags)
   - creates and attaches minimal runtime bundle zip assets (`retreivr-runtime-<tag>.zip`) containing compose/env/config example + `README-runtime.md`
-- Info-page project links panel (repository, organization, and X links) and README social link near the top.
+- Added dedicated `README-runtime.md` for simplified Docker-first deployment.
+- Added deterministic query-ladder progression coverage and targeted runtime assertion tests for music retry escalation behavior.
 
 ### Changed
-- Launcher Docker command execution hardened for desktop environments, including improved macOS PATH handling for Docker CLI discovery.
-- Launcher now normalizes Docker image references to lowercase to prevent invalid image reference failures.
-- Launcher defaults aligned around local-first runtime behavior and documented default host port `8090`.
-- Launcher metadata/version alignment updated to `0.9.6` across Tauri/Cargo/package manifests.
-- Music discovery scoring refined with source-aware confidence boosting for high-confidence YouTube/YouTube Music authority channels when uploader↔artist overlap is strong.
-- MusicBrainz binding variant policy hardened with explicit disallowed token/phrase matching and neutral suffix stripping before title similarity scoring.
-- Status/Info table UX refinements:
-  - sticky table headers during scroll
-  - better bounded scrolling behavior for long lists
-  - improved Info-page panel layout balance for results/history views
+- Music discovery/scoring hardening for better true-positive recovery on edge tracks without lowering global thresholds:
+  - deterministic multi-rung query ladder execution with structured fallback behavior
+  - two-pass duration gating (`strict` then bounded expanded pass) with authority and similarity constraints
+  - targeted retry escalation to avoid repeating dead-end queries
+- Parenthetical normalization was consolidated into reusable search/scoring utilities (search-only influence; canonical/stored metadata unchanged).
+- MusicBrainz retry behavior was hardened for transient failures with classified retry logic and bounded staggered backoff.
+- yt-dlp metadata probe handling was tuned to reduce non-fatal noise from format-unavailable probe failures while keeping download behavior unchanged.
 
 ### Fixed
-- Resolved launcher startup/runtime issues that could surface as blank or non-responsive windows in early builds.
-- Fixed false-negative Docker readiness cases on macOS when Docker existed outside minimal app PATH contexts.
-- Fixed image pull failures caused by mixed-case image references.
 - Fixed album download MusicBrainz include-contract failures by removing invalid `genres` includes from release-group/release fetch paths.
 - Fixed mp4 output regression where final mp4 artifacts could still carry incompatible audio streams by enforcing post-processing recode in the canonical yt-dlp contract.
 - Fixed web header branding text and topbar control placement consistency after nav/action refinements.
