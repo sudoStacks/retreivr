@@ -928,6 +928,35 @@ body.home-page .home-candidate-source-tag {
   text-decoration: underline;
 }
 
+.home-footer-links {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+body.home-page .home-footer-links {
+  justify-content: center;
+}
+
+.home-footer-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.x-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .grid {
   display: grid;
   gap: 12px;
