@@ -314,7 +314,7 @@ def _classify_release_bucket(release_payload: dict) -> str:
         if str(value or "").strip()
     }
 
-    if primary_type == "album":
+    if primary_type in {"album", "ep"}:
         if {"compilation", "retrospective"} & secondary_types:
             return "compilation"
         if {"live", "soundtrack", "remix"} & secondary_types:
@@ -513,14 +513,15 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         return response
 
     if resolved_mode == "album":
+        primary_type_clause = "primarytype:(album OR ep)"
         if route_case == "artist_album":
             release_group_query = (
                 f"artist:{_field(artist_value)} AND "
                 f"release:{_field(album_value)} AND "
-                "primarytype:album"
+                f"{primary_type_clause}"
             )
         else:
-            release_group_query = f"release:{_field(album_value)} AND primarytype:album"
+            release_group_query = f"release:{_field(album_value)} AND {primary_type_clause}"
         logger.info(
             "[MUSICBRAINZ] metadata_search endpoint=search_release_groups query=%s",
             release_group_query,

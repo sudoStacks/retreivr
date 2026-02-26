@@ -428,7 +428,7 @@ class MusicBrainzService:
         clean_tokens = self._remove_noise_tokens(query_tokens) or query_tokens
         normalized_query = " ".join(clean_tokens).strip() or cleaned_query
         artist_fragment, album_fragment = self._split_artist_album(normalized_query)
-        lucene_parts = ['primarytype:"album"']
+        lucene_parts = ['(primarytype:"album" OR primarytype:"ep")']
         if artist_fragment:
             lucene_parts.append(f'artist:"{self._lucene_escape(artist_fragment)}"')
         if album_fragment:
@@ -476,7 +476,7 @@ class MusicBrainzService:
             if "remix" in secondary_lower:
                 adjusted -= 20
             primary_type = str(group.get("primary-type") or "")
-            if primary_type and primary_type.lower() != "album":
+            if primary_type and primary_type.lower() not in {"album", "ep"}:
                 adjusted -= 15
             adjusted = max(0, min(100, adjusted))
             candidates.append(

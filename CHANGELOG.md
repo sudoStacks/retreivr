@@ -12,16 +12,20 @@ All notable changes to this project will be documented here.
 
 ### Changed
 - Music search pipeline hardened without relaxing gates: deterministic multi-rung fallback, bounded duration expansion, and cleaner retry escalation.
+- EP album runs now use a bounded EP-only retrieval refinement rung (`{artist} - {track} audio topic`) with no scoring/threshold changes.
 - Search normalization/parenthetical handling consolidated into shared scoring utilities (search influence only; canonical metadata unchanged).
 - Explicit retrieval vs ranking/gating separation with benchmark `recall@k` metrics (`k={1,3,5,10}`).
 - Observability expanded for benchmark/runtime paths:
   - decision-edge reporting (failed gate + nearest-pass margin, accepted support features, runner-up gap)
   - MB-injected candidate rejection classification and per-album injected rejection mix
+  - EP refinement telemetry in runtime summaries (`ep_refinement_attempted`, `ep_refinement_candidates_considered`)
   - deterministic title-based variant tagging surfaced in summaries
   - benchmark failure motif rollups and hard-negative fixture stub mining workflow (review-only generation).
 - MusicBrainz transient retry behavior and yt-dlp metadata probe noise handling refined for stability.
 
 ### Fixed
+- Album metadata search now includes EP release groups alongside albums (`primarytype:album OR ep`) for artist+album and album-only flows.
+- MusicBrainz pair resolution no longer rejects EP releases as `invalid_release_type`/`no_official_album` in album-run binding paths.
 - MusicBrainz include-contract failures in album metadata fetch (`genres` include misuse).
 - MP4 post-processing regression where incompatible audio streams could survive final output.
 - Home/header UI consistency regressions after navigation/action layout refinements.
