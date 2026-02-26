@@ -74,7 +74,13 @@ from engine.job_queue import (
 from engine.json_utils import safe_json_dumps
 from engine.paths import DATA_DIR
 from engine.search_adapters import default_adapters
-from engine.search_scoring import rank_candidates, score_candidate, select_best_candidate
+from engine.search_scoring import (
+    classify_music_title_variants,
+    rank_candidates,
+    score_candidate,
+    select_best_candidate,
+    tokenize,
+)
 from engine.musicbrainz_binding import _normalize_title_for_mb_lookup
 from engine.music_title_normalization import has_live_intent, relaxed_search_title
 from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
@@ -127,6 +133,22 @@ class SearchRequest:
     duration_hint_sec: int | None
     source_priority: list[str]
     max_candidates_per_source: int
+
+
+@dataclass(frozen=True)
+class MusicTrackSelectionResult:
+    selected: dict | None
+    selected_pass: str | None
+    ranked: list[dict]
+    failure_reason: str
+    coherence_boost_applied: int
+    mb_injected_rejections: dict[str, int]
+    rejected_candidates: list[dict]
+    accepted_selection: dict | None
+    final_rejection: dict | None
+    candidate_variant_distribution: dict[str, int]
+    selected_candidate_variant_tags: list[str]
+    top_rejected_variant_tags: list[str]
 
 
 
@@ -1356,6 +1378,503 @@ class SearchResolutionService:
         )
         return candidates
 
+    def retrieve_candidates(self, ctx) -> list[dict]:
+        query = str((ctx or {}).get("query") or "").strip()
+        if not query:
+            return []
+        limit = int((ctx or {}).get("limit") or 6)
+        query_label = (ctx or {}).get("query_label")
+        rung = int((ctx or {}).get("rung") or 0)
+        first_rung = int((ctx or {}).get("first_rung") or 0)
+        injected = (ctx or {}).get("mb_injected_candidates")
+        injected_candidates = [dict(c) for c in (injected or []) if isinstance(c, dict)]
+
+        candidates = self.search_music_track_candidates(query, limit=limit, query_label=query_label)
+        if rung == first_rung and injected_candidates:
+            deduped = []
+            seen_urls = set()
+            for candidate in list(injected_candidates) + list(candidates):
+                if not isinstance(candidate, dict):
+                    continue
+                url_key = str(candidate.get("url") or "").strip().lower()
+                if url_key and url_key in seen_urls:
+                    continue
+                if url_key:
+                    seen_urls.add(url_key)
+                deduped.append(candidate)
+            candidates = deduped
+        return candidates
+
+    def _music_similarity_thresholds(self, expected_base):
+        has_album = bool(tokenize(expected_base.get("album")))
+        if has_album:
+            return {
+                "title_similarity": (20.0 / 30.0),
+                "artist_similarity": (15.0 / 24.0),
+                "album_similarity": (8.0 / 18.0),
+            }
+        return {
+            "title_similarity": (20.0 / 39.0),
+            "artist_similarity": (15.0 / 33.0),
+            "album_similarity": 0.0,
+        }
+
+    def _build_candidate_observation(self, candidate, *, reason, expected_base, pass_name):
+        similarity_thresholds = self._music_similarity_thresholds(expected_base)
+        max_delta_ms = (
+            _MUSIC_DURATION_STRICT_MAX_DELTA_MS
+            if pass_name == "strict"
+            else _MUSIC_DURATION_EXPANDED_MAX_DELTA_MS
+        )
+        hard_cap_ms = int(expected_base.get("duration_hard_cap_ms") or _MUSIC_DURATION_HARD_CAP_MS)
+        title_similarity = max(
+            float(candidate.get("score_track") or 0.0),
+            min(float(candidate.get("score_track_relaxed") or 0.0) * 0.90, 1.0),
+        )
+        artist_similarity = float(candidate.get("score_artist") or 0.0)
+        album_similarity = float(candidate.get("score_album") or 0.0)
+        duration_delta_ms = candidate.get("duration_delta_ms")
+        try:
+            duration_delta_ms = int(duration_delta_ms) if duration_delta_ms is not None else None
+        except Exception:
+            duration_delta_ms = None
+        final_score = float(candidate.get("final_score") or 0.0)
+        gate = "score_threshold"
+        metric = {
+            "name": "final_score",
+            "value": final_score,
+            "threshold": float(self.music_source_match_threshold),
+            "margin_to_pass": float(self.music_source_match_threshold) - final_score,
+            "direction": ">=",
+        }
+
+        reason_value = str(reason or "").strip().lower()
+        if reason_value in {"duration_out_of_bounds", "pass_b_duration"}:
+            gate = "duration_delta_ms"
+            metric = {
+                "name": "duration_delta_ms",
+                "value": duration_delta_ms,
+                "threshold": max_delta_ms,
+                "margin_to_pass": (float(duration_delta_ms) - float(max_delta_ms)) if duration_delta_ms is not None else None,
+                "direction": "<=",
+            }
+        elif reason_value == "duration_over_hard_cap":
+            gate = "duration_hard_cap_ms"
+            metric = {
+                "name": "duration_delta_ms",
+                "value": duration_delta_ms,
+                "threshold": hard_cap_ms,
+                "margin_to_pass": (float(duration_delta_ms) - float(hard_cap_ms)) if duration_delta_ms is not None else None,
+                "direction": "<=",
+            }
+        elif reason_value == "preview_duration":
+            expected_sec = expected_base.get("duration_hint_sec")
+            try:
+                expected_ms = int(expected_sec) * 1000 if expected_sec is not None else None
+                candidate_sec = candidate.get("duration_sec")
+                candidate_ms = int(candidate_sec) * 1000 if candidate_sec is not None else None
+            except Exception:
+                expected_ms, candidate_ms = None, None
+            min_ms = max(45000, int(expected_ms * 0.45)) if expected_ms is not None else 45000
+            gate = "preview_duration_min_ms"
+            metric = {
+                "name": "candidate_duration_ms",
+                "value": candidate_ms,
+                "threshold": min_ms,
+                "margin_to_pass": (float(min_ms) - float(candidate_ms)) if candidate_ms is not None else None,
+                "direction": ">=",
+            }
+        elif reason_value in {"low_title_similarity", "floor_check_failed", "pass_b_track_similarity"}:
+            gate = "title_similarity"
+            threshold = _MUSIC_PASS_B_MIN_TITLE_SIMILARITY if reason_value == "pass_b_track_similarity" else similarity_thresholds["title_similarity"]
+            metric = {
+                "name": "title_similarity",
+                "value": title_similarity,
+                "threshold": threshold,
+                "margin_to_pass": threshold - title_similarity,
+                "direction": ">=",
+            }
+        elif reason_value in {"low_artist_similarity", "cover_artist_mismatch", "pass_b_artist_similarity"}:
+            gate = "artist_similarity"
+            threshold = _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY if reason_value == "pass_b_artist_similarity" else similarity_thresholds["artist_similarity"]
+            metric = {
+                "name": "artist_similarity",
+                "value": artist_similarity,
+                "threshold": threshold,
+                "margin_to_pass": threshold - artist_similarity,
+                "direction": ">=",
+            }
+        elif reason_value == "low_album_similarity":
+            gate = "album_similarity"
+            metric = {
+                "name": "album_similarity",
+                "value": album_similarity,
+                "threshold": similarity_thresholds["album_similarity"],
+                "margin_to_pass": similarity_thresholds["album_similarity"] - album_similarity,
+                "direction": ">=",
+            }
+        elif reason_value in {"disallowed_variant", "preview_variant", "session_variant"}:
+            gate = "variant_alignment"
+            metric = {
+                "name": "variant_alignment",
+                "value": 0.0,
+                "threshold": 1.0,
+                "margin_to_pass": 1.0,
+                "direction": "==",
+            }
+        elif reason_value == "pass_b_authority":
+            gate = "authority_channel_match"
+            authority_value = 1.0 if bool(candidate.get("authority_channel_match")) else 0.0
+            metric = {
+                "name": "authority_channel_match",
+                "value": authority_value,
+                "threshold": 1.0,
+                "margin_to_pass": 1.0 - authority_value,
+                "direction": "==",
+            }
+
+        return {
+            "candidate_id": candidate.get("candidate_id"),
+            "source": candidate.get("source"),
+            "title": candidate.get("title"),
+            "variant_tags": sorted(classify_music_title_variants(candidate.get("title"))),
+            "rejection_reason": reason_value or "score_threshold",
+            "top_failed_gate": gate,
+            "nearest_pass_margin": metric,
+            "final_score": final_score,
+            "pass": pass_name,
+        }
+
+    def _nearest_rejection(self, rejected_candidates):
+        if not rejected_candidates:
+            return None
+
+        def _margin_value(entry):
+            metric = entry.get("nearest_pass_margin") if isinstance(entry.get("nearest_pass_margin"), dict) else {}
+            value = metric.get("margin_to_pass")
+            try:
+                return abs(float(value))
+            except Exception:
+                return float("inf")
+
+        ranked = sorted(
+            [entry for entry in rejected_candidates if isinstance(entry, dict)],
+            key=lambda entry: (
+                _margin_value(entry),
+                -float(entry.get("final_score") or 0.0),
+                str(entry.get("candidate_id") or ""),
+            ),
+        )
+        return ranked[0] if ranked else None
+
+    def _top_rejected_variant_tags(self, rejected_candidates):
+        tag_counts = {}
+        for entry in rejected_candidates or []:
+            if not isinstance(entry, dict):
+                continue
+            tags = entry.get("variant_tags") if isinstance(entry.get("variant_tags"), list) else []
+            for tag in tags:
+                key = str(tag or "").strip()
+                if not key:
+                    continue
+                tag_counts[key] = int(tag_counts.get(key) or 0) + 1
+        ranked = sorted(tag_counts.items(), key=lambda item: (-int(item[1]), item[0]))
+        return [tag for tag, _count in ranked]
+
+    def rank_and_gate(self, ctx, candidates) -> MusicTrackSelectionResult:
+        expected_base = dict((ctx or {}).get("expected_base") or {})
+        coherence_key = (ctx or {}).get("coherence_key")
+        query_label = str((ctx or {}).get("query_label") or "")
+        rung = int((ctx or {}).get("rung") or 0)
+        recording_mbid = str((ctx or {}).get("recording_mbid") or "").strip() or None
+        selected = None
+        selected_pass = None
+        ranked_selected: list[dict] = []
+        failure_reason = "no_candidate_above_threshold"
+        coherence_boost_applied = 0
+        mb_injected_rejections: dict[str, int] = {}
+        rejected_candidates: list[dict] = []
+        accepted_selection = None
+        final_rejection = None
+        variant_distribution = {}
+        for candidate in candidates:
+            tags = classify_music_title_variants(candidate.get("title"))
+            for tag in tags:
+                variant_distribution[tag] = int(variant_distribution.get(tag) or 0) + 1
+
+        def _score_for_pass(duration_max_delta_ms):
+            scored = []
+            expected = dict(expected_base)
+            expected["duration_max_delta_ms"] = int(duration_max_delta_ms)
+            for candidate in candidates:
+                source = candidate.get("source")
+                adapter = self.adapters.get(source)
+                source_modifier = adapter.source_modifier(candidate) if adapter else 1.0
+                item = dict(candidate)
+                item.update(score_candidate(expected, item, source_modifier=source_modifier))
+                breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+                item["base_score"] = breakdown.get("raw_score_100")
+                item["final_score_100"] = breakdown.get("final_score_100")
+                scored.append(item)
+            return rank_candidates(scored, source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY_WITH_MB))
+
+        ranked_a = _score_for_pass(_MUSIC_DURATION_STRICT_MAX_DELTA_MS)
+        if coherence_key:
+            ranked_a, applied = self._apply_album_coherence_tiebreak(
+                ranked_a,
+                coherence_key=coherence_key,
+                pass_name="strict",
+                query_label=query_label,
+            )
+            coherence_boost_applied += applied
+        for scored in ranked_a:
+            rejection_reason = str(scored.get("rejection_reason") or "").strip()
+            if rejection_reason:
+                rejected_candidates.append(
+                    self._build_candidate_observation(
+                        scored,
+                        reason=rejection_reason,
+                        expected_base=expected_base,
+                        pass_name="strict",
+                    )
+                )
+            elif float(scored.get("final_score", 0.0)) < float(self.music_source_match_threshold):
+                rejected_candidates.append(
+                    self._build_candidate_observation(
+                        scored,
+                        reason="score_threshold",
+                        expected_base=expected_base,
+                        pass_name="strict",
+                    )
+                )
+            if str(scored.get("source") or "").strip().lower() != "mb_relationship":
+                continue
+            if not rejection_reason:
+                continue
+            key = self._classify_mb_injected_rejection(rejection_reason)
+            mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+            _log_event(
+                logging.INFO,
+                "mb_youtube_injected_rejected",
+                recording_mbid=recording_mbid,
+                candidate_id=scored.get("candidate_id"),
+                url=scored.get("url"),
+                rejection_reason=rejection_reason,
+                classified_reason=key,
+                selected_rung=rung,
+                query_label=query_label,
+            )
+        eligible_a = [
+            c for c in ranked_a
+            if not c.get("rejection_reason")
+            and float(c.get("final_score", 0.0)) >= float(self.music_source_match_threshold)
+        ]
+        selected_a = eligible_a[0] if eligible_a else None
+        if selected_a is not None:
+            selected = selected_a
+            ranked_selected = ranked_a
+            selected_pass = "strict"
+            selected_score = float(selected_a.get("final_score") or 0.0)
+            runner_up_score = None
+            for item in ranked_a:
+                if item.get("candidate_id") == selected_a.get("candidate_id"):
+                    continue
+                if item.get("rejection_reason"):
+                    continue
+                runner_up_score = float(item.get("final_score") or 0.0)
+                break
+            title_similarity = max(
+                float(selected_a.get("score_track") or 0.0),
+                min(float(selected_a.get("score_track_relaxed") or 0.0) * 0.90, 1.0),
+            )
+            accepted_selection = {
+                "selected_candidate_id": selected_a.get("candidate_id"),
+                "selected_score": selected_score,
+                "runner_up_score": runner_up_score,
+                "runner_up_gap": selected_score - float(runner_up_score or 0.0),
+                    "top_supporting_features": {
+                        "duration_delta_ms": selected_a.get("duration_delta_ms"),
+                        "title_similarity": title_similarity,
+                        "artist_similarity": float(selected_a.get("score_artist") or 0.0),
+                        "variant_alignment": True,
+                        "variant_tags": sorted(classify_music_title_variants(selected_a.get("title"))),
+                    },
+                }
+            return MusicTrackSelectionResult(
+                selected=selected,
+                selected_pass=selected_pass,
+                ranked=ranked_selected,
+                failure_reason="",
+                coherence_boost_applied=coherence_boost_applied,
+                mb_injected_rejections=mb_injected_rejections,
+                rejected_candidates=rejected_candidates,
+                accepted_selection=accepted_selection,
+                final_rejection=None,
+                candidate_variant_distribution=dict(sorted(variant_distribution.items(), key=lambda item: item[0])),
+                selected_candidate_variant_tags=sorted(classify_music_title_variants(selected_a.get("title"))),
+                top_rejected_variant_tags=self._top_rejected_variant_tags(rejected_candidates),
+            )
+
+        ranked_b = _score_for_pass(_MUSIC_DURATION_EXPANDED_MAX_DELTA_MS)
+        if coherence_key:
+            ranked_b, applied = self._apply_album_coherence_tiebreak(
+                ranked_b,
+                coherence_key=coherence_key,
+                pass_name="expanded",
+                query_label=query_label,
+            )
+            coherence_boost_applied += applied
+        eligible_b = []
+        for candidate in ranked_b:
+            candidate_reason = str(candidate.get("rejection_reason") or "").strip()
+            if candidate_reason:
+                rejected_candidates.append(
+                    self._build_candidate_observation(
+                        candidate,
+                        reason=candidate_reason,
+                        expected_base=expected_base,
+                        pass_name="expanded",
+                    )
+                )
+                continue
+            if float(candidate.get("final_score", 0.0)) < float(self.music_source_match_threshold):
+                rejected_candidates.append(
+                    self._build_candidate_observation(
+                        candidate,
+                        reason="score_threshold",
+                        expected_base=expected_base,
+                        pass_name="expanded",
+                    )
+                )
+                continue
+            try:
+                delta_ok = candidate.get("duration_delta_ms") is not None and int(candidate.get("duration_delta_ms")) <= _MUSIC_DURATION_EXPANDED_MAX_DELTA_MS
+            except Exception:
+                delta_ok = False
+            if not delta_ok:
+                rejected_candidates.append(
+                    self._build_candidate_observation(
+                        candidate,
+                        reason="pass_b_duration",
+                        expected_base=expected_base,
+                        pass_name="expanded",
+                    )
+                )
+                continue
+            if float(candidate.get("score_track", 0.0)) < _MUSIC_PASS_B_MIN_TITLE_SIMILARITY:
+                rejected_candidates.append(
+                    self._build_candidate_observation(
+                        candidate,
+                        reason="pass_b_track_similarity",
+                        expected_base=expected_base,
+                        pass_name="expanded",
+                    )
+                )
+                if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
+                    key = "mb_injected_failed_title"
+                    mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                continue
+            if float(candidate.get("score_artist", 0.0)) < _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY:
+                rejected_candidates.append(
+                    self._build_candidate_observation(
+                        candidate,
+                        reason="pass_b_artist_similarity",
+                        expected_base=expected_base,
+                        pass_name="expanded",
+                    )
+                )
+                if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
+                    key = "mb_injected_failed_artist"
+                    mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                continue
+            if not bool(candidate.get("authority_channel_match")):
+                rejected_candidates.append(
+                    self._build_candidate_observation(
+                        candidate,
+                        reason="pass_b_authority",
+                        expected_base=expected_base,
+                        pass_name="expanded",
+                    )
+                )
+                if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
+                    key = "mb_injected_failed_authority"
+                    mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                continue
+            eligible_b.append(candidate)
+        selected_b = eligible_b[0] if eligible_b else None
+        if selected_b is not None:
+            selected = selected_b
+            ranked_selected = ranked_b
+            selected_pass = "expanded"
+            selected_score = float(selected_b.get("final_score") or 0.0)
+            runner_up_score = None
+            for item in ranked_b:
+                if item.get("candidate_id") == selected_b.get("candidate_id"):
+                    continue
+                if item.get("rejection_reason"):
+                    continue
+                if float(item.get("final_score", 0.0)) < float(self.music_source_match_threshold):
+                    continue
+                runner_up_score = float(item.get("final_score") or 0.0)
+                break
+            title_similarity = max(
+                float(selected_b.get("score_track") or 0.0),
+                min(float(selected_b.get("score_track_relaxed") or 0.0) * 0.90, 1.0),
+            )
+            accepted_selection = {
+                "selected_candidate_id": selected_b.get("candidate_id"),
+                "selected_score": selected_score,
+                "runner_up_score": runner_up_score,
+                "runner_up_gap": selected_score - float(runner_up_score or 0.0),
+                    "top_supporting_features": {
+                        "duration_delta_ms": selected_b.get("duration_delta_ms"),
+                        "title_similarity": title_similarity,
+                        "artist_similarity": float(selected_b.get("score_artist") or 0.0),
+                        "variant_alignment": True,
+                        "variant_tags": sorted(classify_music_title_variants(selected_b.get("title"))),
+                    },
+                }
+            return MusicTrackSelectionResult(
+                selected=selected,
+                selected_pass=selected_pass,
+                ranked=ranked_selected,
+                failure_reason="",
+                coherence_boost_applied=coherence_boost_applied,
+                mb_injected_rejections=mb_injected_rejections,
+                rejected_candidates=rejected_candidates,
+                accepted_selection=accepted_selection,
+                final_rejection=None,
+                candidate_variant_distribution=dict(sorted(variant_distribution.items(), key=lambda item: item[0])),
+                selected_candidate_variant_tags=sorted(classify_music_title_variants(selected_b.get("title"))),
+                top_rejected_variant_tags=self._top_rejected_variant_tags(rejected_candidates),
+            )
+
+        pass_a_reasons = {str(c.get("rejection_reason") or "") for c in ranked_a if c.get("rejection_reason")}
+        if "duration_out_of_bounds" in pass_a_reasons or "duration_over_hard_cap" in pass_a_reasons:
+            failure_reason = "duration_filtered"
+        final_rejection = self._nearest_rejection(rejected_candidates)
+        if isinstance(final_rejection, dict):
+            final_rejection = {
+                "failure_reason": failure_reason,
+                "top_failed_gate": final_rejection.get("top_failed_gate"),
+                "nearest_pass_margin": final_rejection.get("nearest_pass_margin"),
+                "candidate_id": final_rejection.get("candidate_id"),
+            }
+        return MusicTrackSelectionResult(
+            selected=None,
+            selected_pass=None,
+            ranked=[],
+            failure_reason=failure_reason,
+            coherence_boost_applied=coherence_boost_applied,
+            mb_injected_rejections=mb_injected_rejections,
+            rejected_candidates=rejected_candidates,
+            accepted_selection=None,
+            final_rejection=final_rejection,
+            candidate_variant_distribution=dict(sorted(variant_distribution.items(), key=lambda item: item[0])),
+            selected_candidate_variant_tags=[],
+            top_rejected_variant_tags=self._top_rejected_variant_tags(rejected_candidates),
+        )
+
     def search_music_track_best_match(
         self,
         artist,
@@ -1396,6 +1915,14 @@ class SearchResolutionService:
                 "failure_reason": "no_candidates",
                 "coherence_key": coherence_key,
                 "coherence_boost_applied": 0,
+                "decision_edge": {
+                    "accepted_selection": None,
+                    "rejected_candidates": [],
+                    "final_rejection": None,
+                    "candidate_variant_distribution": {},
+                    "selected_candidate_variant_tags": [],
+                    "top_rejected_variant_tags": [],
+                },
             }
             return None
         first_rung = max(0, min(int(start_rung or 0), len(ladder) - 1))
@@ -1420,6 +1947,12 @@ class SearchResolutionService:
             mb_injected_candidates, mb_probe_rejections = resolved_injected, {}
         mb_injected_rejections = dict(mb_probe_rejections or {})
         mb_injected_selected = False
+        decision_rejected_candidates = []
+        decision_accepted = None
+        decision_final_rejection = None
+        decision_variant_distribution = {}
+        decision_selected_variant_tags = []
+        decision_top_rejected_variant_tags = []
 
         for ladder_entry in ladder[first_rung:]:
             query = str(ladder_entry.get("query") or "").strip()
@@ -1437,20 +1970,16 @@ class SearchResolutionService:
                 "track_aliases": normalized_aliases,
                 "track_disambiguation": normalized_disambiguation,
             }
-            candidates = self.search_music_track_candidates(query, limit=limit, query_label=query_label)
-            if rung == first_rung and mb_injected_candidates:
-                deduped = []
-                seen_urls = set()
-                for candidate in list(mb_injected_candidates) + list(candidates):
-                    if not isinstance(candidate, dict):
-                        continue
-                    url_key = str(candidate.get("url") or "").strip().lower()
-                    if url_key and url_key in seen_urls:
-                        continue
-                    if url_key:
-                        seen_urls.add(url_key)
-                    deduped.append(candidate)
-                candidates = deduped
+            candidates = self.retrieve_candidates(
+                {
+                    "query": query,
+                    "limit": limit,
+                    "query_label": query_label,
+                    "rung": rung,
+                    "first_rung": first_rung,
+                    "mb_injected_candidates": mb_injected_candidates,
+                }
+            )
             rung_meta = {
                 "rung": rung,
                 "query_label": query_label,
@@ -1473,64 +2002,39 @@ class SearchResolutionService:
                 )
                 continue
 
-            def _score_for_pass(duration_max_delta_ms):
-                scored = []
-                expected = dict(expected_base)
-                expected["duration_max_delta_ms"] = int(duration_max_delta_ms)
-                for candidate in candidates:
-                    source = candidate.get("source")
-                    adapter = self.adapters.get(source)
-                    source_modifier = adapter.source_modifier(candidate) if adapter else 1.0
-                    item = dict(candidate)
-                    item.update(score_candidate(expected, item, source_modifier=source_modifier))
-                    breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
-                    item["base_score"] = breakdown.get("raw_score_100")
-                    item["final_score_100"] = breakdown.get("final_score_100")
-                    scored.append(item)
-                return rank_candidates(scored, source_priority=list(MUSIC_TRACK_SOURCE_PRIORITY_WITH_MB))
-
-            ranked_a = _score_for_pass(_MUSIC_DURATION_STRICT_MAX_DELTA_MS)
-            if coherence_key:
-                ranked_a, applied = self._apply_album_coherence_tiebreak(
-                    ranked_a,
-                    coherence_key=coherence_key,
-                    pass_name="strict",
-                    query_label=query_label,
-                )
-                coherence_boost_applied += applied
-            for scored in ranked_a:
-                if str(scored.get("source") or "").strip().lower() != "mb_relationship":
+            rank_result = self.rank_and_gate(
+                {
+                    "expected_base": expected_base,
+                    "coherence_key": coherence_key,
+                    "query_label": query_label,
+                    "rung": rung,
+                    "recording_mbid": recording_mbid,
+                },
+                candidates,
+            )
+            coherence_boost_applied += int(rank_result.coherence_boost_applied or 0)
+            for key, value in (rank_result.mb_injected_rejections or {}).items():
+                mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + int(value or 0)
+            for tag, count in (rank_result.candidate_variant_distribution or {}).items():
+                tag_key = str(tag or "").strip()
+                if not tag_key:
                     continue
-                reason = scored.get("rejection_reason")
-                if not reason:
-                    continue
-                key = self._classify_mb_injected_rejection(reason)
-                mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
-                _log_event(
-                    logging.INFO,
-                    "mb_youtube_injected_rejected",
-                    recording_mbid=str(recording_mbid or "").strip() or None,
-                    candidate_id=scored.get("candidate_id"),
-                    url=scored.get("url"),
-                    rejection_reason=reason,
-                    classified_reason=key,
-                    selected_rung=rung,
-                    query_label=query_label,
-                )
-            eligible_a = [
-                c for c in ranked_a
-                if not c.get("rejection_reason")
-                and float(c.get("final_score", 0.0)) >= float(self.music_source_match_threshold)
-            ]
-            selected_a = eligible_a[0] if eligible_a else None
-            if selected_a is not None:
-                selected = selected_a
-                selected_ranked = ranked_a
+                decision_variant_distribution[tag_key] = int(decision_variant_distribution.get(tag_key) or 0) + int(count or 0)
+            for entry in (rank_result.rejected_candidates or []):
+                if isinstance(entry, dict):
+                    decision_rejected_candidates.append(entry)
+            if rank_result.selected is not None:
+                selected = rank_result.selected
+                selected_ranked = rank_result.ranked
                 selected_query = query
                 selected_rung = rung
-                selected_pass = "strict"
-                mb_injected_selected = str(selected_a.get("source") or "").strip().lower() == "mb_relationship"
-                rung_meta["selected_pass"] = "strict"
+                selected_pass = rank_result.selected_pass
+                mb_injected_selected = str(selected.get("source") or "").strip().lower() == "mb_relationship"
+                decision_accepted = rank_result.accepted_selection if isinstance(rank_result.accepted_selection, dict) else None
+                decision_selected_variant_tags = list(rank_result.selected_candidate_variant_tags or [])
+                decision_top_rejected_variant_tags = list(rank_result.top_rejected_variant_tags or [])
+                decision_final_rejection = None
+                rung_meta["selected_pass"] = selected_pass
                 attempted.append(rung_meta)
                 _log_event(
                     logging.INFO,
@@ -1539,79 +2043,17 @@ class SearchResolutionService:
                     query_label=query_label,
                     query=query,
                     candidates=len(candidates),
-                    selected_pass="strict",
+                    selected_pass=selected_pass,
                     failure_reason=None,
                 )
                 if coherence_key:
-                    self._record_album_coherence_family(coherence_key, selected_a)
+                    self._record_album_coherence_family(coherence_key, selected)
                 break
 
-            ranked_b = _score_for_pass(_MUSIC_DURATION_EXPANDED_MAX_DELTA_MS)
-            if coherence_key:
-                ranked_b, applied = self._apply_album_coherence_tiebreak(
-                    ranked_b,
-                    coherence_key=coherence_key,
-                    pass_name="expanded",
-                    query_label=query_label,
-                )
-                coherence_boost_applied += applied
-            eligible_b = []
-            for candidate in ranked_b:
-                if candidate.get("rejection_reason"):
-                    continue
-                if float(candidate.get("final_score", 0.0)) < float(self.music_source_match_threshold):
-                    continue
-                try:
-                    delta_ok = candidate.get("duration_delta_ms") is not None and int(candidate.get("duration_delta_ms")) <= _MUSIC_DURATION_EXPANDED_MAX_DELTA_MS
-                except Exception:
-                    delta_ok = False
-                if not delta_ok:
-                    continue
-                if float(candidate.get("score_track", 0.0)) < _MUSIC_PASS_B_MIN_TITLE_SIMILARITY:
-                    if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
-                        key = "mb_injected_failed_title"
-                        mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
-                    continue
-                if float(candidate.get("score_artist", 0.0)) < _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY:
-                    if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
-                        key = "mb_injected_failed_artist"
-                        mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
-                    continue
-                if not bool(candidate.get("authority_channel_match")):
-                    if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
-                        key = "mb_injected_failed_authority"
-                        mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
-                    continue
-                eligible_b.append(candidate)
-            selected_b = eligible_b[0] if eligible_b else None
-            if selected_b is not None:
-                selected = selected_b
-                selected_ranked = ranked_b
-                selected_query = query
-                selected_rung = rung
-                selected_pass = "expanded"
-                mb_injected_selected = str(selected_b.get("source") or "").strip().lower() == "mb_relationship"
-                rung_meta["selected_pass"] = "expanded"
-                attempted.append(rung_meta)
-                _log_event(
-                    logging.INFO,
-                    "music_query_rung_evaluated",
-                    rung=rung,
-                    query_label=query_label,
-                    query=query,
-                    candidates=len(candidates),
-                    selected_pass="expanded",
-                    failure_reason=None,
-                )
-                if coherence_key:
-                    self._record_album_coherence_family(coherence_key, selected_b)
-                break
-
-            pass_a_reasons = {str(c.get("rejection_reason") or "") for c in ranked_a if c.get("rejection_reason")}
-            if "duration_out_of_bounds" in pass_a_reasons or "duration_over_hard_cap" in pass_a_reasons:
-                failure_reason = "duration_filtered"
-            else:
-                failure_reason = "no_candidate_above_threshold"
+            failure_reason = str(rank_result.failure_reason or "no_candidate_above_threshold")
+            if isinstance(rank_result.final_rejection, dict):
+                decision_final_rejection = rank_result.final_rejection
+            decision_top_rejected_variant_tags = list(rank_result.top_rejected_variant_tags or decision_top_rejected_variant_tags)
             rung_meta["failure_reason"] = failure_reason
             attempted.append(rung_meta)
             _log_event(
@@ -1624,6 +2066,17 @@ class SearchResolutionService:
                 selected_pass=None,
                 failure_reason=failure_reason,
             )
+        if selected is None and not isinstance(decision_final_rejection, dict):
+            nearest = self._nearest_rejection(decision_rejected_candidates)
+            if isinstance(nearest, dict):
+                decision_final_rejection = {
+                    "failure_reason": failure_reason,
+                    "top_failed_gate": nearest.get("top_failed_gate"),
+                    "nearest_pass_margin": nearest.get("nearest_pass_margin"),
+                    "candidate_id": nearest.get("candidate_id"),
+                }
+        if not decision_top_rejected_variant_tags:
+            decision_top_rejected_variant_tags = self._top_rejected_variant_tags(decision_rejected_candidates)
         mb_injected_album_success_count = 0
         if mb_injected_selected and coherence_key:
             with self._album_coherence_lock:
@@ -1650,6 +2103,14 @@ class SearchResolutionService:
             "mb_injected_selected": mb_injected_selected,
             "mb_injected_rejections": mb_injected_rejections,
             "mb_injected_album_success_count": mb_injected_album_success_count,
+            "decision_edge": {
+                "accepted_selection": decision_accepted,
+                "rejected_candidates": decision_rejected_candidates,
+                "final_rejection": None if selected is not None else decision_final_rejection,
+                "candidate_variant_distribution": dict(sorted(decision_variant_distribution.items(), key=lambda item: item[0])),
+                "selected_candidate_variant_tags": sorted({str(tag) for tag in (decision_selected_variant_tags or []) if str(tag or "").strip()}),
+                "top_rejected_variant_tags": list(decision_top_rejected_variant_tags or []),
+            },
         }
         ranked = selected_ranked
         if self.debug_music_scoring:

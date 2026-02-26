@@ -82,7 +82,25 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
                         "canonical_metadata": {
                             "recording_mbid": "rec-ok",
                             "mb_release_group_id": "rg-1",
-                        }
+                        },
+                        "runtime_search_meta": {
+                            "decision_edge": {
+                                "accepted_selection": {
+                                    "selected_candidate_id": "ok-cand",
+                                    "selected_score": 0.95,
+                                    "runner_up_score": 0.90,
+                                    "runner_up_gap": 0.05,
+                                    "top_supporting_features": {
+                                        "duration_delta_ms": 0,
+                                        "title_similarity": 1.0,
+                                        "artist_similarity": 1.0,
+                                        "variant_alignment": True,
+                                    },
+                                },
+                                "rejected_candidates": [],
+                                "final_rejection": None,
+                            }
+                        },
                     }
                 ),
                 str(tmp_path / "Music" / "Artist" / "Album (2024)" / "01 - Song.mp3"),
@@ -100,7 +118,37 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
                         "canonical_metadata": {
                             "recording_mbid": "rec-fail",
                             "mb_release_group_id": "rg-1",
-                        }
+                        },
+                        "runtime_search_meta": {
+                            "decision_edge": {
+                                "accepted_selection": None,
+                                "rejected_candidates": [
+                                    {
+                                        "candidate_id": "bad-cand",
+                                        "top_failed_gate": "duration_delta_ms",
+                                        "nearest_pass_margin": {
+                                            "name": "duration_delta_ms",
+                                            "value": 4200,
+                                            "threshold": 3000,
+                                            "margin_to_pass": 1200,
+                                            "direction": "<=",
+                                        },
+                                    }
+                                ],
+                                "final_rejection": {
+                                    "failure_reason": "duration_filtered",
+                                    "top_failed_gate": "duration_delta_ms",
+                                    "nearest_pass_margin": {
+                                        "name": "duration_delta_ms",
+                                        "value": 4200,
+                                        "threshold": 3000,
+                                        "margin_to_pass": 1200,
+                                        "direction": "<=",
+                                    },
+                                    "candidate_id": "bad-cand",
+                                },
+                            }
+                        },
                     }
                 ),
                 None,
@@ -140,3 +188,10 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
     assert "why_missing" in payload
     assert "hint_counts" in payload["why_missing"]
     assert isinstance(payload["why_missing"]["tracks"], list)
+    assert "per_track" in payload
+    assert isinstance(payload["per_track"], list)
+    assert all("decision_edge" in item for item in payload["per_track"])
+    edge = payload["per_track"][0]["decision_edge"]
+    assert "candidate_variant_distribution" in edge
+    assert "selected_candidate_variant_tags" in edge
+    assert "top_rejected_variant_tags" in edge

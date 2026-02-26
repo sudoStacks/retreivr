@@ -28,6 +28,7 @@ rank_candidates = scoring.rank_candidates
 score_candidate = scoring.score_candidate
 select_best_candidate = scoring.select_best_candidate
 tokenize = scoring.tokenize
+classify_music_title_variants = scoring.classify_music_title_variants
 
 
 class SearchScoringTests(unittest.TestCase):
@@ -159,6 +160,25 @@ class SearchScoringTests(unittest.TestCase):
         }
         scored = score_candidate(expected, candidate, source_modifier=1.0)
         self.assertEqual(scored.get("rejection_reason"), "disallowed_variant")
+
+    def test_classify_music_title_variants_representative_tokens(self):
+        tags = classify_music_title_variants(
+            "Artist - Song (Official Audio) [Lyric Video] (Remastered 2020) (Radio Edit) (Extended Cut) [Sped Up] [Nightcore] [8D]"
+        )
+        self.assertIn("official_audio", tags)
+        self.assertIn("lyric_video", tags)
+        self.assertIn("remaster", tags)
+        self.assertIn("radio_edit", tags)
+        self.assertIn("extended", tags)
+        self.assertIn("cut", tags)
+        self.assertIn("sped_up", tags)
+        self.assertIn("nightcore", tags)
+        self.assertIn("8d", tags)
+
+    def test_classify_music_title_variants_stable_under_normalization(self):
+        a = classify_music_title_variants("  ARTIST — Song (Lyric Video) [Slowed Down]  ")
+        b = classify_music_title_variants("artist song lyric-video slowed_down")
+        self.assertEqual(a, b)
 
 
 if __name__ == "__main__":

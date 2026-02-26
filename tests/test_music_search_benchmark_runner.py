@@ -105,7 +105,263 @@ def test_run_benchmark_returns_expected_summary_fields() -> None:
     assert summary["completion_percent"] == 50.0
     assert "rejection_mix" in summary
     assert "per_track" in summary
+    assert "retrieval_metrics" in summary
     assert summary["unresolved_classification"]["no_viable_match"] >= 1
+
+
+def test_retrieval_metrics_recall_at_k_are_deterministic() -> None:
+    dataset = {
+        "dataset_name": "retrieval-metrics",
+        "fixtures": {
+            "fixture-top1": {
+                "expect_match": True,
+                "expect_selected_candidate_id": "cand-1",
+                "rungs": [[
+                    {
+                        "candidate_id": "cand-1",
+                        "source": "youtube_music",
+                        "title": "{{track}}",
+                        "uploader": "{{artist}} - Topic",
+                        "artist_detected": "{{artist}}",
+                        "track_detected": "{{track}}",
+                        "album_detected": "{{album}}",
+                        "duration_sec": 210,
+                        "url": "https://music.youtube.com/watch?v={{recording_mbid}}1",
+                    },
+                    {
+                        "candidate_id": "cand-2",
+                        "source": "youtube",
+                        "title": "{{track}} live",
+                        "uploader": "{{artist}} Archive",
+                        "artist_detected": "{{artist}}",
+                        "track_detected": "{{track}}",
+                        "album_detected": "{{album}}",
+                        "duration_sec": 210,
+                        "url": "https://youtube.com/watch?v={{recording_mbid}}2",
+                    },
+                ]],
+            },
+            "fixture-top4": {
+                "expect_match": False,
+                "expect_selected_candidate_id": "cand-4",
+                "rungs": [[
+                    {"candidate_id": "cand-a", "source": "youtube", "title": "{{track}} remix", "uploader": "Mixes", "artist_detected": "{{artist}}", "track_detected": "{{track}}", "album_detected": "{{album}}", "duration_sec": 210, "url": "https://youtube.com/watch?v={{recording_mbid}}a"},
+                    {"candidate_id": "cand-b", "source": "youtube", "title": "{{track}} cover", "uploader": "Covers", "artist_detected": "Other", "track_detected": "{{track}}", "album_detected": "{{album}}", "duration_sec": 210, "url": "https://youtube.com/watch?v={{recording_mbid}}b"},
+                    {"candidate_id": "cand-c", "source": "youtube", "title": "{{track}} live", "uploader": "Live", "artist_detected": "{{artist}}", "track_detected": "{{track}}", "album_detected": "{{album}}", "duration_sec": 210, "url": "https://youtube.com/watch?v={{recording_mbid}}c"},
+                    {"candidate_id": "cand-4", "source": "youtube", "title": "{{track}} acoustic", "uploader": "{{artist}}", "artist_detected": "{{artist}}", "track_detected": "{{track}}", "album_detected": "{{album}}", "duration_sec": 210, "url": "https://youtube.com/watch?v={{recording_mbid}}4"},
+                ]],
+            },
+            "fixture-miss": {
+                "expect_match": False,
+                "expect_selected_candidate_id": "missing-id",
+                "rungs": [[
+                    {"candidate_id": "cand-x", "source": "youtube", "title": "{{track}} remix", "uploader": "Mixes", "artist_detected": "{{artist}}", "track_detected": "{{track}}", "album_detected": "{{album}}", "duration_sec": 210, "url": "https://youtube.com/watch?v={{recording_mbid}}x"},
+                ]],
+            },
+        },
+        "albums": [
+            {
+                "album_id": "retrieval-a1",
+                "artist": "Artist",
+                "title": "Album",
+                "release_group_mbid": "51000000-0000-4000-8000-000000000001",
+                "tracks": [
+                    {"recording_mbid": "51000000-0000-4000-8000-000000000101", "track": "Track 1", "duration_ms": 210000, "fixture": "fixture-top1"},
+                    {"recording_mbid": "51000000-0000-4000-8000-000000000102", "track": "Track 2", "duration_ms": 210000, "fixture": "fixture-top4"},
+                    {"recording_mbid": "51000000-0000-4000-8000-000000000103", "track": "Track 3", "duration_ms": 210000, "fixture": "fixture-miss"},
+                ],
+            }
+        ],
+    }
+    first = run_benchmark(dataset)
+    second = run_benchmark(dataset)
+    assert first["retrieval_metrics"] == second["retrieval_metrics"]
+
+    recall = first["retrieval_metrics"]["recall_at_k"]
+    assert recall["1"]["hits"] == 1
+    assert recall["3"]["hits"] == 1
+    assert recall["5"]["hits"] == 2
+    assert recall["10"]["hits"] == 2
+    assert recall["10"]["evaluated"] == 3
+    assert recall["1"]["recall_percent"] == pytest.approx(100.0 / 3.0)
+    assert recall["5"]["recall_percent"] == pytest.approx(200.0 / 3.0)
+
+
+def test_benchmark_decision_edge_emits_gate_margins() -> None:
+    dataset = {
+        "dataset_name": "decision-edge-margins",
+        "fixtures": {
+            "edge": {
+                "expect_match": False,
+                "rungs": [
+                    [
+                        {
+                            "candidate_id": "c-variant",
+                            "source": "youtube_music",
+                            "title": "{{track}} (Live)",
+                            "uploader": "{{artist}} - Topic",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}v",
+                        },
+                        {
+                            "candidate_id": "c-artist",
+                            "source": "youtube_music",
+                            "title": "{{track}}",
+                            "uploader": "Unrelated Performer - Topic",
+                            "artist_detected": "Unrelated Performer",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}a",
+                        },
+                        {
+                            "candidate_id": "c-title",
+                            "source": "youtube_music",
+                            "title": "Different Song",
+                            "uploader": "{{artist}} - Topic",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "Totally Different",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 210,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}t",
+                        },
+                        {
+                            "candidate_id": "c-duration",
+                            "source": "youtube_music",
+                            "title": "{{track}}",
+                            "uploader": "{{artist}} - Topic",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 280,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}d",
+                        },
+                    ]
+                ],
+            }
+        },
+        "albums": [
+            {
+                "album_id": "edge-a1",
+                "artist": "Artist",
+                "title": "Album",
+                "release_group_mbid": "52000000-0000-4000-8000-000000000001",
+                "tracks": [
+                    {
+                        "recording_mbid": "52000000-0000-4000-8000-000000000101",
+                        "track": "Song",
+                        "duration_ms": 210000,
+                        "fixture": "edge",
+                    }
+                ],
+            }
+        ],
+    }
+    summary = run_benchmark(dataset)
+    per_track = summary["per_track"][0]
+    decision_edge = per_track["decision_edge"]
+    rejected = decision_edge["rejected_candidates"]
+    gates = {str(item.get("top_failed_gate") or "") for item in rejected}
+    assert "variant_alignment" in gates
+    assert "artist_similarity" in gates
+    assert "title_similarity" in gates
+    assert ("duration_delta_ms" in gates) or ("duration_hard_cap_ms" in gates)
+    final_rejection = decision_edge["final_rejection"]
+    assert isinstance(final_rejection, dict)
+    margin = final_rejection.get("nearest_pass_margin") or {}
+    assert "margin_to_pass" in margin
+    variant_dist = decision_edge.get("candidate_variant_distribution") or {}
+    assert int(variant_dist.get("live") or 0) >= 1
+    assert int(variant_dist.get("remaster") or 0) == 0
+    assert isinstance(decision_edge.get("selected_candidate_variant_tags"), list)
+    assert isinstance(decision_edge.get("top_rejected_variant_tags"), list)
+    assert "live" in set(decision_edge.get("top_rejected_variant_tags") or [])
+
+
+def test_benchmark_decision_edge_margins_stable_across_candidate_shuffles() -> None:
+    base_candidates = [
+        {
+            "candidate_id": "s-variant",
+            "source": "youtube_music",
+            "title": "{{track}} (Live)",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}sv",
+        },
+        {
+            "candidate_id": "s-artist",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "Unrelated Performer - Topic",
+            "artist_detected": "Unrelated Performer",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 210,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}sa",
+        },
+        {
+            "candidate_id": "s-duration",
+            "source": "youtube_music",
+            "title": "{{track}}",
+            "uploader": "{{artist}} - Topic",
+            "artist_detected": "{{artist}}",
+            "track_detected": "{{track}}",
+            "album_detected": "{{album}}",
+            "duration_sec": 260,
+            "url": "https://music.youtube.com/watch?v={{recording_mbid}}sd",
+        },
+    ]
+    reference = None
+    for seed in range(10):
+        shuffled = copy.deepcopy(base_candidates)
+        random.Random(seed).shuffle(shuffled)
+        dataset = {
+            "dataset_name": f"decision-edge-stable-{seed}",
+            "fixtures": {"edge": {"expect_match": False, "rungs": [shuffled]}},
+            "albums": [
+                {
+                    "album_id": "edge-a2",
+                    "artist": "Artist",
+                    "title": "Album",
+                    "release_group_mbid": "52000000-0000-4000-8000-000000000002",
+                    "tracks": [
+                        {
+                            "recording_mbid": "52000000-0000-4000-8000-000000000202",
+                            "track": "Song",
+                            "duration_ms": 210000,
+                            "fixture": "edge",
+                        }
+                    ],
+                }
+            ],
+        }
+        summary = run_benchmark(dataset)
+        edge = summary["per_track"][0]["decision_edge"]
+        normalized = {
+            "final_rejection": edge.get("final_rejection"),
+            "variant_distribution": edge.get("candidate_variant_distribution"),
+            "top_rejected_variant_tags": edge.get("top_rejected_variant_tags"),
+            "rejected": sorted(
+                [
+                    (
+                        str(item.get("candidate_id") or ""),
+                        str(item.get("top_failed_gate") or ""),
+                        float(((item.get("nearest_pass_margin") or {}).get("margin_to_pass")) or 0.0),
+                    )
+                    for item in (edge.get("rejected_candidates") or [])
+                ]
+            ),
+        }
+        if reference is None:
+            reference = normalized
+            continue
+        assert normalized == reference
 
 
 def test_gate_passes_and_fails_as_expected() -> None:
@@ -691,6 +947,13 @@ def test_why_missing_hint_unavailable_maps_from_failure_reason() -> None:
             candidate_count=1,
             expected_selected_candidate_id=None,
             expected_match=False,
+            retrieved_candidate_ids=[],
+            decision_accepted_selection=None,
+            decision_rejected_candidates=[],
+            decision_final_rejection=None,
+            decision_candidate_variant_distribution={},
+            decision_selected_candidate_variant_tags=[],
+            decision_top_rejected_variant_tags=[],
             coherence_boost_applied=0,
             coherence_selected_delta=0.0,
             coherence_near_miss=False,
@@ -720,6 +983,13 @@ def test_why_missing_hint_duration_mismatch_persistent() -> None:
             candidate_count=4,
             expected_selected_candidate_id=None,
             expected_match=False,
+            retrieved_candidate_ids=[],
+            decision_accepted_selection=None,
+            decision_rejected_candidates=[],
+            decision_final_rejection=None,
+            decision_candidate_variant_distribution={},
+            decision_selected_candidate_variant_tags=[],
+            decision_top_rejected_variant_tags=[],
             coherence_boost_applied=0,
             coherence_selected_delta=0.0,
             coherence_near_miss=False,
@@ -748,6 +1018,13 @@ def test_why_missing_hint_coherence_near_miss() -> None:
             candidate_count=3,
             expected_selected_candidate_id=None,
             expected_match=False,
+            retrieved_candidate_ids=[],
+            decision_accepted_selection=None,
+            decision_rejected_candidates=[],
+            decision_final_rejection=None,
+            decision_candidate_variant_distribution={},
+            decision_selected_candidate_variant_tags=[],
+            decision_top_rejected_variant_tags=[],
             coherence_boost_applied=0,
             coherence_selected_delta=0.0,
             coherence_near_miss=True,

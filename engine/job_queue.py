@@ -1706,22 +1706,22 @@ class DownloadWorkerEngine:
             injected_selected = bool(search_meta.get("mb_injected_selected"))
             injected_candidates = int(search_meta.get("mb_injected_candidates") or 0)
             album_success_count = int(search_meta.get("mb_injected_album_success_count") or 0)
-            if injected_candidates > 0 or injected_selected or injected_rejections:
-                try:
-                    self.store.merge_output_template_fields(
-                        job.id,
-                        {
-                            "runtime_search_meta": {
-                                "failure_reason": search_meta.get("failure_reason"),
-                                "mb_injected_candidates": injected_candidates,
-                                "mb_injected_selected": injected_selected,
-                                "mb_injected_rejections": injected_rejections or {},
-                                "mb_injected_album_success_count": album_success_count,
-                            }
-                        },
-                    )
-                except Exception:
-                    logger.exception("[MUSIC] failed to persist runtime_search_meta job_id=%s", job.id)
+            try:
+                self.store.merge_output_template_fields(
+                    job.id,
+                    {
+                        "runtime_search_meta": {
+                            "failure_reason": search_meta.get("failure_reason"),
+                            "mb_injected_candidates": injected_candidates,
+                            "mb_injected_selected": injected_selected,
+                            "mb_injected_rejections": injected_rejections or {},
+                            "mb_injected_album_success_count": album_success_count,
+                            "decision_edge": search_meta.get("decision_edge") if isinstance(search_meta.get("decision_edge"), dict) else {},
+                        }
+                    },
+                )
+            except Exception:
+                logger.exception("[MUSIC] failed to persist runtime_search_meta job_id=%s", job.id)
             if injected_candidates > 0 or injected_selected or injected_rejections:
                 _log_event(
                     logging.INFO,
@@ -5445,6 +5445,36 @@ def _classify_runtime_missing_hint(failure_reason):
     return ("recoverable_ladder_extension", "Recoverable by ladder extension (no candidates)")
 
 
+def _normalize_decision_edge(value):
+    edge = value if isinstance(value, dict) else {}
+    accepted = edge.get("accepted_selection") if isinstance(edge.get("accepted_selection"), dict) else None
+    final_rejection = edge.get("final_rejection") if isinstance(edge.get("final_rejection"), dict) else None
+    rejected_candidates = edge.get("rejected_candidates") if isinstance(edge.get("rejected_candidates"), list) else []
+    normalized_rejected = [dict(item) for item in rejected_candidates if isinstance(item, dict)]
+    candidate_variant_distribution = edge.get("candidate_variant_distribution") if isinstance(edge.get("candidate_variant_distribution"), dict) else {}
+    normalized_distribution = {}
+    for key, value in candidate_variant_distribution.items():
+        tag = str(key or "").strip()
+        if not tag:
+            continue
+        try:
+            normalized_distribution[tag] = int(value or 0)
+        except Exception:
+            continue
+    selected_variant_tags = edge.get("selected_candidate_variant_tags") if isinstance(edge.get("selected_candidate_variant_tags"), list) else []
+    normalized_selected_variant_tags = sorted({str(tag or "").strip() for tag in selected_variant_tags if str(tag or "").strip()})
+    top_rejected_variant_tags = edge.get("top_rejected_variant_tags") if isinstance(edge.get("top_rejected_variant_tags"), list) else []
+    normalized_top_rejected_variant_tags = [str(tag or "").strip() for tag in top_rejected_variant_tags if str(tag or "").strip()]
+    return {
+        "accepted_selection": accepted,
+        "final_rejection": final_rejection,
+        "rejected_candidates": normalized_rejected,
+        "candidate_variant_distribution": dict(sorted(normalized_distribution.items(), key=lambda item: item[0])),
+        "selected_candidate_variant_tags": normalized_selected_variant_tags,
+        "top_rejected_variant_tags": normalized_top_rejected_variant_tags,
+    }
+
+
 def build_music_album_run_summary(db_path, album_run_id):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -5487,6 +5517,7 @@ def build_music_album_run_summary(db_path, album_run_id):
         canonical = output_template.get("canonical_metadata") if isinstance(output_template.get("canonical_metadata"), dict) else {}
         track_id = str(canonical.get("recording_mbid") or output_template.get("recording_mbid") or row["id"]).strip()
         runtime_search_meta = output_template.get("runtime_search_meta") if isinstance(output_template.get("runtime_search_meta"), dict) else {}
+        decision_edge = _normalize_decision_edge(runtime_search_meta.get("decision_edge"))
         if bool(runtime_search_meta.get("wrong_variant_flag")):
             wrong_variant_count += 1
 
@@ -5521,6 +5552,7 @@ def build_music_album_run_summary(db_path, album_run_id):
                 "track_id": track_id,
                 "resolved": resolved,
                 "failure_reason": failure_reason,
+                "decision_edge": decision_edge,
             }
         )
 

@@ -57,6 +57,21 @@ _MUSIC_NOISE_PATTERNS = (
     ("session_noise", re.compile(r"\bcmt\s*\d+\s*sessions?\b", re.IGNORECASE), 7.0),
 )
 
+_VARIANT_TOKEN_RULES = (
+    ("official_audio", re.compile(r"\bofficial\s+audio\b", re.IGNORECASE)),
+    ("lyric_video", re.compile(r"\blyrics?\b|\blyric\s+video\b", re.IGNORECASE)),
+    ("live", re.compile(r"\blive\b", re.IGNORECASE)),
+    ("remaster", re.compile(r"\bremaster(?:ed)?(?:\s+\d{2,4})?\b", re.IGNORECASE)),
+    ("radio_edit", re.compile(r"\bradio\s+edit(?:ion)?\b|\bradio\s+version\b", re.IGNORECASE)),
+    ("sped_up", re.compile(r"\bsped[\s_-]*up\b", re.IGNORECASE)),
+    ("slowed", re.compile(r"\bslowed(?:[\s_-]+down)?\b", re.IGNORECASE)),
+    ("nightcore", re.compile(r"\bnightcore\b", re.IGNORECASE)),
+    ("8d", re.compile(r"\b8d\b", re.IGNORECASE)),
+    ("extended", re.compile(r"\bextended\b", re.IGNORECASE)),
+    ("edit", re.compile(r"\bedit\b", re.IGNORECASE)),
+    ("cut", re.compile(r"\bcut\b", re.IGNORECASE)),
+)
+
 
 def _music_query_variant_flags(query):
     query_lower = str(query or "").lower()
@@ -190,6 +205,17 @@ def normalize_text(value):
     text = re.sub(r"[^\w\s/&]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def classify_music_title_variants(title):
+    raw = unicodedata.normalize("NFKD", str(title or "")).lower()
+    normalized = re.sub(r"[^\w\s]", " ", raw)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    tags = set()
+    for tag, pattern in _VARIANT_TOKEN_RULES:
+        if pattern.search(normalized):
+            tags.add(tag)
+    return tags
 
 
 def tokenize(value):

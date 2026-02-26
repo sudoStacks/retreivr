@@ -29,6 +29,8 @@ Transient network failures are excluded from unavailable classification (timeout
 
 ## What it measures
 
+- Retrieval quality before ranking/gating:
+  - `retrieval_metrics.recall_at_k` for `k={1,3,5,10}` based on `expected_selected_candidate_id` presence in retrieved candidates
 - Album completion rate (`resolved tracks / total tracks`)
 - Precision proxy: wrong-variant acceptance flags
 - Rejection mix (aggregate candidate rejection reasons)
@@ -49,6 +51,17 @@ Transient network failures are excluded from unavailable classification (timeout
 - Injected candidates are marked as `source=mb_relationship` for observability.
 - Injection does **not** auto-accept: candidates still pass the full existing scoring and hard gates (title/artist similarity, duration bounds, variant blocking, and threshold checks).
 - If injected candidates fail gates, the normal ladder continues unchanged.
+
+## Retrieval/Ranking Split
+
+Music Mode evaluation is explicitly split into two phases:
+
+- `retrieve_candidates(ctx) -> [Candidate]`
+  - Broad, fixture-driven candidate collection (high recall objective).
+- `rank_and_gate(ctx, candidates) -> SelectionResult`
+  - Existing strict scoring and acceptance gates (precision objective).
+
+This split is reporting-only in terms of benchmark output; acceptance thresholds and gate behavior remain unchanged.
 
 ## Dataset
 
@@ -96,6 +109,23 @@ Alternative wrapper:
 ```bash
 python3 scripts/music_search_benchmark.py --enforce-gate
 ```
+
+Hard-negative fixture mining (review-only):
+
+```bash
+python3 scripts/music_hard_negative_miner.py \
+  --input /path/to/run_summary.json \
+  --output benchmarks/generated_fixture_stubs/hard_negative_fixture_candidates.json
+```
+
+The miner accepts either a direct `run_summary.json`/benchmark summary payload or wrapped artifacts
+(for example `{"summary": {...}}` or `{"run_summary": {...}}`). It emits:
+
+- `generated_fixtures`: compact fixture stubs with placeholder metadata for manual curation
+- `album_stubs`: track/album placeholders ready to copy into dataset drafts
+- `top_recurring_failure_motifs`: motif counts (wrong artist, lyric/remaster/live variants, duration drift, unavailable, etc.)
+
+Generated output is intentionally review-only and must not be auto-merged into the benchmark dataset.
 
 ## Adding albums
 

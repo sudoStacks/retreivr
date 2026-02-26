@@ -5,25 +5,26 @@ All notable changes to this project will be documented here.
 ## v0.9.6 — Runtime Distribution + Music Match Robustness
 
 ### Added
-- Added tag-driven GitHub release workflow for runtime distribution:
-  - builds/pushes versioned GHCR image (`ghcr.io/<owner>/retreivr:<tag>`, plus `latest` on non-prerelease tags)
-  - creates and attaches minimal runtime bundle zip assets (`retreivr-runtime-<tag>.zip`) containing compose/env/config example + `README-runtime.md`
-- Added dedicated `README-runtime.md` for simplified Docker-first deployment.
-- Added deterministic query-ladder progression coverage and targeted runtime assertion tests for music retry escalation behavior.
+- Tag-driven runtime distribution workflow: GHCR versioned images and release bundle zip assets.
+- `README-runtime.md` for streamlined Docker-first deployment.
+- Deterministic, fixture-driven music benchmark gate with CI artifacts (`results` + markdown delta report).
+- Runtime `run_summary.json` artifact for album runs (completion, unresolved classes, rejection mix, why-missing hints, per-track diagnostics).
 
 ### Changed
-- Music discovery/scoring hardening for better true-positive recovery on edge tracks without lowering global thresholds:
-  - deterministic multi-rung query ladder execution with structured fallback behavior
-  - two-pass duration gating (`strict` then bounded expanded pass) with authority and similarity constraints
-  - targeted retry escalation to avoid repeating dead-end queries
-- Parenthetical normalization was consolidated into reusable search/scoring utilities (search-only influence; canonical/stored metadata unchanged).
-- MusicBrainz retry behavior was hardened for transient failures with classified retry logic and bounded staggered backoff.
-- yt-dlp metadata probe handling was tuned to reduce non-fatal noise from format-unavailable probe failures while keeping download behavior unchanged.
+- Music search pipeline hardened without relaxing gates: deterministic multi-rung fallback, bounded duration expansion, and cleaner retry escalation.
+- Search normalization/parenthetical handling consolidated into shared scoring utilities (search influence only; canonical metadata unchanged).
+- Explicit retrieval vs ranking/gating separation with benchmark `recall@k` metrics (`k={1,3,5,10}`).
+- Observability expanded for benchmark/runtime paths:
+  - decision-edge reporting (failed gate + nearest-pass margin, accepted support features, runner-up gap)
+  - MB-injected candidate rejection classification and per-album injected rejection mix
+  - deterministic title-based variant tagging surfaced in summaries
+  - benchmark failure motif rollups and hard-negative fixture stub mining workflow (review-only generation).
+- MusicBrainz transient retry behavior and yt-dlp metadata probe noise handling refined for stability.
 
 ### Fixed
-- Fixed album download MusicBrainz include-contract failures by removing invalid `genres` includes from release-group/release fetch paths.
-- Fixed mp4 output regression where final mp4 artifacts could still carry incompatible audio streams by enforcing post-processing recode in the canonical yt-dlp contract.
-- Fixed web header branding text and topbar control placement consistency after nav/action refinements.
+- MusicBrainz include-contract failures in album metadata fetch (`genres` include misuse).
+- MP4 post-processing regression where incompatible audio streams could survive final output.
+- Home/header UI consistency regressions after navigation/action layout refinements.
 
 ## v0.9.5 — Music Mode Hardening + Playlist File Import
 

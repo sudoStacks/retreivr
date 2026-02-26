@@ -6,6 +6,31 @@
   "tracks_resolved": 41,
   "completion_percent": 97.61904761904762,
   "wrong_variant_flags": 0,
+  "retrieval_metrics": {
+    "evaluated_tracks": 41,
+    "recall_at_k": {
+      "1": {
+        "hits": 40,
+        "evaluated": 41,
+        "recall_percent": 97.5609756097561
+      },
+      "3": {
+        "hits": 41,
+        "evaluated": 41,
+        "recall_percent": 100.0
+      },
+      "5": {
+        "hits": 41,
+        "evaluated": 41,
+        "recall_percent": 100.0
+      },
+      "10": {
+        "hits": 41,
+        "evaluated": 41,
+        "recall_percent": 100.0
+      }
+    }
+  },
   "avg_selected_score": 0.9797951219512193,
   "avg_candidate_score": 0.9529087301587298,
   "coherence_boost_events": 1,
@@ -48,6 +73,13 @@
         }
       }
     ]
+  },
+  "failure_motifs": {
+    "live_rejection": 19,
+    "wrong_variant_accept": 2,
+    "duration_drift": 1,
+    "lyric_video_rejection": 1,
+    "remaster_rejection": 1
   },
   "per_album": {
     "brooks-dunn-greatest-hits": {
@@ -723,6 +755,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "mb-rel-ok",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "mb-rel-ok"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "mb-rel-ok",
+          "selected_score": 0.94,
+          "runner_up_score": null,
+          "runner_up_gap": 0.94,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -752,6 +807,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Believe (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -779,6 +882,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -808,6 +934,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Chattahoochee (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -837,6 +1011,57 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-expanded",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-expanded"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-expanded",
+          "selected_score": 0.8904000000000001,
+          "runner_up_score": null,
+          "runner_up_gap": 0.8904000000000001,
+          "top_supporting_features": {
+            "duration_delta_ms": 30000,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": [
+              "live"
+            ]
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "ok-expanded",
+            "source": "youtube_music",
+            "title": "Live Like You Were Dying",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "duration_out_of_bounds",
+            "top_failed_gate": "duration_delta_ms",
+            "nearest_pass_margin": {
+              "name": "duration_delta_ms",
+              "value": 30000,
+              "threshold": 12000,
+              "margin_to_pass": 18000.0,
+              "direction": "<="
+            },
+            "final_score": 0.8480000000000001,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [
+          "live"
+        ],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -866,6 +1091,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Man! I Feel Like a Woman! (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -893,6 +1166,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -922,6 +1218,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Friends in Low Places (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -949,6 +1293,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -978,6 +1345,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "The Good Stuff (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1007,6 +1422,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Blank Space (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1036,6 +1499,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "drivers license (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1063,6 +1574,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1090,6 +1624,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1119,6 +1676,47 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-expanded",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-expanded"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-expanded",
+          "selected_score": 0.8904000000000001,
+          "runner_up_score": null,
+          "runner_up_gap": 0.8904000000000001,
+          "top_supporting_features": {
+            "duration_delta_ms": 30000,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "ok-expanded",
+            "source": "youtube_music",
+            "title": "Happier Than Ever",
+            "variant_tags": [],
+            "rejection_reason": "duration_out_of_bounds",
+            "top_failed_gate": "duration_delta_ms",
+            "nearest_pass_margin": {
+              "name": "duration_delta_ms",
+              "value": 30000,
+              "threshold": 12000,
+              "margin_to_pass": 18000.0,
+              "direction": "<="
+            },
+            "final_score": 0.8480000000000001,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1148,6 +1746,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Easy On Me (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1175,6 +1821,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1204,6 +1873,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Circles (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1231,6 +1948,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1260,6 +2000,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "N95 (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1289,6 +2077,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Kill Bill (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1318,6 +2154,47 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-expanded",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-expanded"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-expanded",
+          "selected_score": 0.8904000000000001,
+          "runner_up_score": null,
+          "runner_up_gap": 0.8904000000000001,
+          "top_supporting_features": {
+            "duration_delta_ms": 30000,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "ok-expanded",
+            "source": "youtube_music",
+            "title": "Sand in My Boots",
+            "variant_tags": [],
+            "rejection_reason": "duration_out_of_bounds",
+            "top_failed_gate": "duration_delta_ms",
+            "nearest_pass_margin": {
+              "name": "duration_delta_ms",
+              "value": 30000,
+              "threshold": 12000,
+              "margin_to_pass": 18000.0,
+              "direction": "<="
+            },
+            "final_score": 0.8480000000000001,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1345,6 +2222,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1374,6 +2274,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "The Kind of Love We Make (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1401,6 +2349,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1430,6 +2401,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Dreams (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1459,6 +2478,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Hotel California (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1486,6 +2553,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1513,6 +2603,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1542,6 +2655,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Back in Black (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1571,6 +2732,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "Bohemian Rhapsody (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1600,6 +2809,47 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-expanded",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-expanded"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-expanded",
+          "selected_score": 0.8904000000000001,
+          "runner_up_score": null,
+          "runner_up_gap": 0.8904000000000001,
+          "top_supporting_features": {
+            "duration_delta_ms": 30000,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "ok-expanded",
+            "source": "youtube_music",
+            "title": "Billie Jean",
+            "variant_tags": [],
+            "rejection_reason": "duration_out_of_bounds",
+            "top_failed_gate": "duration_delta_ms",
+            "nearest_pass_margin": {
+              "name": "duration_delta_ms",
+              "value": 30000,
+              "threshold": 12000,
+              "margin_to_pass": 18000.0,
+              "direction": "<="
+            },
+            "final_score": 0.8480000000000001,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1627,6 +2877,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-r1",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-r1"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-r1",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1656,6 +2929,54 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "ok-main",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-main",
+        "bad-live"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-main",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-live",
+            "source": "youtube",
+            "title": "With or Without You (Live)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1683,6 +3004,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "ok-legacy-topic",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "ok-legacy-topic"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "ok-legacy-topic",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1712,6 +3056,63 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": null,
       "expected_match": false,
+      "retrieved_candidate_ids": [
+        "bad-duration"
+      ],
+      "decision_edge": {
+        "accepted_selection": null,
+        "rejected_candidates": [
+          {
+            "candidate_id": "bad-duration",
+            "source": "youtube_music",
+            "title": "Believer",
+            "variant_tags": [],
+            "rejection_reason": "duration_over_hard_cap",
+            "top_failed_gate": "duration_hard_cap_ms",
+            "nearest_pass_margin": {
+              "name": "duration_delta_ms",
+              "value": 110000,
+              "threshold": 35000,
+              "margin_to_pass": 75000.0,
+              "direction": "<="
+            },
+            "final_score": 0.8480000000000001,
+            "pass": "strict"
+          },
+          {
+            "candidate_id": "bad-duration",
+            "source": "youtube_music",
+            "title": "Believer",
+            "variant_tags": [],
+            "rejection_reason": "duration_over_hard_cap",
+            "top_failed_gate": "duration_hard_cap_ms",
+            "nearest_pass_margin": {
+              "name": "duration_delta_ms",
+              "value": 110000,
+              "threshold": 35000,
+              "margin_to_pass": 75000.0,
+              "direction": "<="
+            },
+            "final_score": 0.8480000000000001,
+            "pass": "expanded"
+          }
+        ],
+        "final_rejection": {
+          "failure_reason": "duration_filtered",
+          "top_failed_gate": "duration_hard_cap_ms",
+          "nearest_pass_margin": {
+            "name": "duration_delta_ms",
+            "value": 110000,
+            "threshold": 35000,
+            "margin_to_pass": 75000.0,
+            "direction": "<="
+          },
+          "candidate_id": "bad-duration"
+        },
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1739,6 +3140,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "seed-a",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "seed-a"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "seed-a",
+          "selected_score": 0.94,
+          "runner_up_score": null,
+          "runner_up_gap": 0.94,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1766,6 +3190,58 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "family-a",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "family-a",
+        "family-b"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "family-a",
+          "selected_score": 0.79,
+          "runner_up_score": 0.76,
+          "runner_up_gap": 0.030000000000000027,
+          "top_supporting_features": {
+            "duration_delta_ms": 8000,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": [
+              "cut"
+            ]
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "family-b",
+            "source": "youtube",
+            "title": "Deep Cut (Official Video)",
+            "variant_tags": [
+              "cut"
+            ],
+            "rejection_reason": "score_threshold",
+            "top_failed_gate": "score_threshold",
+            "nearest_pass_margin": {
+              "name": "final_score",
+              "value": 0.76,
+              "threshold": 0.78,
+              "margin_to_pass": 0.020000000000000018,
+              "direction": ">="
+            },
+            "final_score": 0.76,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "cut": 2
+        },
+        "selected_candidate_variant_tags": [
+          "cut"
+        ],
+        "top_rejected_variant_tags": [
+          "cut"
+        ]
+      },
       "coherence_boost_applied": 1,
       "coherence_selected_delta": 0.03,
       "coherence_near_miss": true,
@@ -1793,6 +3269,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "alias-hit",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "alias-hit"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "alias-hit",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1820,6 +3319,29 @@
       "candidate_count": 1,
       "expected_selected_candidate_id": "alias-r0",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "alias-r0"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "alias-r0",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1851,6 +3373,138 @@
       "candidate_count": 6,
       "expected_selected_candidate_id": "vc-official-audio",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "vc-official-audio",
+        "vc-lyric-video",
+        "vc-remastered",
+        "vc-live",
+        "vc-duration-intro",
+        "vc-wrong-artist"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "vc-official-audio",
+          "selected_score": 1.0,
+          "runner_up_score": null,
+          "runner_up_gap": 1.0,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "vc-live",
+            "source": "youtube",
+            "title": "City Lights (Live at Wembley)",
+            "variant_tags": [
+              "live"
+            ],
+            "rejection_reason": "disallowed_variant",
+            "top_failed_gate": "variant_alignment",
+            "nearest_pass_margin": {
+              "name": "variant_alignment",
+              "value": 0.0,
+              "threshold": 1.0,
+              "margin_to_pass": 1.0,
+              "direction": "=="
+            },
+            "final_score": 0.94,
+            "pass": "strict"
+          },
+          {
+            "candidate_id": "vc-wrong-artist",
+            "source": "youtube_music",
+            "title": "City Lights",
+            "variant_tags": [],
+            "rejection_reason": "low_artist_similarity",
+            "top_failed_gate": "artist_similarity",
+            "nearest_pass_margin": {
+              "name": "artist_similarity",
+              "value": 0.0,
+              "threshold": 0.625,
+              "margin_to_pass": 0.625,
+              "direction": ">="
+            },
+            "final_score": 0.7632000000000001,
+            "pass": "strict"
+          },
+          {
+            "candidate_id": "vc-duration-intro",
+            "source": "youtube",
+            "title": "City Lights (Official Audio)",
+            "variant_tags": [
+              "official_audio"
+            ],
+            "rejection_reason": "low_artist_similarity",
+            "top_failed_gate": "artist_similarity",
+            "nearest_pass_margin": {
+              "name": "artist_similarity",
+              "value": 0.5,
+              "threshold": 0.625,
+              "margin_to_pass": 0.125,
+              "direction": ">="
+            },
+            "final_score": 0.72,
+            "pass": "strict"
+          },
+          {
+            "candidate_id": "vc-remastered",
+            "source": "youtube_music",
+            "title": "City Lights (Remastered 2021)",
+            "variant_tags": [
+              "remaster"
+            ],
+            "rejection_reason": "low_album_similarity",
+            "top_failed_gate": "album_similarity",
+            "nearest_pass_margin": {
+              "name": "album_similarity",
+              "value": 0.0,
+              "threshold": 0.4444444444444444,
+              "margin_to_pass": 0.4444444444444444,
+              "direction": ">="
+            },
+            "final_score": 0.7102,
+            "pass": "strict"
+          },
+          {
+            "candidate_id": "vc-lyric-video",
+            "source": "youtube",
+            "title": "City Lights (Official Lyric Video)",
+            "variant_tags": [
+              "lyric_video"
+            ],
+            "rejection_reason": "low_album_similarity",
+            "top_failed_gate": "album_similarity",
+            "nearest_pass_margin": {
+              "name": "album_similarity",
+              "value": 0.0,
+              "threshold": 0.4444444444444444,
+              "margin_to_pass": 0.4444444444444444,
+              "direction": ">="
+            },
+            "final_score": 0.58,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {
+          "live": 1,
+          "lyric_video": 1,
+          "official_audio": 1,
+          "remaster": 1
+        },
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": [
+          "live",
+          "lyric_video",
+          "official_audio",
+          "remaster"
+        ]
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,
@@ -1880,6 +3534,48 @@
       "candidate_count": 2,
       "expected_selected_candidate_id": "waac-correct-lower-authority",
       "expected_match": true,
+      "retrieved_candidate_ids": [
+        "waac-wrong-high-authority",
+        "waac-correct-lower-authority"
+      ],
+      "decision_edge": {
+        "accepted_selection": {
+          "selected_candidate_id": "waac-correct-lower-authority",
+          "selected_score": 0.94,
+          "runner_up_score": null,
+          "runner_up_gap": 0.94,
+          "top_supporting_features": {
+            "duration_delta_ms": 0,
+            "title_similarity": 1.0,
+            "artist_similarity": 1.0,
+            "variant_alignment": true,
+            "variant_tags": []
+          }
+        },
+        "rejected_candidates": [
+          {
+            "candidate_id": "waac-wrong-high-authority",
+            "source": "youtube_music",
+            "title": "Afterglow",
+            "variant_tags": [],
+            "rejection_reason": "low_artist_similarity",
+            "top_failed_gate": "artist_similarity",
+            "nearest_pass_margin": {
+              "name": "artist_similarity",
+              "value": 0.0,
+              "threshold": 0.625,
+              "margin_to_pass": 0.625,
+              "direction": ">="
+            },
+            "final_score": 0.7632000000000001,
+            "pass": "strict"
+          }
+        ],
+        "final_rejection": null,
+        "candidate_variant_distribution": {},
+        "selected_candidate_variant_tags": [],
+        "top_rejected_variant_tags": []
+      },
       "coherence_boost_applied": 0,
       "coherence_selected_delta": 0.0,
       "coherence_near_miss": false,

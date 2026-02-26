@@ -5123,6 +5123,36 @@ def _normalize_injected_rejection_mix(value: object) -> dict[str, int]:
     return mix
 
 
+def _normalize_decision_edge(value: object) -> dict[str, object]:
+    edge = value if isinstance(value, dict) else {}
+    accepted = edge.get("accepted_selection") if isinstance(edge.get("accepted_selection"), dict) else None
+    final_rejection = edge.get("final_rejection") if isinstance(edge.get("final_rejection"), dict) else None
+    rejected_candidates = edge.get("rejected_candidates") if isinstance(edge.get("rejected_candidates"), list) else []
+    normalized_rejected = [dict(item) for item in rejected_candidates if isinstance(item, dict)]
+    candidate_variant_distribution = edge.get("candidate_variant_distribution") if isinstance(edge.get("candidate_variant_distribution"), dict) else {}
+    normalized_distribution: dict[str, int] = {}
+    for key, value in candidate_variant_distribution.items():
+        tag = str(key or "").strip()
+        if not tag:
+            continue
+        try:
+            normalized_distribution[tag] = int(value or 0)
+        except Exception:
+            continue
+    selected_variant_tags = edge.get("selected_candidate_variant_tags") if isinstance(edge.get("selected_candidate_variant_tags"), list) else []
+    normalized_selected_variant_tags = sorted({str(tag or "").strip() for tag in selected_variant_tags if str(tag or "").strip()})
+    top_rejected_variant_tags = edge.get("top_rejected_variant_tags") if isinstance(edge.get("top_rejected_variant_tags"), list) else []
+    normalized_top_rejected_variant_tags = [str(tag or "").strip() for tag in top_rejected_variant_tags if str(tag or "").strip()]
+    return {
+        "accepted_selection": accepted,
+        "final_rejection": final_rejection,
+        "rejected_candidates": normalized_rejected,
+        "candidate_variant_distribution": dict(sorted(normalized_distribution.items(), key=lambda item: item[0])),
+        "selected_candidate_variant_tags": normalized_selected_variant_tags,
+        "top_rejected_variant_tags": normalized_top_rejected_variant_tags,
+    }
+
+
 def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_group_mbid: str | None = None) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -5148,6 +5178,7 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
     why_missing_counts = {}
     source_unavailable = 0
     injected_rejection_mix = _empty_injected_rejection_mix()
+    per_track = []
 
     for row in rows:
         status = str(row["status"] or "").strip().lower()
@@ -5172,6 +5203,7 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
             except Exception:
                 parsed = {}
         runtime_search_meta = parsed.get("runtime_search_meta") if isinstance(parsed.get("runtime_search_meta"), dict) else {}
+        decision_edge = _normalize_decision_edge(runtime_search_meta.get("decision_edge"))
         normalized_rejections = _normalize_injected_rejection_mix(runtime_search_meta.get("mb_injected_rejections"))
         for key, count in normalized_rejections.items():
             injected_rejection_mix[key] = int(injected_rejection_mix.get(key) or 0) + int(count or 0)
@@ -5199,6 +5231,43 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
             }
         )
         unresolved.append(row)
+        per_track.append(
+            {
+                "track_id": track_id,
+                "resolved": False,
+                "failure_reason": failure_reason,
+                "decision_edge": decision_edge,
+            }
+        )
+    for row in rows:
+        status = str(row["status"] or "").strip().lower()
+        if status != "completed":
+            continue
+        output_template = row["output_template"]
+        parsed = {}
+        if isinstance(output_template, str) and output_template.strip():
+            try:
+                loaded = json.loads(output_template)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = {}
+        canonical = parsed.get("canonical_metadata") if isinstance(parsed.get("canonical_metadata"), dict) else {}
+        track_id = str(
+            canonical.get("recording_mbid")
+            or parsed.get("recording_mbid")
+            or row["id"]
+        ).strip()
+        runtime_search_meta = parsed.get("runtime_search_meta") if isinstance(parsed.get("runtime_search_meta"), dict) else {}
+        decision_edge = _normalize_decision_edge(runtime_search_meta.get("decision_edge"))
+        per_track.append(
+            {
+                "track_id": track_id,
+                "resolved": True,
+                "failure_reason": None,
+                "decision_edge": decision_edge,
+            }
+        )
 
     no_viable = max(0, len(unresolved) - source_unavailable)
     completion_percent = (tracks_resolved / tracks_total * 100.0) if tracks_total else 0.0
@@ -5225,6 +5294,7 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
                 "injected_rejection_mix": injected_rejection_mix,
             }
         },
+        "per_track": sorted(per_track, key=lambda item: str(item.get("track_id") or "")),
     }
 
 

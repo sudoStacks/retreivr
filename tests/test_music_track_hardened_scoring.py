@@ -467,6 +467,240 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
                 self.assertIsNotNone(final_score)
                 self.assertAlmostEqual(float(final_score), float(expected_score), places=12)
 
+    def test_rank_and_gate_matches_end_to_end_selection_for_same_candidate_list(self):
+        adapter_candidates = [
+            _candidate(
+                source="youtube_music",
+                candidate_id="best-canonical",
+                title="Artist - Song",
+                uploader="Artist - Topic",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube_music",
+                candidate_id="variant-live",
+                title="Artist - Song (Live)",
+                uploader="Artist - Topic",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube",
+                candidate_id="bad-duration",
+                title="Artist - Song",
+                uploader="Artist Archive",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=320,
+            ),
+        ]
+        service = self._service({"youtube_music": adapter_candidates, "youtube": []})
+        ladder = service._build_music_track_query_ladder("Artist", "Song", "Album")
+        first = dict(ladder[0])
+        expected_base = {
+            "artist": "Artist",
+            "track": "Song",
+            "album": "Album",
+            "query": first.get("query"),
+            "media_intent": "music_track",
+            "duration_hint_sec": 200,
+            "duration_hard_cap_ms": 35000,
+            "variant_allow_tokens": set(),
+            "track_aliases": [],
+            "track_disambiguation": None,
+        }
+        retrieved = service.retrieve_candidates(
+            {
+                "query": first.get("query"),
+                "limit": 6,
+                "query_label": first.get("label"),
+                "rung": int(first.get("rung") or 0),
+                "first_rung": int(first.get("rung") or 0),
+                "mb_injected_candidates": [],
+            }
+        )
+        direct = service.rank_and_gate(
+            {
+                "expected_base": expected_base,
+                "coherence_key": None,
+                "query_label": first.get("label"),
+                "rung": int(first.get("rung") or 0),
+                "recording_mbid": "rec-direct",
+            },
+            retrieved,
+        )
+
+        best = service.search_music_track_best_match(
+            "Artist",
+            "Song",
+            album="Album",
+            duration_ms=200000,
+            limit=6,
+        )
+        meta = getattr(service, "last_music_track_search", {}) or {}
+        direct_selected_id = direct.selected.get("candidate_id") if isinstance(direct.selected, dict) else None
+        best_selected_id = best.get("candidate_id") if isinstance(best, dict) else None
+        self.assertEqual(direct_selected_id, best_selected_id)
+        self.assertEqual(direct.selected_pass, meta.get("selected_pass"))
+        self.assertEqual(str(direct.failure_reason or "") or None, str(meta.get("failure_reason") or "") or None)
+        if isinstance(best, dict) and isinstance(direct.selected, dict):
+            self.assertAlmostEqual(
+                float(best.get("final_score") or 0.0),
+                float(direct.selected.get("final_score") or 0.0),
+                places=12,
+            )
+
+    def test_rank_and_gate_emits_decision_edge_margins_for_core_gates(self):
+        candidates = [
+            _candidate(
+                source="youtube_music",
+                candidate_id="gate-variant",
+                title="Artist - Song (Live)",
+                uploader="Artist - Topic",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube_music",
+                candidate_id="gate-artist",
+                title="Artist - Song",
+                uploader="Unrelated Performer Official",
+                artist="Unrelated Performer",
+                track="Song",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube_music",
+                candidate_id="gate-title",
+                title="Artist - Different Song",
+                uploader="Artist - Topic",
+                artist="Artist",
+                track="Totally Different",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube_music",
+                candidate_id="gate-duration",
+                title="Artist - Song",
+                uploader="Artist - Topic",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=260,
+            ),
+        ]
+        service = self._service({"youtube_music": [], "youtube": []})
+        result = service.rank_and_gate(
+            {
+                "expected_base": {
+                    "artist": "Artist",
+                    "track": "Song",
+                    "album": "Album",
+                    "query": '"Artist" "Song" "Album"',
+                    "media_intent": "music_track",
+                    "duration_hint_sec": 200,
+                    "duration_hard_cap_ms": 35000,
+                },
+                "coherence_key": None,
+                "query_label": "unit",
+                "rung": 0,
+                "recording_mbid": "edge-1",
+            },
+            candidates,
+        )
+        self.assertIsNone(result.selected)
+        gates = {str(item.get("top_failed_gate") or "") for item in result.rejected_candidates}
+        self.assertIn("variant_alignment", gates)
+        self.assertIn("artist_similarity", gates)
+        self.assertIn("title_similarity", gates)
+        self.assertTrue("duration_delta_ms" in gates or "duration_hard_cap_ms" in gates)
+        self.assertIsInstance(result.final_rejection, dict)
+        self.assertIn("nearest_pass_margin", result.final_rejection)
+
+    def test_rank_and_gate_margins_stable_across_candidate_shuffles(self):
+        base_candidates = [
+            _candidate(
+                source="youtube_music",
+                candidate_id="stable-variant",
+                title="Artist - Song (Live)",
+                uploader="Artist - Topic",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube_music",
+                candidate_id="stable-artist",
+                title="Artist - Song",
+                uploader="Unrelated Performer Official",
+                artist="Unrelated Performer",
+                track="Song",
+                album="Album",
+                duration_sec=200,
+            ),
+            _candidate(
+                source="youtube_music",
+                candidate_id="stable-duration",
+                title="Artist - Song",
+                uploader="Artist - Topic",
+                artist="Artist",
+                track="Song",
+                album="Album",
+                duration_sec=260,
+            ),
+        ]
+        reference = None
+        for seed in range(10):
+            shuffled = [dict(c) for c in base_candidates]
+            random.Random(seed).shuffle(shuffled)
+            service = self._service({"youtube_music": [], "youtube": []})
+            result = service.rank_and_gate(
+                {
+                    "expected_base": {
+                        "artist": "Artist",
+                        "track": "Song",
+                        "album": "Album",
+                        "query": '"Artist" "Song" "Album"',
+                        "media_intent": "music_track",
+                        "duration_hint_sec": 200,
+                        "duration_hard_cap_ms": 35000,
+                    },
+                    "coherence_key": None,
+                    "query_label": "unit",
+                    "rung": 0,
+                    "recording_mbid": "edge-2",
+                },
+                shuffled,
+            )
+            normalized = {
+                "final_rejection": result.final_rejection,
+                "rejected": sorted(
+                    [
+                        (
+                            str(item.get("candidate_id") or ""),
+                            str(item.get("top_failed_gate") or ""),
+                            float(((item.get("nearest_pass_margin") or {}).get("margin_to_pass")) or 0.0),
+                        )
+                        for item in (result.rejected_candidates or [])
+                    ]
+                ),
+            }
+            if reference is None:
+                reference = normalized
+                continue
+            self.assertEqual(normalized, reference)
+
     def test_topic_channel_with_strong_artist_overlap_gets_authority_bonus(self):
         expected = {
             "artist": "Kenny Chesney",

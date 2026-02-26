@@ -41,6 +41,7 @@ def build_report(summary: dict[str, Any], gate: dict[str, Any]) -> str:
     unresolved = summary.get("unresolved_classification") if isinstance(summary.get("unresolved_classification"), dict) else {}
     why_missing = summary.get("why_missing") if isinstance(summary.get("why_missing"), dict) else {}
     hint_counts = why_missing.get("hint_counts") if isinstance(why_missing.get("hint_counts"), dict) else {}
+    failure_motifs = summary.get("failure_motifs") if isinstance(summary.get("failure_motifs"), dict) else {}
 
     lines = [
         "# Music Search Benchmark Delta",
@@ -80,6 +81,19 @@ def build_report(summary: dict[str, Any], gate: dict[str, Any]) -> str:
 
     if hint_counts:
         for label, count in sorted(hint_counts.items(), key=lambda item: (-int(item[1]), item[0])):
+            lines.append(f"- {label}: `{int(count)}`")
+    else:
+        lines.append("- none")
+
+    lines.extend(
+        [
+            "",
+            "## Top Recurring Failure Motifs",
+            "",
+        ]
+    )
+    if failure_motifs:
+        for label, count in sorted(failure_motifs.items(), key=lambda item: (-int(item[1]), item[0])):
             lines.append(f"- {label}: `{int(count)}`")
     else:
         lines.append("- none")
