@@ -494,6 +494,49 @@ def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
     return _mb_service().search_release_groups(normalized_query, limit=limit)
 
 
+def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: int) -> list[dict]:
+    normalized_artist_mbid = str(artist_mbid or "").strip()
+    if not normalized_artist_mbid:
+        return []
+    payload = musicbrainzngs.search_release_groups(
+        query=f"arid:{normalized_artist_mbid}",
+        limit=max(1, min(int(limit or 10), 100)),
+    )
+    groups = payload.get("release-group-list", []) if isinstance(payload, dict) else []
+    candidates: list[dict] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        artist_credit = group.get("artist-credit")
+        artist_name = ""
+        if isinstance(artist_credit, list):
+            parts: list[str] = []
+            for item in artist_credit:
+                if not isinstance(item, dict):
+                    continue
+                artist_obj = item.get("artist") if isinstance(item.get("artist"), dict) else {}
+                name = str(item.get("name") or artist_obj.get("name") or "").strip()
+                joinphrase = str(item.get("joinphrase") or "")
+                if name:
+                    parts.append(name)
+                if joinphrase:
+                    parts.append(joinphrase)
+            artist_name = "".join(parts).strip()
+        candidates.append(
+            {
+                "release_group_id": group.get("id"),
+                "title": group.get("title"),
+                "artist_credit": artist_name,
+                "first_release_date": group.get("first-release-date"),
+                "primary_type": group.get("primary-type"),
+                "secondary_types": group.get("secondary-type-list") or [],
+                "score": group.get("ext:score"),
+                "track_count": None,
+            }
+        )
+    return candidates
+
+
 def _search_music_recording_candidates(query: str, *, limit: int, config: dict | None = None) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:
@@ -5785,7 +5828,18 @@ def music_album_candidates(payload: dict):
 
 
 @app.get("/api/music/albums/search")
-def music_albums_search(q: str = Query("", alias="q"), limit: int = Query(10, ge=1, le=50)):
+def music_albums_search(
+    q: str = Query("", alias="q"),
+    limit: int = Query(10, ge=1, le=50),
+    artist_mbid: str = Query("", alias="artist_mbid"),
+):
+    artist_mbid_value = str(artist_mbid or "").strip()
+    if artist_mbid_value:
+        try:
+            return _search_music_album_candidates_for_artist_mbid(artist_mbid_value, limit=int(limit))
+        except Exception:
+            logging.exception("music_albums_search artist-mbid lookup failed artist_mbid=%s", artist_mbid_value)
+            raise HTTPException(status_code=502, detail="musicbrainz_artist_album_search_failed")
     return _search_music_album_candidates(str(q or ""), limit=int(limit))
 
 

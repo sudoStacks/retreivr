@@ -2444,6 +2444,7 @@ function renderMusicModeResults(response, query = "") {
       button.textContent = "View Albums";
       button.addEventListener("click", async () => {
         const nextQuery = String(artistItem?.name || "").trim();
+        const nextArtistMbid = String(artistItem?.artist_mbid || "").trim();
         if (!nextQuery) {
           return;
         }
@@ -2461,7 +2462,7 @@ function renderMusicModeResults(response, query = "") {
         button.textContent = "Loading...";
         setNotice($("#home-search-message"), `Loading albums for ${nextQuery}...`, false);
         try {
-          const albums = await fetchMusicAlbumsByArtist(nextQuery);
+          const albums = await fetchMusicAlbumsByArtist({ name: nextQuery, artist_mbid: nextArtistMbid });
           renderMusicModeResults({ artists: [], albums, tracks: [], mode_used: "album" }, nextQuery);
           setNotice($("#home-search-message"), `Loaded ${albums.length} album candidates for ${nextQuery}.`, false);
         } catch (err) {
@@ -2568,13 +2569,24 @@ function renderMusicModeResults(response, query = "") {
   }
 }
 
-async function fetchMusicAlbumsByArtist(artistName) {
-  const query = String(artistName || "").trim();
+async function fetchMusicAlbumsByArtist(artist) {
+  const query = typeof artist === "object" && artist !== null
+    ? String(artist.name || "").trim()
+    : String(artist || "").trim();
+  const artistMbid = typeof artist === "object" && artist !== null
+    ? String(artist.artist_mbid || "").trim()
+    : "";
   if (!query) {
     return [];
   }
+  const params = new URLSearchParams();
+  params.set("q", query);
+  params.set("limit", "50");
+  if (artistMbid) {
+    params.set("artist_mbid", artistMbid);
+  }
   const raw = await fetchJson(
-    `/api/music/albums/search?q=${encodeURIComponent(query)}&limit=50`
+    `/api/music/albums/search?${params.toString()}`
   );
   const entries = Array.isArray(raw)
     ? raw

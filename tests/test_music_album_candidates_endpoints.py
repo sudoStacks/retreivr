@@ -72,3 +72,25 @@ def test_album_candidates_post_empty_query_returns_legacy_envelope(monkeypatch) 
     resp = client.post("/api/music/album/candidates", json={"query": ""})
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok", "album_candidates": []}
+
+
+def test_album_search_get_uses_artist_mbid_strict_lookup(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    called = {"artist_mbid": None}
+
+    def _fake_by_mbid(artist_mbid: str, *, limit: int):
+        called["artist_mbid"] = artist_mbid
+        return [{"release_group_id": "rg-strict", "title": "Strict Album"}]
+
+    monkeypatch.setattr(module, "_search_music_album_candidates_for_artist_mbid", _fake_by_mbid)
+    monkeypatch.setattr(module, "_search_music_album_candidates", lambda query, limit: [{"release_group_id": "rg-loose"}])
+
+    resp = client.get(
+        "/api/music/albums/search",
+        params={"q": "ERNEST", "artist_mbid": "artist-mbid-123", "limit": 10},
+    )
+    assert resp.status_code == 200
+    assert called["artist_mbid"] == "artist-mbid-123"
+    assert resp.json() == [{"release_group_id": "rg-strict", "title": "Strict Album"}]
