@@ -2442,18 +2442,32 @@ function renderMusicModeResults(response, query = "") {
       const button = document.createElement("button");
       button.className = "button ghost small";
       button.textContent = "View Albums";
-      button.addEventListener("click", () => {
+      button.addEventListener("click", async () => {
         const nextQuery = String(artistItem?.name || "").trim();
-        if (nextQuery) {
-          const artistInput = document.getElementById("search-artist");
-          const albumInput = document.getElementById("search-album");
-          const trackInput = document.getElementById("search-track");
-          const modeSelect = document.getElementById("music-mode-select");
-          if (artistInput) artistInput.value = nextQuery;
-          if (albumInput) albumInput.value = "";
-          if (trackInput) trackInput.value = "";
-          if (modeSelect) modeSelect.value = "album";
-          performMusicModeSearch();
+        if (!nextQuery) {
+          return;
+        }
+        const artistInput = document.getElementById("search-artist");
+        const albumInput = document.getElementById("search-album");
+        const trackInput = document.getElementById("search-track");
+        const modeSelect = document.getElementById("music-mode-select");
+        if (artistInput) artistInput.value = nextQuery;
+        if (albumInput) albumInput.value = "";
+        if (trackInput) trackInput.value = "";
+        if (modeSelect) modeSelect.value = "album";
+
+        button.disabled = true;
+        const previousLabel = button.textContent;
+        button.textContent = "Loading...";
+        setNotice($("#home-search-message"), `Loading albums for ${nextQuery}...`, false);
+        try {
+          const albums = await fetchMusicAlbumsByArtist(nextQuery);
+          renderMusicModeResults({ artists: [], albums, tracks: [], mode_used: "album" }, nextQuery);
+          setNotice($("#home-search-message"), `Loaded ${albums.length} album candidates for ${nextQuery}.`, false);
+        } catch (err) {
+          button.disabled = false;
+          button.textContent = previousLabel;
+          setNotice($("#home-search-message"), `View Albums failed: ${err.message}`, true);
         }
       });
       action.appendChild(button);
@@ -2552,6 +2566,34 @@ function renderMusicModeResults(response, query = "") {
       container.appendChild(card);
     });
   }
+}
+
+async function fetchMusicAlbumsByArtist(artistName) {
+  const query = String(artistName || "").trim();
+  if (!query) {
+    return [];
+  }
+  const raw = await fetchJson(
+    `/api/music/albums/search?q=${encodeURIComponent(query)}&limit=50`
+  );
+  const entries = Array.isArray(raw)
+    ? raw
+    : (Array.isArray(raw?.album_candidates) ? raw.album_candidates : []);
+  const out = [];
+  for (const item of entries) {
+    if (!item || typeof item !== "object") continue;
+    const releaseGroupMbid = String(item.release_group_mbid || item.release_group_id || item.album_id || "").trim();
+    if (!releaseGroupMbid) continue;
+    const first = String(item.first_release_date || item.first_released || "").trim();
+    const releaseYear = first && /^\d{4}/.test(first) ? first.slice(0, 4) : null;
+    out.push({
+      release_group_mbid: releaseGroupMbid,
+      title: String(item.title || "").trim(),
+      artist: String(item.artist || item.artist_credit || "").trim(),
+      release_year: releaseYear,
+    });
+  }
+  return out;
 }
 
 async function performMusicModeSearch() {
@@ -2838,7 +2880,7 @@ function renderHomeAlbumCandidates(candidates, query = "") {
     button.disabled = true;
     try {
       const payload = {
-        release_group_id: releaseGroupId,
+        release_group_mbid: releaseGroupId,
         destination: $("#home-destination")?.value.trim() || null,
         final_format: $("#home-format")?.value.trim() || null,
         music_mode: true,
