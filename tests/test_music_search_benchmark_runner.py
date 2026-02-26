@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import copy
+import json
+import random
+from pathlib import Path
+
 from benchmarks.music_search_benchmark_runner import (
     TrackRunResult,
     _classify_missing_hint,
@@ -854,3 +859,75 @@ def test_mb_relationship_injection_improves_completion_without_variant_regressio
     assert with_injection["tracks_resolved"] == 1
     assert int(with_injection.get("wrong_variant_flags") or 0) <= int(without_injection.get("wrong_variant_flags") or 0)
     assert int(with_injection.get("mb_injected_success_total") or 0) == 1
+
+
+def _load_album_benchmark_dataset() -> dict:
+    dataset_path = Path(__file__).resolve().parents[1] / "benchmarks" / "music_search_album_dataset.json"
+    return json.loads(dataset_path.read_text(encoding="utf-8"))
+
+
+def _shuffle_fixture_candidates(dataset: dict, seed: int) -> dict:
+    shuffled = copy.deepcopy(dataset)
+    rng = random.Random(seed)
+    fixtures = shuffled.get("fixtures") if isinstance(shuffled.get("fixtures"), dict) else {}
+    for fixture in fixtures.values():
+        if not isinstance(fixture, dict):
+            continue
+        rungs = fixture.get("rungs")
+        if not isinstance(rungs, list):
+            continue
+        for rung in rungs:
+            if isinstance(rung, list):
+                rng.shuffle(rung)
+    return shuffled
+
+
+def _selected_map(summary: dict) -> dict[str, str | None]:
+    out: dict[str, str | None] = {}
+    for item in summary.get("per_track") or []:
+        if not isinstance(item, dict):
+            continue
+        track_id = str(item.get("track_id") or "")
+        out[track_id] = str(item.get("selected_candidate_id") or "") or None
+    return out
+
+
+def test_fixture_candidate_order_shuffle_does_not_change_benchmark_outcome() -> None:
+    dataset = _load_album_benchmark_dataset()
+    baseline = run_benchmark(dataset)
+    baseline_selected = _selected_map(baseline)
+
+    for seed in (3, 7, 13, 23, 42):
+        shuffled_summary = run_benchmark(_shuffle_fixture_candidates(dataset, seed))
+        assert shuffled_summary["tracks_resolved"] == baseline["tracks_resolved"]
+        assert shuffled_summary["completion_percent"] == baseline["completion_percent"]
+        assert shuffled_summary["wrong_variant_flags"] == baseline["wrong_variant_flags"]
+        assert _selected_map(shuffled_summary) == baseline_selected
+
+
+def test_fixture_candidates_do_not_embed_precomputed_score_fields() -> None:
+    dataset = _load_album_benchmark_dataset()
+    fixtures = dataset.get("fixtures") if isinstance(dataset.get("fixtures"), dict) else {}
+    forbidden = {
+        "final_score",
+        "score_track",
+        "score_artist",
+        "score_album",
+        "rejection_reason",
+        "coherence_delta",
+        "base_final_score",
+    }
+    for fixture_name, fixture in fixtures.items():
+        if not isinstance(fixture, dict):
+            continue
+        rungs = fixture.get("rungs")
+        if not isinstance(rungs, list):
+            continue
+        for rung in rungs:
+            if not isinstance(rung, list):
+                continue
+            for candidate in rung:
+                if not isinstance(candidate, dict):
+                    continue
+                leaked = forbidden.intersection(candidate.keys())
+                assert not leaked, f"fixture {fixture_name} candidate leaks precomputed fields: {sorted(leaked)}"

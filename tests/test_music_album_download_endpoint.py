@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+import sqlite3
 import sys
 import types
 
@@ -434,3 +436,84 @@ def test_album_download_uses_release_group_genre_before_resolved_fallback(monkey
     assert response.status_code == 200
     assert len(enqueued) == 1
     assert enqueued[0]["genre"] == "Americana"
+
+
+def test_music_album_run_summary_endpoint_writes_artifact_and_classifies_failures(monkeypatch, tmp_path) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    db_path = tmp_path / "db.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE download_jobs (
+                id TEXT PRIMARY KEY,
+                origin TEXT NOT NULL,
+                origin_id TEXT NOT NULL,
+                media_intent TEXT NOT NULL,
+                status TEXT NOT NULL,
+                last_error TEXT,
+                output_template TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        rows = [
+            (
+                "j-ok",
+                "music_album",
+                "album-run-1",
+                "music_track",
+                "completed",
+                None,
+                json.dumps({"canonical_metadata": {"recording_mbid": "rec-ok", "mb_release_group_id": "rg-1"}}),
+                "2026-02-26T00:00:01+00:00",
+            ),
+            (
+                "j-unavailable",
+                "music_album",
+                "album-run-1",
+                "music_track",
+                "failed",
+                "source_unavailable:removed_or_deleted",
+                json.dumps({"canonical_metadata": {"recording_mbid": "rec-missing-1", "mb_release_group_id": "rg-1"}}),
+                "2026-02-26T00:00:02+00:00",
+            ),
+            (
+                "j-duration",
+                "music_album",
+                "album-run-1",
+                "music_track",
+                "failed",
+                "duration_filtered",
+                json.dumps({"canonical_metadata": {"recording_mbid": "rec-missing-2", "mb_release_group_id": "rg-1"}}),
+                "2026-02-26T00:00:03+00:00",
+            ),
+        ]
+        conn.executemany(
+            "INSERT INTO download_jobs (id, origin, origin_id, media_intent, status, last_error, output_template, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(module, "DATA_DIR", tmp_path)
+    module.app.state.paths = types.SimpleNamespace(db_path=str(db_path))
+
+    response = client.get("/api/music/album/runs/album-run-1/summary", params={"release_group_mbid": "rg-1"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tracks_total"] == 3
+    assert payload["tracks_resolved"] == 1
+    assert payload["unresolved_classification"]["source_unavailable"] == 1
+    assert payload["unresolved_classification"]["no_viable_match"] == 1
+    hint_counts = payload["why_missing"]["hint_counts"]
+    assert hint_counts["Unavailable (blocked/removed)"] == 1
+    assert hint_counts["Likely wrong MB recording length (duration mismatch persistent across many candidates)"] == 1
+
+    summary_path = tmp_path / "run_summaries" / "music_album" / "album-run-1" / "run_summary.json"
+    assert summary_path.exists()
+    saved = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert saved["album_run_id"] == "album-run-1"

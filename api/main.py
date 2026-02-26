@@ -1194,8 +1194,13 @@ class _IntentQueueAdapter:
         base_dir = app.state.paths.single_downloads_dir
 
         media_intent = str(payload.get("media_intent") or "").strip() or "track"
-        origin = "spotify_playlist" if payload.get("playlist_id") else "intent"
-        origin_id = str(payload.get("playlist_id") or payload.get("spotify_track_id") or "manual")
+        origin = str(payload.get("origin") or "").strip() or ("spotify_playlist" if payload.get("playlist_id") else "intent")
+        origin_id = str(
+            payload.get("origin_id")
+            or payload.get("playlist_id")
+            or payload.get("spotify_track_id")
+            or "manual"
+        ).strip() or "manual"
         destination = str(payload.get("destination") or "").strip() or None
         final_format = str(payload.get("final_format") or "").strip() or None
         force_redownload = bool(payload.get("force_redownload"))
@@ -5032,6 +5037,159 @@ async def run_search_resolution_once():
     return {"request_id": request_id}
 
 
+def _album_run_summary_dir() -> Path:
+    return DATA_DIR / "run_summaries" / "music_album"
+
+
+def _album_run_summary_path(album_run_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(album_run_id or "").strip())
+    if not safe_id:
+        raise ValueError("invalid_album_run_id")
+    return _album_run_summary_dir() / safe_id / "run_summary.json"
+
+
+def _normalize_runtime_failure_reason(last_error: str | None) -> str:
+    text = str(last_error or "").strip().lower()
+    if not text:
+        return "unknown"
+    marker = "yt_dlp_source_unavailable:"
+    if marker in text:
+        tail = text.split(marker, 1)[1]
+        unavailable_class = tail.split(":", 1)[0].strip() or "unknown"
+        return f"source_unavailable:{unavailable_class}"
+    if "source_unavailable:" in text:
+        tail = text.split("source_unavailable:", 1)[1]
+        unavailable_class = tail.split(":", 1)[0].strip() or "unknown"
+        return f"source_unavailable:{unavailable_class}"
+    if "duration_filtered" in text:
+        return "duration_filtered"
+    if "no_candidate_above_threshold" in text:
+        return "no_candidate_above_threshold"
+    if "no_candidates" in text:
+        return "no_candidates"
+    return "unknown"
+
+
+def _classify_runtime_missing_hint(failure_reason: str) -> tuple[str, str]:
+    reason = str(failure_reason or "").strip().lower()
+    if reason.startswith("source_unavailable:"):
+        return ("unavailable", "Unavailable (blocked/removed)")
+    if reason == "duration_filtered":
+        return (
+            "likely_wrong_mb_recording_length",
+            "Likely wrong MB recording length (duration mismatch persistent across many candidates)",
+        )
+    return (
+        "recoverable_ladder_extension",
+        "Recoverable by ladder extension (no candidates)",
+    )
+
+
+def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_group_mbid: str | None = None) -> dict:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, status, last_error, output_template
+            FROM download_jobs
+            WHERE origin=? AND origin_id=? AND media_intent=?
+            ORDER BY created_at ASC
+            """,
+            ("music_album", album_run_id, "music_track"),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    tracks_total = len(rows)
+    tracks_resolved = 0
+    unresolved = []
+    why_missing_tracks = []
+    why_missing_counts = {}
+    source_unavailable = 0
+
+    for row in rows:
+        status = str(row["status"] or "").strip().lower()
+        if status == "completed":
+            tracks_resolved += 1
+            continue
+        if status in {"queued", "claimed", "downloading", "postprocessing"}:
+            continue
+        failure_reason = _normalize_runtime_failure_reason(row["last_error"])
+        if failure_reason.startswith("source_unavailable:"):
+            source_unavailable += 1
+        hint_code, hint_label = _classify_runtime_missing_hint(failure_reason)
+        why_missing_counts[hint_label] = int(why_missing_counts.get(hint_label) or 0) + 1
+
+        output_template = row["output_template"]
+        parsed = {}
+        if isinstance(output_template, str) and output_template.strip():
+            try:
+                loaded = json.loads(output_template)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = {}
+        canonical = parsed.get("canonical_metadata") if isinstance(parsed.get("canonical_metadata"), dict) else {}
+        track_id = str(
+            canonical.get("recording_mbid")
+            or parsed.get("recording_mbid")
+            or row["id"]
+        ).strip()
+
+        why_missing_tracks.append(
+            {
+                "album_id": str(
+                    canonical.get("mb_release_group_id")
+                    or parsed.get("mb_release_group_id")
+                    or release_group_mbid
+                    or ""
+                ).strip(),
+                "track_id": track_id,
+                "hint_code": hint_code,
+                "hint_label": hint_label,
+                "evidence": {
+                    "failure_reason": failure_reason,
+                },
+            }
+        )
+        unresolved.append(row)
+
+    no_viable = max(0, len(unresolved) - source_unavailable)
+    completion_percent = (tracks_resolved / tracks_total * 100.0) if tracks_total else 0.0
+    return {
+        "schema_version": 1,
+        "run_type": "music_album",
+        "album_run_id": album_run_id,
+        "release_group_mbid": release_group_mbid,
+        "tracks_total": tracks_total,
+        "tracks_resolved": tracks_resolved,
+        "completion_percent": completion_percent,
+        "unresolved_classification": {
+            "source_unavailable": source_unavailable,
+            "no_viable_match": no_viable,
+        },
+        "why_missing": {
+            "hint_counts": dict(sorted(why_missing_counts.items(), key=lambda item: (-int(item[1]), item[0]))),
+            "tracks": why_missing_tracks,
+        },
+    }
+
+
+def _write_music_album_run_summary(summary: dict[str, object]) -> str:
+    album_run_id = str(summary.get("album_run_id") or "").strip()
+    if not album_run_id:
+        raise ValueError("album_run_id required")
+    output_path = _album_run_summary_path(album_run_id)
+    ensure_dir(str(output_path.parent))
+    with output_path.open("w", encoding="utf-8") as handle:
+        safe_json_dump(summary, handle, indent=2)
+        handle.write("\n")
+    return str(output_path)
+
+
 @app.post("/api/music/album/download")
 def download_full_album(data: dict):
     release_group_mbid = str((data or {}).get("release_group_mbid") or "").strip()
@@ -5192,6 +5350,7 @@ def download_full_album(data: dict):
     job_ids = []
     failed_tracks = []
     album_duration_delta_limit_ms = 25000
+    album_run_id = uuid4().hex
 
     for medium in media:
         if not isinstance(medium, dict):
@@ -5251,6 +5410,8 @@ def download_full_album(data: dict):
                     continue
 
                 payload = {
+                    "origin": "music_album",
+                    "origin_id": album_run_id,
                     "media_intent": "music_track",
                     "force_redownload": force_redownload,
                     "artist": resolved.get("artist") or artist,
@@ -5309,8 +5470,29 @@ def download_full_album(data: dict):
                 )
                 continue
 
+    initial_summary = {
+        "schema_version": 1,
+        "run_type": "music_album",
+        "album_run_id": album_run_id,
+        "release_group_mbid": release_group_mbid,
+        "tracks_total": tracks_enqueued,
+        "tracks_resolved": 0,
+        "completion_percent": 0.0,
+        "unresolved_classification": {
+            "source_unavailable": 0,
+            "no_viable_match": 0,
+        },
+        "why_missing": {
+            "hint_counts": {},
+            "tracks": [],
+        },
+    }
+    summary_path = _write_music_album_run_summary(initial_summary)
+
     return {
         "status": "enqueued",
+        "album_run_id": album_run_id,
+        "run_summary_path": summary_path,
         "release_group_mbid": release_group_mbid,
         "release_mbid": release_mbid,
         "tracks_enqueued": tracks_enqueued,
@@ -5318,6 +5500,28 @@ def download_full_album(data: dict):
         "failed_tracks": failed_tracks,
         "job_ids": job_ids,
     }
+
+
+@app.get("/api/music/album/runs/{album_run_id}/summary")
+def music_album_run_summary(album_run_id: str, release_group_mbid: str | None = Query(None)):
+    normalized_run_id = str(album_run_id or "").strip()
+    if not normalized_run_id:
+        raise HTTPException(status_code=400, detail="album_run_id required")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", normalized_run_id):
+        raise HTTPException(status_code=400, detail="invalid_album_run_id")
+
+    db_path = str(getattr(getattr(app.state, "paths", None), "db_path", "") or "")
+    if not db_path:
+        db_path = str((DATA_DIR / "database" / "db.sqlite").resolve())
+
+    summary = _compute_music_album_run_summary(
+        db_path,
+        normalized_run_id,
+        release_group_mbid=str(release_group_mbid or "").strip() or None,
+    )
+    summary_path = _write_music_album_run_summary(summary)
+    summary["run_summary_path"] = summary_path
+    return summary
 
 
 @app.post("/api/music/album/candidates")
