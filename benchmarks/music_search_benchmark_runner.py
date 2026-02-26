@@ -170,6 +170,20 @@ def _build_ladder(artist: str, track: str, album: str | None) -> list[dict[str, 
     return out
 
 
+def _is_ep_release_context(
+    release_primary_type: str | None,
+    release_secondary_types: list[str] | None = None,
+) -> bool:
+    primary = str(release_primary_type or "").strip().lower()
+    if primary == "ep":
+        return True
+    if isinstance(release_secondary_types, (list, tuple, set)):
+        for value in release_secondary_types:
+            if str(value or "").strip().lower() == "ep":
+                return True
+    return False
+
+
 def _render_template(value: Any, context: dict[str, str]) -> Any:
     if isinstance(value, str):
         rendered = value
@@ -806,6 +820,7 @@ def _evaluate_track(
     track: dict[str, Any],
     fixture: dict[str, Any],
     *,
+    is_ep_release: bool = False,
     album_coherence_counts: Counter[str] | None = None,
     enable_alias_matching: bool = True,
     enable_mb_relationship_injection: bool = True,
@@ -814,6 +829,18 @@ def _evaluate_track(
     duration_ms = track.get("duration_ms")
     duration_hint_sec = int(duration_ms) // 1000 if duration_ms is not None else None
     ladder = _build_ladder(artist, track_name, album)
+    if is_ep_release:
+        ep_query = " ".join(part for part in [artist, "-", track_name, "audio", "topic"] if part).strip()
+        seen_queries = {str(entry.get("query") or "").strip() for entry in ladder}
+        if ep_query and ep_query not in seen_queries:
+            next_rung = max((int(entry.get("rung") or 0) for entry in ladder), default=-1) + 1
+            ladder.append(
+                {
+                    "rung": next_rung,
+                    "label": "ep_audio_topic_fallback",
+                    "query": ep_query,
+                }
+            )
     rung_candidates = fixture.get("rungs") if isinstance(fixture.get("rungs"), list) else []
     expected_selected_candidate_id = str(fixture.get("expect_selected_candidate_id") or "").strip() or None
     expected_match = bool(fixture.get("expect_match", True))
@@ -1072,6 +1099,10 @@ def run_benchmark(
         album_id = str(album.get("album_id") or album.get("release_group_mbid") or "").strip() or "unknown_album"
         artist = str(album.get("artist") or "").strip()
         album_title = str(album.get("title") or "").strip()
+        is_ep_release = _is_ep_release_context(
+            str(album.get("release_primary_type") or ""),
+            album.get("release_secondary_types") if isinstance(album.get("release_secondary_types"), list) else [],
+        )
         tracks = album.get("tracks") if isinstance(album.get("tracks"), list) else []
         album_coherence_counts: Counter[str] | None = (
             Counter() if (enable_album_coherence and len(tracks) > 1) else None
@@ -1093,6 +1124,7 @@ def run_benchmark(
                 album_title,
                 track,
                 fixture,
+                is_ep_release=is_ep_release,
                 album_coherence_counts=album_coherence_counts,
                 enable_alias_matching=enable_alias_matching,
                 enable_mb_relationship_injection=enable_mb_relationship_injection,

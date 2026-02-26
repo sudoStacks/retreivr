@@ -125,6 +125,8 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
                             "mb_release_group_id": "rg-1",
                         },
                         "runtime_search_meta": {
+                            "ep_refinement_attempted": True,
+                            "ep_refinement_candidates_considered": 3,
                             "decision_edge": {
                                 "accepted_selection": None,
                                 "rejected_candidates": [
@@ -210,3 +212,10 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
     assert "final_container" in payload["per_track"][0]
     assert "final_video_codec" in payload["per_track"][0]
     assert "final_audio_codec" in payload["per_track"][0]
+    assert all("ep_refinement_attempted" in item for item in payload["per_track"])
+    assert all("ep_refinement_candidates_considered" in item for item in payload["per_track"])
+    by_track = {str(item.get("track_id") or ""): item for item in payload["per_track"]}
+    assert by_track["rec-ok"]["ep_refinement_attempted"] is False
+    assert by_track["rec-ok"]["ep_refinement_candidates_considered"] == 0
+    assert by_track["rec-fail"]["ep_refinement_attempted"] is True
+    assert by_track["rec-fail"]["ep_refinement_candidates_considered"] == 3

@@ -187,6 +187,79 @@ def test_retrieval_metrics_recall_at_k_are_deterministic() -> None:
     assert recall["5"]["recall_percent"] == pytest.approx(200.0 / 3.0)
 
 
+def test_ep_specific_retrieval_refinement_improves_ep_completion_only() -> None:
+    dataset = {
+        "dataset_name": "ep-refinement",
+        "fixtures": {
+            "ep-only-rung": {
+                "expect_match": True,
+                "expect_selected_candidate_id": "ep-canonical",
+                "rungs": [
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [
+                        {
+                            "candidate_id": "ep-canonical",
+                            "source": "youtube_music",
+                            "title": "{{track}} (Audio)",
+                            "uploader": "{{artist}} - Topic",
+                            "artist_detected": "{{artist}}",
+                            "track_detected": "{{track}}",
+                            "album_detected": "{{album}}",
+                            "duration_sec": 200,
+                            "url": "https://music.youtube.com/watch?v={{recording_mbid}}ep",
+                        }
+                    ],
+                ],
+            }
+        },
+        "albums": [
+            {
+                "album_id": "ep-a1",
+                "artist": "Artist",
+                "title": "EP Title",
+                "release_group_mbid": "53000000-0000-4000-8000-000000000001",
+                "release_primary_type": "EP",
+                "tracks": [
+                    {
+                        "recording_mbid": "53000000-0000-4000-8000-000000000101",
+                        "track": "Track EP",
+                        "duration_ms": 200000,
+                        "fixture": "ep-only-rung",
+                    }
+                ],
+            },
+            {
+                "album_id": "album-a1",
+                "artist": "Artist",
+                "title": "Album Title",
+                "release_group_mbid": "53000000-0000-4000-8000-000000000002",
+                "release_primary_type": "Album",
+                "tracks": [
+                    {
+                        "recording_mbid": "53000000-0000-4000-8000-000000000102",
+                        "track": "Track LP",
+                        "duration_ms": 200000,
+                        "fixture": "ep-only-rung",
+                    }
+                ],
+            },
+        ],
+    }
+
+    summary = run_benchmark(dataset)
+    by_album = {str(item.get("album_id") or ""): item for item in summary.get("per_track") or []}
+
+    assert bool(by_album["ep-a1"]["resolved"]) is True
+    assert bool(by_album["album-a1"]["resolved"]) is False
+    assert int(summary.get("wrong_variant_flags") or 0) == 0
+    assert float(summary.get("completion_percent") or 0.0) == pytest.approx(50.0)
+
+
 def test_benchmark_decision_edge_emits_gate_margins() -> None:
     dataset = {
         "dataset_name": "decision-edge-margins",

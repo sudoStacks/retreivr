@@ -249,6 +249,7 @@ def test_music_retry_escalates_query_rung_and_records_duration_filtered(monkeypa
                 track_disambiguation=None,
                 mb_youtube_urls=None,
                 recording_mbid=None,
+                is_ep_release=False,
             ):
                 self.calls.append(
                     {
@@ -263,6 +264,7 @@ def test_music_retry_escalates_query_rung_and_records_duration_filtered(monkeypa
                         "track_disambiguation": track_disambiguation,
                         "mb_youtube_urls": mb_youtube_urls,
                         "recording_mbid": recording_mbid,
+                        "is_ep_release": bool(is_ep_release),
                     }
                 )
                 return None
@@ -340,3 +342,120 @@ def test_music_retry_escalates_query_rung_and_records_duration_filtered(monkeypa
         assert captured["job_id"] == "job-escalate-1"
         assert captured["error_message"] == "duration_filtered"
         assert captured["retryable"] is True
+        assert fake_search.calls[0]["is_ep_release"] is False
+
+
+def test_music_retry_marks_ep_release_context_when_release_type_ep(monkeypatch) -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+
+        class _FakeSearchService:
+            def __init__(self):
+                self.calls = []
+                self.last_music_track_search = {"failure_reason": "all_filtered_by_gate"}
+
+            def search_music_track_best_match(
+                self,
+                artist,
+                track,
+                album=None,
+                duration_ms=None,
+                limit=6,
+                *,
+                start_rung=0,
+                coherence_context=None,
+                track_aliases=None,
+                track_disambiguation=None,
+                mb_youtube_urls=None,
+                recording_mbid=None,
+                is_ep_release=False,
+            ):
+                self.calls.append(
+                    {
+                        "artist": artist,
+                        "track": track,
+                        "album": album,
+                        "start_rung": start_rung,
+                        "recording_mbid": recording_mbid,
+                        "is_ep_release": bool(is_ep_release),
+                    }
+                )
+                return None
+
+        fake_search = _FakeSearchService()
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={},
+            paths=paths,
+            adapters={},
+            search_service=fake_search,
+        )
+
+        monkeypatch.setattr(
+            engine.store,
+            "record_failure",
+            lambda job, *, error_message, retryable, retry_delay_seconds: jq.JOB_STATUS_QUEUED,
+        )
+
+        job = jq.DownloadJob(
+            id="job-ep-1",
+            origin="music_album",
+            origin_id="album-run-ep",
+            media_type="music",
+            media_intent="music_track",
+            source="youtube_music",
+            url="musicbrainz://recording/rec-ep",
+            input_url="musicbrainz://recording/rec-ep",
+            canonical_url="musicbrainz://recording/rec-ep",
+            external_id=None,
+            status=jq.JOB_STATUS_QUEUED,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=1,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error="all_filtered_by_gate",
+            trace_id="trace-ep-1",
+            output_template={
+                "artist": "Artist",
+                "track": "Song",
+                "album": "EP Title",
+                "recording_mbid": "rec-ep",
+                "mb_release_id": "rel-ep",
+                "duration_ms": 200000,
+                "canonical_metadata": {
+                    "artist": "Artist",
+                    "track": "Song",
+                    "album": "EP Title",
+                    "recording_mbid": "rec-ep",
+                    "mb_release_id": "rel-ep",
+                    "duration_ms": 200000,
+                    "release_primary_type": "EP",
+                    "release_secondary_types": [],
+                },
+            },
+            resolved_destination=tmp,
+            canonical_id="music_track:rec-ep:rel-ep:disc-1",
+            file_path=None,
+        )
+
+        resolved = engine._resolve_music_track_job(job)
+        assert resolved is None
+        assert len(fake_search.calls) == 1
+        assert fake_search.calls[0]["is_ep_release"] is True

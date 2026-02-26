@@ -181,6 +181,17 @@ def _payload_contains_url(payload: dict) -> bool:
     return False
 
 
+def _is_ep_release_context(release_primary_type: str | None, release_secondary_types: list[str] | None = None) -> bool:
+    primary = str(release_primary_type or "").strip().lower()
+    if primary == "ep":
+        return True
+    if isinstance(release_secondary_types, (list, tuple, set)):
+        for value in release_secondary_types:
+            if str(value or "").strip().lower() == "ep":
+                return True
+    return False
+
+
 def _log_event(level, message, **fields):
     payload = {"message": message, **fields}
     try:
@@ -1277,11 +1288,11 @@ class SearchResolutionService:
                     )
         return adjustment, reasons
 
-    def _build_music_track_query(self, artist, track, album=None):
-        ladder = self._build_music_track_query_ladder(artist, track, album)
+    def _build_music_track_query(self, artist, track, album=None, *, is_ep_release: bool = False):
+        ladder = self._build_music_track_query_ladder(artist, track, album, is_ep_release=is_ep_release)
         return ladder[0]["query"] if ladder else ""
 
-    def _build_music_track_query_ladder(self, artist, track, album=None):
+    def _build_music_track_query_ladder(self, artist, track, album=None, *, is_ep_release: bool = False):
         artist_v = str(artist or "").strip()
         track_v = str(track or "").strip()
         album_v = str(album or "").strip()
@@ -1322,6 +1333,14 @@ class SearchResolutionService:
                 "query": " ".join(part for part in [artist_v, "-", track_v, "audio"] if part).strip(),
             },
         ]
+        if bool(is_ep_release):
+            ladder.append(
+                {
+                    "rung": 6,
+                    "label": "ep_audio_topic_fallback",
+                    "query": " ".join(part for part in [artist_v, "-", track_v, "audio", "topic"] if part).strip(),
+                }
+            )
         seen = set()
         unique_ladder = []
         for entry in ladder:
@@ -1590,7 +1609,7 @@ class SearchResolutionService:
         selected = None
         selected_pass = None
         ranked_selected: list[dict] = []
-        failure_reason = "no_candidate_above_threshold"
+        failure_reason = "all_filtered_by_gate"
         coherence_boost_applied = 0
         mb_injected_rejections: dict[str, int] = {}
         rejected_candidates: list[dict] = []
@@ -1852,6 +1871,10 @@ class SearchResolutionService:
         pass_a_reasons = {str(c.get("rejection_reason") or "") for c in ranked_a if c.get("rejection_reason")}
         if "duration_out_of_bounds" in pass_a_reasons or "duration_over_hard_cap" in pass_a_reasons:
             failure_reason = "duration_filtered"
+        elif pass_a_reasons and pass_a_reasons.issubset({"low_album_similarity"}):
+            failure_reason = "album_similarity_blocked"
+        elif rejected_candidates:
+            failure_reason = "all_filtered_by_gate"
         final_rejection = self._nearest_rejection(rejected_candidates)
         if isinstance(final_rejection, dict):
             final_rejection = {
@@ -1889,9 +1912,10 @@ class SearchResolutionService:
         track_disambiguation=None,
         mb_youtube_urls=None,
         recording_mbid=None,
+        is_ep_release=False,
     ):
         expected_duration_hint_sec = (int(duration_ms) // 1000) if duration_ms is not None else None
-        ladder = self._build_music_track_query_ladder(artist, track, album)
+        ladder = self._build_music_track_query_ladder(artist, track, album, is_ep_release=bool(is_ep_release))
         coherence_key = self._coherence_context_key(coherence_context)
         normalized_aliases = []
         if isinstance(track_aliases, (list, tuple, set)):
@@ -1912,9 +1936,11 @@ class SearchResolutionService:
                 "start_rung": 0,
                 "selected_rung": None,
                 "selected_pass": None,
-                "failure_reason": "no_candidates",
+                "failure_reason": "no_candidates_retrieved",
                 "coherence_key": coherence_key,
                 "coherence_boost_applied": 0,
+                "ep_refinement_attempted": False,
+                "ep_refinement_candidates_considered": 0,
                 "decision_edge": {
                     "accepted_selection": None,
                     "rejected_candidates": [],
@@ -1932,7 +1958,7 @@ class SearchResolutionService:
         selected_query = None
         selected_rung = None
         selected_pass = None
-        failure_reason = "no_candidates"
+        failure_reason = "no_candidates_retrieved"
         coherence_boost_applied = 0
         resolved_injected = self._resolve_mb_relationship_candidates(
             mb_youtube_urls=mb_youtube_urls,
@@ -1953,11 +1979,15 @@ class SearchResolutionService:
         decision_variant_distribution = {}
         decision_selected_variant_tags = []
         decision_top_rejected_variant_tags = []
+        ep_refinement_attempted = False
+        ep_refinement_candidates_considered = 0
 
         for ladder_entry in ladder[first_rung:]:
             query = str(ladder_entry.get("query") or "").strip()
             rung = int(ladder_entry.get("rung") or 0)
             query_label = str(ladder_entry.get("label") or f"rung_{rung}")
+            if query_label == "ep_audio_topic_fallback":
+                ep_refinement_attempted = True
             expected_base = {
                 "artist": artist,
                 "track": track,
@@ -1988,7 +2018,7 @@ class SearchResolutionService:
                 "selected_pass": None,
             }
             if not candidates:
-                rung_meta["failure_reason"] = "no_candidates"
+                rung_meta["failure_reason"] = "no_candidates_retrieved"
                 attempted.append(rung_meta)
                 _log_event(
                     logging.INFO,
@@ -1998,9 +2028,11 @@ class SearchResolutionService:
                     query=query,
                     candidates=0,
                     selected_pass=None,
-                    failure_reason="no_candidates",
+                    failure_reason="no_candidates_retrieved",
                 )
                 continue
+            if query_label == "ep_audio_topic_fallback":
+                ep_refinement_candidates_considered += len(candidates)
 
             rank_result = self.rank_and_gate(
                 {
@@ -2050,7 +2082,7 @@ class SearchResolutionService:
                     self._record_album_coherence_family(coherence_key, selected)
                 break
 
-            failure_reason = str(rank_result.failure_reason or "no_candidate_above_threshold")
+            failure_reason = str(rank_result.failure_reason or "all_filtered_by_gate")
             if isinstance(rank_result.final_rejection, dict):
                 decision_final_rejection = rank_result.final_rejection
             decision_top_rejected_variant_tags = list(rank_result.top_rejected_variant_tags or decision_top_rejected_variant_tags)
@@ -2099,6 +2131,8 @@ class SearchResolutionService:
             "failure_reason": None if selected is not None else failure_reason,
             "coherence_key": coherence_key,
             "coherence_boost_applied": coherence_boost_applied,
+            "ep_refinement_attempted": bool(ep_refinement_attempted),
+            "ep_refinement_candidates_considered": int(ep_refinement_candidates_considered),
             "mb_injected_candidates": len(mb_injected_candidates),
             "mb_injected_selected": mb_injected_selected,
             "mb_injected_rejections": mb_injected_rejections,

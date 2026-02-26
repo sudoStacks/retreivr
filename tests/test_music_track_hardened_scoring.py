@@ -861,6 +861,102 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         self.assertEqual(best.get("candidate_id"), "legacy-audio-hit")
         self.assertEqual(adapter.calls, [rung_1, rung_2, rung_4, rung_5, rung_6])
 
+    def test_ep_audio_topic_rung_activates_only_for_ep_runs(self):
+        rung_1 = '"Artist" "Song" "Album"'
+        rung_2 = '"Artist" "Song"'
+        rung_4 = "Artist Song official audio"
+        rung_5 = "Artist - Song topic"
+        rung_6 = "Artist - Song audio"
+        rung_ep = "Artist - Song audio topic"
+        adapter = _QueryAwareAdapter(
+            "youtube_music",
+            {
+                rung_ep: [
+                    _candidate(
+                        source="youtube_music",
+                        candidate_id="ep-topic-hit",
+                        title="Artist - Song (Audio)",
+                        uploader="Artist - Topic",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=200,
+                    )
+                ]
+            },
+        )
+        service = self.se.SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"youtube_music": adapter},
+            config={},
+            paths=None,
+            canonical_resolver=_StubCanonicalResolver(),
+        )
+
+        best = service.search_music_track_best_match(
+            "Artist",
+            "Song",
+            album="Album",
+            duration_ms=200000,
+            limit=6,
+            is_ep_release=True,
+        )
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "ep-topic-hit")
+        self.assertEqual(adapter.calls, [rung_1, rung_2, rung_4, rung_5, rung_6, rung_ep])
+        meta = getattr(service, "last_music_track_search", {}) or {}
+        self.assertTrue(bool(meta.get("ep_refinement_attempted")))
+        self.assertEqual(int(meta.get("ep_refinement_candidates_considered") or 0), 1)
+
+    def test_ep_audio_topic_rung_not_used_for_non_ep_runs(self):
+        rung_1 = '"Artist" "Song" "Album"'
+        rung_2 = '"Artist" "Song"'
+        rung_4 = "Artist Song official audio"
+        rung_5 = "Artist - Song topic"
+        rung_6 = "Artist - Song audio"
+        rung_ep = "Artist - Song audio topic"
+        adapter = _QueryAwareAdapter(
+            "youtube_music",
+            {
+                rung_ep: [
+                    _candidate(
+                        source="youtube_music",
+                        candidate_id="ep-only-hit",
+                        title="Artist - Song (Audio)",
+                        uploader="Artist - Topic",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=200,
+                    )
+                ]
+            },
+        )
+        service = self.se.SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"youtube_music": adapter},
+            config={},
+            paths=None,
+            canonical_resolver=_StubCanonicalResolver(),
+        )
+
+        best = service.search_music_track_best_match(
+            "Artist",
+            "Song",
+            album="Album",
+            duration_ms=200000,
+            limit=6,
+            is_ep_release=False,
+        )
+        self.assertIsNone(best)
+        self.assertEqual(adapter.calls, [rung_1, rung_2, rung_4, rung_5, rung_6])
+        self.assertNotIn(rung_ep, adapter.calls)
+        meta = getattr(service, "last_music_track_search", {}) or {}
+        self.assertFalse(bool(meta.get("ep_refinement_attempted")))
+        self.assertEqual(int(meta.get("ep_refinement_candidates_considered") or 0), 0)
+
     def test_pass_b_accepts_high_similarity_authority_match_with_expanded_duration(self):
         service = self._service(
             {

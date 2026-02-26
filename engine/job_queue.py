@@ -182,6 +182,17 @@ _YTDLP_UNAVAILABLE_SIGNAL_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
+
+def _is_ep_release_context(release_primary_type: str | None, release_secondary_types: list[str] | None = None) -> bool:
+    primary = str(release_primary_type or "").strip().lower()
+    if primary == "ep":
+        return True
+    if isinstance(release_secondary_types, (list, tuple, set)):
+        for value in release_secondary_types:
+            if str(value or "").strip().lower() == "ep":
+                return True
+    return False
+
 _YTDLP_TRANSIENT_ERROR_MARKERS: tuple[str, ...] = (
     "timed out",
     "timeout",
@@ -1597,6 +1608,24 @@ class DownloadWorkerEngine:
                         continue
                     seen_urls.add(lowered)
                     mb_youtube_urls.append(text)
+        release_primary_type = str(
+            canonical.get("release_primary_type")
+            or canonical.get("primary_type")
+            or payload.get("release_primary_type")
+            or payload.get("primary_type")
+            or ""
+        ).strip()
+        release_secondary_types_raw = (
+            canonical.get("release_secondary_types")
+            or payload.get("release_secondary_types")
+        )
+        release_secondary_types = []
+        if isinstance(release_secondary_types_raw, (list, tuple, set)):
+            for value in release_secondary_types_raw:
+                text = str(value or "").strip()
+                if text:
+                    release_secondary_types.append(text)
+        is_ep_release = _is_ep_release_context(release_primary_type, release_secondary_types)
         duration_hint_sec = None
         try:
             if duration_ms_raw is not None:
@@ -1655,8 +1684,11 @@ class DownloadWorkerEngine:
                 "track_total": track_total_value,
             }
         if isinstance(job.last_error, str) and (
-            "no_candidate_above_threshold" in job.last_error
-            or "duration_filtered" in job.last_error
+            "duration_filtered" in job.last_error
+            or "no_candidate_above_threshold" in job.last_error
+            or "all_filtered_by_gate" in job.last_error
+            or "album_similarity_blocked" in job.last_error
+            or "no_candidates_retrieved" in job.last_error
         ):
             try:
                 retry_start_rung = max(0, min(int(job.attempts or 0), 3))
@@ -1677,6 +1709,7 @@ class DownloadWorkerEngine:
                     track_disambiguation=track_disambiguation,
                     mb_youtube_urls=mb_youtube_urls,
                     recording_mbid=recording_mbid,
+                    is_ep_release=is_ep_release,
                 )
             except Exception as exc:
                 logging.exception("Music track search service failed query=%s", search_query)
@@ -1716,6 +1749,8 @@ class DownloadWorkerEngine:
                             "mb_injected_selected": injected_selected,
                             "mb_injected_rejections": injected_rejections or {},
                             "mb_injected_album_success_count": album_success_count,
+                            "ep_refinement_attempted": bool(search_meta.get("ep_refinement_attempted")),
+                            "ep_refinement_candidates_considered": int(search_meta.get("ep_refinement_candidates_considered") or 0),
                             "decision_edge": search_meta.get("decision_edge") if isinstance(search_meta.get("decision_edge"), dict) else {},
                         }
                     },
@@ -1740,8 +1775,14 @@ class DownloadWorkerEngine:
                 unavailable_class = _classify_ytdlp_unavailability(job.last_error)
                 if "yt_dlp_source_unavailable:" in job.last_error.lower() and unavailable_class:
                     failure_reason = f"source_unavailable:{unavailable_class}"
-            failure_reason = failure_reason or "no_candidate_above_threshold"
-            retryable_no_candidate = failure_reason in {"duration_filtered", "no_candidate_above_threshold"}
+            failure_reason = failure_reason or "all_filtered_by_gate"
+            retryable_no_candidate = failure_reason in {
+                "duration_filtered",
+                "no_candidate_above_threshold",
+                "all_filtered_by_gate",
+                "album_similarity_blocked",
+                "no_candidates_retrieved",
+            }
             logging.error("Music track search failed")
             self.store.record_failure(
                 job,
@@ -5533,7 +5574,7 @@ def _normalize_runtime_failure_reason(last_error, output_template):
         return runtime_reason
     text = str(last_error or "").strip().lower()
     if not text:
-        return "unknown"
+        return "no_candidates_retrieved"
     marker = "yt_dlp_source_unavailable:"
     if marker in text:
         tail = text.split(marker, 1)[1]
@@ -5548,8 +5589,12 @@ def _normalize_runtime_failure_reason(last_error, output_template):
     if "no_candidate_above_threshold" in text:
         return "no_candidate_above_threshold"
     if "no_candidates" in text:
-        return "no_candidates"
-    return "unknown"
+        return "no_candidates_retrieved"
+    if "album_similarity_blocked" in text:
+        return "album_similarity_blocked"
+    if "all_filtered_by_gate" in text:
+        return "all_filtered_by_gate"
+    return "all_filtered_by_gate"
 
 
 def _classify_runtime_missing_hint(failure_reason):
@@ -5636,6 +5681,8 @@ def build_music_album_run_summary(db_path, album_run_id):
         canonical = output_template.get("canonical_metadata") if isinstance(output_template.get("canonical_metadata"), dict) else {}
         track_id = str(canonical.get("recording_mbid") or output_template.get("recording_mbid") or row["id"]).strip()
         runtime_search_meta = output_template.get("runtime_search_meta") if isinstance(output_template.get("runtime_search_meta"), dict) else {}
+        ep_refinement_attempted = bool(runtime_search_meta.get("ep_refinement_attempted"))
+        ep_refinement_candidates_considered = int(runtime_search_meta.get("ep_refinement_candidates_considered") or 0)
         runtime_media_profile = output_template.get("runtime_media_profile") if isinstance(output_template.get("runtime_media_profile"), dict) else {}
         final_container = str(runtime_media_profile.get("final_container") or "").strip() or None
         final_video_codec = str(runtime_media_profile.get("final_video_codec") or "").strip() or None
@@ -5676,6 +5723,8 @@ def build_music_album_run_summary(db_path, album_run_id):
                 "resolved": resolved,
                 "failure_reason": failure_reason,
                 "decision_edge": decision_edge,
+                "ep_refinement_attempted": ep_refinement_attempted,
+                "ep_refinement_candidates_considered": ep_refinement_candidates_considered,
                 "final_container": final_container,
                 "final_video_codec": final_video_codec,
                 "final_audio_codec": final_audio_codec,

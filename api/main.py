@@ -1421,6 +1421,14 @@ class _IntentQueueAdapter:
             normalized_release_date = str(payload.get("release_date") or "").strip() or None
             normalized_artwork_url = str(payload.get("artwork_url") or "").strip() or None
             normalized_genre = str(payload.get("genre") or "").strip() or None
+            normalized_release_primary_type = str(payload.get("release_primary_type") or "").strip() or None
+            release_secondary_raw = payload.get("release_secondary_types")
+            normalized_release_secondary_types = []
+            if isinstance(release_secondary_raw, (list, tuple, set)):
+                for value in release_secondary_raw:
+                    text = str(value or "").strip()
+                    if text:
+                        normalized_release_secondary_types.append(text)
             normalized_mb_youtube_urls = (
                 list(payload.get("mb_youtube_urls"))
                 if isinstance(payload.get("mb_youtube_urls"), (list, tuple, set))
@@ -1449,6 +1457,8 @@ class _IntentQueueAdapter:
                 "mb_release_id": normalized_release_mbid,
                 "mb_release_group_id": normalized_release_group_mbid,
                 "mb_youtube_urls": normalized_mb_youtube_urls,
+                "release_primary_type": normalized_release_primary_type,
+                "release_secondary_types": normalized_release_secondary_types,
             }
             canonical_id = _build_music_track_canonical_id(
                 normalized_artist,
@@ -1489,6 +1499,8 @@ class _IntentQueueAdapter:
                     "mb_release_id": normalized_release_mbid,
                     "mb_release_group_id": normalized_release_group_mbid,
                     "mb_youtube_urls": normalized_mb_youtube_urls,
+                    "release_primary_type": normalized_release_primary_type,
+                    "release_secondary_types": normalized_release_secondary_types,
                 },
                 canonical_id=canonical_id,
             )
@@ -5191,7 +5203,7 @@ def _album_run_summary_path(album_run_id: str) -> Path:
 def _normalize_runtime_failure_reason(last_error: str | None) -> str:
     text = str(last_error or "").strip().lower()
     if not text:
-        return "unknown"
+        return "no_candidates_retrieved"
     marker = "yt_dlp_source_unavailable:"
     if marker in text:
         tail = text.split(marker, 1)[1]
@@ -5206,8 +5218,12 @@ def _normalize_runtime_failure_reason(last_error: str | None) -> str:
     if "no_candidate_above_threshold" in text:
         return "no_candidate_above_threshold"
     if "no_candidates" in text:
-        return "no_candidates"
-    return "unknown"
+        return "no_candidates_retrieved"
+    if "album_similarity_blocked" in text:
+        return "album_similarity_blocked"
+    if "all_filtered_by_gate" in text:
+        return "all_filtered_by_gate"
+    return "all_filtered_by_gate"
 
 
 def _classify_runtime_missing_hint(failure_reason: str) -> tuple[str, str]:
@@ -5343,6 +5359,8 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
             except Exception:
                 parsed = {}
         runtime_search_meta = parsed.get("runtime_search_meta") if isinstance(parsed.get("runtime_search_meta"), dict) else {}
+        ep_refinement_attempted = bool(runtime_search_meta.get("ep_refinement_attempted"))
+        ep_refinement_candidates_considered = int(runtime_search_meta.get("ep_refinement_candidates_considered") or 0)
         runtime_media_profile = parsed.get("runtime_media_profile") if isinstance(parsed.get("runtime_media_profile"), dict) else {}
         final_container = str(runtime_media_profile.get("final_container") or "").strip() or None
         final_video_codec = str(runtime_media_profile.get("final_video_codec") or "").strip() or None
@@ -5381,6 +5399,8 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
                 "resolved": False,
                 "failure_reason": failure_reason,
                 "decision_edge": decision_edge,
+                "ep_refinement_attempted": ep_refinement_attempted,
+                "ep_refinement_candidates_considered": ep_refinement_candidates_considered,
                 "final_container": final_container,
                 "final_video_codec": final_video_codec,
                 "final_audio_codec": final_audio_codec,
@@ -5406,6 +5426,8 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
             or row["id"]
         ).strip()
         runtime_search_meta = parsed.get("runtime_search_meta") if isinstance(parsed.get("runtime_search_meta"), dict) else {}
+        ep_refinement_attempted = bool(runtime_search_meta.get("ep_refinement_attempted"))
+        ep_refinement_candidates_considered = int(runtime_search_meta.get("ep_refinement_candidates_considered") or 0)
         runtime_media_profile = parsed.get("runtime_media_profile") if isinstance(parsed.get("runtime_media_profile"), dict) else {}
         final_container = str(runtime_media_profile.get("final_container") or "").strip() or None
         final_video_codec = str(runtime_media_profile.get("final_video_codec") or "").strip() or None
@@ -5417,6 +5439,8 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
                 "resolved": True,
                 "failure_reason": None,
                 "decision_edge": decision_edge,
+                "ep_refinement_attempted": ep_refinement_attempted,
+                "ep_refinement_candidates_considered": ep_refinement_candidates_considered,
                 "final_container": final_container,
                 "final_video_codec": final_video_codec,
                 "final_audio_codec": final_audio_codec,
@@ -5618,6 +5642,10 @@ def download_full_album(data: dict):
         except Exception:
             album_artwork_url = None
     album_genre = _best_mb_genre(release_obj) or _best_mb_genre(release_group)
+    release_primary_type = str(release_group.get("primary-type") or "").strip() if isinstance(release_group, dict) else ""
+    release_secondary_types = release_group.get("secondary-type-list") if isinstance(release_group, dict) else []
+    if not isinstance(release_secondary_types, list):
+        release_secondary_types = []
 
     queue = _IntentQueueAdapter()
     engine = getattr(app.state, "worker_engine", None)
@@ -5712,6 +5740,8 @@ def download_full_album(data: dict):
                     "track_disambiguation": resolved.get("track_disambiguation") if isinstance(resolved, dict) else None,
                     "mb_recording_title": resolved.get("mb_recording_title") if isinstance(resolved, dict) else None,
                     "mb_youtube_urls": resolved.get("mb_youtube_urls") if isinstance(resolved, dict) else None,
+                    "release_primary_type": release_primary_type or None,
+                    "release_secondary_types": release_secondary_types or [],
                 }
                 canonical_id = _build_music_track_canonical_id(
                     payload.get("artist"),
