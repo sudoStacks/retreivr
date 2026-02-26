@@ -796,14 +796,14 @@ def build_video_url(video_id):
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
-def telegram_notify(config, message):
+def telegram_notify_result(config, message):
     telegram = config.get("telegram") if isinstance(config, dict) else None
     if not telegram or not message:
-        return False
+        return {"ok": False, "message_id": None}
     bot_token = telegram.get("bot_token")
     chat_id = telegram.get("chat_id")
     if not bot_token or not chat_id:
-        return False
+        return {"ok": False, "message_id": None}
     max_chars = 4096
     text = str(message)
     if len(text) > max_chars:
@@ -813,11 +813,25 @@ def telegram_notify(config, message):
     try:
         resp = requests.post(url, json=payload, timeout=15)
         if resp.ok:
-            return True
+            message_id = None
+            try:
+                body = resp.json()
+                if isinstance(body, dict):
+                    result = body.get("result")
+                    if isinstance(result, dict):
+                        message_id = result.get("message_id")
+            except Exception:
+                message_id = None
+            return {"ok": True, "message_id": message_id}
         logging.warning("Telegram notify failed: %s", resp.text)
     except Exception:
         logging.exception("Telegram notify failed")
-    return False
+    return {"ok": False, "message_id": None}
+
+
+def telegram_notify(config, message):
+    result = telegram_notify_result(config, message)
+    return bool(result.get("ok"))
 
 
 def run_single_download(

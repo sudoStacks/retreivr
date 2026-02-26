@@ -2393,6 +2393,12 @@ class YouTubeAdapter:
                 enforce_music_contract=enforce_music_contract,
                 enqueue_audio_metadata=bool(music_mode),
             )
+            runtime_media_profile = meta.get("runtime_media_profile") if isinstance(meta.get("runtime_media_profile"), dict) else None
+            if runtime_media_profile:
+                self.store.merge_output_template_fields(
+                    job.id,
+                    {"runtime_media_profile": runtime_media_profile},
+                )
             logger.info(f"[MUSIC] finalized file: {final_path}")
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -5060,6 +5066,108 @@ def _assert_music_canonical_metadata_contract(meta):
         raise RuntimeError("music_track_requires_mb_bound_metadata")
 
 
+def _probe_media_profile(file_path):
+    path = str(file_path or "").strip()
+    if not path:
+        return {
+            "final_container": None,
+            "final_video_codec": None,
+            "final_audio_codec": None,
+        }
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=format_name:stream=codec_type,codec_name",
+        "-of",
+        "json",
+        path,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        payload = json.loads(proc.stdout or "{}")
+    except Exception:
+        return {
+            "final_container": None,
+            "final_video_codec": None,
+            "final_audio_codec": None,
+        }
+
+    container = None
+    fmt = payload.get("format") if isinstance(payload, dict) else None
+    if isinstance(fmt, dict):
+        format_name = str(fmt.get("format_name") or "").strip().lower()
+        if format_name:
+            container = format_name.split(",")[0].strip() or None
+
+    video_codec = None
+    audio_codec = None
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    if isinstance(streams, list):
+        for stream in streams:
+            if not isinstance(stream, dict):
+                continue
+            codec_type = str(stream.get("codec_type") or "").strip().lower()
+            codec_name = str(stream.get("codec_name") or "").strip().lower() or None
+            if codec_type == "video" and video_codec is None:
+                video_codec = codec_name
+            elif codec_type == "audio" and audio_codec is None:
+                audio_codec = codec_name
+
+    return {
+        "final_container": container,
+        "final_video_codec": video_codec,
+        "final_audio_codec": audio_codec,
+    }
+
+
+def _enforce_video_codec_container_rules(local_file, *, target_container):
+    container = str(target_container or "").strip().lower()
+    profile = _probe_media_profile(local_file)
+    if container != "mp4":
+        return local_file, profile
+    audio_codec = str(profile.get("final_audio_codec") or "").strip().lower()
+    if audio_codec == "aac":
+        return local_file, profile
+
+    mp4_compatible_path = f"{local_file}.mp4compat"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(local_file),
+        "-map",
+        "0:v?",
+        "-map",
+        "0:a?",
+        "-map",
+        "0:s?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-c:s",
+        "copy",
+        "-movflags",
+        "+faststart",
+        mp4_compatible_path,
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except Exception as exc:
+        raise RuntimeError(f"mp4_audio_codec_enforcement_failed: {exc}") from exc
+
+    os.replace(mp4_compatible_path, local_file)
+    updated = _probe_media_profile(local_file)
+    updated_audio = str(updated.get("final_audio_codec") or "").strip().lower()
+    if updated_audio != "aac":
+        raise RuntimeError(
+            f"mp4_audio_codec_enforcement_failed: expected_aac got={updated_audio or 'unknown'}"
+        )
+    return local_file, updated
+
+
 def finalize_download_artifact(
     *,
     local_file,
@@ -5078,6 +5186,17 @@ def finalize_download_artifact(
         raise RuntimeError("missing_local_file_for_finalize")
     meta = dict(meta or {})
     fallback_id = str(fallback_id or "")
+    if not audio_mode:
+        target_container = _normalize_format(final_format) or "mkv"
+        local_file, media_profile = _enforce_video_codec_container_rules(
+            local_file,
+            target_container=target_container,
+        )
+        meta["runtime_media_profile"] = {
+            "final_container": media_profile.get("final_container"),
+            "final_video_codec": media_profile.get("final_video_codec"),
+            "final_audio_codec": media_profile.get("final_audio_codec"),
+        }
     ext = os.path.splitext(local_file)[1].lstrip(".")
     if audio_mode:
         actual_ext = str(ext or "").strip().lower()
@@ -5517,6 +5636,10 @@ def build_music_album_run_summary(db_path, album_run_id):
         canonical = output_template.get("canonical_metadata") if isinstance(output_template.get("canonical_metadata"), dict) else {}
         track_id = str(canonical.get("recording_mbid") or output_template.get("recording_mbid") or row["id"]).strip()
         runtime_search_meta = output_template.get("runtime_search_meta") if isinstance(output_template.get("runtime_search_meta"), dict) else {}
+        runtime_media_profile = output_template.get("runtime_media_profile") if isinstance(output_template.get("runtime_media_profile"), dict) else {}
+        final_container = str(runtime_media_profile.get("final_container") or "").strip() or None
+        final_video_codec = str(runtime_media_profile.get("final_video_codec") or "").strip() or None
+        final_audio_codec = str(runtime_media_profile.get("final_audio_codec") or "").strip() or None
         decision_edge = _normalize_decision_edge(runtime_search_meta.get("decision_edge"))
         if bool(runtime_search_meta.get("wrong_variant_flag")):
             wrong_variant_count += 1
@@ -5553,6 +5676,9 @@ def build_music_album_run_summary(db_path, album_run_id):
                 "resolved": resolved,
                 "failure_reason": failure_reason,
                 "decision_edge": decision_edge,
+                "final_container": final_container,
+                "final_video_codec": final_video_codec,
+                "final_audio_codec": final_audio_codec,
             }
         )
 
@@ -5567,6 +5693,8 @@ def build_music_album_run_summary(db_path, album_run_id):
         "schema_version": 2,
         "run_type": "music_album",
         "album_run_id": str(album_run_id or ""),
+        "telegram_sent": False,
+        "telegram_message_id": None,
         "tracks_total": tracks_total,
         "tracks_resolved": tracks_resolved,
         "completion_percent": completion_percent,

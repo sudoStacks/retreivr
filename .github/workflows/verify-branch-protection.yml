@@ -1,0 +1,75 @@
+name: verify-branch-protection
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-branch-protection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required benchmark status check on main
+        env:
+          REQUIRED_CHECK: "music-search-benchmark / benchmark"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main"
+          RESPONSE_JSON="$(mktemp)"
+
+          HTTP_CODE="$(curl -sS -o "${RESPONSE_JSON}" -w "%{http_code}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "${API_URL}")"
+
+          if [[ "${HTTP_CODE}" != "200" ]]; then
+            echo "::error::Failed to read branch protection for main (HTTP ${HTTP_CODE})."
+            echo "Response:"
+            cat "${RESPONSE_JSON}" || true
+            exit 1
+          fi
+
+          python3 - "${RESPONSE_JSON}" "${REQUIRED_CHECK}" <<'PY'
+import json
+import sys
+
+response_path = sys.argv[1]
+required = sys.argv[2]
+
+with open(response_path, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+if not bool(payload.get("protected")):
+    print("::error::main branch is not protected. Enable branch protection with required status checks.")
+    raise SystemExit(1)
+
+protection = payload.get("protection")
+if not isinstance(protection, dict):
+    print("::error::Missing branch protection payload. Ensure branch protection is configured and readable.")
+    raise SystemExit(1)
+
+required_status = protection.get("required_status_checks")
+if not isinstance(required_status, dict):
+    print("::error::required_status_checks missing on main branch protection.")
+    raise SystemExit(1)
+
+contexts = required_status.get("contexts")
+if not isinstance(contexts, list):
+    print("::error::required_status_checks.contexts missing or unreadable. Check token permissions and branch protection setup.")
+    raise SystemExit(1)
+
+if required not in contexts:
+    print(f"::error::Required status check '{required}' is not configured on main.")
+    print(f"Configured checks: {contexts}")
+    raise SystemExit(1)
+
+print(f"Verified required status check present: {required}")
+PY

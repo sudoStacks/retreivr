@@ -27,6 +27,8 @@ Thanks for taking the time to contribute.
 - The benchmark gate is mandatory for those PRs: no completion/precision regression beyond configured tolerance.
 - The PR must include the benchmark delta output published by CI (artifact + job summary markdown).
 - Threshold/gate changes are allowed only with explicit gate-config + baseline updates in the same PR.
+- Branch protection on `main` must include required check: `music-search-benchmark / benchmark`.
+- CI enforces this via `verify-branch-protection` workflow on `main` and tag pushes.
 - The CI run publishes two artifacts for review:
   - `music_search_benchmark_results.json` (raw summary)
   - `music_search_benchmark_report.md` (before/after delta summary vs baseline)
@@ -41,6 +43,13 @@ Thanks for taking the time to contribute.
   - What changed
   - Why it changed
   - Benchmark impact summary (completion delta and wrong-variant delta)
+
+## Manual Override Procedure (Branch Protection Verification)
+- This should be rare and admin-only.
+- If `verify-branch-protection` fails due GitHub API/read-permission issues (not because check is missing):
+  1. Repository admin manually verifies `main` branch protection includes `music-search-benchmark / benchmark`.
+  2. Record evidence in the release/PR thread (screenshot or settings link + timestamp).
+  3. Fix permissions/config and re-run the workflow; do not remove benchmark required checks as a workaround.
 
 ## Code style
 - Prefer explicit and readable code over cleverness.

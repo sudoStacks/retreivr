@@ -101,6 +101,11 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
                                 "final_rejection": None,
                             }
                         },
+                        "runtime_media_profile": {
+                            "final_container": "mp4",
+                            "final_video_codec": "h264",
+                            "final_audio_codec": "aac",
+                        },
                     }
                 ),
                 str(tmp_path / "Music" / "Artist" / "Album (2024)" / "01 - Song.mp3"),
@@ -149,6 +154,11 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
                                 },
                             }
                         },
+                        "runtime_media_profile": {
+                            "final_container": "mkv",
+                            "final_video_codec": "vp9",
+                            "final_audio_codec": "opus",
+                        },
                     }
                 ),
                 None,
@@ -179,6 +189,8 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
 
     assert payload["run_type"] == "music_album"
     assert payload["album_run_id"] == "album-run-1"
+    assert payload["telegram_sent"] is False
+    assert payload["telegram_message_id"] is None
     assert payload["tracks_total"] == 2
     assert payload["tracks_resolved"] == 1
     assert "completion_percent" in payload
@@ -195,3 +207,6 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
     assert "candidate_variant_distribution" in edge
     assert "selected_candidate_variant_tags" in edge
     assert "top_rejected_variant_tags" in edge
+    assert "final_container" in payload["per_track"][0]
+    assert "final_video_codec" in payload["per_track"][0]
+    assert "final_audio_codec" in payload["per_track"][0]

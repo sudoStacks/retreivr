@@ -105,6 +105,7 @@ from engine.core import (
     run_archive,
     run_single_playlist,
     telegram_notify,
+    telegram_notify_result,
     validate_config,
 )
 from engine.paths import (
@@ -684,9 +685,9 @@ def _ensure_music_failures_table(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_music_failures_batch ON music_failures (origin_batch_id)")
     conn.commit()
 
-def notify_run_summary(config, *, run_type: str, status, started_at, finished_at):
+def notify_run_summary(config, *, run_type: str, status, started_at, finished_at, force_send: bool = False):
     if run_type not in {"scheduled", "watcher", "api"}:
-        return
+        return {"attempted": 0, "sent": False, "telegram_message_id": None}
 
     TELEGRAM_MAX_MESSAGE_CHARS = 4096
 
@@ -797,8 +798,11 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
     failures = _count(getattr(status, "run_failures", 0))
     attempted = successes + failures
 
-    if attempted <= 0:
-        return
+    if attempted <= 0 and not force_send:
+        return {"attempted": 0, "sent": False, "telegram_message_id": None}
+    if attempted <= 0 and force_send:
+        failures = 1
+        attempted = 1
 
     duration_label = "unknown"
     if started_at and finished_at:
@@ -812,10 +816,100 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
     downloaded_labels = _resolve_downloaded_labels(getattr(status, "run_successes", []) or [])
     msg = _build_message(successes, failures, duration_label, downloaded_labels)
 
+    telegram_message_id = None
+    sent = False
     try:
-        telegram_notify(config, msg)
+        result = telegram_notify_result(config, msg)
+        if isinstance(result, dict):
+            sent = bool(result.get("ok"))
+            telegram_message_id = result.get("message_id")
+        else:
+            sent = bool(telegram_notify(config, msg))
     except Exception:
         logging.exception("Telegram notify failed (run_type=%s)", run_type)
+        sent = False
+        telegram_message_id = None
+
+    return {
+        "attempted": attempted,
+        "sent": sent,
+        "telegram_message_id": telegram_message_id,
+    }
+
+
+def dispatch_run_summary_once(
+    config,
+    *,
+    run_type: str,
+    run_id: str | None,
+    status,
+    started_at,
+    finished_at,
+    last_error: str | None = None,
+):
+    registry = getattr(app.state, "run_summary_dispatch", None)
+    if not isinstance(registry, dict):
+        registry = {}
+        app.state.run_summary_dispatch = registry
+
+    dedupe_key = f"{run_type}:{str(run_id or '').strip() or 'unknown'}"
+    existing = registry.get(dedupe_key) if isinstance(registry.get(dedupe_key), dict) else None
+    if existing and bool(existing.get("summary_sent")):
+        setattr(status, "summary_sent", True)
+        setattr(status, "telegram_message_id", existing.get("telegram_message_id"))
+        logging.info(
+            "run_summary_telegram_dispatch_skipped run_id=%s run_type=%s reason=already_sent message_id=%s",
+            run_id,
+            run_type,
+            existing.get("telegram_message_id"),
+        )
+        return existing
+
+    if bool(getattr(status, "summary_sent", False)):
+        cached = {
+            "summary_sent": True,
+            "telegram_message_id": getattr(status, "telegram_message_id", None),
+            "attempted": 0,
+        }
+        registry[dedupe_key] = cached
+        logging.info(
+            "run_summary_telegram_dispatch_skipped run_id=%s run_type=%s reason=status_summary_sent message_id=%s",
+            run_id,
+            run_type,
+            cached.get("telegram_message_id"),
+        )
+        return cached
+
+    force_send = bool(str(last_error or "").strip())
+    result = notify_run_summary(
+        config,
+        run_type=run_type,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        force_send=force_send,
+    )
+    sent = bool(result.get("sent")) if isinstance(result, dict) else False
+    telegram_message_id = result.get("telegram_message_id") if isinstance(result, dict) else None
+    attempted = int(result.get("attempted") or 0) if isinstance(result, dict) else 0
+    setattr(status, "summary_sent", sent)
+    setattr(status, "telegram_message_id", telegram_message_id)
+
+    record = {
+        "summary_sent": sent,
+        "telegram_message_id": telegram_message_id,
+        "attempted": attempted,
+    }
+    registry[dedupe_key] = record
+    logging.info(
+        "run_summary_telegram_dispatch run_id=%s run_type=%s attempted=%s sent=%s message_id=%s",
+        run_id,
+        run_type,
+        attempted,
+        sent,
+        telegram_message_id,
+    )
+    return record
 
 
 def normalize_search_payload(payload: dict | None, *, default_sources: list[str]) -> dict:
@@ -1494,6 +1588,7 @@ async def startup():
     app.state.run_lock = asyncio.Lock()
     app.state.stop_event = threading.Event()
     app.state.run_task = None
+    app.state.run_summary_dispatch = {}
     app.state.loop = asyncio.get_running_loop()
     app.state.schedule_lock = threading.Lock()
     app.state.ytdlp_update_lock = threading.Lock()
@@ -2981,12 +3076,14 @@ async def _start_run_with_config(
                 elif app.state.state in {"running", "completed"}:
                     app.state.state = "idle"
                 
-                notify_run_summary(
+                dispatch_run_summary_once(
                     config,
                     run_type=run_source,
+                    run_id=app.state.run_id,
                     status=status,
                     started_at=app.state.started_at,
                     finished_at=app.state.finished_at,
+                    last_error=app.state.last_error,
                 )
 
         app.state.run_task = asyncio.create_task(_runner())
@@ -5203,6 +5300,10 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
             except Exception:
                 parsed = {}
         runtime_search_meta = parsed.get("runtime_search_meta") if isinstance(parsed.get("runtime_search_meta"), dict) else {}
+        runtime_media_profile = parsed.get("runtime_media_profile") if isinstance(parsed.get("runtime_media_profile"), dict) else {}
+        final_container = str(runtime_media_profile.get("final_container") or "").strip() or None
+        final_video_codec = str(runtime_media_profile.get("final_video_codec") or "").strip() or None
+        final_audio_codec = str(runtime_media_profile.get("final_audio_codec") or "").strip() or None
         decision_edge = _normalize_decision_edge(runtime_search_meta.get("decision_edge"))
         normalized_rejections = _normalize_injected_rejection_mix(runtime_search_meta.get("mb_injected_rejections"))
         for key, count in normalized_rejections.items():
@@ -5237,6 +5338,9 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
                 "resolved": False,
                 "failure_reason": failure_reason,
                 "decision_edge": decision_edge,
+                "final_container": final_container,
+                "final_video_codec": final_video_codec,
+                "final_audio_codec": final_audio_codec,
             }
         )
     for row in rows:
@@ -5259,6 +5363,10 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
             or row["id"]
         ).strip()
         runtime_search_meta = parsed.get("runtime_search_meta") if isinstance(parsed.get("runtime_search_meta"), dict) else {}
+        runtime_media_profile = parsed.get("runtime_media_profile") if isinstance(parsed.get("runtime_media_profile"), dict) else {}
+        final_container = str(runtime_media_profile.get("final_container") or "").strip() or None
+        final_video_codec = str(runtime_media_profile.get("final_video_codec") or "").strip() or None
+        final_audio_codec = str(runtime_media_profile.get("final_audio_codec") or "").strip() or None
         decision_edge = _normalize_decision_edge(runtime_search_meta.get("decision_edge"))
         per_track.append(
             {
@@ -5266,6 +5374,9 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
                 "resolved": True,
                 "failure_reason": None,
                 "decision_edge": decision_edge,
+                "final_container": final_container,
+                "final_video_codec": final_video_codec,
+                "final_audio_codec": final_audio_codec,
             }
         )
 
@@ -5277,6 +5388,8 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
         "run_type": "music_album",
         "album_run_id": album_run_id,
         "release_group_mbid": release_group_mbid,
+        "telegram_sent": False,
+        "telegram_message_id": None,
         "tracks_total": tracks_total,
         "tracks_resolved": tracks_resolved,
         "completion_percent": completion_percent,
