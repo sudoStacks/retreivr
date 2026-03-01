@@ -14,6 +14,7 @@ import threading
 import time
 import urllib.parse
 import unicodedata
+import hashlib
 from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -219,6 +220,7 @@ _MUSIC_SOURCE_PRIORITY_WEIGHTS = {
 }
 _VIDEO_CONTAINERS = {"mkv", "mp4", "webm"}
 _MUSIC_AUDIO_FORMAT_WARNED = False
+_MUSIC_REVIEW_FOLDER_NAME = "Needs Review"
 
 
 @dataclass(frozen=True)
@@ -1776,6 +1778,32 @@ class DownloadWorkerEngine:
                 if "yt_dlp_source_unavailable:" in job.last_error.lower() and unavailable_class:
                     failure_reason = f"source_unavailable:{unavailable_class}"
             failure_reason = failure_reason or "all_filtered_by_gate"
+            review_job_enqueued = False
+            if self._review_quarantine_enabled_for_job(job, payload):
+                review_candidate = self._select_low_confidence_review_candidate(search_meta)
+                if isinstance(review_candidate, dict):
+                    review_job_enqueued = self._enqueue_low_confidence_review_job(
+                        job=job,
+                        payload=payload,
+                        canonical=canonical,
+                        review_candidate=review_candidate,
+                        failure_reason=failure_reason,
+                    )
+                    if review_job_enqueued:
+                        try:
+                            self.store.merge_output_template_fields(
+                                job.id,
+                                {
+                                    "runtime_search_meta": {
+                                        "review_job_enqueued": True,
+                                        "review_candidate_id": review_candidate.get("candidate_id"),
+                                        "review_candidate_url": review_candidate.get("url"),
+                                        "review_candidate_gate": review_candidate.get("top_failed_gate"),
+                                    }
+                                },
+                            )
+                        except Exception:
+                            logger.exception("[MUSIC] failed to persist review enqueue metadata job_id=%s", job.id)
             retryable_no_candidate = failure_reason in {
                 "duration_filtered",
                 "no_candidate_above_threshold",
@@ -1783,6 +1811,8 @@ class DownloadWorkerEngine:
                 "album_similarity_blocked",
                 "no_candidates_retrieved",
             }
+            if review_job_enqueued:
+                retryable_no_candidate = False
             logging.error("Music track search failed")
             self.store.record_failure(
                 job,
@@ -1836,6 +1866,168 @@ class DownloadWorkerEngine:
             canonical_url=canonical_url,
             external_id=external_id,
         )
+
+    def _review_quarantine_enabled_for_job(self, job, payload):
+        if not bool(self.config.get("music_low_confidence_review_enabled", True)):
+            return False
+        origin = str(getattr(job, "origin", "") or "").strip().lower()
+        if origin != "import":
+            return False
+        if not isinstance(payload, dict):
+            return False
+        return bool(str(payload.get("import_batch_id") or payload.get("import_batch") or "").strip())
+
+    def _select_low_confidence_review_candidate(self, search_meta):
+        if not isinstance(search_meta, dict):
+            return None
+        edge = search_meta.get("decision_edge")
+        if not isinstance(edge, dict):
+            return None
+        rejected = edge.get("rejected_candidates")
+        if not isinstance(rejected, list):
+            return None
+
+        def _as_float(value, default):
+            try:
+                return float(value)
+            except Exception:
+                return float(default)
+
+        def _as_int(value, default):
+            try:
+                return int(value)
+            except Exception:
+                return int(default)
+
+        def _margin(item):
+            metric = item.get("nearest_pass_margin") if isinstance(item.get("nearest_pass_margin"), dict) else {}
+            return _as_float(metric.get("margin_to_pass"), 1e9)
+
+        def _eligible(item):
+            if not isinstance(item, dict):
+                return False
+            if not _is_http_url(item.get("url")):
+                return False
+            reason = str(item.get("rejection_reason") or "").strip().lower()
+            gate = str(item.get("top_failed_gate") or "").strip().lower()
+            if gate == "variant_alignment":
+                return False
+            if reason in {"disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
+                return False
+            margin_value = _margin(item)
+            if gate in {"score_threshold", "title_similarity", "artist_similarity", "album_similarity"}:
+                return margin_value <= 0.08
+            if gate in {"duration_delta_ms", "duration_hard_cap_ms"}:
+                return margin_value <= 3000.0
+            if gate == "authority_channel_match":
+                return (
+                    _as_float(item.get("title_similarity"), 0.0) >= 0.94
+                    and _as_float(item.get("artist_similarity"), 0.0) >= 0.94
+                    and _as_int(item.get("duration_delta_ms"), 999999) <= 8000
+                )
+            return False
+
+        eligible = [item for item in rejected if _eligible(item)]
+        if not eligible:
+            return None
+        ranked = sorted(
+            eligible,
+            key=lambda item: (
+                _margin(item),
+                -_as_float(item.get("final_score"), 0.0),
+                str(item.get("candidate_id") or ""),
+            ),
+        )
+        return ranked[0] if ranked else None
+
+    def _enqueue_low_confidence_review_job(self, *, job, payload, canonical, review_candidate, failure_reason):
+        if not isinstance(payload, dict):
+            payload = {}
+        if not isinstance(canonical, dict):
+            canonical = {}
+        candidate_url = str(review_candidate.get("url") or "").strip()
+        if not _is_http_url(candidate_url):
+            return False
+
+        recording_mbid = str(
+            canonical.get("recording_mbid")
+            or canonical.get("mb_recording_id")
+            or payload.get("recording_mbid")
+            or payload.get("mb_recording_id")
+            or ""
+        ).strip()
+        candidate_id = str(review_candidate.get("candidate_id") or "").strip()
+        review_key = candidate_id or hashlib.sha1(candidate_url.encode("utf-8")).hexdigest()[:12]
+        review_canonical_id = f"review:{recording_mbid or job.id}:{review_key}"
+
+        music_root = resolve_dir(self.config.get("music_download_folder"), self.paths.single_downloads_dir)
+        needs_review_root = os.path.join(music_root, "Music", _MUSIC_REVIEW_FOLDER_NAME)
+        review_metadata = {
+            "artist": str(canonical.get("artist") or payload.get("artist") or "").strip() or "Unknown Artist",
+            "track": str(canonical.get("track") or payload.get("track") or "").strip() or "Unknown Track",
+            "album": _MUSIC_REVIEW_FOLDER_NAME,
+            "album_artist": str(
+                canonical.get("album_artist")
+                or canonical.get("artist")
+                or payload.get("artist")
+                or ""
+            ).strip() or "Unknown Artist",
+            "release_date": str(canonical.get("release_date") or payload.get("release_date") or "0000").strip() or "0000",
+            "track_number": canonical.get("track_number") or payload.get("track_number") or 1,
+            "disc_number": canonical.get("disc_number") or payload.get("disc_number") or 1,
+            "duration_ms": canonical.get("duration_ms") or payload.get("duration_ms"),
+            "recording_mbid": recording_mbid or None,
+            "mb_recording_id": recording_mbid or None,
+            "mb_release_id": canonical.get("mb_release_id") or payload.get("mb_release_id"),
+            "mb_release_group_id": canonical.get("mb_release_group_id") or payload.get("mb_release_group_id"),
+        }
+        final_format_override = payload.get("music_final_format") or self.config.get("music_final_format") or "mp3"
+        review_source = resolve_source(candidate_url)
+        external_id = extract_video_id(candidate_url) if review_source in {"youtube", "youtube_music"} else None
+        canonical_url = canonicalize_url(review_source, candidate_url, external_id)
+        enqueue_payload = build_download_job_payload(
+            config=self.config if isinstance(self.config, dict) else {},
+            origin="music_review",
+            origin_id=str(getattr(job, "origin_id", "") or "").strip() or job.id,
+            media_type="music",
+            media_intent="music_track_review",
+            source=review_source,
+            url=candidate_url,
+            input_url=candidate_url,
+            destination=needs_review_root,
+            base_dir=self.paths.single_downloads_dir,
+            final_format_override=final_format_override,
+            resolved_metadata=review_metadata,
+            output_template_overrides={
+                "kind": "music_track_review",
+                "source": "music_review",
+                "import_batch": payload.get("import_batch"),
+                "import_batch_id": payload.get("import_batch_id"),
+                "review_candidate_id": review_candidate.get("candidate_id"),
+                "review_candidate_url": candidate_url,
+                "review_failure_reason": failure_reason,
+                "review_top_failed_gate": review_candidate.get("top_failed_gate"),
+                "review_nearest_pass_margin": review_candidate.get("nearest_pass_margin")
+                if isinstance(review_candidate.get("nearest_pass_margin"), dict)
+                else {},
+            },
+            canonical_id=review_canonical_id,
+            canonical_url=canonical_url,
+            external_id=external_id,
+        )
+        _job_id, created, _reason = self.store.enqueue_job(**enqueue_payload)
+        if created:
+            _log_event(
+                logging.INFO,
+                "music_review_job_enqueued",
+                failed_job_id=job.id,
+                review_canonical_id=review_canonical_id,
+                candidate_id=review_candidate.get("candidate_id"),
+                candidate_url=candidate_url,
+                top_failed_gate=review_candidate.get("top_failed_gate"),
+                failure_reason=failure_reason,
+            )
+        return bool(created)
 
     def run_once(self, *, stop_event=None):
         sources = self.store.list_sources_with_queued_jobs()
@@ -2620,10 +2812,10 @@ def _fetch_release_enrichment(recording_mbid: str, release_id_hint: Optional[str
             release_group = release_item.get("release-group") if isinstance(release_item.get("release-group"), dict) else {}
         primary_type = str(release_group.get("primary-type") or "").strip().lower()
 
-        # valid release filter: Official Album only
+        # valid release filter: Official Album/EP only
         if status != "official":
             continue
-        if primary_type != "album":
+        if primary_type not in {"album", "ep"}:
             continue
 
         selected_release = release_id
@@ -4957,7 +5149,7 @@ def _extract_release_year(value):
     return ""
 
 
-def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
+def build_audio_filename(meta, ext, *, template=None, fallback_id=None, require_release_metadata=True):
     required_album = str(meta.get("album") or "").strip()
     required_release_date = str(meta.get("release_date") or meta.get("date") or "").strip()
     required_track_number = normalize_track_number(meta.get("track_number"))
@@ -4969,7 +5161,11 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
         or required_track_number <= 0
         or not required_release_group_id
     ):
-        raise RuntimeError("music_release_metadata_incomplete_before_path_build")
+        if require_release_metadata:
+            raise RuntimeError("music_release_metadata_incomplete_before_path_build")
+        fallback_title = meta.get("track") or meta.get("title") or fallback_id or "media"
+        fallback_artist = meta.get("artist") or meta.get("channel") or ""
+        return f"{pretty_filename(fallback_title, fallback_artist, None)}.{ext}"
 
     album_artist = sanitize_for_filesystem(
         _normalize_nfc(_clean_audio_artist(meta.get("album_artist") or ""))
@@ -4996,9 +5192,15 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None):
     )
 
 
-def build_output_filename(meta, fallback_id, ext, template, audio_mode):
+def build_output_filename(meta, fallback_id, ext, template, audio_mode, *, enforce_music_contract=False):
     if audio_mode:
-        return build_audio_filename(meta, ext, template=template, fallback_id=fallback_id)
+        return build_audio_filename(
+            meta,
+            ext,
+            template=template,
+            fallback_id=fallback_id,
+            require_release_metadata=bool(enforce_music_contract),
+        )
     if template:
         try:
             rendered = template % {
@@ -5247,7 +5449,14 @@ def finalize_download_artifact(
     elif not ext:
         ext = _normalize_format(final_format) or "mkv"
 
-    cleaned_name = build_output_filename(meta, fallback_id, ext, template, audio_mode)
+    cleaned_name = build_output_filename(
+        meta,
+        fallback_id,
+        ext,
+        template,
+        audio_mode,
+        enforce_music_contract=bool(enforce_music_contract),
+    )
     if audio_mode and enforce_music_contract:
         _assert_music_canonical_metadata_contract(meta)
         normalized_cleaned = str(cleaned_name or "").replace("\\", "/")

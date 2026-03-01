@@ -1555,12 +1555,19 @@ class SearchResolutionService:
         return {
             "candidate_id": candidate.get("candidate_id"),
             "source": candidate.get("source"),
+            "url": candidate.get("url"),
+            "uploader": candidate.get("uploader"),
             "title": candidate.get("title"),
             "variant_tags": sorted(classify_music_title_variants(candidate.get("title"))),
             "rejection_reason": reason_value or "score_threshold",
             "top_failed_gate": gate,
             "nearest_pass_margin": metric,
             "final_score": final_score,
+            "title_similarity": title_similarity,
+            "artist_similarity": artist_similarity,
+            "album_similarity": album_similarity,
+            "duration_delta_ms": duration_delta_ms,
+            "authority_channel_match": bool(candidate.get("authority_channel_match")),
             "pass": pass_name,
         }
 

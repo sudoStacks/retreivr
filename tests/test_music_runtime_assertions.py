@@ -459,3 +459,259 @@ def test_music_retry_marks_ep_release_context_when_release_type_ep(monkeypatch) 
         assert resolved is None
         assert len(fake_search.calls) == 1
         assert fake_search.calls[0]["is_ep_release"] is True
+
+
+def test_import_failure_enqueues_review_job_for_eligible_near_miss(monkeypatch) -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+
+        class _FakeSearchService:
+            def __init__(self):
+                self.last_music_track_search = {
+                    "failure_reason": "all_filtered_by_gate",
+                    "decision_edge": {
+                        "rejected_candidates": [
+                            {
+                                "candidate_id": "cand-near",
+                                "source": "youtube",
+                                "url": "https://www.youtube.com/watch?v=abc123xyz00",
+                                "title": "Artist - Song",
+                                "rejection_reason": "score_threshold",
+                                "top_failed_gate": "score_threshold",
+                                "nearest_pass_margin": {
+                                    "name": "final_score",
+                                    "value": 0.74,
+                                    "threshold": 0.78,
+                                    "margin_to_pass": 0.04,
+                                    "direction": ">=",
+                                },
+                                "final_score": 0.74,
+                                "title_similarity": 0.96,
+                                "artist_similarity": 0.95,
+                                "duration_delta_ms": 2000,
+                            }
+                        ]
+                    },
+                }
+
+            def search_music_track_best_match(self, *args, **kwargs):
+                _ = args, kwargs
+                return None
+
+        fake_search = _FakeSearchService()
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={"music_low_confidence_review_enabled": True},
+            paths=paths,
+            adapters={},
+            search_service=fake_search,
+        )
+
+        captured_failure = {}
+        captured_enqueue = {}
+
+        def _capture_record_failure(job, *, error_message, retryable, retry_delay_seconds):
+            captured_failure["error_message"] = error_message
+            captured_failure["retryable"] = retryable
+            _ = job, retry_delay_seconds
+            return jq.JOB_STATUS_FAILED
+
+        def _capture_enqueue_job(**kwargs):
+            captured_enqueue.update(kwargs)
+            return ("review-job-1", True, None)
+
+        monkeypatch.setattr(engine.store, "record_failure", _capture_record_failure)
+        monkeypatch.setattr(engine.store, "enqueue_job", _capture_enqueue_job)
+
+        job = jq.DownloadJob(
+            id="job-import-1",
+            origin="import",
+            origin_id="batch-1",
+            media_type="music",
+            media_intent="music_track",
+            source="music_import",
+            url="musicbrainz://recording/rec-1",
+            input_url="musicbrainz://recording/rec-1",
+            canonical_url="musicbrainz://recording/rec-1",
+            external_id=None,
+            status=jq.JOB_STATUS_QUEUED,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=1,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error=None,
+            trace_id="trace-import-1",
+            output_template={
+                "artist": "Artist",
+                "track": "Song",
+                "album": "Album",
+                "recording_mbid": "rec-1",
+                "mb_release_id": "rel-1",
+                "mb_release_group_id": "rg-1",
+                "duration_ms": 200000,
+                "import_batch_id": "batch-1",
+                "canonical_metadata": {
+                    "artist": "Artist",
+                    "track": "Song",
+                    "album": "Album",
+                    "release_date": "2024",
+                    "track_number": 1,
+                    "disc_number": 1,
+                    "recording_mbid": "rec-1",
+                    "mb_release_id": "rel-1",
+                    "mb_release_group_id": "rg-1",
+                    "duration_ms": 200000,
+                },
+            },
+            resolved_destination=tmp,
+            canonical_id="music_track:rec-1:rel-1:disc-1",
+            file_path=None,
+        )
+
+        resolved = engine._resolve_music_track_job(job)
+        assert resolved is None
+        assert captured_failure["error_message"] == "all_filtered_by_gate"
+        assert captured_failure["retryable"] is False
+        assert captured_enqueue["origin"] == "music_review"
+        assert captured_enqueue["media_intent"] == "music_track_review"
+        assert "Needs Review" in str(captured_enqueue["resolved_destination"])
+        assert str(captured_enqueue["canonical_id"]).startswith("review:rec-1:")
+
+
+def test_audio_filename_falls_back_when_contract_not_enforced() -> None:
+    jq = _load_job_queue()
+    filename = jq.build_output_filename(
+        {"title": "Song", "artist": "Artist"},
+        "fallback-id",
+        "mp3",
+        None,
+        True,
+        enforce_music_contract=False,
+    )
+    assert filename.endswith(".mp3")
+    assert "Music/" not in filename
+
+
+def test_import_failure_does_not_enqueue_review_for_variant_rejection(monkeypatch) -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+
+        class _FakeSearchService:
+            def __init__(self):
+                self.last_music_track_search = {
+                    "failure_reason": "all_filtered_by_gate",
+                    "decision_edge": {
+                        "rejected_candidates": [
+                            {
+                                "candidate_id": "cand-live",
+                                "source": "youtube",
+                                "url": "https://www.youtube.com/watch?v=abc123xyz00",
+                                "title": "Artist - Song (Live)",
+                                "rejection_reason": "disallowed_variant",
+                                "top_failed_gate": "variant_alignment",
+                                "nearest_pass_margin": {"margin_to_pass": 1.0},
+                            }
+                        ]
+                    },
+                }
+
+            def search_music_track_best_match(self, *args, **kwargs):
+                _ = args, kwargs
+                return None
+
+        fake_search = _FakeSearchService()
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={"music_low_confidence_review_enabled": True},
+            paths=paths,
+            adapters={},
+            search_service=fake_search,
+        )
+
+        captured_enqueue = {"count": 0}
+        monkeypatch.setattr(
+            engine.store,
+            "enqueue_job",
+            lambda **kwargs: (captured_enqueue.update({"count": captured_enqueue["count"] + 1}), ("review", True, None))[1],
+        )
+        monkeypatch.setattr(
+            engine.store,
+            "record_failure",
+            lambda job, *, error_message, retryable, retry_delay_seconds: jq.JOB_STATUS_FAILED,
+        )
+
+        job = jq.DownloadJob(
+            id="job-import-variant-1",
+            origin="import",
+            origin_id="batch-1",
+            media_type="music",
+            media_intent="music_track",
+            source="music_import",
+            url="musicbrainz://recording/rec-1",
+            input_url="musicbrainz://recording/rec-1",
+            canonical_url="musicbrainz://recording/rec-1",
+            external_id=None,
+            status=jq.JOB_STATUS_QUEUED,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=1,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error=None,
+            trace_id="trace-import-variant-1",
+            output_template={
+                "artist": "Artist",
+                "track": "Song",
+                "album": "Album",
+                "recording_mbid": "rec-1",
+                "mb_release_id": "rel-1",
+                "import_batch_id": "batch-1",
+                "canonical_metadata": {
+                    "artist": "Artist",
+                    "track": "Song",
+                    "album": "Album",
+                    "recording_mbid": "rec-1",
+                    "mb_release_id": "rel-1",
+                },
+            },
+            resolved_destination=tmp,
+            canonical_id="music_track:rec-1:rel-1:disc-1",
+            file_path=None,
+        )
+
+        resolved = engine._resolve_music_track_job(job)
+        assert resolved is None
+        assert captured_enqueue["count"] == 0

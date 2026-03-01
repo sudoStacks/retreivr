@@ -9,6 +9,7 @@ All notable changes to this project will be documented here.
 - `README-runtime.md` for streamlined Docker-first deployment.
 - Deterministic, fixture-driven music benchmark gate with CI artifacts (`results` + markdown delta report).
 - Runtime `run_summary.json` artifact for album runs (completion, unresolved classes, rejection mix, why-missing hints, per-track diagnostics).
+- Import-only low-confidence quarantine flow: bounded near-miss candidates can be queued to `Music/Needs Review` as separate review jobs (`music_track_review`) without marking canonical track completion.
 
 ### Changed
 - Music search pipeline hardened without relaxing gates: deterministic multi-rung fallback, bounded duration expansion, and cleaner retry escalation.
@@ -17,6 +18,7 @@ All notable changes to this project will be documented here.
 - Explicit retrieval vs ranking/gating separation with benchmark `recall@k` metrics (`k={1,3,5,10}`).
 - Observability expanded for benchmark/runtime paths:
   - decision-edge reporting (failed gate + nearest-pass margin, accepted support features, runner-up gap)
+  - richer rejected-candidate fields (URL/uploader/similarity metrics) to support deterministic review-candidate selection
   - MB-injected candidate rejection classification and per-album injected rejection mix
   - EP refinement telemetry in runtime summaries (`ep_refinement_attempted`, `ep_refinement_candidates_considered`)
   - deterministic title-based variant tagging surfaced in summaries
@@ -26,6 +28,7 @@ All notable changes to this project will be documented here.
 ### Fixed
 - Album metadata search now includes EP release groups alongside albums (`primarytype:album OR ep`) for artist+album and album-only flows.
 - MusicBrainz pair resolution no longer rejects EP releases as `invalid_release_type`/`no_official_album` in album-run binding paths.
+- Release enrichment fallback now accepts official EP releases (not only albums) when completing canonical music-track metadata.
 - MusicBrainz include-contract failures in album metadata fetch (`genres` include misuse).
 - MP4 post-processing regression where incompatible audio streams could survive final output.
 - Home/header UI consistency regressions after navigation/action layout refinements.
