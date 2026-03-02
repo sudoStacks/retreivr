@@ -441,6 +441,12 @@ def is_music_media_type(value):
     value = str(value).strip().lower()
     return value in {"music", "audio"}
 
+
+def is_music_track_intent(value):
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"music_track", "music_track_review"}
+
 def _normalize_audio_format(value: str | None) -> str | None:
     if not value:
         return None
@@ -2010,21 +2016,47 @@ class DownloadWorkerEngine:
         review_key = candidate_id or hashlib.sha1(candidate_url.encode("utf-8")).hexdigest()[:12]
         review_canonical_id = f"review:{recording_mbid or job.id}:{review_key}"
 
-        music_root = resolve_dir(self.config.get("music_download_folder"), self.paths.single_downloads_dir)
-        needs_review_root = os.path.join(music_root, _MUSIC_REVIEW_FOLDER_NAME)
+        base_music_root = resolve_dir(
+            payload.get("output_dir")
+            or getattr(job, "resolved_destination", None)
+            or self.config.get("music_download_folder"),
+            self.paths.single_downloads_dir,
+        )
+        needs_review_root = os.path.join(base_music_root, _MUSIC_REVIEW_FOLDER_NAME)
+        review_artist = str(canonical.get("artist") or payload.get("artist") or "").strip() or "Unknown Artist"
+        review_track = str(canonical.get("track") or payload.get("track") or "").strip() or "Unknown Track"
+        review_album = str(canonical.get("album") or payload.get("album") or "").strip() or "Unknown Album"
+        review_album_artist = str(
+            canonical.get("album_artist")
+            or payload.get("album_artist")
+            or canonical.get("artist")
+            or payload.get("artist")
+            or ""
+        ).strip() or review_artist
+        review_release_date = str(
+            canonical.get("release_date")
+            or payload.get("release_date")
+            or canonical.get("date")
+            or payload.get("date")
+            or "0000"
+        ).strip() or "0000"
         review_metadata = {
-            "artist": str(canonical.get("artist") or payload.get("artist") or "").strip() or "Unknown Artist",
-            "track": str(canonical.get("track") or payload.get("track") or "").strip() or "Unknown Track",
-            "album": _MUSIC_REVIEW_FOLDER_NAME,
-            "album_artist": str(
-                canonical.get("album_artist")
-                or canonical.get("artist")
-                or payload.get("artist")
-                or ""
-            ).strip() or "Unknown Artist",
-            "release_date": str(canonical.get("release_date") or payload.get("release_date") or "0000").strip() or "0000",
+            "artist": review_artist,
+            "track": review_track,
+            "album": review_album,
+            "album_artist": review_album_artist,
+            "release_date": review_release_date,
             "track_number": canonical.get("track_number") or payload.get("track_number") or 1,
             "disc_number": canonical.get("disc_number") or payload.get("disc_number") or 1,
+            "track_total": canonical.get("track_total") or payload.get("track_total"),
+            "disc_total": canonical.get("disc_total") or payload.get("disc_total"),
+            "artwork_url": canonical.get("artwork_url") or payload.get("artwork_url"),
+            "genre": canonical.get("genre") or payload.get("genre"),
+            "track_aliases": canonical.get("track_aliases") or payload.get("track_aliases") or [],
+            "title_aliases": canonical.get("title_aliases") or payload.get("title_aliases") or [],
+            "track_disambiguation": canonical.get("track_disambiguation") or payload.get("track_disambiguation"),
+            "mb_recording_title": canonical.get("mb_recording_title") or payload.get("mb_recording_title"),
+            "mb_youtube_urls": canonical.get("mb_youtube_urls") or payload.get("mb_youtube_urls") or [],
             "duration_ms": canonical.get("duration_ms") or payload.get("duration_ms"),
             "recording_mbid": recording_mbid or None,
             "mb_recording_id": recording_mbid or None,
@@ -2610,7 +2642,8 @@ class YouTubeAdapter:
             if release_group_mbid:
                 meta["mb_release_group_id"] = release_group_mbid
             effective_media_intent = media_intent or getattr(job, "media_intent", None)
-            if is_music_media_type(effective_media_type) and str(effective_media_intent or "").strip().lower() == "music_track":
+            normalized_intent = str(effective_media_intent or "").strip().lower()
+            if is_music_media_type(effective_media_type) and is_music_track_intent(normalized_intent):
                 pre_fields = _release_fields_from_template(output_template, canonical)
                 if not _release_fields_complete(pre_fields):
                     _log_event(
@@ -2619,14 +2652,25 @@ class YouTubeAdapter:
                         job_id=getattr(job, "id", None),
                         recording_mbid=recording_mbid,
                     )
-                _ensure_release_enriched(job)
-                refreshed_template = job.output_template if isinstance(job.output_template, dict) else {}
+                if normalized_intent == "music_track":
+                    _ensure_release_enriched(job)
+                else:
+                    try:
+                        _ensure_release_enriched(job)
+                    except Exception:
+                        _log_event(
+                            logging.WARNING,
+                            "review_release_enrichment_best_effort_failed",
+                            job_id=getattr(job, "id", None),
+                            recording_mbid=recording_mbid,
+                        )
+                refreshed_template = job.output_template if isinstance(job.output_template, dict) else output_template
                 refreshed_canonical = (
                     refreshed_template.get("canonical_metadata")
                     if isinstance(refreshed_template.get("canonical_metadata"), dict)
                     else {}
                 )
-                # For music_track jobs, canonical path/tag fields come from bound canonical metadata only.
+                # For music_track* jobs, canonical path/tag fields come from bound canonical metadata only.
                 canonical_artist = refreshed_canonical.get("artist")
                 canonical_album_artist = refreshed_canonical.get("album_artist") or canonical_artist
                 canonical_track = refreshed_canonical.get("track") or refreshed_canonical.get("title")
@@ -2656,7 +2700,11 @@ class YouTubeAdapter:
             enforce_music_contract = bool(
                 audio_mode
                 and is_music_media_type(effective_media_type)
-                and str(effective_media_intent or "").strip().lower() == "music_track"
+                and is_music_track_intent(effective_media_intent)
+                and (
+                    normalized_intent == "music_track"
+                    or _release_fields_complete(_release_fields_from_template(output_template, canonical))
+                )
             )
 
             if stop_event and stop_event.is_set():
@@ -4417,7 +4465,7 @@ def download_with_ytdlp(
         opts["cookiefile"] = resolved_cookiefile
 
     normalized_intent = str(media_intent or "").strip().lower()
-    if audio_mode and is_music_media_type(media_type) and normalized_intent == "music_track":
+    if audio_mode and is_music_media_type(media_type) and is_music_track_intent(normalized_intent):
         if "format" not in opts:
             _log_event(
                 logging.ERROR,

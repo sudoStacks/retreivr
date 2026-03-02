@@ -592,7 +592,12 @@ def test_import_failure_enqueues_review_job_for_eligible_near_miss(monkeypatch) 
         assert captured_enqueue["origin"] == "music_review"
         assert captured_enqueue["media_intent"] == "music_track_review"
         assert "Needs Review" in str(captured_enqueue["resolved_destination"])
+        assert str(captured_enqueue["resolved_destination"]).startswith(tmp)
         assert str(captured_enqueue["canonical_id"]).startswith("review:rec-1:")
+        captured_template = captured_enqueue.get("output_template") if isinstance(captured_enqueue.get("output_template"), dict) else {}
+        captured_canonical = captured_template.get("canonical_metadata") if isinstance(captured_template.get("canonical_metadata"), dict) else {}
+        assert captured_template.get("album") == "Album"
+        assert captured_canonical.get("album") == "Album"
 
 
 def test_non_import_music_failure_enqueues_review_job_for_eligible_near_miss(monkeypatch) -> None:
