@@ -6721,11 +6721,50 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
 
 @app.get("/api/download_jobs")
 async def list_download_jobs(limit: int = 100, status: str | None = None):
+    def _display_title(media_intent: str | None, url: str | None, output_template_raw: str | None) -> str:
+        media_intent_value = str(media_intent or "").strip().lower()
+        fallback = str(url or "").strip()
+        if fallback and "watch?v=" in fallback:
+            fallback = fallback.split("watch?v=", 1)[1]
+        if fallback and "/" in fallback:
+            fallback = fallback.rsplit("/", 1)[-1]
+        if not fallback:
+            fallback = "Unknown item"
+
+        parsed: dict[str, object] = {}
+        if isinstance(output_template_raw, str) and output_template_raw.strip():
+            try:
+                loaded = json.loads(output_template_raw)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = {}
+
+        canonical = parsed.get("canonical_metadata") if isinstance(parsed.get("canonical_metadata"), dict) else {}
+        if media_intent_value == "music_track":
+            artist = str(canonical.get("artist") or parsed.get("artist") or "").strip()
+            track = str(canonical.get("track") or parsed.get("track") or parsed.get("title") or "").strip()
+            if artist and track:
+                return f"{artist} - {track}"
+            if track:
+                return track
+        if media_intent_value in {"music_album", "album"}:
+            artist = str(parsed.get("artist") or "").strip()
+            album = str(parsed.get("album") or "").strip()
+            if artist and album:
+                return f"{artist} - {album}"
+            if album:
+                return album
+        title = str(parsed.get("title") or parsed.get("track") or "").strip()
+        if title:
+            return title
+        return fallback
+
     conn = sqlite3.connect(app.state.paths.db_path)
     try:
         cur = conn.cursor()
         query = (
-            "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error, "
+            "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error, output_template, "
             "progress_downloaded_bytes, progress_total_bytes, progress_percent, progress_speed_bps, progress_eta_seconds, progress_updated_at "
             "FROM download_jobs"
         )
@@ -6744,7 +6783,7 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                 raise
             # Backward compatibility if DB has not yet migrated progress columns.
             query = (
-                "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error "
+                "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error, output_template "
                 "FROM download_jobs"
             )
             params = []
@@ -6768,6 +6807,7 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                     "attempts": row[7],
                     "created_at": row[8],
                     "last_error": row[9],
+                    "display_title": _display_title(row[5], row[3], row[10]),
                     "progress_downloaded_bytes": None,
                     "progress_total_bytes": None,
                     "progress_percent": None,
@@ -6790,18 +6830,34 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                 "attempts": row[7],
                 "created_at": row[8],
                 "last_error": row[9],
-                "progress_downloaded_bytes": row[10],
-                "progress_total_bytes": row[11],
-                "progress_percent": row[12],
-                "progress_speed_bps": row[13],
-                "progress_eta_seconds": row[14],
-                "progress_updated_at": row[15],
+                "display_title": _display_title(row[5], row[3], row[10]),
+                "progress_downloaded_bytes": row[11],
+                "progress_total_bytes": row[12],
+                "progress_percent": row[13],
+                "progress_speed_bps": row[14],
+                "progress_eta_seconds": row[15],
+                "progress_updated_at": row[16],
             }
             for row in cur.fetchall()
         ]
     finally:
         conn.close()
     return safe_json({"jobs": rows})
+
+
+@app.post("/api/download_jobs/clear_failed")
+async def clear_failed_download_jobs():
+    conn = sqlite3.connect(app.state.paths.db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM download_jobs WHERE status=?", ("failed",))
+        before_count = int((cur.fetchone() or [0])[0] or 0)
+        cur.execute("DELETE FROM download_jobs WHERE status=?", ("failed",))
+        deleted_count = int(cur.rowcount or 0)
+        conn.commit()
+    finally:
+        conn.close()
+    return safe_json({"deleted": deleted_count, "before": before_count, "remaining": max(0, before_count - deleted_count)})
 
 
 @app.get("/api/music/failures")

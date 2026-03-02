@@ -4871,9 +4871,13 @@ async function refreshSearchQueue() {
         progressParts.push(`ETA ${formatDuration(Number(job.progress_eta_seconds))}`);
       }
       const progressText = progressParts.length ? progressParts.join(" · ") : "-";
+      const displayTitle = String(job.display_title || "").trim()
+        || String(job.url || "").trim()
+        || String(job.id || "").trim()
+        || "-";
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${job.id || ""}</td>
+        <td>${displayTitle}</td>
         <td>${job.origin || ""}</td>
         <td>${job.source || ""}</td>
         <td>${job.media_intent || ""}</td>
@@ -4889,6 +4893,23 @@ async function refreshSearchQueue() {
   } catch (err) {
     renderSearchEmptyRow(body, 9, `Failed to load queue: ${err.message}`);
     setNotice(messageEl, `Failed to load queue: ${err.message}`, true);
+  }
+}
+
+async function clearFailedQueueJobs() {
+  const messageEl = $("#search-queue-message");
+  const confirmed = window.confirm("Clear all failed jobs from the queue table?");
+  if (!confirmed) {
+    return;
+  }
+  try {
+    setNotice(messageEl, "Clearing failed queue jobs...", false);
+    const data = await fetchJson("/api/download_jobs/clear_failed", { method: "POST" });
+    const deleted = Number.isFinite(Number(data?.deleted)) ? Number(data.deleted) : 0;
+    setNotice(messageEl, `Cleared ${deleted} failed job${deleted === 1 ? "" : "s"}.`, false);
+    await refreshSearchQueue();
+  } catch (err) {
+    setNotice(messageEl, `Failed to clear failed jobs: ${err.message}`, true);
   }
 }
 
@@ -5927,6 +5948,7 @@ function bindEvents() {
     refreshSearchRequests();
   });
   $("#search-queue-refresh").addEventListener("click", refreshSearchQueue);
+  $("#search-queue-clear-failed").addEventListener("click", clearFailedQueueJobs);
   const sourceList = $("#search-source-list");
   if (sourceList) {
     sourceList.addEventListener("click", (event) => {

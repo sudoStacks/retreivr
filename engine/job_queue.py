@@ -1309,6 +1309,15 @@ class DownloadWorkerEngine:
         self.retry_delay_seconds = retry_delay_seconds
         self.store = DownloadJobStore(db_path)
         self.adapters = adapters or default_adapters()
+        for adapter in self.adapters.values():
+            if adapter is None:
+                continue
+            # Worker adapters may emit runtime metadata that needs persistence.
+            # Bind store explicitly to avoid adapter-level attribute errors.
+            try:
+                setattr(adapter, "store", self.store)
+            except Exception:
+                continue
         self.search_service = search_service
         # Ensure required DB tables exist (idempotent).
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -2646,10 +2655,12 @@ class YouTubeAdapter:
             )
             runtime_media_profile = meta.get("runtime_media_profile") if isinstance(meta.get("runtime_media_profile"), dict) else None
             if runtime_media_profile:
-                self.store.merge_output_template_fields(
-                    job.id,
-                    {"runtime_media_profile": runtime_media_profile},
-                )
+                adapter_store = getattr(self, "store", None)
+                if adapter_store and hasattr(adapter_store, "merge_output_template_fields"):
+                    adapter_store.merge_output_template_fields(
+                        job.id,
+                        {"runtime_media_profile": runtime_media_profile},
+                    )
             logger.info(f"[MUSIC] finalized file: {final_path}")
             shutil.rmtree(temp_dir, ignore_errors=True)
 

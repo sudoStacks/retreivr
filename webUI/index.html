@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.5-ui-2">
-  <script defer src="app.js?v=0.9.5-ui-2"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.6-ui-queue-1">
+  <script defer src="app.js?v=0.9.6-ui-queue-1"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -209,38 +209,7 @@
         </a>
       </footer>
     </section>
-    <section class="panel" id="search-queue-panel" data-page="status">
-      <div class="panel-title">Download Queue</div>
-      <div class="notice">Live operations queue (completed jobs are shown in Download History).</div>
-      <div class="row">
-        <label class="field inline short">
-          <span>Limit</span>
-          <input id="search-queue-limit" type="number" min="1" max="5000" value="100">
-        </label>
-        <button id="search-queue-refresh" class="button ghost">Refresh</button>
-        <div id="search-queue-message" class="notice" role="status"></div>
-      </div>
-      <div class="table-wrap">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>Job ID</th>
-              <th>Origin</th>
-              <th>Source</th>
-              <th>Media intent</th>
-              <th>Status</th>
-              <th>Progress</th>
-              <th>Attempts</th>
-              <th>Created</th>
-              <th>Last error</th>
-            </tr>
-          </thead>
-          <tbody id="search-queue-body"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel" id="status-panel" data-page="status">
+    <section class="panel full" id="status-panel" data-page="status">
       <div class="panel-title">Operations Status (Live)</div>
       <div class="stack">
         <div class="row">
@@ -450,7 +419,39 @@
       </div>
     </section>
 
-    <section class="panel" id="metrics-panel" data-page="status">
+    <section class="panel full" id="search-queue-panel" data-page="status">
+      <div class="panel-title">Download Queue</div>
+      <div class="notice">Live operations queue (completed jobs are shown in Download History).</div>
+      <div class="row">
+        <label class="field inline short">
+          <span>Limit</span>
+          <input id="search-queue-limit" type="number" min="1" max="5000" value="100">
+        </label>
+        <button id="search-queue-refresh" class="button ghost">Refresh</button>
+        <button id="search-queue-clear-failed" class="button ghost remove">Clear Failed</button>
+        <div id="search-queue-message" class="notice" role="status"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Origin</th>
+              <th>Source</th>
+              <th>Media intent</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Attempts</th>
+              <th>Created</th>
+              <th>Last error</th>
+            </tr>
+          </thead>
+          <tbody id="search-queue-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="metrics-panel" data-page="advanced">
       <div class="panel-title">Metrics</div>
       <div class="panel-body">
         <div class="row">

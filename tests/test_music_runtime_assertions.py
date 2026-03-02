@@ -834,3 +834,29 @@ def test_import_failure_enqueues_review_for_likely_artist_metadata_mismatch(monk
         assert resolved is None
         assert captured_enqueue["origin"] == "music_review"
         assert captured_enqueue["media_intent"] == "music_track_review"
+
+
+def test_worker_binds_store_into_adapters() -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={},
+            paths=paths,
+            adapters=jq.default_adapters(),
+            search_service=None,
+        )
+        for source in ("youtube", "youtube_music", "soundcloud", "bandcamp", "direct", "unknown"):
+            adapter = engine.adapters.get(source)
+            assert adapter is not None
+            assert getattr(adapter, "store", None) is engine.store
