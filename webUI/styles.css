@@ -326,12 +326,14 @@ body.home-page .home-results {
 }
 
 .app-icon {
-  width: 36px;
   height: 36px;
+  width: auto;
+  max-width: 220px;
   border-radius: 10px;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
   background: #0d1117;
-  object-fit: cover;
+  object-fit: contain;
+  display: block;
 }
 
 :root[data-theme="light"] .app-icon {
@@ -358,6 +360,14 @@ body.home-page .home-results {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.topbar .button.small {
+  height: 36px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 #top-actions:empty {
