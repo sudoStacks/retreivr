@@ -58,6 +58,7 @@ import sqlite3
 import threading
 import time
 import urllib.parse
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -218,6 +219,11 @@ def _normalize_media_type(value, *, default="generic"):
     if value in {"generic", "general"}:
         return "generic"
     return None
+
+
+def _ascii_fold(value: str | None) -> str:
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    return text.encode("ascii", "ignore").decode("ascii").strip()
 
 
 # Audio formats that require the audio-mode download pipeline
@@ -1297,6 +1303,8 @@ class SearchResolutionService:
         track_v = str(track or "").strip()
         album_v = str(album or "").strip()
         relaxed_track = relaxed_search_title(track_v) or track_v
+        normalized_lookup_track = _normalize_title_for_mb_lookup(track_v) or track_v
+        ascii_lookup_track = _ascii_fold(normalized_lookup_track)
         ladder = [
             {
                 "rung": 0,
@@ -1332,11 +1340,18 @@ class SearchResolutionService:
                 "label": "legacy_audio_fallback",
                 "query": " ".join(part for part in [artist_v, "-", track_v, "audio"] if part).strip(),
             },
+            {
+                "rung": 6,
+                "label": "normalized_ascii_audio_fallback",
+                "query": " ".join(
+                    part for part in [artist_v, "-", ascii_lookup_track or normalized_lookup_track or track_v, "audio"] if part
+                ).strip(),
+            },
         ]
         if bool(is_ep_release):
             ladder.append(
                 {
-                    "rung": 6,
+                    "rung": 7,
                     "label": "ep_audio_topic_fallback",
                     "query": " ".join(part for part in [artist_v, "-", track_v, "audio", "topic"] if part).strip(),
                 }

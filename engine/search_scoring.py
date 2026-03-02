@@ -134,6 +134,9 @@ def _expected_artist_token_variants(expected):
         primary = _FEAT_RE.split(normalized, maxsplit=1)[0].strip()
         if primary:
             _add(primary)
+        collaborator_parts = re.split(r"\s*(?:&|,|/|\band\b|\bx\b|\bwith\b)\s*", str(raw_value), flags=re.IGNORECASE)
+        for part in collaborator_parts:
+            _add(part)
 
     return variants or [tokenize(artist_value)]
 
@@ -200,6 +203,51 @@ def _music_source_authority_points(expected, candidate):
             channel_authority_bonus = 2.0
 
     return min(12.0, authority_points + channel_authority_bonus)
+
+
+def _music_owned_channel_bonus(
+    expected,
+    candidate,
+    *,
+    artist_overlap,
+    effective_track_overlap,
+    duration_delta_ms,
+):
+    source = str(candidate.get("source") or "").strip().lower()
+    if source not in {"youtube_music", "youtube", "soundcloud"}:
+        return 0.0
+    if float(artist_overlap or 0.0) < 0.625:
+        return 0.0
+    if float(effective_track_overlap or 0.0) < 0.95:
+        return 0.0
+    try:
+        delta = abs(int(duration_delta_ms)) if duration_delta_ms is not None else None
+    except Exception:
+        delta = None
+    if delta is None or delta > 3000:
+        return 0.0
+
+    uploader_lower = normalize_text(candidate.get("uploader") or candidate.get("artist_detected"))
+    uploader_tokens = tokenize(candidate.get("uploader") or candidate.get("artist_detected"))
+    if not uploader_tokens:
+        return 0.0
+    expected_artist_variants = _expected_artist_token_variants(expected)
+    uploader_artist_overlap = max(
+        (token_overlap_score(tokens, uploader_tokens) for tokens in expected_artist_variants),
+        default=0.0,
+    )
+    if uploader_artist_overlap < 0.80:
+        return 0.0
+
+    official = bool(candidate.get("official"))
+    if source in {"youtube_music", "youtube"}:
+        if "topic" in uploader_lower or "official artist channel" in uploader_lower or official:
+            return 2.5
+        return 0.0
+    if source == "soundcloud":
+        if official or uploader_artist_overlap >= 1.0:
+            return 2.0
+    return 0.0
 
 
 def _music_reject_reason(expected, candidate):
@@ -427,6 +475,13 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             album_pts = 0.0
 
         source_authority_pts = _music_source_authority_points(expected, candidate)
+        owned_channel_bonus_pts = _music_owned_channel_bonus(
+            expected,
+            candidate,
+            artist_overlap=artist_overlap,
+            effective_track_overlap=effective_track_overlap,
+            duration_delta_ms=duration_delta_ms,
+        )
         authority_channel_match = source_authority_pts >= 8.0
 
         noise_penalty = 0.0
@@ -480,6 +535,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             + album_pts
             + duration_pts
             + source_authority_pts
+            + owned_channel_bonus_pts
             - noise_penalty
             - duration_penalty
         )
@@ -507,6 +563,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
                 "album_pts": album_pts,
                 "duration_pts": duration_pts,
                 "source_authority_pts": source_authority_pts,
+                "owned_channel_bonus_pts": owned_channel_bonus_pts,
                 "noise_penalty": noise_penalty,
                 "duration_penalty": duration_penalty,
                 "source_multiplier": multiplier,

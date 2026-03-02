@@ -238,6 +238,26 @@ class SearchScoringTests(unittest.TestCase):
         scored = score_candidate(expected, candidate, source_modifier=1.0)
         self.assertGreaterEqual(float(scored.get("score_artist") or 0.0), 0.99)
 
+    def test_music_track_scoring_splits_collaboration_artists(self):
+        expected = {
+            "artist": "HiXTAPE, HARDY & Morgan Wallen",
+            "track": "He Went To Jared",
+            "duration_hint_sec": 210,
+            "media_intent": "music_track",
+            "query": '"HiXTAPE, HARDY & Morgan Wallen" "He Went To Jared"',
+        }
+        candidate = {
+            "source": "youtube_music",
+            "title": "HARDY - He Went To Jared",
+            "uploader": "HARDY",
+            "artist_detected": "HARDY",
+            "track_detected": "He Went To Jared",
+            "duration_sec": 210,
+            "official": True,
+        }
+        scored = score_candidate(expected, candidate, source_modifier=1.0)
+        self.assertGreaterEqual(float(scored.get("score_artist") or 0.0), 0.99)
+
     def test_music_track_youtube_missing_album_does_not_trigger_album_gate_rejection(self):
         expected = {
             "artist": "Artist",

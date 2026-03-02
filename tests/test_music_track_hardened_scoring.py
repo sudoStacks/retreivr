@@ -796,6 +796,14 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         self.assertNotIn(rung_5, adapter.calls)
         self.assertNotIn(rung_6, adapter.calls)
 
+    def test_query_ladder_adds_normalized_ascii_fallback_when_distinct(self):
+        service = self._service({"youtube_music": []})
+        ladder = service._build_music_track_query_ladder("Artist", "Nothin’ Out Here", "Album")
+        labels = [str(item.get("label") or "") for item in ladder]
+        self.assertIn("normalized_ascii_audio_fallback", labels)
+        normalized_entry = next(item for item in ladder if item.get("label") == "normalized_ascii_audio_fallback")
+        self.assertIn("nothin out here", str(normalized_entry.get("query") or "").lower())
+
     def test_legacy_topic_rung_activates_only_after_prior_rungs_fail(self):
         rung_1 = '"Artist" "Song" "Album"'
         rung_2 = '"Artist" "Song"'

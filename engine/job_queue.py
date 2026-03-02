@@ -1382,6 +1382,13 @@ class DownloadWorkerEngine:
         track_v = str(track or "").strip()
         album_v = str(album or "").strip()
         relaxed_track = relaxed_search_title(track_v) or track_v
+        normalized_lookup_track = _normalize_title_for_mb_lookup(track_v) or track_v
+        ascii_lookup_track = (
+            unicodedata.normalize("NFKD", str(normalized_lookup_track or ""))
+            .encode("ascii", "ignore")
+            .decode("ascii")
+            .strip()
+        )
         ladder = [
             {"rung": 0, "label": "canonical_full", "query": " ".join(part for part in [f'"{artist_v}"', f'"{track_v}"', f'"{album_v}"' if album_v else ""] if part).strip()},
             {"rung": 1, "label": "canonical_no_album", "query": " ".join(part for part in [f'"{artist_v}"', f'"{track_v}"'] if part).strip()},
@@ -1389,6 +1396,11 @@ class DownloadWorkerEngine:
             {"rung": 3, "label": "official_audio_fallback", "query": " ".join(part for part in [artist_v, relaxed_track, "official audio"] if part).strip()},
             {"rung": 4, "label": "legacy_topic_fallback", "query": " ".join(part for part in [artist_v, "-", track_v, "topic"] if part).strip()},
             {"rung": 5, "label": "legacy_audio_fallback", "query": " ".join(part for part in [artist_v, "-", track_v, "audio"] if part).strip()},
+            {
+                "rung": 6,
+                "label": "normalized_ascii_audio_fallback",
+                "query": " ".join(part for part in [artist_v, "-", ascii_lookup_track or normalized_lookup_track or track_v, "audio"] if part).strip(),
+            },
         ]
         seen = set()
         unique_ladder = []
