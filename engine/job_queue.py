@@ -1915,15 +1915,33 @@ class DownloadWorkerEngine:
             if reason in {"disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
                 return False
             margin_value = _margin(item)
+            title_similarity = _as_float(item.get("title_similarity"), 0.0)
+            artist_similarity = _as_float(item.get("artist_similarity"), 0.0)
+            duration_delta_ms = _as_int(item.get("duration_delta_ms"), 999999)
+            source = str(item.get("source") or "").strip().lower()
+
+            # Conservative metadata-mismatch fallback:
+            # candidate strongly matches title + duration but artist text extraction appears unreliable.
+            # Keep this review-only so strict acceptance remains unchanged.
+            if gate == "artist_similarity":
+                likely_metadata_mismatch = (
+                    title_similarity >= 0.98
+                    and artist_similarity <= 0.10
+                    and duration_delta_ms <= 3000
+                    and source in {"youtube", "youtube_music", "soundcloud"}
+                )
+                if likely_metadata_mismatch:
+                    return True
+
             if gate in {"score_threshold", "title_similarity", "artist_similarity", "album_similarity"}:
                 return margin_value <= 0.08
             if gate in {"duration_delta_ms", "duration_hard_cap_ms"}:
                 return margin_value <= 3000.0
             if gate == "authority_channel_match":
                 return (
-                    _as_float(item.get("title_similarity"), 0.0) >= 0.94
-                    and _as_float(item.get("artist_similarity"), 0.0) >= 0.94
-                    and _as_int(item.get("duration_delta_ms"), 999999) <= 8000
+                    title_similarity >= 0.94
+                    and artist_similarity >= 0.94
+                    and duration_delta_ms <= 8000
                 )
             return False
 

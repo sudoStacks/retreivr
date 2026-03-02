@@ -715,3 +715,122 @@ def test_import_failure_does_not_enqueue_review_for_variant_rejection(monkeypatc
         resolved = engine._resolve_music_track_job(job)
         assert resolved is None
         assert captured_enqueue["count"] == 0
+
+
+def test_import_failure_enqueues_review_for_likely_artist_metadata_mismatch(monkeypatch) -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+
+        class _FakeSearchService:
+            def __init__(self):
+                self.last_music_track_search = {
+                    "failure_reason": "all_filtered_by_gate",
+                    "decision_edge": {
+                        "rejected_candidates": [
+                            {
+                                "candidate_id": "cand-artist-mismatch",
+                                "source": "youtube_music",
+                                "url": "https://www.youtube.com/watch?v=abc123xyz00",
+                                "title": "HiXTAPE - To Hank (feat. HARDY, Brantley Gilbert & Colt Ford)",
+                                "rejection_reason": "low_artist_similarity",
+                                "top_failed_gate": "artist_similarity",
+                                "nearest_pass_margin": {
+                                    "name": "artist_similarity",
+                                    "value": 0.0,
+                                    "threshold": 0.625,
+                                    "margin_to_pass": 0.625,
+                                    "direction": ">=",
+                                },
+                                "final_score": 0.40,
+                                "title_similarity": 1.0,
+                                "artist_similarity": 0.0,
+                                "duration_delta_ms": 2000,
+                            }
+                        ]
+                    },
+                }
+
+            def search_music_track_best_match(self, *args, **kwargs):
+                _ = args, kwargs
+                return None
+
+        fake_search = _FakeSearchService()
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={"music_low_confidence_review_enabled": True},
+            paths=paths,
+            adapters={},
+            search_service=fake_search,
+        )
+
+        captured_enqueue = {}
+        monkeypatch.setattr(
+            engine.store,
+            "enqueue_job",
+            lambda **kwargs: (captured_enqueue.update(kwargs), ("review-job-2", True, None))[1],
+        )
+        monkeypatch.setattr(
+            engine.store,
+            "record_failure",
+            lambda job, *, error_message, retryable, retry_delay_seconds: jq.JOB_STATUS_FAILED,
+        )
+
+        job = jq.DownloadJob(
+            id="job-import-artist-mismatch-1",
+            origin="import",
+            origin_id="batch-artist-mismatch",
+            media_type="music",
+            media_intent="music_track",
+            source="music_import",
+            url="musicbrainz://recording/rec-artist-mismatch",
+            input_url="musicbrainz://recording/rec-artist-mismatch",
+            canonical_url="musicbrainz://recording/rec-artist-mismatch",
+            external_id=None,
+            status=jq.JOB_STATUS_QUEUED,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=1,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error=None,
+            trace_id="trace-import-artist-mismatch-1",
+            output_template={
+                "artist": "HARDY",
+                "track": "To Hank",
+                "album": "Hixtape Vol. 2",
+                "recording_mbid": "rec-artist-mismatch",
+                "mb_release_id": "rel-artist-mismatch",
+                "import_batch_id": "batch-artist-mismatch",
+                "canonical_metadata": {
+                    "artist": "HARDY",
+                    "track": "To Hank",
+                    "album": "Hixtape Vol. 2",
+                    "recording_mbid": "rec-artist-mismatch",
+                    "mb_release_id": "rel-artist-mismatch",
+                },
+            },
+            resolved_destination=tmp,
+            canonical_id="music_track:rec-artist-mismatch:rel-artist-mismatch:disc-1",
+            file_path=None,
+        )
+
+        resolved = engine._resolve_music_track_job(job)
+        assert resolved is None
+        assert captured_enqueue["origin"] == "music_review"
+        assert captured_enqueue["media_intent"] == "music_track_review"

@@ -161,6 +161,41 @@ class SearchScoringTests(unittest.TestCase):
         scored = score_candidate(expected, candidate, source_modifier=1.0)
         self.assertEqual(scored.get("rejection_reason"), "disallowed_variant")
 
+    def test_music_track_scoring_is_case_insensitive_for_artist_track_album(self):
+        expected_upper = {
+            "artist": "HIXTAPE",
+            "track": "TO HANK",
+            "album": "HIXTAPE VOL. 2",
+            "duration_hint_sec": 200,
+            "media_intent": "music_track",
+            "query": '"HIXTAPE" "TO HANK" "HIXTAPE VOL. 2"',
+        }
+        expected_mixed = {
+            "artist": "HiXtaPe",
+            "track": "To Hank",
+            "album": "Hixtape Vol. 2",
+            "duration_hint_sec": 200,
+            "media_intent": "music_track",
+            "query": '"HiXtaPe" "To Hank" "Hixtape Vol. 2"',
+        }
+        candidate = {
+            "source": "youtube_music",
+            "title": "HiXTAPE - To Hank (Official Audio)",
+            "uploader": "HiXTAPE - Topic",
+            "artist_detected": "hixtape",
+            "track_detected": "to hank",
+            "album_detected": "HIXTAPE vol 2",
+            "duration_sec": 200,
+            "official": True,
+        }
+
+        scored_upper = score_candidate(expected_upper, candidate, source_modifier=1.0)
+        scored_mixed = score_candidate(expected_mixed, candidate, source_modifier=1.0)
+        self.assertAlmostEqual(float(scored_upper.get("score_artist") or 0.0), float(scored_mixed.get("score_artist") or 0.0))
+        self.assertAlmostEqual(float(scored_upper.get("score_track") or 0.0), float(scored_mixed.get("score_track") or 0.0))
+        self.assertAlmostEqual(float(scored_upper.get("score_album") or 0.0), float(scored_mixed.get("score_album") or 0.0))
+        self.assertAlmostEqual(float(scored_upper.get("final_score") or 0.0), float(scored_mixed.get("final_score") or 0.0))
+
     def test_classify_music_title_variants_representative_tokens(self):
         tags = classify_music_title_variants(
             "Artist - Song (Official Audio) [Lyric Video] (Remastered 2020) (Radio Edit) (Extended Cut) [Sped Up] [Nightcore] [8D]"
