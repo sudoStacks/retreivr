@@ -178,6 +178,11 @@ class MusicBrainzService:
     def _lucene_escape(self, text):
         return str(text or "").replace("\\", "\\\\").replace('"', '\\"')
 
+    @staticmethod
+    def _is_allowed_album_release_group_type(primary_type) -> bool:
+        value = str(primary_type or "").strip().lower()
+        return value in {"album", "ep"}
+
     def _artist_credit_text(self, artist_credit):
         if not isinstance(artist_credit, list):
             return ""
@@ -476,8 +481,8 @@ class MusicBrainzService:
             if "remix" in secondary_lower:
                 adjusted -= 20
             primary_type = str(group.get("primary-type") or "")
-            if primary_type and primary_type.lower() not in {"album", "ep"}:
-                adjusted -= 15
+            if not self._is_allowed_album_release_group_type(primary_type):
+                continue
             adjusted = max(0, min(100, adjusted))
             candidates.append(
                 {

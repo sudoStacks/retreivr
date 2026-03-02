@@ -298,6 +298,11 @@ def _extract_release_year(value: Any) -> str | None:
     return None
 
 
+def _is_allowed_album_release_group_type(primary_type: Any) -> bool:
+    value = str(primary_type or "").strip().lower()
+    return value in {"album", "ep"}
+
+
 def _classify_release_bucket(release_payload: dict) -> str:
     release = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
     if not isinstance(release, dict):
@@ -536,6 +541,8 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         group_list = payload.get("release-group-list", []) if isinstance(payload, dict) else []
         for group in group_list[:limit_value]:
             if not isinstance(group, dict):
+                continue
+            if not _is_allowed_album_release_group_type(group.get("primary-type")):
                 continue
             response["albums"].append(
                 {

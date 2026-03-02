@@ -494,6 +494,11 @@ def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
     return _mb_service().search_release_groups(normalized_query, limit=limit)
 
 
+def _is_allowed_album_release_group_type(primary_type: str | None) -> bool:
+    value = str(primary_type or "").strip().lower()
+    return value in {"album", "ep"}
+
+
 def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: int) -> list[dict]:
     normalized_artist_mbid = str(artist_mbid or "").strip()
     if not normalized_artist_mbid:
@@ -506,6 +511,9 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
     candidates: list[dict] = []
     for group in groups:
         if not isinstance(group, dict):
+            continue
+        primary_type = str(group.get("primary-type") or "").strip()
+        if not _is_allowed_album_release_group_type(primary_type):
             continue
         artist_credit = group.get("artist-credit")
         artist_name = ""
@@ -528,7 +536,7 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
                 "title": group.get("title"),
                 "artist_credit": artist_name,
                 "first_release_date": group.get("first-release-date"),
-                "primary_type": group.get("primary-type"),
+                "primary_type": primary_type,
                 "secondary_types": group.get("secondary-type-list") or [],
                 "score": group.get("ext:score"),
                 "track_count": None,
