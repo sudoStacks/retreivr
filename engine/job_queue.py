@@ -1897,12 +1897,17 @@ class DownloadWorkerEngine:
     def _review_quarantine_enabled_for_job(self, job, payload):
         if not bool(self.config.get("music_low_confidence_review_enabled", True)):
             return False
-        origin = str(getattr(job, "origin", "") or "").strip().lower()
-        if origin != "import":
+        media_type = str(getattr(job, "media_type", "") or "").strip().lower()
+        media_intent = str(getattr(job, "media_intent", "") or "").strip().lower()
+        if media_type != "music":
+            return False
+        if media_intent != "music_track":
+            return False
+        if str(getattr(job, "origin", "") or "").strip().lower() == "music_review":
             return False
         if not isinstance(payload, dict):
             return False
-        return bool(str(payload.get("import_batch_id") or payload.get("import_batch") or "").strip())
+        return True
 
     def _select_low_confidence_review_candidate(self, search_meta):
         if not isinstance(search_meta, dict):
