@@ -179,16 +179,19 @@ WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI
 MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024
 SUPPORTED_IMPORT_EXTENSIONS = {".m3u", ".m3u8", ".csv", ".xml", ".plist", ".json"}
 IMPORT_JOB_TTL_SECONDS = 6 * 60 * 60
+_LAST_TRANSITION_EVENT: str | None = None
 
 
 def _log_transition(event: str, **fields) -> None:
+    global _LAST_TRANSITION_EVENT
     label = str(event or "event").strip() or "event"
+    if _LAST_TRANSITION_EVENT != label:
+        logging.info("")
+        _LAST_TRANSITION_EVENT = label
     if fields:
         parts = [f"{key}={value}" for key, value in fields.items()]
-        logging.info("")
         logging.info("========== %s | %s ==========", label, " ".join(parts))
     else:
-        logging.info("")
         logging.info("========== %s ==========", label)
 
 
@@ -1713,6 +1716,7 @@ async def basic_auth_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup():
+    _log_transition("APP_STARTUP", phase="begin")
     app.state.paths = build_engine_paths()
     try:
         app.state.config_path = resolve_config_path(os.environ.get("YT_ARCHIVER_CONFIG"))
@@ -1896,10 +1900,17 @@ async def startup():
         app.state.single_worker_enforced,
         downtime_active,
     )
+    _log_transition(
+        "APP_STARTUP",
+        phase="complete",
+        watcher_enabled=bool(app.state.watcher_lock),
+        worker_count=app.state.worker_count,
+    )
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    _log_transition("APP_SHUTDOWN", phase="begin")
     if app.state.running:
         app.state.stop_event.set()
         task = app.state.run_task
@@ -1933,6 +1944,7 @@ async def shutdown():
             os.close(lock_fd)
         except OSError:
             pass
+    _log_transition("APP_SHUTDOWN", phase="complete")
     logging.shutdown()
 
 
