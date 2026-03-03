@@ -1344,27 +1344,16 @@ async function refreshStatus() {
     } else {
       $("#status-last-completed").textContent = "-";
     }
-    if (Number.isFinite(status.progress_total) && Number.isFinite(status.progress_current)) {
-      const percent = Number.isFinite(status.progress_percent)
-        ? status.progress_percent
-        : (status.progress_total > 0
-          ? Math.round((status.progress_current / status.progress_total) * 100)
-          : 0);
-      $("#status-playlist-progress-text").textContent =
-        `${status.progress_current}/${status.progress_total} (${percent}%)`;
-      $("#status-playlist-progress-bar").style.width = `${Math.max(0, Math.min(100, percent))}%`;
-    } else if (activeQueueCount > 0) {
-      const aggregateDownloaded = downloadingJobs.reduce((sum, job) => {
-        const value = toFiniteNumber(job?.progress_downloaded_bytes);
-        return value !== null ? sum + value : sum;
-      }, 0);
-      const aggregateTotal = downloadingJobs.reduce((sum, job) => {
-        const value = toFiniteNumber(job?.progress_total_bytes);
-        return value !== null ? sum + value : sum;
-      }, 0);
-      const aggregatePercent = aggregateTotal > 0
-        ? Math.max(0, Math.min(100, Math.round((aggregateDownloaded / aggregateTotal) * 100)))
-        : null;
+    if (activeQueueCount > 0) {
+      const queueLeadDownloading = downloadingJobs[0] || null;
+      const leadDownloaded = toFiniteNumber(queueLeadDownloading?.progress_downloaded_bytes);
+      const leadTotal = toFiniteNumber(queueLeadDownloading?.progress_total_bytes);
+      const leadPercentRaw = toFiniteNumber(queueLeadDownloading?.progress_percent);
+      const leadPercent = leadPercentRaw !== null
+        ? Math.max(0, Math.min(100, Math.round(leadPercentRaw)))
+        : ((leadDownloaded !== null && leadTotal !== null && leadTotal > 0)
+          ? Math.max(0, Math.min(100, Math.round((leadDownloaded / leadTotal) * 100)))
+          : null);
       const queuePendingCount = queuedCount + claimedCount;
       const summaryParts = [
         `${downloadingCount} downloading`,
@@ -1373,19 +1362,28 @@ async function refreshStatus() {
       if (postprocessingCount > 0) {
         summaryParts.push(`${postprocessingCount} postprocessing`);
       }
-      if (aggregatePercent !== null) {
-        summaryParts.push(`${aggregatePercent}% data`);
+      if (leadPercent !== null) {
+        summaryParts.push(`${leadPercent}% lead`);
       }
       $("#status-playlist-progress-text").textContent = summaryParts.join(" · ");
       $("#status-playlist-progress-bar").style.width =
-        aggregatePercent !== null ? `${aggregatePercent}%` : "0%";
+        leadPercent !== null ? `${leadPercent}%` : "0%";
+    } else if (Number.isFinite(status.progress_total) && Number.isFinite(status.progress_current)) {
+      const percent = Number.isFinite(status.progress_percent)
+        ? status.progress_percent
+        : (status.progress_total > 0
+          ? Math.round((status.progress_current / status.progress_total) * 100)
+          : 0);
+      $("#status-playlist-progress-text").textContent =
+        `${status.progress_current}/${status.progress_total} (${percent}%)`;
+      $("#status-playlist-progress-bar").style.width = `${Math.max(0, Math.min(100, percent))}%`;
     } else {
       $("#status-playlist-progress-text").textContent = "-";
       $("#status-playlist-progress-bar").style.width = "0%";
     }
 
     const videoContainer = $("#status-video-progress");
-    const queueHead = downloadingJobs[0] || activeJobs[0] || null;
+    const queueHead = downloadingJobs[0] || null;
     const downloaded = queueHead
       ? toFiniteNumber(queueHead.progress_downloaded_bytes)
       : toFiniteNumber(status.video_downloaded_bytes);
@@ -1404,7 +1402,7 @@ async function refreshStatus() {
     if (videoPercent === null && downloaded !== null && total !== null && total > 0) {
       videoPercent = Math.round((downloaded / total) * 100);
     }
-    const hasVideoProgress = activeQueueCount > 0 && (
+    const hasVideoProgress = activeQueueCount > 0 && queueHead && (
       videoPercent !== null ||
       downloaded !== null ||
       total !== null
@@ -1433,18 +1431,7 @@ async function refreshStatus() {
 
     const cancelBtn = $("#status-cancel");
     if (cancelBtn) {
-      cancelBtn.disabled = !data.running;
-      cancelBtn.onclick = async () => {
-        const jobId = data.current_job_id || data.run_id;
-        if (!jobId) return;
-        cancelBtn.disabled = true;
-        try {
-          await cancelJob(jobId);
-          await refreshStatus();
-        } catch (err) {
-          setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
-        }
-      };
+      cancelBtn.disabled = !(Boolean(data.running) || activeQueueCount > 0);
     }
     if (!state.playlistImportInProgress) {
       const activeImport = !!importState.active;
@@ -5130,7 +5117,7 @@ async function refreshSearchQueue() {
 
     body.textContent = "";
     if (!jobs.length) {
-      renderSearchEmptyRow(body, 9, "No active queue jobs found.");
+      renderSearchEmptyRow(body, 10, "No active queue jobs found.");
       if (messageEl) messageEl.textContent = "";
       return;
     }
@@ -5163,6 +5150,11 @@ async function refreshSearchQueue() {
         || String(job.url || "").trim()
         || String(job.id || "").trim()
         || "-";
+      const statusValue = String(job.status || "").trim().toLowerCase();
+      const cancellable = ["queued", "claimed", "downloading", "postprocessing"].includes(statusValue);
+      const actionHtml = cancellable
+        ? `<button class="button ghost small" data-action="cancel-queue-job" data-job-id="${job.id || ""}">Cancel</button>`
+        : `<span class="meta">-</span>`;
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${displayTitle}</td>
@@ -5174,12 +5166,13 @@ async function refreshSearchQueue() {
         <td>${job.attempts ?? ""}</td>
         <td>${formatTimestamp(job.created_at) || ""}</td>
         <td>${job.last_error || ""}</td>
+        <td>${actionHtml}</td>
       `;
       body.appendChild(tr);
     });
     if (messageEl) messageEl.textContent = "";
   } catch (err) {
-    renderSearchEmptyRow(body, 9, `Failed to load queue: ${err.message}`);
+    renderSearchEmptyRow(body, 10, `Failed to load queue: ${err.message}`);
     setNotice(messageEl, `Failed to load queue: ${err.message}`, true);
   }
 }
@@ -6237,6 +6230,24 @@ function bindEvents() {
   });
   $("#search-queue-refresh").addEventListener("click", refreshSearchQueue);
   $("#search-queue-clear-failed").addEventListener("click", clearFailedQueueJobs);
+  $("#search-queue-body").addEventListener("click", async (event) => {
+    const button = event.target.closest('button[data-action="cancel-queue-job"]');
+    if (!button) return;
+    const jobId = String(button.dataset.jobId || "").trim();
+    if (!jobId) return;
+    const ok = window.confirm("Cancel this queued/download job?");
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      await cancelJob(jobId);
+      setNotice($("#search-queue-message"), `Cancel requested for job ${jobId}.`, false);
+      await refreshSearchQueue();
+      await refreshStatus();
+    } catch (err) {
+      button.disabled = false;
+      setNotice($("#search-queue-message"), `Cancel failed: ${err.message}`, true);
+    }
+  });
   const sourceList = $("#search-source-list");
   if (sourceList) {
     sourceList.addEventListener("click", (event) => {
