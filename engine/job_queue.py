@@ -6127,7 +6127,11 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
     if not needs_video_transcode and not needs_audio_transcode:
         return local_file, profile
 
-    mp4_compatible_path = f"{local_file}.mp4compat"
+    # Use a short temp filename in the same directory to avoid path-length issues on long titles.
+    mp4_compatible_path = os.path.join(
+        os.path.dirname(str(local_file)),
+        f".retreivr-mp4compat-{uuid4().hex}.mp4",
+    )
 
     def _run_enforcement(*, include_subtitles: bool):
         cmd = [
@@ -6159,7 +6163,15 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
                 mp4_compatible_path,
             ]
         )
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as exc:
+            stderr_text = (exc.stderr or exc.stdout or "").strip()
+            if len(stderr_text) > 1200:
+                stderr_text = stderr_text[-1200:]
+            raise RuntimeError(
+                f"ffmpeg_exit={exc.returncode} stderr={stderr_text or '<empty>'}"
+            ) from exc
 
     first_error = None
     try:
@@ -6190,6 +6202,11 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
         raise RuntimeError(
             f"mp4_audio_codec_enforcement_failed: expected_aac got={updated_audio or 'unknown'}"
         )
+    try:
+        if os.path.exists(mp4_compatible_path):
+            os.remove(mp4_compatible_path)
+    except Exception:
+        pass
     return local_file, updated
 
 

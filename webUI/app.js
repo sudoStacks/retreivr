@@ -4065,9 +4065,24 @@ async function refreshHomeDirectJobStatus() {
     const data = await fetchJson("/api/download_jobs?limit=500");
     const jobs = data.jobs || [];
     const playlistId = state.homeDirectJob.playlistId || null;
+    const startedAtMs = Date.parse(String(state.homeDirectJob.startedAt || ""));
+    const isCurrentRunJob = (entry) => {
+      if (!Number.isFinite(startedAtMs)) {
+        return true;
+      }
+      const createdAtMs = Date.parse(String(entry?.created_at || ""));
+      if (!Number.isFinite(createdAtMs)) {
+        return true;
+      }
+      // Small tolerance for clock skew/order.
+      return createdAtMs >= (startedAtMs - 5000);
+    };
     if (playlistId) {
       const playlistJobs = jobs.filter(
-        (entry) => entry.origin === "playlist" && String(entry.origin_id || "") === String(playlistId)
+        (entry) =>
+          entry.origin === "playlist" &&
+          String(entry.origin_id || "") === String(playlistId) &&
+          isCurrentRunJob(entry)
       );
       if (playlistJobs.length) {
         const statuses = new Set(playlistJobs.map((entry) => String(entry.status || "")));
@@ -4107,7 +4122,7 @@ async function refreshHomeDirectJobStatus() {
         return;
       }
     }
-    const job = jobs.find((entry) => entry.url === state.homeDirectJob.url);
+    const job = jobs.find((entry) => entry.url === state.homeDirectJob.url && isCurrentRunJob(entry));
     if (job) {
       state.homeDirectJob.status = String(job.status || "queued");
       state.homeDirectPreview = {
