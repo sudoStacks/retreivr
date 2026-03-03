@@ -4564,8 +4564,11 @@ async function handleHomePlaylistUrl(url, playlistId, destination, autoEnqueue, 
     return;
   }
   const formatOverride = $("#home-format")?.value.trim();
+  const musicToggle = document.querySelector("#music-mode-toggle");
+  const treatAsMusic = Boolean(state.homeMusicMode && musicToggle?.checked);
   const payload = {
     playlist_id: playlistId,
+    music_mode: treatAsMusic,
   };
   if (destination) {
     payload.destination = destination;

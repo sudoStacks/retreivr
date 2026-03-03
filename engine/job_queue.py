@@ -5369,8 +5369,12 @@ def download_with_ytdlp(
     # Remove progress_hooks if present
     if "progress_hooks" in opts_for_run:
         opts_for_run.pop("progress_hooks")
-    # First attempt must be clean/minimal (no cookies/js runtime).
-    configured_cookiefile = opts_for_run.pop("cookiefile", None)
+    # Keep cookies on first attempt for music-mode runs; audio-only streams often
+    # require authenticated/session-backed requests on some videos.
+    configured_cookiefile = opts_for_run.get("cookiefile")
+    keep_cookies_first_attempt = bool(audio_mode and configured_cookiefile)
+    if not keep_cookies_first_attempt:
+        configured_cookiefile = opts_for_run.pop("cookiefile", None)
     opts_for_run.pop("js_runtimes", None)
     opts_for_run.pop("remote_components", None)
     # Always request sidecar metadata from successful download attempts.
@@ -5428,6 +5432,8 @@ def download_with_ytdlp(
         )
 
         retry_attempts = []
+        if audio_mode and "requested format is not available" in lower_error:
+            retry_attempts.append("audio_best")
         if should_escalate_js:
             retry_attempts.append("js")
         if should_try_cookies and configured_cookiefile:
@@ -5438,6 +5444,8 @@ def download_with_ytdlp(
         js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
         for attempt in retry_attempts:
             retry_opts = dict(opts_for_run)
+            if attempt == "audio_best":
+                retry_opts["format"] = "best"
             if attempt in {"js", "js+cookies"} and js_runtime_map:
                 retry_opts["js_runtimes"] = js_runtime_map
                 retry_opts["remote_components"] = "ejs:github"
