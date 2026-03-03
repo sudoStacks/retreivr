@@ -743,6 +743,64 @@ def _ensure_music_failures_table(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_music_failures_batch ON music_failures (origin_batch_id)")
     conn.commit()
 
+
+def _parse_iso_datetime(value: str, *, field_name: str) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail=f"{field_name}_required")
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid_{field_name}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _delete_music_failures(
+    conn: sqlite3.Connection,
+    *,
+    before: datetime | None = None,
+    keep_latest: int | None = None,
+) -> tuple[int, int, int]:
+    _ensure_music_failures_table(conn)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM music_failures")
+    before_count = int((cur.fetchone() or [0])[0] or 0)
+
+    where_clause = ""
+    params: list[object] = []
+    if before is not None:
+        where_clause = " WHERE created_at < ?"
+        params.append(before.replace(microsecond=0).isoformat())
+
+    if keep_latest is None:
+        cur.execute(f"DELETE FROM music_failures{where_clause}", tuple(params))
+        deleted = int(cur.rowcount or 0)
+    else:
+        if keep_latest < 0:
+            raise HTTPException(status_code=400, detail="invalid_keep_latest")
+        query = f"""
+            DELETE FROM music_failures
+            WHERE id IN (
+                SELECT id
+                FROM music_failures
+                {where_clause}
+                ORDER BY id DESC
+                LIMIT -1 OFFSET ?
+            )
+        """
+        params_with_offset = list(params)
+        params_with_offset.append(int(keep_latest))
+        cur.execute(query, tuple(params_with_offset))
+        deleted = int(cur.rowcount or 0)
+
+    conn.commit()
+    cur.execute("SELECT COUNT(*) FROM music_failures")
+    remaining = int((cur.fetchone() or [0])[0] or 0)
+    return deleted, before_count, remaining
+
 def notify_run_summary(config, *, run_type: str, status, started_at, finished_at, force_send: bool = False):
     if run_type not in {"scheduled", "watcher", "api"}:
         return {"attempted": 0, "sent": False, "telegram_message_id": None}
@@ -6912,6 +6970,34 @@ async def list_music_failures(limit: int = Query(50, ge=1, le=500)):
     finally:
         conn.close()
     return {"count": total_count, "rows": rows}
+
+
+@app.delete("/api/music/failures")
+async def delete_music_failures(
+    before: str | None = Query(None),
+    keep_latest: int | None = Query(None, ge=0),
+):
+    before_dt = _parse_iso_datetime(before, field_name="before") if before else None
+    conn = sqlite3.connect(app.state.paths.db_path)
+    try:
+        deleted, before_count, remaining = _delete_music_failures(
+            conn,
+            before=before_dt,
+            keep_latest=keep_latest,
+        )
+    finally:
+        conn.close()
+    return safe_json(
+        {
+            "deleted": int(deleted),
+            "before": int(before_count),
+            "remaining": int(remaining),
+            "filter": {
+                "before": before_dt.replace(microsecond=0).isoformat() if before_dt else None,
+                "keep_latest": int(keep_latest) if keep_latest is not None else None,
+            },
+        }
+    )
 
 
 

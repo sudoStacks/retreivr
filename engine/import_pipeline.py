@@ -6,7 +6,7 @@ import sqlite3
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -28,6 +28,8 @@ except Exception:
 _DEFAULT_CONFIDENCE_THRESHOLD = 0.78
 _DEFAULT_MB_BINDING_WORKERS = 4
 _MAX_MB_BINDING_WORKERS = 5
+_DEFAULT_MUSIC_FAILURES_RETENTION_MAX_ROWS = 2000
+_DEFAULT_MUSIC_FAILURES_RETENTION_MAX_AGE_DAYS = 30
 logger = logging.getLogger(__name__)
 
 
@@ -88,6 +90,8 @@ def _record_music_failure(
     reasons: list[str] | None = None,
     recording_mbid_attempted: str | None = None,
     last_query: str | None = None,
+    retention_max_rows: int | None = _DEFAULT_MUSIC_FAILURES_RETENTION_MAX_ROWS,
+    retention_max_age_days: int | None = _DEFAULT_MUSIC_FAILURES_RETENTION_MAX_AGE_DAYS,
 ) -> None:
     if not db_path:
         return
@@ -120,11 +124,41 @@ def _record_music_failure(
                     str(last_query or "").strip() or None,
                 ),
             )
+            _prune_music_failures(
+                conn,
+                max_rows=retention_max_rows,
+                max_age_days=retention_max_age_days,
+            )
             conn.commit()
         finally:
             conn.close()
     except Exception:
         logger.exception("music_failure_record_persist_failed")
+
+
+def _prune_music_failures(
+    conn: sqlite3.Connection,
+    *,
+    max_rows: int | None,
+    max_age_days: int | None,
+) -> None:
+    cur = conn.cursor()
+    if isinstance(max_age_days, int) and max_age_days > 0:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).replace(microsecond=0).isoformat()
+        cur.execute("DELETE FROM music_failures WHERE created_at < ?", (cutoff,))
+    if isinstance(max_rows, int) and max_rows > 0:
+        cur.execute(
+            """
+            DELETE FROM music_failures
+            WHERE id IN (
+                SELECT id
+                FROM music_failures
+                ORDER BY id DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (int(max_rows),),
+        )
 
 
 def _build_query(intent: TrackIntent) -> str:
@@ -469,6 +503,51 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 mb_binding_workers = _DEFAULT_MB_BINDING_WORKERS
     mb_binding_workers = max(1, min(int(mb_binding_workers), _MAX_MB_BINDING_WORKERS))
 
+    retention_max_rows = _DEFAULT_MUSIC_FAILURES_RETENTION_MAX_ROWS
+    retention_max_age_days = _DEFAULT_MUSIC_FAILURES_RETENTION_MAX_AGE_DAYS
+    if isinstance(runtime_config, dict):
+        rows_value = runtime_config.get("music_failures_retention_max_rows")
+        if rows_value is None and isinstance(config, dict):
+            rows_value = config.get("music_failures_retention_max_rows")
+        if rows_value is not None:
+            try:
+                retention_max_rows = int(rows_value)
+            except (TypeError, ValueError):
+                retention_max_rows = _DEFAULT_MUSIC_FAILURES_RETENTION_MAX_ROWS
+        if retention_max_rows < 0:
+            retention_max_rows = _DEFAULT_MUSIC_FAILURES_RETENTION_MAX_ROWS
+
+        days_value = runtime_config.get("music_failures_retention_max_age_days")
+        if days_value is None and isinstance(config, dict):
+            days_value = config.get("music_failures_retention_max_age_days")
+        if days_value is not None:
+            try:
+                retention_max_age_days = int(days_value)
+            except (TypeError, ValueError):
+                retention_max_age_days = _DEFAULT_MUSIC_FAILURES_RETENTION_MAX_AGE_DAYS
+        if retention_max_age_days < 0:
+            retention_max_age_days = _DEFAULT_MUSIC_FAILURES_RETENTION_MAX_AGE_DAYS
+
+    def _record_failure(
+        *,
+        artist: str | None,
+        track: str | None,
+        reasons: list[str] | None,
+        recording_mbid_attempted: str | None,
+        last_query: str | None,
+    ) -> None:
+        _record_music_failure(
+            db_path=failure_db_path,
+            origin_batch_id=import_batch_id,
+            artist=artist,
+            track=track,
+            reasons=reasons,
+            recording_mbid_attempted=recording_mbid_attempted,
+            last_query=last_query,
+            retention_max_rows=retention_max_rows,
+            retention_max_age_days=retention_max_age_days,
+        )
+
     def _emit_progress(*, phase: str, processed_tracks: int) -> None:
         if not callable(progress_callback):
             return
@@ -563,9 +642,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     artist = entry["artist"]
                     title = str(entry["title"] or "").strip() or query
                     failed_count += 1
-                    _record_music_failure(
-                        db_path=failure_db_path,
-                        origin_batch_id=import_batch_id,
+                    _record_failure(
                         artist=artist,
                         track=title,
                         reasons=["import_exception", str(exc)],
@@ -585,9 +662,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 try:
                     if not selected_pair:
                         unresolved_count += 1
-                        _record_music_failure(
-                            db_path=failure_db_path,
-                            origin_batch_id=import_batch_id,
+                        _record_failure(
                             artist=artist,
                             track=title,
                             reasons=["mb_pair_not_found"],
@@ -600,9 +675,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     recording_mbid = str(selected_pair.get("recording_mbid") or "").strip()
                     if not recording_mbid:
                         unresolved_count += 1
-                        _record_music_failure(
-                            db_path=failure_db_path,
-                            origin_batch_id=import_batch_id,
+                        _record_failure(
                             artist=artist,
                             track=title,
                             reasons=["missing_recording_mbid"],
@@ -664,9 +737,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                         enqueued_count += 1
                 except Exception as exc:
                     failed_count += 1
-                    _record_music_failure(
-                        db_path=failure_db_path,
-                        origin_batch_id=import_batch_id,
+                    _record_failure(
                         artist=artist,
                         track=title,
                         reasons=["import_exception", str(exc)],

@@ -1533,6 +1533,21 @@ async function refreshMusicFailures() {
   }
 }
 
+async function clearMusicFailures() {
+  const ok = confirm("Clear stored music failure diagnostics?");
+  if (!ok) {
+    return;
+  }
+  try {
+    const result = await fetchJson("/api/music/failures", { method: "DELETE" });
+    const deleted = Number.isFinite(Number(result?.deleted)) ? Number(result.deleted) : 0;
+    setNotice($("#home-search-message"), `Cleared ${deleted} music failure record(s).`, false);
+    await refreshMusicFailures();
+  } catch (err) {
+    setNotice($("#home-search-message"), `Clear music failures failed: ${err.message}`, true);
+  }
+}
+
 async function refreshLogs() {
   const lines = parseInt($("#logs-lines").value, 10) || 200;
   try {
@@ -6329,6 +6344,10 @@ function bindEvents() {
   const musicFailuresRefresh = $("#music-failures-refresh");
   if (musicFailuresRefresh) {
     musicFailuresRefresh.addEventListener("click", refreshMusicFailures);
+  }
+  const musicFailuresClear = $("#music-failures-clear");
+  if (musicFailuresClear) {
+    musicFailuresClear.addEventListener("click", clearMusicFailures);
   }
 
   $("#toggle-theme").addEventListener("click", () => {
