@@ -96,9 +96,9 @@ jobs:
           fi
 
           if [[ -f "config/config.json.example" ]]; then
-            cp "config/config.json.example" "${BUNDLE_DIR}/config/config.json.example"
+            cp "config/config.json.example" "${BUNDLE_DIR}/config/config.json"
           elif [[ -f "config/config_sample.json" ]]; then
-            cp "config/config_sample.json" "${BUNDLE_DIR}/config/config.json.example"
+            cp "config/config_sample.json" "${BUNDLE_DIR}/config/config.json"
           else
             echo "No config example file found." >&2
             exit 1
@@ -110,7 +110,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ZIP_NAME="retreivr-runtime-${GITHUB_REF_NAME}.zip"
+          ZIP_NAME="retreivr-runtime-${{ github.ref_name }}.zip"
           rm -f "${ZIP_NAME}"
           (cd runtime-bundle && zip -rq "../${ZIP_NAME}" .)
 
