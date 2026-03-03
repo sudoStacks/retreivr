@@ -272,6 +272,11 @@ body.home-page .music-search-console {
   background: rgba(15, 21, 29, 0.75);
 }
 
+/* Keep music console hidden until Music Mode is explicitly enabled. */
+body.home-page .music-search-console.hidden {
+  display: none !important;
+}
+
 :root[data-theme="light"] body.home-page .music-search-console {
   background: #f8fafc;
   border-color: rgba(15, 23, 42, 0.14);
