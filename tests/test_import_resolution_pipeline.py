@@ -343,3 +343,63 @@ def test_import_pipeline_threshold_uses_app_config_when_wrapper_passed() -> None
     assert result.unresolved_count == 1
     assert result.enqueued_count == 0
     assert len(queue_store.enqueued) == 0
+
+
+def test_import_pipeline_progress_callback_reports_completed_work_units() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-progress-1",
+                        "title": "Song One",
+                        "ext:score": "95",
+                        "artist-credit": [{"name": "Artist One"}],
+                        "release-list": [{"id": "release-progress-1"}],
+                    }
+                ]
+            },
+            {"recording-list": []},
+        ]
+    )
+    queue_store = FakeQueueStore()
+    intents = [
+        TrackIntent(
+            artist="Artist One",
+            title="Song One",
+            album="Album One",
+            raw_line="",
+            source_format="m3u",
+        ),
+        TrackIntent(
+            artist="Artist Two",
+            title="Song Two",
+            album="Album Two",
+            raw_line="",
+            source_format="m3u",
+        ),
+    ]
+    snapshots: list[dict] = []
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+            "progress_callback": lambda snapshot: snapshots.append(dict(snapshot)),
+        },
+    )
+
+    assert snapshots
+    assert snapshots[0]["phase"] == "resolving"
+    assert snapshots[0]["processed_tracks"] == 0
+    assert snapshots[1]["processed_tracks"] == 1
+    assert snapshots[2]["processed_tracks"] == 2
+    assert snapshots[-1]["phase"] == "finalizing"
+    assert snapshots[-1]["processed_tracks"] == 2
+    assert snapshots[-1]["resolved_count"] == result.resolved_count
+    assert snapshots[-1]["unresolved_count"] == result.unresolved_count
+    assert snapshots[-1]["enqueued_count"] == result.enqueued_count
+    assert snapshots[-1]["failed_count"] == result.failed_count

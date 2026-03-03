@@ -963,7 +963,11 @@ function renderPlaylistImportStatus(status) {
   const safe = status || {};
   const phase = String(safe.phase || safe.state || "queued");
   const phaseLower = phase.toLowerCase();
-  const active = phaseLower === "queued" || phaseLower === "parsing" || phaseLower === "resolving";
+  const active =
+    phaseLower === "queued" ||
+    phaseLower === "parsing" ||
+    phaseLower === "resolving" ||
+    phaseLower === "finalizing";
   const total = Number.isFinite(Number(safe.total_tracks)) ? Number(safe.total_tracks) : 0;
   const processed = Number.isFinite(Number(safe.processed_tracks)) ? Number(safe.processed_tracks) : 0;
   const resolved = Number.isFinite(Number(safe.resolved)) ? Number(safe.resolved) : 0;
@@ -1030,8 +1034,12 @@ async function pollPlaylistImportStatus() {
     const data = await fetchJson(`/api/import/playlist/jobs/${encodeURIComponent(jobId)}`);
     const status = data.status || {};
     renderPlaylistImportStatus(status);
-    const phase = String(status.state || "").toLowerCase();
-    const active = phase === "queued" || phase === "parsing" || phase === "resolving";
+    const phase = String(status.phase || status.state || "").toLowerCase();
+    const active =
+      phase === "queued" ||
+      phase === "parsing" ||
+      phase === "resolving" ||
+      phase === "finalizing";
     state.playlistImportInProgress = active;
     setPlaylistImportControlsEnabled(!active);
     if (!active) {

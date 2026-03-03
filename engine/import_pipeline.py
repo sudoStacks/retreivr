@@ -453,28 +453,33 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     failed_count = 0
     resolved_mbids: list[str] = []
 
-    for idx, intent in enumerate(track_intents):
-        if callable(progress_callback):
-            try:
-                progress_callback(
-                    {
-                        "total_tracks": int(total_tracks),
-                        "processed_tracks": int(idx),
-                        "resolved_count": int(resolved_count),
-                        "unresolved_count": int(unresolved_count),
-                        "enqueued_count": int(enqueued_count),
-                        "failed_count": int(failed_count),
-                        "phase": "resolving",
-                    }
-                )
-            except Exception:
-                logger.exception("import_progress_callback_failed")
+    def _emit_progress(*, phase: str, processed_tracks: int) -> None:
+        if not callable(progress_callback):
+            return
+        try:
+            progress_callback(
+                {
+                    "total_tracks": int(total_tracks),
+                    "processed_tracks": int(processed_tracks),
+                    "resolved_count": int(resolved_count),
+                    "unresolved_count": int(unresolved_count),
+                    "enqueued_count": int(enqueued_count),
+                    "failed_count": int(failed_count),
+                    "phase": str(phase or "resolving"),
+                }
+            )
+        except Exception:
+            logger.exception("import_progress_callback_failed")
+
+    _emit_progress(phase="resolving", processed_tracks=0)
+    for idx, intent in enumerate(track_intents, start=1):
         query = _build_query(intent)
-        if not query:
-            failed_count += 1
-            continue
         artist = str(intent.artist or "").strip() or None
         title = str(intent.title or "").strip() or query
+        if not query:
+            failed_count += 1
+            _emit_progress(phase="resolving", processed_tracks=idx)
+            continue
         album = str(intent.album or "").strip() or None
         duration_ms = getattr(intent, "duration_ms", None)
         try:
@@ -510,6 +515,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     recording_mbid_attempted=None,
                     last_query=query,
                 )
+                _emit_progress(phase="resolving", processed_tracks=idx)
                 continue
             recording_mbid = str(selected_pair.get("recording_mbid") or "").strip()
             if not recording_mbid:
@@ -523,6 +529,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     recording_mbid_attempted=None,
                     last_query=query,
                 )
+                _emit_progress(phase="resolving", processed_tracks=idx)
                 continue
             release_mbid = str(selected_pair.get("mb_release_id") or "").strip() or None
             release_group_mbid = str(selected_pair.get("mb_release_group_id") or "").strip() or None
@@ -554,7 +561,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 destination=destination,
                 final_format_override=final_format_override,
                 import_batch_id=import_batch_id,
-                source_index=idx,
+                source_index=idx - 1,
                 recording_mbid=recording_mbid,
                 release_mbid=release_mbid,
                 release_group_mbid=release_group_mbid,
@@ -585,24 +592,10 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                 recording_mbid_attempted=None,
                 last_query=query,
             )
-
-    if callable(progress_callback):
-        try:
-            progress_callback(
-                {
-                    "total_tracks": int(total_tracks),
-                    "processed_tracks": int(total_tracks),
-                    "resolved_count": int(resolved_count),
-                    "unresolved_count": int(unresolved_count),
-                    "enqueued_count": int(enqueued_count),
-                    "failed_count": int(failed_count),
-                    "phase": "finalizing",
-                }
-            )
-        except Exception:
-            logger.exception("import_progress_callback_failed")
+        _emit_progress(phase="resolving", processed_tracks=idx)
 
     unresolved_count = max(unresolved_count, total_tracks - resolved_count - failed_count)
+    _emit_progress(phase="finalizing", processed_tracks=total_tracks)
     return ImportResult(
         total_tracks=total_tracks,
         resolved_count=resolved_count,
