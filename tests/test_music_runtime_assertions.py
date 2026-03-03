@@ -990,3 +990,93 @@ def test_worker_binds_store_into_adapters() -> None:
             adapter = engine.adapters.get(source)
             assert adapter is not None
             assert getattr(adapter, "store", None) is engine.store
+
+
+def test_music_resolve_uses_runtime_preresolved_candidate_without_search() -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=db_path,
+            temp_downloads_dir=tmp,
+            single_downloads_dir=tmp,
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+
+        class _FakeSearchService:
+            def __init__(self):
+                self.calls = 0
+                self.last_music_track_search = {}
+
+            def search_music_track_best_match(self, *args, **kwargs):
+                _ = args, kwargs
+                self.calls += 1
+                return None
+
+        fake_search = _FakeSearchService()
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={},
+            paths=paths,
+            adapters={},
+            search_service=fake_search,
+        )
+
+        job = jq.DownloadJob(
+            id="job-preresolved-1",
+            origin="music_album",
+            origin_id="album-run-preresolved",
+            media_type="music",
+            media_intent="music_track",
+            source="youtube_music",
+            url="musicbrainz://recording/rec-preresolved",
+            input_url="musicbrainz://recording/rec-preresolved",
+            canonical_url="musicbrainz://recording/rec-preresolved",
+            external_id=None,
+            status=jq.JOB_STATUS_QUEUED,
+            queued=None,
+            claimed=None,
+            downloading=None,
+            postprocessing=None,
+            completed=None,
+            failed=None,
+            canceled=None,
+            attempts=0,
+            max_attempts=3,
+            created_at=None,
+            updated_at=None,
+            last_error=None,
+            trace_id="trace-preresolved-1",
+            output_template={
+                "artist": "Artist",
+                "track": "Song",
+                "album": "Album",
+                "recording_mbid": "rec-preresolved",
+                "mb_release_id": "rel-preresolved",
+                "canonical_metadata": {
+                    "artist": "Artist",
+                    "track": "Song",
+                    "album": "Album",
+                    "recording_mbid": "rec-preresolved",
+                    "mb_release_id": "rel-preresolved",
+                },
+                "runtime_pre_resolved": {
+                    "recording_mbid": "rec-preresolved",
+                    "mb_release_id": "rel-preresolved",
+                    "resolved_url": "https://www.youtube.com/watch?v=abc123xyz00",
+                    "resolved_source": "youtube_music",
+                },
+            },
+            resolved_destination=tmp,
+            canonical_id="music_track:rec-preresolved:rel-preresolved:disc-1",
+            file_path=None,
+        )
+
+        resolved = engine._resolve_music_track_job(job)
+        assert resolved is not None
+        assert resolved.url == "https://www.youtube.com/watch?v=abc123xyz00"
+        assert resolved.source in {"youtube", "youtube_music"}
+        assert fake_search.calls == 0

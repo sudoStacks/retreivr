@@ -1108,6 +1108,39 @@ class DownloadJobStore:
             return self._row_to_job(updated_row)
         finally:
             conn.close()
+
+    def peek_next_queued_job(self, source, *, exclude_job_id=None, now=None):
+        """Return the next ready queued job for a source without claiming it."""
+        now = now or utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            if exclude_job_id:
+                cur.execute(
+                    """
+                    SELECT * FROM download_jobs
+                    WHERE status=? AND source=? AND id!=? AND (queued IS NULL OR queued<=?)
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    (JOB_STATUS_QUEUED, source, exclude_job_id, now),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT * FROM download_jobs
+                    WHERE status=? AND source=? AND (queued IS NULL OR queued<=?)
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    (JOB_STATUS_QUEUED, source, now),
+                )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_job(row)
+        finally:
+            conn.close()
             
     def mark_completed(self, job_id, *, file_path=None):
         now = utc_now()
@@ -1342,6 +1375,8 @@ class DownloadWorkerEngine:
         self._locks_lock = threading.Lock()
         self._cancel_flags = {}
         self._cancel_lock = threading.Lock()
+        self._pre_resolve_lock = threading.Lock()
+        self._pre_resolve_inflight = set()
 
     def _extract_resolved_candidate(self, resolved):
         if not resolved:
@@ -1567,7 +1602,7 @@ class DownloadWorkerEngine:
             )
         return None
 
-    def _resolve_music_track_job(self, job):
+    def _resolve_music_track_job(self, job, *, persist_failures=True):
         payload = job.output_template if isinstance(job.output_template, dict) else {}
         canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
         # Prefer bound MB canonical metadata for scoring expectations.
@@ -1668,22 +1703,24 @@ class DownloadWorkerEngine:
         except Exception:
             duration_hint_sec = None
         if not recording_mbid or not release_mbid:
-            self.store.record_failure(
-                job,
-                error_message="music_track_binding_missing",
-                retryable=False,
-                retry_delay_seconds=self.retry_delay_seconds,
-            )
+            if persist_failures:
+                self.store.record_failure(
+                    job,
+                    error_message="music_track_binding_missing",
+                    retryable=False,
+                    retry_delay_seconds=self.retry_delay_seconds,
+                )
             return None
         allow_live = self._music_track_is_live(artist, track, album)
         if not artist or not track:
             logging.error("Music track search failed")
-            self.store.record_failure(
-                job,
-                error_message="music_track_metadata_missing",
-                retryable=False,
-                retry_delay_seconds=self.retry_delay_seconds,
-            )
+            if persist_failures:
+                self.store.record_failure(
+                    job,
+                    error_message="music_track_metadata_missing",
+                    retryable=False,
+                    retry_delay_seconds=self.retry_delay_seconds,
+                )
             return None
         logger.info(f"[WORKER] processing music_track artist={artist} track={track}")
         logger.info(
@@ -1695,7 +1732,12 @@ class DownloadWorkerEngine:
 
         search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
         logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
-        resolved = None
+        resolved = self._extract_runtime_pre_resolved(
+            payload,
+            recording_mbid=recording_mbid,
+            release_mbid=release_mbid,
+        )
+        used_pre_resolved = bool(resolved)
         retry_start_rung = 0
         track_total_value = None
         for candidate_total in (
@@ -1730,7 +1772,7 @@ class DownloadWorkerEngine:
             except Exception:
                 retry_start_rung = 0
         # Music-track acquisition must go through SearchService for deterministic orchestration/logging.
-        if self.search_service:
+        if self.search_service and not resolved:
             try:
                 resolved = self.search_service.search_music_track_best_match(
                     artist,
@@ -1759,51 +1801,57 @@ class DownloadWorkerEngine:
                     candidate_id=None,
                     retryable=retryable,
                 )
-                self.store.record_failure(
-                    job,
-                    error_message=f"music_track_adapter_search_exception:{exc}",
-                    retryable=retryable,
-                    retry_delay_seconds=self.retry_delay_seconds,
-                )
+                if persist_failures:
+                    self.store.record_failure(
+                        job,
+                        error_message=f"music_track_adapter_search_exception:{exc}",
+                        retryable=retryable,
+                        retry_delay_seconds=self.retry_delay_seconds,
+                    )
                 return None
 
         resolved_url, resolved_source = self._extract_resolved_candidate(resolved)
-        search_meta = getattr(self.search_service, "last_music_track_search", {}) if self.search_service else {}
+        search_meta = (
+            getattr(self.search_service, "last_music_track_search", {})
+            if self.search_service and not used_pre_resolved
+            else {}
+        )
         if isinstance(search_meta, dict):
             injected_rejections = search_meta.get("mb_injected_rejections")
             injected_selected = bool(search_meta.get("mb_injected_selected"))
             injected_candidates = int(search_meta.get("mb_injected_candidates") or 0)
             album_success_count = int(search_meta.get("mb_injected_album_success_count") or 0)
-            try:
-                self.store.merge_output_template_fields(
-                    job.id,
-                    {
-                        "runtime_search_meta": {
-                            "failure_reason": search_meta.get("failure_reason"),
-                            "mb_injected_candidates": injected_candidates,
-                            "mb_injected_selected": injected_selected,
-                            "mb_injected_rejections": injected_rejections or {},
-                            "mb_injected_album_success_count": album_success_count,
-                            "ep_refinement_attempted": bool(search_meta.get("ep_refinement_attempted")),
-                            "ep_refinement_candidates_considered": int(search_meta.get("ep_refinement_candidates_considered") or 0),
-                            "decision_edge": search_meta.get("decision_edge") if isinstance(search_meta.get("decision_edge"), dict) else {},
-                        }
-                    },
-                )
-            except Exception:
-                logger.exception("[MUSIC] failed to persist runtime_search_meta job_id=%s", job.id)
-            if injected_candidates > 0 or injected_selected or injected_rejections:
-                _log_event(
-                    logging.INFO,
-                    "music_track_mb_injected_outcome",
-                    job_id=job.id,
-                    recording_mbid=recording_mbid,
-                    release_mbid=release_mbid,
-                    injected_candidates=injected_candidates,
-                    injected_selected=injected_selected,
-                    injected_rejections=injected_rejections or {},
-                    album_run_success_count=album_success_count,
-                )
+            if persist_failures:
+                try:
+                    self.store.merge_output_template_fields(
+                        job.id,
+                        {
+                            "runtime_search_meta": {
+                                "failure_reason": search_meta.get("failure_reason"),
+                                "mb_injected_candidates": injected_candidates,
+                                "mb_injected_selected": injected_selected,
+                                "mb_injected_rejections": injected_rejections or {},
+                                "mb_injected_album_success_count": album_success_count,
+                                "ep_refinement_attempted": bool(search_meta.get("ep_refinement_attempted")),
+                                "ep_refinement_candidates_considered": int(search_meta.get("ep_refinement_candidates_considered") or 0),
+                                "decision_edge": search_meta.get("decision_edge") if isinstance(search_meta.get("decision_edge"), dict) else {},
+                            }
+                        },
+                    )
+                except Exception:
+                    logger.exception("[MUSIC] failed to persist runtime_search_meta job_id=%s", job.id)
+                if injected_candidates > 0 or injected_selected or injected_rejections:
+                    _log_event(
+                        logging.INFO,
+                        "music_track_mb_injected_outcome",
+                        job_id=job.id,
+                        recording_mbid=recording_mbid,
+                        release_mbid=release_mbid,
+                        injected_candidates=injected_candidates,
+                        injected_selected=injected_selected,
+                        injected_rejections=injected_rejections or {},
+                        album_run_success_count=album_success_count,
+                    )
         if not _is_http_url(resolved_url):
             failure_reason = str((search_meta or {}).get("failure_reason") or "").strip()
             if not failure_reason and isinstance(job.last_error, str):
@@ -1812,7 +1860,7 @@ class DownloadWorkerEngine:
                     failure_reason = f"source_unavailable:{unavailable_class}"
             failure_reason = failure_reason or "all_filtered_by_gate"
             review_job_enqueued = False
-            if self._review_quarantine_enabled_for_job(job, payload):
+            if persist_failures and self._review_quarantine_enabled_for_job(job, payload):
                 review_candidate = self._select_low_confidence_review_candidate(search_meta)
                 if isinstance(review_candidate, dict):
                     review_job_enqueued = self._enqueue_low_confidence_review_job(
@@ -1847,12 +1895,13 @@ class DownloadWorkerEngine:
             if review_job_enqueued:
                 retryable_no_candidate = False
             logging.error("Music track search failed")
-            self.store.record_failure(
-                job,
-                error_message=failure_reason,
-                retryable=retryable_no_candidate,
-                retry_delay_seconds=self.retry_delay_seconds,
-            )
+            if persist_failures:
+                self.store.record_failure(
+                    job,
+                    error_message=failure_reason,
+                    retryable=retryable_no_candidate,
+                    retry_delay_seconds=self.retry_delay_seconds,
+                )
             return None
         selected_score = None
         duration_delta_ms = None
@@ -1872,6 +1921,19 @@ class DownloadWorkerEngine:
             f"candidate={resolved_url}"
         )
         logger.debug("[MUSIC] selected_duration_delta_ms=%s", duration_delta_ms)
+        if used_pre_resolved:
+            _log_event(
+                logging.INFO,
+                "music_track_preresolved_candidate_used",
+                job_id=job.id,
+                recording_mbid=recording_mbid,
+                release_mbid=release_mbid,
+                candidate_url=resolved_url,
+            )
+            try:
+                self.store.merge_output_template_fields(job.id, {"runtime_pre_resolved": None})
+            except Exception:
+                logger.exception("[MUSIC] failed clearing runtime_pre_resolved job_id=%s", job.id)
 
         source = resolved_source or resolve_source(resolved_url)
         if str(source or "").strip().lower() == "mb_relationship":
@@ -2181,6 +2243,123 @@ class DownloadWorkerEngine:
             evt = self._cancel_flags.get(job_id)
             return bool(evt and evt.is_set())
 
+    def _claim_pre_resolve_slot(self, job_id: str) -> bool:
+        with self._pre_resolve_lock:
+            if job_id in self._pre_resolve_inflight:
+                return False
+            self._pre_resolve_inflight.add(job_id)
+            return True
+
+    def _release_pre_resolve_slot(self, job_id: str) -> None:
+        with self._pre_resolve_lock:
+            self._pre_resolve_inflight.discard(job_id)
+
+    def _extract_runtime_pre_resolved(self, payload, *, recording_mbid, release_mbid):
+        if not isinstance(payload, dict):
+            return None
+        runtime = payload.get("runtime_pre_resolved")
+        if not isinstance(runtime, dict):
+            return None
+        rec = str(runtime.get("recording_mbid") or "").strip()
+        rel = str(runtime.get("mb_release_id") or runtime.get("release_mbid") or "").strip()
+        if not rec or not rel:
+            return None
+        if rec != str(recording_mbid or "").strip() or rel != str(release_mbid or "").strip():
+            return None
+        resolved_url = str(runtime.get("resolved_url") or "").strip()
+        if not _is_http_url(resolved_url):
+            return None
+        resolved_source = str(runtime.get("resolved_source") or resolve_source(resolved_url)).strip() or None
+        return {
+            "url": resolved_url,
+            "source": resolved_source,
+            "candidate_id": runtime.get("candidate_id"),
+            "final_score": runtime.get("selected_score"),
+            "duration_delta_ms": runtime.get("duration_delta_ms"),
+        }
+
+    def _maybe_preresolve_next_music_job(self, current_job, *, stop_event=None):
+        if not self.search_service:
+            return
+        if not bool(self.config.get("music_preresolve_enabled", True)):
+            return
+        if str(getattr(current_job, "media_intent", "") or "").strip().lower() != "music_track":
+            return
+        if not is_music_media_type(getattr(current_job, "media_type", None)):
+            return
+
+        next_job = self.store.peek_next_queued_job(current_job.source, exclude_job_id=current_job.id)
+        if not next_job:
+            return
+        if str(getattr(next_job, "media_intent", "") or "").strip().lower() != "music_track":
+            return
+        if not is_music_media_type(getattr(next_job, "media_type", None)):
+            return
+        if not self._claim_pre_resolve_slot(next_job.id):
+            return
+
+        def _runner():
+            try:
+                if self._is_job_cancelled(next_job.id, stop_event):
+                    return
+                if self.store.get_job_status(next_job.id) != JOB_STATUS_QUEUED:
+                    return
+                payload = next_job.output_template if isinstance(next_job.output_template, dict) else {}
+                canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+                recording_mbid, release_mbid = _extract_music_binding_ids(next_job)
+                if not recording_mbid or not release_mbid:
+                    return
+                if self._extract_runtime_pre_resolved(
+                    payload,
+                    recording_mbid=recording_mbid,
+                    release_mbid=release_mbid,
+                ):
+                    return
+
+                resolved_job = self._resolve_music_track_job(next_job, persist_failures=False)
+                if resolved_job is None:
+                    return
+                resolved_url = str(getattr(resolved_job, "url", "") or "").strip()
+                if not _is_http_url(resolved_url):
+                    return
+                resolved_source = str(getattr(resolved_job, "source", "") or resolve_source(resolved_url)).strip() or None
+                if self.store.get_job_status(next_job.id) != JOB_STATUS_QUEUED:
+                    return
+
+                self.store.merge_output_template_fields(
+                    next_job.id,
+                    {
+                        "runtime_pre_resolved": {
+                            "recording_mbid": recording_mbid,
+                            "mb_release_id": release_mbid,
+                            "mb_release_group_id": str(
+                                payload.get("mb_release_group_id")
+                                or payload.get("release_group_id")
+                                or canonical.get("mb_release_group_id")
+                                or canonical.get("release_group_id")
+                                or ""
+                            ).strip()
+                            or None,
+                            "resolved_url": resolved_url,
+                            "resolved_source": resolved_source,
+                            "candidate_id": None,
+                            "selected_score": None,
+                            "duration_delta_ms": None,
+                            "pre_resolved_at": utc_now(),
+                        }
+                    },
+                )
+            except Exception:
+                logger.exception("[MUSIC] pre-resolve failed next_job_id=%s", next_job.id)
+            finally:
+                self._release_pre_resolve_slot(next_job.id)
+
+        threading.Thread(
+            target=_runner,
+            name=f"music-preresolve-{next_job.id[:8]}",
+            daemon=True,
+        ).start()
+
     def _run_source_once(self, source, lock, stop_event):
         try:
             # Drain all ready jobs for this source while holding the source lock.
@@ -2337,6 +2516,7 @@ class DownloadWorkerEngine:
                 origin=job.origin,
                 media_intent=job.media_intent,
             )
+            self._maybe_preresolve_next_music_job(job, stop_event=stop_event)
             last_progress_write = {"ts": 0.0}
 
             def _on_progress(snapshot):
