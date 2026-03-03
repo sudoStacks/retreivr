@@ -227,6 +227,8 @@ _MUSIC_RESOLUTION_CACHE_MAX_ENTRIES = 256
 _MUSIC_DEFAULT_PRERESOLVE_LOOKAHEAD = 3
 _MUSIC_MAX_PRERESOLVE_LOOKAHEAD = 4
 _WORKER_DEFAULT_POLL_SECONDS = 1
+_WORKER_IDLE_MIN_POLL_SECONDS = 2
+_WORKER_IDLE_MAX_POLL_SECONDS = 5
 _SOURCE_DEFAULT_CONCURRENCY = 2
 _SOURCE_MAX_CONCURRENCY = 4
 _GLOBAL_MAX_CONCURRENT_JOBS = 32
@@ -2322,8 +2324,9 @@ class DownloadWorkerEngine:
             )
         return bool(created)
 
-    def run_once(self, *, stop_event=None):
+    def run_once(self, *, stop_event=None) -> bool:
         sources = self.store.list_sources_with_queued_jobs()
+        had_queued_work = bool(sources)
         for source in sources:
             if stop_event and stop_event.is_set():
                 break
@@ -2336,16 +2339,27 @@ class DownloadWorkerEngine:
                 daemon=False,
             )
             thread.start()
+        return had_queued_work
 
     def run_loop(self, *, poll_seconds=_WORKER_DEFAULT_POLL_SECONDS, stop_event=None):
         json_sanity_check()
         _log_event(logging.INFO, "worker_started")
         _log_event(logging.INFO, "queue_polling_started")
+        idle_streak = 0
         while True:
             if stop_event and stop_event.is_set():
                 return
-            self.run_once(stop_event=stop_event)
-            time.sleep(poll_seconds)
+            had_queued_work = self.run_once(stop_event=stop_event)
+            if had_queued_work:
+                idle_streak = 0
+                sleep_seconds = max(float(poll_seconds), 0.1)
+            else:
+                idle_streak += 1
+                sleep_seconds = min(
+                    float(_WORKER_IDLE_MAX_POLL_SECONDS),
+                    float(_WORKER_IDLE_MIN_POLL_SECONDS + max(idle_streak - 1, 0)),
+                )
+            time.sleep(sleep_seconds)
 
     def _get_source_lock(self, source):
         with self._locks_lock:
