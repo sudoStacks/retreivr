@@ -124,52 +124,47 @@
           </div>
         </div>
 
-        <div id="music-mode-console" class="hidden">
-          <section class="panel">
+        <div id="music-mode-console" class="music-search-console hidden">
+          <div class="music-search-header">
             <div class="panel-title">Music Search</div>
-            <div class="stack">
-              <div class="group">
-                <div class="group-title">Create Search Request</div>
-                <div class="grid two">
-                  <label class="field medium">
-                    <span>Artist</span>
-                    <input id="search-artist" type="text" placeholder="Artist name">
-                  </label>
-                  <label class="field medium">
-                    <span>Album</span>
-                    <input id="search-album" type="text" placeholder="Optional album">
-                  </label>
-                  <label class="field medium">
-                    <span>Track</span>
-                    <input id="search-track" type="text" placeholder="Optional track">
-                  </label>
-                  <label class="field short">
-                    <span>Mode</span>
-                    <select id="music-mode-select">
-                      <option value="auto">Auto</option>
-                      <option value="artist">Artist</option>
-                      <option value="album">Album</option>
-                      <option value="track">Track</option>
-                    </select>
-                    <div class="checkbox-inline" style="margin-top:8px;">
-                      <input id="music-force-redownload" type="checkbox">
-                      <span>Force re-download</span>
-                    </div>
-                  </label>
-                  <label class="field short">
-                    <span>Max candidates (1-15)</span>
-                    <input id="search-max-candidates" type="number" min="1" max="15" value="10">
-                  </label>
-                </div>
-                <div class="row">
-                  <div class="action-group">
-                    <button id="search-create-only" class="button">Search</button>
-                  </div>
-                  <div id="search-create-message" class="notice" role="status"></div>
-                </div>
-              </div>
-            </div>
-          </section>
+          </div>
+          <div class="music-search-grid">
+            <label class="field">
+              <span>Artist</span>
+              <input id="search-artist" type="text" placeholder="Artist name">
+            </label>
+            <label class="field">
+              <span>Album</span>
+              <input id="search-album" type="text" placeholder="Optional album">
+            </label>
+            <label class="field">
+              <span>Track</span>
+              <input id="search-track" type="text" placeholder="Optional track">
+            </label>
+          </div>
+          <div class="music-search-options">
+            <label class="field">
+              <span>Mode</span>
+              <select id="music-mode-select">
+                <option value="auto">Auto</option>
+                <option value="artist">Artist</option>
+                <option value="album">Album</option>
+                <option value="track">Track</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Max candidates (1-15)</span>
+              <input id="search-max-candidates" type="number" min="1" max="15" value="10">
+            </label>
+            <label class="checkbox-inline music-search-force-redownload">
+              <input id="music-force-redownload" type="checkbox">
+              <span>Force re-download</span>
+            </label>
+          </div>
+          <div class="music-search-actions-row">
+            <button id="search-create-only" class="button primary">Search</button>
+            <div id="search-create-message" class="notice" role="status"></div>
+          </div>
         </div>
         <div id="music-results-container"></div>
 
