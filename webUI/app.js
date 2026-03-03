@@ -1581,6 +1581,10 @@ async function clearMusicFailures() {
   }
 }
 
+// Expose these handlers for inline fallback and defensive delegated binding.
+window.refreshMusicFailures = refreshMusicFailures;
+window.clearMusicFailures = clearMusicFailures;
+
 async function refreshLogs() {
   const lines = parseInt($("#logs-lines").value, 10) || 200;
   try {
@@ -6374,15 +6378,6 @@ function bindEvents() {
       setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
     }
   });
-  const musicFailuresRefresh = $("#music-failures-refresh");
-  if (musicFailuresRefresh) {
-    musicFailuresRefresh.addEventListener("click", refreshMusicFailures);
-  }
-  const musicFailuresClear = $("#music-failures-clear");
-  if (musicFailuresClear) {
-    musicFailuresClear.addEventListener("click", clearMusicFailures);
-  }
-
   $("#toggle-theme").addEventListener("click", () => {
     const next = resolveTheme() === "light" ? "dark" : "light";
     applyTheme(next);
