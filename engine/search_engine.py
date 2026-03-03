@@ -1370,39 +1370,53 @@ class SearchResolutionService:
         return has_live_intent(artist, track, album)
 
     def search_music_track_candidates(self, query: str, limit: int = 6, *, query_label: str | None = None) -> list[dict]:
+        candidate_batches: dict[str, list[dict]] = {}
+        sources = [source for source in MUSIC_TRACK_SOURCE_PRIORITY if self.adapters.get(source)]
+        if sources:
+            futures = {}
+            with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ADAPTERS, len(sources))) as pool:
+                for source in sources:
+                    adapter = self.adapters.get(source)
+                    if not adapter:
+                        continue
+                    _log_event(
+                        logging.INFO,
+                        "adapter_search_started",
+                        source=source,
+                        mode="music_track",
+                        query=query,
+                        query_label=query_label,
+                    )
+                    futures[pool.submit(adapter.search_music_track, query, limit)] = source
+
+                for fut in as_completed(futures):
+                    source = futures[fut]
+                    try:
+                        adapter_candidates = fut.result()
+                    except Exception:
+                        logging.exception("Music track adapter failed source=%s query=%s", source, query)
+                        adapter_candidates = []
+                    adapter_candidates = [dict(c) for c in (adapter_candidates or []) if isinstance(c, dict)]
+                    _log_event(
+                        logging.INFO,
+                        "adapter_search_completed",
+                        source=source,
+                        mode="music_track",
+                        query=query,
+                        query_label=query_label,
+                        candidates=len(adapter_candidates),
+                    )
+                    normalized = []
+                    for candidate in adapter_candidates:
+                        if not _is_http_url(candidate.get("url")):
+                            continue
+                        candidate["source"] = candidate.get("source") or source
+                        normalized.append(candidate)
+                    candidate_batches[source] = normalized
+
         candidates = []
         for source in MUSIC_TRACK_SOURCE_PRIORITY:
-            adapter = self.adapters.get(source)
-            if not adapter:
-                continue
-            _log_event(
-                logging.INFO,
-                "adapter_search_started",
-                source=source,
-                mode="music_track",
-                query=query,
-                query_label=query_label,
-            )
-            try:
-                adapter_candidates = adapter.search_music_track(query, limit)
-            except Exception:
-                logging.exception("Music track adapter failed source=%s query=%s", source, query)
-                adapter_candidates = []
-            adapter_candidates = [dict(c) for c in (adapter_candidates or []) if isinstance(c, dict)]
-            _log_event(
-                logging.INFO,
-                "adapter_search_completed",
-                source=source,
-                mode="music_track",
-                query=query,
-                query_label=query_label,
-                candidates=len(adapter_candidates),
-            )
-            for candidate in adapter_candidates:
-                if not _is_http_url(candidate.get("url")):
-                    continue
-                candidate["source"] = candidate.get("source") or source
-                candidates.append(candidate)
+            candidates.extend(candidate_batches.get(source, []))
         _log_event(
             logging.INFO,
             "music_track_candidates_total",
