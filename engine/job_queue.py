@@ -58,6 +58,17 @@ except Exception:
 if _MP4_ENFORCEMENT_TIMEOUT_SECONDS < 60:
     _MP4_ENFORCEMENT_TIMEOUT_SECONDS = 60
 
+_MP4_ENFORCEMENT_VIDEO_PRESET = str(
+    os.environ.get("RETREIVR_MP4_ENFORCEMENT_PRESET", "veryfast") or "veryfast"
+).strip().lower() or "veryfast"
+try:
+    _MP4_ENFORCEMENT_VIDEO_CRF = int(
+        str(os.environ.get("RETREIVR_MP4_ENFORCEMENT_CRF", "21") or "21").strip()
+    )
+except Exception:
+    _MP4_ENFORCEMENT_VIDEO_CRF = 21
+_MP4_ENFORCEMENT_VIDEO_CRF = max(16, min(30, _MP4_ENFORCEMENT_VIDEO_CRF))
+
 JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_CLAIMED = "claimed"
 JOB_STATUS_DOWNLOADING = "downloading"
@@ -95,8 +106,9 @@ _FORMAT_VIDEO = (
 # For mp4 final container targets, prefer native mp4+h264/m4a candidates first to
 # minimize expensive full transcodes, while retaining webm fallbacks for availability.
 _FORMAT_VIDEO_MP4_PREFERRED = (
-    "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
-    "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
+    "bestvideo[ext=mp4][vcodec~='^(avc1|h264)'][height<=1080]+bestaudio[ext=m4a]/"
+    "bestvideo[ext=mp4][vcodec~='^(avc1|h264)']+bestaudio[ext=m4a]/"
+    "best[ext=mp4]/"
     "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
     "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
     "bestvideo*+bestaudio/best"
@@ -6130,6 +6142,31 @@ def _probe_media_profile(file_path):
     }
 
 
+def _probe_media_duration_seconds(file_path):
+    path = str(file_path or "").strip()
+    if not path:
+        return None
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=nokey=1:noprint_wrappers=1",
+        path,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        duration_raw = str(proc.stdout or "").strip()
+        duration_value = float(duration_raw)
+        if duration_value > 0:
+            return duration_value
+    except Exception:
+        return None
+    return None
+
+
 def _enforce_video_codec_container_rules(local_file, *, target_container):
     container = str(target_container or "").strip().lower()
     profile = _probe_media_profile(local_file)
@@ -6149,6 +6186,13 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
         os.path.dirname(str(local_file)),
         f".retreivr-mp4compat-{uuid4().hex}.mp4",
     )
+    source_duration_seconds = _probe_media_duration_seconds(local_file)
+    effective_timeout_seconds = _MP4_ENFORCEMENT_TIMEOUT_SECONDS
+    if needs_video_transcode and source_duration_seconds:
+        # Duration-aware timeout for CPU-bound full video transcodes.
+        # Keeps quick jobs on default timeout while avoiding false failures on long clips.
+        computed = int((float(source_duration_seconds) * 1.8) + 180)
+        effective_timeout_seconds = max(_MP4_ENFORCEMENT_TIMEOUT_SECONDS, min(5400, computed))
 
     def _run_enforcement(*, include_subtitles: bool):
         cmd = [
@@ -6159,18 +6203,29 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
             "-map",
             "0:v?",
             "-map",
-            "0:a?",
+            "0:a:0?",
         ]
         if include_subtitles:
             cmd.extend(["-map", "0:s?", "-c:s", "copy"])
         else:
             cmd.append("-sn")
         if needs_video_transcode:
-            cmd.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"])
+            cmd.extend(
+                [
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    _MP4_ENFORCEMENT_VIDEO_PRESET,
+                    "-crf",
+                    str(_MP4_ENFORCEMENT_VIDEO_CRF),
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+            )
         else:
             cmd.extend(["-c:v", "copy"])
         if needs_audio_transcode:
-            cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+            cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"])
         else:
             cmd.extend(["-c:a", "copy"])
         cmd.extend(
@@ -6182,12 +6237,15 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
         )
         started_at = time.time()
         logger.info(
-            "mp4_enforcement_started file=%s include_subtitles=%s needs_video_transcode=%s needs_audio_transcode=%s timeout_seconds=%s",
+            "mp4_enforcement_started file=%s include_subtitles=%s needs_video_transcode=%s needs_audio_transcode=%s preset=%s crf=%s timeout_seconds=%s src_duration_seconds=%s",
             local_file,
             bool(include_subtitles),
             bool(needs_video_transcode),
             bool(needs_audio_transcode),
-            _MP4_ENFORCEMENT_TIMEOUT_SECONDS,
+            _MP4_ENFORCEMENT_VIDEO_PRESET,
+            _MP4_ENFORCEMENT_VIDEO_CRF,
+            effective_timeout_seconds,
+            round(source_duration_seconds, 2) if source_duration_seconds else None,
         )
         try:
             proc = subprocess.Popen(
@@ -6214,7 +6272,7 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
                         bool(include_subtitles),
                         elapsed_seconds,
                     )
-                    if elapsed_seconds >= _MP4_ENFORCEMENT_TIMEOUT_SECONDS:
+                    if elapsed_seconds >= effective_timeout_seconds:
                         try:
                             proc.kill()
                         except Exception:
@@ -6226,7 +6284,7 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
                         if len(stderr_text) > 1200:
                             stderr_text = stderr_text[-1200:]
                         raise RuntimeError(
-                            f"ffmpeg_timeout={_MP4_ENFORCEMENT_TIMEOUT_SECONDS}s stderr={stderr_text or '<empty>'}"
+                            f"ffmpeg_timeout={effective_timeout_seconds}s stderr={stderr_text or '<empty>'}"
                         ) from exc
             if proc.returncode != 0:
                 stderr_text = "".join(stderr_chunks).strip()
@@ -6250,6 +6308,8 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
     try:
         _run_enforcement(include_subtitles=True)
     except Exception as exc:
+        if "ffmpeg_timeout=" in str(exc):
+            raise RuntimeError(f"mp4_audio_codec_enforcement_failed: first={exc}") from exc
         first_error = exc
         logger.warning(
             "mp4 audio enforcement retrying without subtitles for %s: %s",
