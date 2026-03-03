@@ -92,6 +92,15 @@ _FORMAT_VIDEO = (
     "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
     "bestvideo*+bestaudio/best"
 )
+# For mp4 final container targets, prefer native mp4+h264/m4a candidates first to
+# minimize expensive full transcodes, while retaining webm fallbacks for availability.
+_FORMAT_VIDEO_MP4_PREFERRED = (
+    "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
+    "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
+    "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
+    "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
+    "bestvideo*+bestaudio/best"
+)
 # Prefer audio-only formats first; fall back to any best format only if needed.
 # Keep this quoted/argument-safe in CLI execution (we do NOT use shell=True).
 _FORMAT_AUDIO = "bestaudio/best"
@@ -4542,13 +4551,12 @@ def build_ytdlp_opts(context):
             # Video mode strategy:
             # - Keep download selector stable and quality-first across all final containers.
             # - Use final_format only as post-merge container preference.
-            opts["format"] = _FORMAT_VIDEO
+            if video_container_target == "mp4":
+                opts["format"] = _FORMAT_VIDEO_MP4_PREFERRED
+            else:
+                opts["format"] = _FORMAT_VIDEO
             if video_container_target in {"mp4", "mkv"}:
                 opts["merge_output_format"] = video_container_target
-            # mp4 requires codec-compatible post-conversion. Without this, merged mp4 can
-            # still contain opus audio when source streams are webm/opus.
-            if video_container_target == "mp4":
-                opts["recodevideo"] = "mp4"
 
     # Only lock down format-related overrides when the target_format was actually applied
     # (audio codec in audio_mode, or video container preference in video mode).
