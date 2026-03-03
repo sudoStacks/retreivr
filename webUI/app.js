@@ -123,6 +123,8 @@ const HOME_FINAL_STATUSES = new Set(["completed", "completed_with_skips", "faile
 const HOME_RESULT_TIMEOUT_MS = 18000;
 const DIRECT_URL_PLAYLIST_ERROR =
   "Playlist URLs are not supported in Direct URL mode. Please add this playlist via Scheduler or Playlist settings.";
+const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
+  "Playlist URL detected. Use Search & Download to enqueue all videos in the playlist.";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -4426,6 +4428,11 @@ async function submitHomeSearch(autoEnqueue) {
   }
   try {
     if (isValidHttpUrl(inputValue)) {
+      const playlistId = extractPlaylistIdFromUrl(inputValue);
+      if (playlistId) {
+        await handleHomePlaylistUrl(inputValue, playlistId, destinationValue, autoEnqueue, messageEl);
+        return;
+      }
       if (!autoEnqueue) {
         await handleHomeDirectUrlPreview(inputValue, destinationValue, messageEl);
         return;
@@ -4443,6 +4450,72 @@ async function submitHomeSearch(autoEnqueue) {
     setNotice(messageEl, `Search failed: ${err.message}`, true);
     setHomeResultsState({ hasResults: false, terminal: true });
     setHomeSearchActive(false);
+  }
+}
+
+async function handleHomePlaylistUrl(url, playlistId, destination, autoEnqueue, messageEl) {
+  if (!messageEl) return;
+  if (!autoEnqueue) {
+    showHomeDirectUrlError(url, HOME_PLAYLIST_SEARCH_ONLY_MESSAGE, messageEl);
+    setHomeSearchControlsEnabled(true);
+    return;
+  }
+  const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
+  if (deliveryMode === "client") {
+    setNotice(messageEl, "Client delivery is not available for playlist URL runs. Select Server delivery.", true);
+    setHomeSearchControlsEnabled(true);
+    setHomeSearchActive(false);
+    return;
+  }
+  const formatOverride = $("#home-format")?.value.trim();
+  const payload = {
+    playlist_id: playlistId,
+  };
+  if (destination) {
+    payload.destination = destination;
+  }
+  if (formatOverride) {
+    payload.final_format_override = formatOverride;
+  }
+  setNotice(messageEl, `Enqueuing playlist ${playlistId}...`, false);
+  try {
+    const runInfo = await startRun(payload);
+    if (!runInfo) {
+      throw new Error("playlist_enqueue_failed");
+    }
+    state.homeSearchMode = "download";
+    state.homeDirectJob = {
+      url,
+      playlistId,
+      startedAt: new Date().toISOString(),
+      runId: runInfo?.run_id || null,
+      status: "queued",
+      deliveryMode,
+      clientDeliveryId: null,
+    };
+    state.homeDirectPreview = {
+      title: `YouTube Playlist (${playlistId})`,
+      url,
+      source: "playlist",
+      uploader: null,
+      thumbnail_url: null,
+      job_status: "queued",
+    };
+    showHomeResults(true);
+    setHomeResultsStatus("Queued");
+    setHomeResultsDetail("Playlist enqueue started. Jobs will appear as they are created.", false);
+    const container = $("#home-results-list");
+    if (container) {
+      container.textContent = "";
+      container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "enqueued"));
+    }
+    setHomeResultsState({ hasResults: true, terminal: false });
+    startHomeDirectJobPolling();
+    setNotice(messageEl, "Playlist enqueue started", false);
+  } catch (err) {
+    setNotice(messageEl, `Playlist enqueue failed: ${err.message}`, true);
+  } finally {
+    setHomeSearchControlsEnabled(true);
   }
 }
 
