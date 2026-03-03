@@ -15,6 +15,7 @@ import time
 import urllib.parse
 import unicodedata
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -229,6 +230,8 @@ _WORKER_DEFAULT_POLL_SECONDS = 1
 _SOURCE_DEFAULT_CONCURRENCY = 2
 _SOURCE_MAX_CONCURRENCY = 4
 _GLOBAL_MAX_CONCURRENT_JOBS = 32
+_MUSIC_PRERESOLVE_POOL_DEFAULT_WORKERS = 3
+_MUSIC_PRERESOLVE_POOL_MAX_WORKERS = 6
 
 
 @dataclass(frozen=True)
@@ -1493,6 +1496,10 @@ class DownloadWorkerEngine:
         self._source_semaphores = {}
         self._source_concurrency_limits = {}
         self._global_concurrency_limit_cache = "__unset__"
+        self._preresolve_executor = ThreadPoolExecutor(
+            max_workers=self._preresolve_pool_workers(),
+            thread_name_prefix="music-preresolve",
+        )
 
     def _extract_resolved_candidate(self, resolved):
         if not resolved:
@@ -2392,6 +2399,17 @@ class DownloadWorkerEngine:
             self._global_concurrency_limit_cache = limit
         return limit
 
+    def _preresolve_pool_workers(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        value = cfg.get("music_preresolve_pool_workers")
+        if value is None:
+            value = _MUSIC_PRERESOLVE_POOL_DEFAULT_WORKERS
+        try:
+            workers = int(value)
+        except (TypeError, ValueError):
+            workers = _MUSIC_PRERESOLVE_POOL_DEFAULT_WORKERS
+        return max(1, min(workers, _MUSIC_PRERESOLVE_POOL_MAX_WORKERS))
+
     def _get_source_semaphore(self, source):
         with self._locks_lock:
             semaphore = self._source_semaphores.get(source)
@@ -2623,12 +2641,11 @@ class DownloadWorkerEngine:
                 self._release_pre_resolve_slot(next_job.id)
 
         for next_job in scheduled_jobs:
-            threading.Thread(
-                target=_runner,
-                args=(next_job,),
-                name=f"music-preresolve-{next_job.id[:8]}",
-                daemon=True,
-            ).start()
+            try:
+                self._preresolve_executor.submit(_runner, next_job)
+            except Exception:
+                logger.exception("[MUSIC] pre-resolve submit failed next_job_id=%s", next_job.id)
+                self._release_pre_resolve_slot(next_job.id)
 
     def _run_source_once(self, source, lock, stop_event):
         try:
