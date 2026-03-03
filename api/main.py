@@ -6896,7 +6896,7 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
     try:
         cur = conn.cursor()
         query = (
-            "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error, output_template, "
+            "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, updated_at, last_error, output_template, "
             "progress_downloaded_bytes, progress_total_bytes, progress_percent, progress_speed_bps, progress_eta_seconds, progress_updated_at "
             "FROM download_jobs"
         )
@@ -6915,7 +6915,7 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                 raise
             # Backward compatibility if DB has not yet migrated progress columns.
             query = (
-                "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, last_error, output_template "
+                "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, updated_at, last_error, output_template "
                 "FROM download_jobs"
             )
             params = []
@@ -6938,8 +6938,9 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                     "status": row[6],
                     "attempts": row[7],
                     "created_at": row[8],
-                    "last_error": row[9],
-                    "display_title": _display_title(row[5], row[3], row[10]),
+                    "updated_at": row[9],
+                    "last_error": row[10],
+                    "display_title": _display_title(row[5], row[3], row[11]),
                     "progress_downloaded_bytes": None,
                     "progress_total_bytes": None,
                     "progress_percent": None,
@@ -6961,14 +6962,15 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                 "status": row[6],
                 "attempts": row[7],
                 "created_at": row[8],
-                "last_error": row[9],
-                "display_title": _display_title(row[5], row[3], row[10]),
-                "progress_downloaded_bytes": row[11],
-                "progress_total_bytes": row[12],
-                "progress_percent": row[13],
-                "progress_speed_bps": row[14],
-                "progress_eta_seconds": row[15],
-                "progress_updated_at": row[16],
+                "updated_at": row[9],
+                "last_error": row[10],
+                "display_title": _display_title(row[5], row[3], row[11]),
+                "progress_downloaded_bytes": row[12],
+                "progress_total_bytes": row[13],
+                "progress_percent": row[14],
+                "progress_speed_bps": row[15],
+                "progress_eta_seconds": row[16],
+                "progress_updated_at": row[17],
             }
             for row in cur.fetchall()
         ]

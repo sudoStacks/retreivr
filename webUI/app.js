@@ -4101,12 +4101,14 @@ async function refreshHomeDirectJobStatus() {
       if (!Number.isFinite(startedAtMs)) {
         return true;
       }
+      const updatedAtMs = Date.parse(String(entry?.updated_at || ""));
       const createdAtMs = Date.parse(String(entry?.created_at || ""));
-      if (!Number.isFinite(createdAtMs)) {
+      const candidateTs = Number.isFinite(updatedAtMs) ? updatedAtMs : createdAtMs;
+      if (!Number.isFinite(candidateTs)) {
         return true;
       }
       // Small tolerance for clock skew/order.
-      return createdAtMs >= (startedAtMs - 5000);
+      return candidateTs >= (startedAtMs - 5000);
     };
     if (playlistId) {
       const playlistJobs = jobs.filter(
