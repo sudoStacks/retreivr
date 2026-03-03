@@ -223,6 +223,8 @@ _MUSIC_AUDIO_FORMAT_WARNED = False
 _MUSIC_REVIEW_FOLDER_NAME = "Needs Review"
 _MUSIC_DEFAULT_CONCURRENT_FRAGMENT_DOWNLOADS = 2
 _MUSIC_RESOLUTION_CACHE_MAX_ENTRIES = 256
+_MUSIC_DEFAULT_PRERESOLVE_LOOKAHEAD = 3
+_MUSIC_MAX_PRERESOLVE_LOOKAHEAD = 4
 
 
 @dataclass(frozen=True)
@@ -1143,7 +1145,39 @@ class DownloadJobStore:
             return self._row_to_job(row)
         finally:
             conn.close()
-            
+
+    def peek_queued_jobs(self, source, *, limit=1, exclude_job_ids=None, now=None):
+        """Return up to `limit` ready queued jobs for a source without claiming."""
+        now = now or utc_now()
+        try:
+            limit_v = max(1, int(limit or 1))
+        except (TypeError, ValueError):
+            limit_v = 1
+        excluded = [
+            str(job_id).strip()
+            for job_id in (exclude_job_ids or [])
+            if str(job_id).strip()
+        ]
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            params = [JOB_STATUS_QUEUED, source, now]
+            sql = (
+                "SELECT * FROM download_jobs "
+                "WHERE status=? AND source=? AND (queued IS NULL OR queued<=?)"
+            )
+            if excluded:
+                placeholders = ",".join("?" for _ in excluded)
+                sql += f" AND id NOT IN ({placeholders})"
+                params.extend(excluded)
+            sql += " ORDER BY created_at ASC LIMIT ?"
+            params.append(limit_v)
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [self._row_to_job(row) for row in rows if row]
+        finally:
+            conn.close()
+
     def mark_completed(self, job_id, *, file_path=None):
         now = utc_now()
         conn = self._connect()
@@ -2395,17 +2429,39 @@ class DownloadWorkerEngine:
         if not is_music_media_type(getattr(current_job, "media_type", None)):
             return
 
-        next_job = self.store.peek_next_queued_job(current_job.source, exclude_job_id=current_job.id)
-        if not next_job:
-            return
-        if str(getattr(next_job, "media_intent", "") or "").strip().lower() != "music_track":
-            return
-        if not is_music_media_type(getattr(next_job, "media_type", None)):
-            return
-        if not self._claim_pre_resolve_slot(next_job.id):
+        lookahead_value = self.config.get("music_preresolve_lookahead")
+        if lookahead_value is None:
+            lookahead_value = _MUSIC_DEFAULT_PRERESOLVE_LOOKAHEAD
+        try:
+            lookahead = int(lookahead_value)
+        except (TypeError, ValueError):
+            lookahead = _MUSIC_DEFAULT_PRERESOLVE_LOOKAHEAD
+        lookahead = max(1, min(lookahead, _MUSIC_MAX_PRERESOLVE_LOOKAHEAD))
+
+        queued_jobs = self.store.peek_queued_jobs(
+            current_job.source,
+            limit=lookahead * 3,
+            exclude_job_ids=[current_job.id],
+        )
+        if not queued_jobs:
             return
 
-        def _runner():
+        scheduled_jobs = []
+        for candidate in queued_jobs:
+            if len(scheduled_jobs) >= lookahead:
+                break
+            if str(getattr(candidate, "media_intent", "") or "").strip().lower() != "music_track":
+                continue
+            if not is_music_media_type(getattr(candidate, "media_type", None)):
+                continue
+            if not self._claim_pre_resolve_slot(candidate.id):
+                continue
+            scheduled_jobs.append(candidate)
+
+        if not scheduled_jobs:
+            return
+
+        def _runner(next_job):
             try:
                 if self._is_job_cancelled(next_job.id, stop_event):
                     return
@@ -2472,11 +2528,13 @@ class DownloadWorkerEngine:
             finally:
                 self._release_pre_resolve_slot(next_job.id)
 
-        threading.Thread(
-            target=_runner,
-            name=f"music-preresolve-{next_job.id[:8]}",
-            daemon=True,
-        ).start()
+        for next_job in scheduled_jobs:
+            threading.Thread(
+                target=_runner,
+                args=(next_job,),
+                name=f"music-preresolve-{next_job.id[:8]}",
+                daemon=True,
+            ).start()
 
     def _run_source_once(self, source, lock, stop_event):
         try:
