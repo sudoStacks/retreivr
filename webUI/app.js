@@ -51,6 +51,7 @@ const state = {
   playlistImportJobId: null,
   playlistImportPollTimer: null,
   playlistImportInProgress: false,
+  logsStickToBottom: true,
 };
 const browserState = {
   open: false,
@@ -1609,6 +1610,10 @@ window.clearMusicFailures = clearMusicFailures;
 
 async function refreshLogs() {
   const lines = parseInt($("#logs-lines").value, 10) || 200;
+  const outputEl = $("#logs-output");
+  if (!outputEl) {
+    return;
+  }
   try {
     const response = await fetch(`/api/logs?lines=${lines}`);
     if (!response.ok) {
@@ -1616,12 +1621,18 @@ async function refreshLogs() {
       throw new Error(`${response.status} ${text}`);
     }
     const text = await response.text();
+    const shouldStick = !!state.logsStickToBottom;
     if (text !== state.lastLogsText) {
-      $("#logs-output").textContent = text;
+      outputEl.textContent = text;
       state.lastLogsText = text;
     }
+    if (shouldStick) {
+      requestAnimationFrame(() => {
+        outputEl.scrollTop = outputEl.scrollHeight;
+      });
+    }
   } catch (err) {
-    $("#logs-output").textContent = `Failed to load logs: ${err.message}`;
+    outputEl.textContent = `Failed to load logs: ${err.message}`;
   }
 }
 
@@ -6207,9 +6218,19 @@ function bindEvents() {
   $("#logs-refresh").addEventListener("click", refreshLogs);
   $("#logs-auto").addEventListener("change", () => {
     if ($("#logs-auto").checked) {
+      state.logsStickToBottom = true;
       refreshLogs();
     }
   });
+  const logsOutput = $("#logs-output");
+  if (logsOutput) {
+    logsOutput.addEventListener("scroll", () => {
+      const threshold = 24;
+      const distanceFromBottom =
+        logsOutput.scrollHeight - (logsOutput.scrollTop + logsOutput.clientHeight);
+      state.logsStickToBottom = distanceFromBottom <= threshold;
+    });
+  }
   $("#downloads-refresh").addEventListener("click", refreshDownloads);
   $("#downloads-apply").addEventListener("click", refreshDownloads);
   $("#downloads-clear").addEventListener("click", async () => {
