@@ -49,6 +49,15 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+try:
+    _MP4_ENFORCEMENT_TIMEOUT_SECONDS = int(
+        str(os.environ.get("RETREIVR_MP4_ENFORCEMENT_TIMEOUT_SECONDS", "900") or "900").strip()
+    )
+except Exception:
+    _MP4_ENFORCEMENT_TIMEOUT_SECONDS = 900
+if _MP4_ENFORCEMENT_TIMEOUT_SECONDS < 60:
+    _MP4_ENFORCEMENT_TIMEOUT_SECONDS = 60
+
 JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_CLAIMED = "claimed"
 JOB_STATUS_DOWNLOADING = "downloading"
@@ -6163,8 +6172,36 @@ def _enforce_video_codec_container_rules(local_file, *, target_container):
                 mp4_compatible_path,
             ]
         )
+        started_at = time.time()
+        logger.info(
+            "mp4_enforcement_started file=%s include_subtitles=%s needs_video_transcode=%s needs_audio_transcode=%s timeout_seconds=%s",
+            local_file,
+            bool(include_subtitles),
+            bool(needs_video_transcode),
+            bool(needs_audio_transcode),
+            _MP4_ENFORCEMENT_TIMEOUT_SECONDS,
+        )
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=_MP4_ENFORCEMENT_TIMEOUT_SECONDS,
+            )
+            logger.info(
+                "mp4_enforcement_completed file=%s include_subtitles=%s elapsed_seconds=%.2f",
+                local_file,
+                bool(include_subtitles),
+                time.time() - started_at,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stderr_text = (exc.stderr or exc.stdout or "").strip()
+            if len(stderr_text) > 1200:
+                stderr_text = stderr_text[-1200:]
+            raise RuntimeError(
+                f"ffmpeg_timeout={_MP4_ENFORCEMENT_TIMEOUT_SECONDS}s stderr={stderr_text or '<empty>'}"
+            ) from exc
         except subprocess.CalledProcessError as exc:
             stderr_text = (exc.stderr or exc.stdout or "").strip()
             if len(stderr_text) > 1200:
