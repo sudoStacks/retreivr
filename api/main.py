@@ -90,6 +90,7 @@ from engine.core import (
     extract_playlist_id,
     get_playlist_videos,
     get_playlist_videos_fallback,
+    get_playlist_preview_fallback,
     get_status,
     init_db,
     is_video_downloaded,
@@ -4951,23 +4952,32 @@ async def api_playlist_preview(playlist_id: str = Query(..., min_length=2, max_l
         raise HTTPException(status_code=400, detail="playlist_id_required")
     config = get_loaded_config() or _read_config_or_404()
     cookie_file = resolve_cookie_file(config)
-    videos, _fallback_error = get_playlist_videos_fallback(
+    preview, _fallback_error = get_playlist_preview_fallback(
         normalized_playlist_id,
         cookie_file=cookie_file,
     )
-    first_video_id = ""
-    if isinstance(videos, list):
-        for entry in videos:
-            if not isinstance(entry, dict):
-                continue
-            candidate = str(entry.get("videoId") or "").strip()
-            if candidate:
-                first_video_id = candidate
-                break
-    thumbnail_url = f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg" if first_video_id else None
+    first_video_id = str((preview or {}).get("first_video_id") or "").strip()
+    thumbnail_url = str((preview or {}).get("thumbnail_url") or "").strip() or None
+    playlist_title = str((preview or {}).get("playlist_title") or "").strip() or None
+    if not first_video_id:
+        videos, _videos_fallback_error = get_playlist_videos_fallback(
+            normalized_playlist_id,
+            cookie_file=cookie_file,
+        )
+        if isinstance(videos, list):
+            for entry in videos:
+                if not isinstance(entry, dict):
+                    continue
+                candidate = str(entry.get("videoId") or "").strip()
+                if candidate:
+                    first_video_id = candidate
+                    break
+        if not thumbnail_url and first_video_id:
+            thumbnail_url = f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg"
     return safe_json(
         {
             "playlist_id": normalized_playlist_id,
+            "playlist_title": playlist_title,
             "first_video_id": first_video_id or None,
             "thumbnail_url": thumbnail_url,
         }

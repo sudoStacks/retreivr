@@ -4561,12 +4561,14 @@ async function handleHomePlaylistUrl(url, playlistId, destination, autoEnqueue, 
     fetchHomePlaylistPreview(playlistId)
       .then((preview) => {
         const thumbnailUrl = String(preview?.thumbnail_url || "").trim();
-        if (!thumbnailUrl || !state.homeDirectPreview) {
+        const playlistTitle = String(preview?.playlist_title || "").trim();
+        if (!state.homeDirectPreview) {
           return;
         }
         state.homeDirectPreview = {
           ...state.homeDirectPreview,
-          thumbnail_url: thumbnailUrl,
+          title: playlistTitle || state.homeDirectPreview.title,
+          thumbnail_url: thumbnailUrl || state.homeDirectPreview.thumbnail_url || null,
         };
         const liveContainer = $("#home-results-list");
         if (!liveContainer) {
@@ -4631,12 +4633,14 @@ async function handleHomePlaylistUrlPreview(url, playlistId, messageEl) {
   try {
     const preview = await fetchHomePlaylistPreview(playlistId);
     const thumbnailUrl = String(preview?.thumbnail_url || "").trim();
-    if (!thumbnailUrl || !state.homeDirectPreview) {
+    const playlistTitle = String(preview?.playlist_title || "").trim();
+    if (!state.homeDirectPreview) {
       return;
     }
     state.homeDirectPreview = {
       ...state.homeDirectPreview,
-      thumbnail_url: thumbnailUrl,
+      title: playlistTitle || state.homeDirectPreview.title,
+      thumbnail_url: thumbnailUrl || state.homeDirectPreview.thumbnail_url || null,
     };
     const liveContainer = $("#home-results-list");
     if (!liveContainer) {

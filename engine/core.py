@@ -762,6 +762,48 @@ def get_playlist_videos_fallback(playlist_id, *, cookie_file=None):
         return [], True
 
 
+def get_playlist_preview_fallback(playlist_id, *, cookie_file=None):
+    playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+    opts = {
+        "skip_download": True,
+        "extract_flat": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(playlist_url, download=False) or {}
+            title = str(info.get("title") or "").strip() or None
+            entries = info.get("entries") or []
+            first_video_id = None
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                candidate = str(entry.get("id") or entry.get("url") or "").strip()
+                if candidate:
+                    first_video_id = candidate
+                    break
+            thumbnail_url = (
+                f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg"
+                if first_video_id
+                else None
+            )
+            return {
+                "playlist_title": title,
+                "first_video_id": first_video_id,
+                "thumbnail_url": thumbnail_url,
+            }, False
+    except Exception:
+        logging.exception("yt-dlp playlist preview fallback failed for %s", playlist_id)
+        return {
+            "playlist_title": None,
+            "first_video_id": None,
+            "thumbnail_url": None,
+        }, True
+
+
 def extract_video_id(url):
     if not url:
         return None
