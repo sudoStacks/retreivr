@@ -113,6 +113,8 @@ jobs:
           ZIP_NAME="retreivr-runtime-${{ github.ref_name }}.zip"
           rm -f "${ZIP_NAME}"
           (cd runtime-bundle && zip -rq "../${ZIP_NAME}" .)
+          echo "Created zip file: ${ZIP_NAME}"
+          ls -lah "${ZIP_NAME}"
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
