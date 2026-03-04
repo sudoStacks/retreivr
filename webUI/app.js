@@ -2836,8 +2836,8 @@ async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   setNotice(messageEl, `${modeLabel}: created ${data.request_id}`, false);
   showHomeResults(true);
   startHomeResultPolling(data.request_id);
-  // Home search should remain non-blocking so progressive candidate updates can
-  // render while the background resolver processes the queue.
+  // Trigger resolver without blocking Home polling/rendering.
+  runSearchResolutionOnce({ preferRequestId: data.request_id, showMessage: false }).catch(() => {});
 }
 
 function normalizeMusicAlbumCandidates(rawCandidates) {
@@ -4482,7 +4482,8 @@ function startHomeResultPolling(requestId) {
       return;
     }
     const elapsed = state.homeSearchPollStart ? Date.now() - state.homeSearchPollStart : 0;
-    if (elapsed >= HOME_RESULT_TIMEOUT_MS) {
+    const hasVisibleCandidates = document.querySelectorAll("#home-results-list .home-candidate-row").length > 0;
+    if (elapsed >= HOME_RESULT_TIMEOUT_MS && !hasVisibleCandidates) {
       abortHomeResultPolling("No adapters responded in time. Please retry or use Advanced Search.");
       return;
     }
