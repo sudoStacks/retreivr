@@ -2836,8 +2836,7 @@ async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   setNotice(messageEl, `${modeLabel}: created ${data.request_id}`, false);
   showHomeResults(true);
   startHomeResultPolling(data.request_id);
-  // Trigger resolver without blocking Home polling/rendering.
-  runSearchResolutionOnce({ preferRequestId: data.request_id, showMessage: false }).catch(() => {});
+  triggerHomeSearchResolution(data.request_id);
 }
 
 function normalizeMusicAlbumCandidates(rawCandidates) {
@@ -4937,6 +4936,15 @@ async function runSearchResolutionOnce({ preferRequestId = null, showMessage = t
       setNotice(messageEl, `Resolution failed: ${err.message}`, true);
     }
   }
+}
+
+function triggerHomeSearchResolution(requestId) {
+  if (!requestId) return;
+  fetchJson("/api/search/resolve/once", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request_id: requestId }),
+  }).catch(() => {});
 }
 
 
