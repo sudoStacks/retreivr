@@ -43,6 +43,7 @@ _SPOTIFY_PLAYLIST_RE = re.compile(
 )
 _COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
 _SEARCH_CACHE_MAX_ENTRIES_DEFAULT = 50000
+_SEARCH_CACHE_SEED_TOP_N_DEFAULT = 30
 
 
 def _install_google_auth_filter():
@@ -258,6 +259,7 @@ def apply_config_defaults(config):
     normalized.setdefault("search_cache_ttl_days", 0)
     normalized.setdefault("search_cache_prune_on_failure", True)
     normalized.setdefault("search_cache_max_entries", _SEARCH_CACHE_MAX_ENTRIES_DEFAULT)
+    normalized.setdefault("search_cache_seed_top_n", _SEARCH_CACHE_SEED_TOP_N_DEFAULT)
 
     return normalized
 
@@ -464,6 +466,13 @@ def validate_config(config):
             errors.append("search_cache_max_entries must be an integer")
         elif search_cache_max_entries < 1000:
             errors.append("search_cache_max_entries must be >= 1000")
+
+    search_cache_seed_top_n = config.get("search_cache_seed_top_n")
+    if search_cache_seed_top_n is not None:
+        if not isinstance(search_cache_seed_top_n, int):
+            errors.append("search_cache_seed_top_n must be an integer")
+        elif search_cache_seed_top_n < 1:
+            errors.append("search_cache_seed_top_n must be >= 1")
 
     return errors
 

@@ -88,5 +88,6 @@
   "search_cache_enabled": true,
   "search_cache_ttl_days": 0,
   "search_cache_prune_on_failure": true,
-  "search_cache_max_entries": 50000
+  "search_cache_max_entries": 50000,
+  "search_cache_seed_top_n": 30
 }

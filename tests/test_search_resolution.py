@@ -277,6 +277,41 @@ class SearchResolutionTests(unittest.TestCase):
             )
         self.assertEqual(rows, [])
 
+    def test_refresh_search_cache_seeds_up_to_top_30_by_default(self):
+        service = SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"stub": StubAdapter()},
+            config={"search_cache_enabled": True},
+            paths=self.paths,
+            canonical_resolver=StubCanonicalResolver(),
+        )
+        ranked = []
+        for idx in range(40):
+            ranked.append(
+                {
+                    "candidate_id": f"cand-{idx}",
+                    "source": "stub",
+                    "url": f"https://example.test/media/{idx}",
+                    "title": f"Candidate {idx}",
+                    "uploader": "Uploader",
+                    "duration_sec": 200,
+                }
+            )
+        captured = {"count": 0}
+
+        def _capture(**kwargs):
+            candidates = kwargs.get("candidates") or []
+            captured["count"] = len(candidates)
+
+        with mock.patch.object(service.store, "replace_search_cache", side_effect=_capture):
+            service._refresh_search_cache_for_item(  # type: ignore[attr-defined]
+                {"id": "req-1", "media_type": "generic", "max_candidates_per_source": 5},
+                {"id": "item-1", "item_type": "track", "artist": "A", "track": "T"},
+                ranked,
+            )
+        self.assertEqual(captured["count"], 30)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1103,6 +1103,9 @@ class SearchResolutionService:
         self.search_cache_max_entries = self._parse_search_cache_max_entries(
             self.config.get("search_cache_max_entries", 50000)
         )
+        self.search_cache_seed_top_n = self._parse_search_cache_seed_top_n(
+            self.config.get("search_cache_seed_top_n", 30)
+        )
         self._maybe_rebuild_community_reverse_index()
 
     def _as_bool(self, value):
@@ -1132,6 +1135,13 @@ class SearchResolutionService:
         except Exception:
             parsed = 50000
         return max(1000, parsed)
+
+    def _parse_search_cache_seed_top_n(self, value):
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = 30
+        return max(1, parsed)
 
     def _community_dataset_root(self):
         configured = str(self.config.get("community_cache_dataset_dir") or "").strip()
@@ -1912,7 +1922,8 @@ class SearchResolutionService:
         try:
             cache_key, query = self._search_cache_key_for_item(item, request_row)
             max_candidates = int((request_row or {}).get("max_candidates_per_source") or 5)
-            top_ranked = list(ranked)[: max(1, max_candidates * 3)]
+            seed_limit = max(int(self.search_cache_seed_top_n or 1), max(1, max_candidates * 3))
+            top_ranked = list(ranked)[:seed_limit]
             self.store.replace_search_cache(
                 cache_key=cache_key,
                 query_text=query,

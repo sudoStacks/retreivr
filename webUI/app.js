@@ -2214,7 +2214,7 @@ function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
     music_mode: treatAsMusic,
     final_format: formatOverride || null,
     source_priority: sources && sources.length ? sources : null,
-    max_candidates_per_source: 5,
+    max_candidates_per_source: 10,
   };
 }
 
