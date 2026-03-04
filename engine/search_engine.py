@@ -586,6 +586,21 @@ class SearchJobStore:
                     (item["id"],),
                 )
                 item["candidate_count"] = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT * FROM search_candidates WHERE item_id=? ORDER BY rank LIMIT 50",
+                    (item["id"],),
+                )
+                candidate_rows = []
+                for cand_row in cur.fetchall():
+                    candidate_entry = dict(cand_row)
+                    canonical_raw = candidate_entry.get("canonical_json")
+                    if canonical_raw:
+                        try:
+                            candidate_entry["canonical_metadata"] = json.loads(canonical_raw)
+                        except json.JSONDecodeError:
+                            candidate_entry["canonical_metadata"] = None
+                    candidate_rows.append(candidate_entry)
+                item["candidates"] = candidate_rows
             return {"request": request, "items": items}
         finally:
             conn.close()

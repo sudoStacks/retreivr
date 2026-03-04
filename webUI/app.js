@@ -3459,10 +3459,11 @@ function scheduleHomeCandidateRefresh(item, container) {
   if (!item || !item.id || !container || state.homeCandidatesLoading[item.id]) {
     return;
   }
-  loadHomeCandidates(item, container);
+  const preloadedCandidates = Array.isArray(item.candidates) ? item.candidates : null;
+  loadHomeCandidates(item, container, preloadedCandidates);
 }
 
-async function loadHomeCandidates(item, container) {
+async function loadHomeCandidates(item, container, preloadedCandidates = null) {
   if (!item || !container) {
     return;
   }
@@ -3481,8 +3482,11 @@ async function loadHomeCandidates(item, container) {
       container.appendChild(placeholder);
     }
     placeholder.textContent = "Fetching candidates…";
-    const data = await fetchJson(`/api/search/items/${encodeURIComponent(item.id)}/candidates`);
-    const candidates = data.candidates || [];
+    let candidates = Array.isArray(preloadedCandidates) ? preloadedCandidates : [];
+    if (!candidates.length) {
+      const data = await fetchJson(`/api/search/items/${encodeURIComponent(item.id)}/candidates`);
+      candidates = data.candidates || [];
+    }
     if (!candidates.length) {
       placeholder.textContent = "Searching…";
       return;
