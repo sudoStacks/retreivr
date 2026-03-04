@@ -824,14 +824,19 @@ class SearchJobStore:
             cur = conn.cursor()
             cur.execute("DELETE FROM search_query_cache WHERE cache_key=?", (cache_key,))
             now_iso = datetime.now(timezone.utc).isoformat()
+            seen_keys = set()
             for candidate in candidates or []:
                 if not isinstance(candidate, dict):
                     continue
                 url = _coerce_http_url(candidate.get("url"))
                 if not url:
                     continue
-                candidate_id = str(candidate.get("candidate_id") or uuid4().hex)
                 video_id = extract_video_id(url) or extract_video_id(candidate.get("video_id"))
+                dedupe_key = (str(video_id or "").strip().lower() or url.lower())
+                if dedupe_key in seen_keys:
+                    continue
+                seen_keys.add(dedupe_key)
+                row_id = uuid4().hex
                 cur.execute(
                     """
                     INSERT INTO search_query_cache (
@@ -841,7 +846,7 @@ class SearchJobStore:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        candidate_id,
+                        row_id,
                         cache_key,
                         query_text,
                         media_type,
