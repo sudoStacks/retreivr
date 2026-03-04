@@ -2185,6 +2185,15 @@ class DownloadWorkerEngine:
                 release_mbid=release_mbid,
             )
         used_cached_resolved = bool(resolved) and not used_pre_resolved
+        if used_pre_resolved or used_cached_resolved:
+            _log_event(
+                logging.INFO,
+                "music_track_search_bypassed",
+                job_id=job.id,
+                recording_mbid=recording_mbid,
+                used_pre_resolved=used_pre_resolved,
+                used_cached_resolved=used_cached_resolved,
+            )
         retry_start_rung = 0
         track_total_value = None
         for candidate_total in (
