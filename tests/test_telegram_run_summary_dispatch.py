@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import json
+import sqlite3
 import sys
+import tempfile
 import types
 from types import SimpleNamespace
 
@@ -172,3 +175,66 @@ def test_retry_flow_still_sends_single_summary(monkeypatch) -> None:
     )
 
     assert calls["count"] == 1
+
+
+def test_notify_run_summary_uses_run_type_header_and_resolves_track_labels(monkeypatch) -> None:
+    module = _load_api_main()
+    captured = {"message": None}
+
+    def _fake_send(_config, message):
+        captured["message"] = str(message)
+        return {"ok": True, "message_id": 909}
+
+    monkeypatch.setattr(module, "telegram_notify_result", _fake_send)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = f"{tmpdir}/db.sqlite"
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS download_jobs (
+                    id TEXT PRIMARY KEY,
+                    file_path TEXT,
+                    output_template TEXT,
+                    url TEXT
+                )
+                """
+            )
+            cur.execute(
+                "INSERT INTO download_jobs (id, file_path, output_template, url) VALUES (?, ?, ?, ?)",
+                (
+                    "0123456789abcdef0123456789abcdef",
+                    None,
+                    json.dumps({"track": "Alcohol"}),
+                    "https://www.youtube.com/watch?v=abc123xyz00",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        module.app.state.paths = SimpleNamespace(db_path=db_path)
+        status = SimpleNamespace(run_successes=["0123456789abcdef0123456789abcdef"], run_failures=[])
+        result = module.notify_run_summary(
+            {},
+            run_type="scheduled",
+            status=status,
+            started_at="2026-02-26T00:00:00+00:00",
+            finished_at="2026-02-26T00:00:10+00:00",
+        )
+
+    msg = captured["message"] or ""
+    assert result["sent"] is True
+    assert "Retreivr Scheduler Run Summary" in msg
+    assert "YouTube Playlist Archive Completed" in msg
+    assert "Alcohol" in msg
+    assert "0123456789abcdef0123456789abcdef" not in msg
+
+
+def test_should_dispatch_run_summary_skips_watcher_only() -> None:
+    module = _load_api_main()
+    assert module._should_dispatch_run_summary("watcher") is False
+    assert module._should_dispatch_run_summary("scheduled") is True
+    assert module._should_dispatch_run_summary("api") is True

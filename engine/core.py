@@ -960,6 +960,10 @@ def telegram_notify_result(config, message):
     telegram = config.get("telegram") if isinstance(config, dict) else None
     if not telegram or not message:
         return {"ok": False, "message_id": None}
+    # Respect explicit telegram.enabled=false while preserving legacy behavior
+    # for configs that only provide bot token/chat id.
+    if isinstance(telegram, dict) and "enabled" in telegram and not bool(telegram.get("enabled")):
+        return {"ok": False, "message_id": None}
     bot_token = telegram.get("bot_token")
     chat_id = telegram.get("chat_id")
     if not bot_token or not chat_id:

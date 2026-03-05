@@ -35,7 +35,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from typing import Optional
 
 import anyio
@@ -850,6 +850,7 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
                 pending_job_ids.append(text)
 
         job_id_to_path: dict[str, str] = {}
+        job_id_to_label: dict[str, str] = {}
         if pending_job_ids:
             db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
             if db_path:
@@ -858,10 +859,33 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
                     cur = conn.cursor()
                     placeholders = ",".join("?" for _ in pending_job_ids)
                     cur.execute(
-                        f"SELECT id, file_path FROM download_jobs WHERE id IN ({placeholders})",
+                        f"SELECT id, file_path, output_template, url FROM download_jobs WHERE id IN ({placeholders})",
                         pending_job_ids,
                     )
-                    for job_id, file_path in cur.fetchall():
+                    for job_id, file_path, output_template_raw, url in cur.fetchall():
+                        if job_id and output_template_raw:
+                            try:
+                                parsed = json.loads(output_template_raw)
+                            except Exception:
+                                parsed = {}
+                            if isinstance(parsed, dict):
+                                canonical = parsed.get("canonical_metadata") if isinstance(parsed.get("canonical_metadata"), dict) else {}
+                                label = (
+                                    canonical.get("track")
+                                    or parsed.get("track")
+                                    or canonical.get("title")
+                                    or parsed.get("title")
+                                )
+                                if label:
+                                    job_id_to_label[str(job_id)] = str(label).strip()
+                        if job_id and not job_id_to_label.get(str(job_id)):
+                            fallback_url = str(url or "").strip()
+                            if fallback_url:
+                                parsed_url = urlparse(fallback_url)
+                                qs = parse_qs(parsed_url.query)
+                                video_id = (qs.get("v") or [None])[0]
+                                if video_id:
+                                    job_id_to_label[str(job_id)] = f"YouTube Video ({video_id})"
                         if job_id and file_path:
                             job_id_to_path[str(job_id)] = str(file_path)
                 except Exception:
@@ -877,8 +901,13 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
             candidate = job_id_to_path.get(raw, raw)
             if os.path.sep in candidate:
                 candidate = os.path.basename(candidate)
+            elif raw in job_id_to_label:
+                candidate = job_id_to_label[raw]
             candidate = str(candidate or "").strip()
             if not candidate:
+                continue
+            # Never leak opaque job IDs in user-facing Telegram summaries.
+            if re.fullmatch(r"[0-9a-f]{32}", candidate):
                 continue
             if candidate in seen:
                 continue
@@ -889,8 +918,14 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
 
     def _build_message(success_count: int, failure_count: int, duration_text: str, downloaded_labels: list[str]) -> str:
         status_text = "completed" if failure_count <= 0 else "completed_with_errors"
+        if run_type == "scheduled":
+            title = "Retreivr Scheduler Run Summary\nYouTube Playlist Archive Completed"
+        elif run_type == "watcher":
+            title = "Retreivr Watcher Run Summary\nYouTube Playlist Archive Completed"
+        else:
+            title = "YouTube Archiver Summary"
         header = (
-            "YouTube Archiver Summary\n"
+            f"{title}\n"
             f"Status: {status_text}\n"
             f"\u2714 Success: {success_count}\n"
             f"\u2716 Failed: {failure_count}\n"
@@ -1043,6 +1078,10 @@ def dispatch_run_summary_once(
         telegram_message_id,
     )
     return record
+
+
+def _should_dispatch_run_summary(run_source: str | None) -> bool:
+    return str(run_source or "").strip().lower() != "watcher"
 
 
 def normalize_search_payload(payload: dict | None, *, default_sources: list[str]) -> dict:
@@ -3234,15 +3273,16 @@ async def _start_run_with_config(
                 elif app.state.state in {"running", "completed"}:
                     app.state.state = "idle"
                 
-                dispatch_run_summary_once(
-                    config,
-                    run_type=run_source,
-                    run_id=app.state.run_id,
-                    status=status,
-                    started_at=app.state.started_at,
-                    finished_at=app.state.finished_at,
-                    last_error=app.state.last_error,
-                )
+                if _should_dispatch_run_summary(run_source):
+                    dispatch_run_summary_once(
+                        config,
+                        run_type=run_source,
+                        run_id=app.state.run_id,
+                        status=status,
+                        started_at=app.state.started_at,
+                        finished_at=app.state.finished_at,
+                        last_error=app.state.last_error,
+                    )
 
         app.state.run_task = asyncio.create_task(_runner())
 
@@ -4406,7 +4446,7 @@ async def _watcher_supervisor():
                     len(batch_playlists),
                     total_downloaded,
                 )
-                if batch_playlists:
+                if batch_playlists and total_downloaded > 0:
                     minutes = duration_seconds // 60
                     seconds = duration_seconds % 60
                     duration_label = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
@@ -4417,6 +4457,11 @@ async def _watcher_supervisor():
                         f"Duration: {duration_label}"
                     )
                     telegram_notify(config, msg)
+                elif batch_playlists:
+                    logging.info(
+                        "Watcher: batch telegram skipped (no downloads) playlists=%s",
+                        len(batch_playlists),
+                    )
                 batch_state["batch_active"] = False
                 batch_state["last_detection_ts"] = None
                 _set_watcher_status("idle", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
