@@ -839,6 +839,16 @@ body.home-page .home-candidate-source-tag {
   flex-shrink: 0;
 }
 
+.album-card .home-candidate-action {
+  align-items: stretch;
+  width: 100%;
+}
+
+.album-card .home-candidate-action .button {
+  width: 100%;
+  text-align: center;
+}
+
 .home-candidate-state {
   font-size: 11px;
   padding: 2px 8px;

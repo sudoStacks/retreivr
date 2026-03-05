@@ -2527,7 +2527,7 @@ function renderMusicModeResults(response, query = "") {
     appendSection("Artists");
     artists.forEach((artistItem) => {
       const card = document.createElement("article");
-      card.className = "home-result-card";
+      card.className = "home-result-card album-card";
       const title = document.createElement("div");
       title.className = "home-candidate-title";
       title.textContent = artistItem?.name || "";
@@ -2551,7 +2551,7 @@ function renderMusicModeResults(response, query = "") {
       button.textContent = "View Albums";
       button.addEventListener("click", async () => {
         const nextQuery = String(artistItem?.name || "").trim();
-        const nextArtistMbid = String(artistItem?.artist_mbid || "").trim();
+        const nextArtistMbid = String(artistItem?.artist_mbid || artistItem?.id || "").trim();
         if (!nextQuery) {
           return;
         }
@@ -2607,12 +2607,17 @@ function renderMusicModeResults(response, query = "") {
       const action = document.createElement("div");
       action.className = "home-candidate-action";
       const viewTracksButton = document.createElement("button");
-      viewTracksButton.className = "button ghost small";
+      viewTracksButton.className = "button ghost small album-view-tracks-btn";
       viewTracksButton.dataset.releaseGroupMbid = releaseGroupMbid;
+      viewTracksButton.dataset.releaseGroupId = releaseGroupMbid;
+      viewTracksButton.dataset.albumTitle = String(albumItem?.title || "");
+      viewTracksButton.dataset.artistCredit = String(albumItem?.artist || "");
       viewTracksButton.textContent = "View Tracks";
       const button = document.createElement("button");
-      button.className = "button primary small";
+      button.className = "button primary small album-download-btn";
       button.dataset.releaseGroupMbid = releaseGroupMbid;
+      button.dataset.releaseGroupId = releaseGroupMbid;
+      button.dataset.albumTitle = String(albumItem?.title || "");
       button.textContent = "Download";
       viewTracksButton.addEventListener("click", async () => {
         const releaseGroupMbidValue = String(viewTracksButton.dataset.releaseGroupMbid || "").trim();
@@ -3057,6 +3062,12 @@ function renderHomeAlbumCandidates(candidates, query = "") {
     date.className = "album-date meta";
     date.textContent = candidate.first_release_date || "";
     body.appendChild(date);
+
+    const entityRef = document.createElement("div");
+    entityRef.className = "home-mb-entity-ref";
+    const releaseGroupId = String(candidate.release_group_id || "").trim();
+    entityRef.textContent = releaseGroupId ? `MB: release-group ${releaseGroupId}` : "MB: release-group (unknown)";
+    body.appendChild(entityRef);
 
     const badges = document.createElement("div");
     badges.className = "row";

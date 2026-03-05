@@ -540,6 +540,7 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
         if not _is_allowed_album_release_group_type(primary_type):
             continue
         artist_credit = group.get("artist-credit")
+        artist_credit_ids: set[str] = set()
         artist_name = ""
         if isinstance(artist_credit, list):
             parts: list[str] = []
@@ -547,6 +548,9 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
                 if not isinstance(item, dict):
                     continue
                 artist_obj = item.get("artist") if isinstance(item.get("artist"), dict) else {}
+                artist_id = str(artist_obj.get("id") or "").strip()
+                if artist_id:
+                    artist_credit_ids.add(artist_id)
                 name = str(item.get("name") or artist_obj.get("name") or "").strip()
                 joinphrase = str(item.get("joinphrase") or "")
                 if name:
@@ -554,6 +558,8 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
                 if joinphrase:
                     parts.append(joinphrase)
             artist_name = "".join(parts).strip()
+        if artist_credit_ids and normalized_artist_mbid not in artist_credit_ids:
+            continue
         candidates.append(
             {
                 "release_group_id": group.get("id"),
