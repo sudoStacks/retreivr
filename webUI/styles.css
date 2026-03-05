@@ -352,16 +352,18 @@ body.home-page .music-search-options {
 }
 
 body.home-page .music-search-options-row {
-  display: flex;
-  align-items: flex-end;
+  display: grid;
+  grid-template-columns: auto auto auto;
+  align-items: end;
   gap: 12px;
-  flex-wrap: wrap;
+  justify-content: start;
 }
 
 body.home-page .music-search-mode-field {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   width: auto;
   max-width: none;
+  min-width: 0;
   gap: 12px;
 }
 
@@ -371,6 +373,12 @@ body.home-page .music-search-options-row .music-search-mode-field {
   justify-self: auto;
 }
 
+body.home-page .music-search-options-row > .field {
+  width: auto;
+  max-width: none;
+  justify-self: start;
+}
+
 body.home-page .music-search-grid .field,
 body.home-page .music-search-options .field {
   width: 100%;
@@ -378,9 +386,16 @@ body.home-page .music-search-options .field {
   justify-self: stretch;
 }
 
+body.home-page .music-search-options .music-search-options-row > .field {
+  width: auto;
+  max-width: none;
+  justify-self: start;
+}
+
 body.home-page .music-search-force-redownload {
   margin: 0;
-  align-self: flex-end;
+  align-self: end;
+  justify-self: start;
   white-space: nowrap;
 }
 
@@ -388,17 +403,11 @@ body.home-page .music-mode-toggle {
   width: fit-content;
 }
 
-body.home-page .music-search-inline-row {
-  display: flex;
-  align-items: flex-end;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
 body.home-page .music-search-max-candidates {
   flex: 0 0 auto;
   width: 132px;
   max-width: 132px;
+  min-width: 132px;
 }
 
 body.home-page .music-search-options-row .music-search-max-candidates {
@@ -408,8 +417,8 @@ body.home-page .music-search-options-row .music-search-max-candidates {
 }
 
 body.home-page .music-search-max-candidates input {
-  width: 84px;
-  min-width: 84px;
+  width: 100%;
+  min-width: 0;
   text-align: center;
 }
 
@@ -2039,12 +2048,26 @@ a[aria-disabled="true"] {
   }
 
   body.home-page .music-search-options-row {
+    grid-template-columns: 1fr;
     width: 100%;
     align-items: flex-start;
   }
 
+  body.home-page .music-search-options-row > .field,
+  body.home-page .music-search-options-row .music-search-mode-field,
+  body.home-page .music-search-options-row .music-search-max-candidates {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+
+  body.home-page .music-search-max-candidates input {
+    text-align: left;
+  }
+
   body.home-page .music-search-force-redownload {
     align-self: flex-start;
+    justify-self: start;
   }
 
   body.home-page .music-search-actions-row {
