@@ -700,6 +700,14 @@ body.home-page .home-source-panel .home-source-pill.selected {
   line-height: 1.4;
 }
 
+.home-mb-entity-ref {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.78);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
 .home-results-detail.home-results-error {
   color: var(--danger);
   font-weight: 600;

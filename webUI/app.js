@@ -2655,6 +2655,21 @@ function renderMusicModeResults(response, query = "") {
       meta.textContent = `${result.artist} • ${result.album || ""} ${yearText ? `(${yearText})` : ""} • ${durationText}`;
       card.appendChild(meta);
 
+      const entityRef = document.createElement("div");
+      entityRef.className = "home-mb-entity-ref";
+      const recordingMbid = String(result.recording_mbid || "").trim();
+      const releaseMbid = String(result.mb_release_id || "").trim();
+      if (recordingMbid && releaseMbid) {
+        entityRef.textContent = `MB: rec ${recordingMbid} • rel ${releaseMbid}`;
+      } else if (recordingMbid) {
+        entityRef.textContent = `MB: rec ${recordingMbid}`;
+      } else if (releaseMbid) {
+        entityRef.textContent = `MB: rel ${releaseMbid}`;
+      } else {
+        entityRef.textContent = "MB: (unknown)";
+      }
+      card.appendChild(entityRef);
+
       const action = document.createElement("div");
       action.className = "home-candidate-action";
       const button = document.createElement("button");
