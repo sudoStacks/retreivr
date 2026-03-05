@@ -22,6 +22,10 @@ This release adds cache-first acceleration for both metadata-first music resolut
   - configurable TTL, prune-on-failure, max entries, and seed depth controls
 - Deterministic community reverse index lifecycle:
   - reverse lookup index is rebuilt from local dataset snapshots (not runtime accumulation)
+- Music-video availability hinting for music-first UX:
+  - new endpoint: `POST /api/music/video/availability`
+  - combines three non-blocking signals: MusicBrainz YouTube URL relations, community cache hit, and bounded YouTube precheck
+  - track cards now hydrate MV-likelihood badges asynchronously (`MV likely/possible/maybe/No MV hint`)
 
 ### Changed
 - Search UX acceleration:
@@ -39,6 +43,10 @@ This release adds cache-first acceleration for both metadata-first music resolut
   - community cache lookup/publish controls
   - local search cache controls
   - backward-compatible default application for missing keys
+- Generic/video scoring now includes a small logarithmic `view_count` tie-break bonus when metadata already contains view counts (no extra fetch calls).
+- Home nav naming aligned to architecture:
+  - page label now uses `Advanced` consistently (instead of `Info`)
+  - backward-compatible hash aliases retained (`#search`/`#info` -> `#advanced`)
 
 ### Fixed
 - Search safety hardening for restricted content:
@@ -55,6 +63,10 @@ This release adds cache-first acceleration for both metadata-first music resolut
   - supervisor crash path now logs and auto-restarts
   - blocking playlist API fetch moved off the event loop thread
   - `/api/config` now hot-applies `enable_watcher` toggles at runtime (start/stop without restart)
+- Music UI regressions:
+  - fixed video-mode result title overwrite where cards could show `Source: generic · Item N` in place of candidate title
+  - fixed album `View Tracks` regression by honoring explicit `mode=track` for artist+album queries in metadata search routing
+- Config UI scheduler section layout cleaned up to prevent overlap/collision while preserving existing behavior and bindings.
 
 ## v0.9.6 — Runtime Distribution + Music Match Robustness
 
