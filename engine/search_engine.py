@@ -3145,6 +3145,73 @@ class SearchResolutionService:
             source_priority = _parse_source_priority(request_row.get("source_priority_json"))
             max_candidates = int(request_row.get("max_candidates_per_source") or 5)
             scored = []
+
+            def _is_blank(value):
+                if value is None:
+                    return True
+                if isinstance(value, str):
+                    return not value.strip()
+                if isinstance(value, (list, tuple, dict, set)):
+                    return len(value) == 0
+                return False
+
+            def _candidate_identity(candidate):
+                if not isinstance(candidate, dict):
+                    return None
+                raw_url = str(candidate.get("url") or "").strip()
+                video_id = extract_video_id(raw_url) or extract_video_id(candidate.get("video_id"))
+                if video_id:
+                    return f"youtube_video:{str(video_id).lower()}"
+                if raw_url:
+                    return f"url:{raw_url.lower()}"
+                return None
+
+            def _merge_candidate(base, incoming):
+                merged = dict(base or {})
+                incoming_candidate = dict(incoming or {})
+                for key, value in incoming_candidate.items():
+                    if key in {"search_cache_seeded", "community_seeded", "mb_injected", "community_verified_transport"}:
+                        merged[key] = bool(merged.get(key)) or bool(value)
+                        continue
+                    if _is_blank(merged.get(key)) and not _is_blank(value):
+                        merged[key] = value
+                try:
+                    base_score = float(merged.get("final_score") or 0.0)
+                except Exception:
+                    base_score = 0.0
+                try:
+                    incoming_score = float(incoming_candidate.get("final_score") or 0.0)
+                except Exception:
+                    incoming_score = 0.0
+                if incoming_score > base_score:
+                    for score_key in (
+                        "score_artist",
+                        "score_track",
+                        "score_album",
+                        "score_duration",
+                        "score_source",
+                        "final_score",
+                        "rejection_reason",
+                        "duration_delta_ms",
+                        "score_breakdown",
+                        "base_score",
+                        "final_score_100",
+                    ):
+                        if score_key in incoming_candidate:
+                            merged[score_key] = incoming_candidate.get(score_key)
+                return merged
+
+            def _append_or_merge_candidate(candidate):
+                identity = _candidate_identity(candidate)
+                if not identity:
+                    scored.append(candidate)
+                    return
+                for idx, existing in enumerate(scored):
+                    if _candidate_identity(existing) == identity:
+                        scored[idx] = _merge_candidate(existing, candidate)
+                        return
+                scored.append(candidate)
+
             # Keep cache-seeded candidates in the working set so they remain visible
             # while adapter batches arrive.
             try:
@@ -3158,7 +3225,7 @@ class SearchResolutionService:
                     continue
                 seeded_candidate = dict(seeded)
                 seeded_candidate["id"] = str(seeded_candidate.get("id") or uuid4().hex)
-                scored.append(seeded_candidate)
+                _append_or_merge_candidate(seeded_candidate)
 
             # --- Parallel adapter execution (bounded) ---
             futures = {}
@@ -3245,7 +3312,7 @@ class SearchResolutionService:
                         cand.update(scores)
                         cand["canonical_json"] = safe_json_dumps(canonical_payload) if canonical_payload else None
                         cand["id"] = uuid4().hex
-                        scored.append(cand)
+                        _append_or_merge_candidate(cand)
 
                     if candidates:
                         # Insert partial candidates immediately for progressive UI updates
