@@ -120,6 +120,60 @@ def test_search_music_metadata_album_mode_filters_out_singles() -> None:
     assert "rg-single-1" not in ids
 
 
+def test_search_music_metadata_track_mode_with_artist_album_queries_recordings() -> None:
+    captured = {"query": None}
+
+    if "musicbrainzngs" not in sys.modules:
+        sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
+    mbngs = sys.modules["musicbrainzngs"]
+    mbngs.search_recordings = lambda query, limit, offset=0: (
+        captured.update({"query": str(query)}),
+        {
+            "recording-list": [
+                {
+                    "id": "rec-1",
+                    "title": "Song A",
+                    "artist-credit": [{"name": "Artist"}],
+                    "release-list": [
+                        {
+                            "id": "rel-1",
+                            "title": "Album",
+                            "date": "2020-01-01",
+                            "release-group": {"id": "rg-1"},
+                        }
+                    ],
+                }
+            ]
+        },
+    )[1]
+
+    if "metadata.services" not in sys.modules:
+        services_pkg = types.ModuleType("metadata.services")
+        services_pkg.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["metadata.services"] = services_pkg
+    mb_service_mod = types.ModuleType("metadata.services.musicbrainz_service")
+    mb_service_mod.get_musicbrainz_service = lambda: types.SimpleNamespace(_call_with_retry=lambda func: func())
+    sys.modules["metadata.services.musicbrainz_service"] = mb_service_mod
+
+    binding = _load_module(
+        "engine_musicbrainz_binding_forced_track_tests",
+        _ROOT / "engine" / "musicbrainz_binding.py",
+    )
+    payload = binding.search_music_metadata(
+        artist="Artist",
+        album="Album",
+        track="",
+        mode="track",
+        limit=50,
+    )
+    assert isinstance(payload, dict)
+    tracks = payload.get("tracks") or []
+    assert len(tracks) == 1
+    query_text = str(captured.get("query") or "")
+    assert "artist:\"Artist\"" in query_text
+    assert "release:\"Album\"" in query_text
+
+
 def test_release_bucket_classifies_ep_as_album() -> None:
     if "musicbrainzngs" not in sys.modules:
         sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")

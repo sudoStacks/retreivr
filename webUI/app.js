@@ -33,6 +33,7 @@ const state = {
   homeArtistCoverCache: {},
   homeMusicRenderToken: 0,
   homeMusicResultMap: {},
+  homeMusicVideoHintCache: {},
   homeRequestContext: {},
   homeBestScores: {},
   homeCandidateCache: {},
@@ -2680,6 +2681,86 @@ function buildMusicTrackEnqueuePayload({ button, result }) {
   return payload;
 }
 
+const MUSIC_VIDEO_HINT_MAX_TRACKS = 10;
+
+function _musicVideoHintBadgeClass(likelihood) {
+  const key = String(likelihood || "").toLowerCase();
+  if (key === "high") return "matched";
+  if (key === "medium") return "queued";
+  if (key === "low") return "searching";
+  if (key === "none") return "failed";
+  return "searching";
+}
+
+function updateMusicVideoHintBadge(recordingMbid, payload = null) {
+  const key = String(recordingMbid || "").trim();
+  if (!key) return;
+  const badges = document.querySelectorAll(`.home-result-badge.music-video-hint[data-recording-mbid="${CSS.escape(key)}"]`);
+  if (!badges.length) return;
+  const likelihood = String(payload?.likelihood || "").trim().toLowerCase();
+  const labelMap = {
+    high: "MV likely",
+    medium: "MV possible",
+    low: "MV maybe",
+    none: "No MV hint",
+  };
+  badges.forEach((badge) => {
+    badge.className = `home-result-badge music-video-hint ${_musicVideoHintBadgeClass(likelihood)}`;
+    badge.textContent = labelMap[likelihood] || "MV checking";
+    const summary = payload?.signals?.youtube_precheck?.title
+      || (payload?.signals?.mb_linked ? "MusicBrainz video link" : "")
+      || (payload?.signals?.community_seeded ? "Community candidate found" : "");
+    if (summary) {
+      badge.title = String(summary);
+    }
+  });
+}
+
+async function hydrateMusicVideoHints(tracks = [], renderToken = 0) {
+  if (!Array.isArray(tracks) || !tracks.length) return;
+  const limited = tracks.slice(0, MUSIC_VIDEO_HINT_MAX_TRACKS);
+  const queue = limited.filter((result) => {
+    const recordingMbid = String(result?.recording_mbid || "").trim();
+    return !!recordingMbid;
+  });
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(3, queue.length) }).map(async () => {
+    while (cursor < queue.length) {
+      const index = cursor;
+      cursor += 1;
+      const result = queue[index];
+      const recordingMbid = String(result?.recording_mbid || "").trim();
+      if (!recordingMbid) continue;
+      if (renderToken !== state.homeMusicRenderToken) return;
+      if (state.homeMusicVideoHintCache[recordingMbid]) {
+        updateMusicVideoHintBadge(recordingMbid, state.homeMusicVideoHintCache[recordingMbid]);
+        continue;
+      }
+      try {
+        const payload = await fetchJson("/api/music/video/availability", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            recording_mbid: recordingMbid,
+            artist: result?.artist || "",
+            track: result?.track || "",
+            album: result?.album || "",
+            include_youtube_probe: true,
+          }),
+        });
+        if (renderToken !== state.homeMusicRenderToken) return;
+        state.homeMusicVideoHintCache[recordingMbid] = payload || {};
+        updateMusicVideoHintBadge(recordingMbid, payload || {});
+      } catch (_err) {
+        if (renderToken !== state.homeMusicRenderToken) return;
+        updateMusicVideoHintBadge(recordingMbid, { likelihood: "none" });
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 80));
+    }
+  });
+  await Promise.all(workers);
+}
+
 function renderMusicModeResults(response, query = "") {
   const artists = Array.isArray(response?.artists) ? response.artists : [];
   const albums = Array.isArray(response?.albums) ? response.albums : [];
@@ -2998,6 +3079,11 @@ function renderMusicModeResults(response, query = "") {
       badge.className = "home-result-badge matched";
       badge.textContent = "MusicBrainz";
       header.appendChild(badge);
+      const videoHintBadge = document.createElement("span");
+      videoHintBadge.className = "home-result-badge music-video-hint searching";
+      videoHintBadge.dataset.recordingMbid = String(result.recording_mbid || "").trim();
+      videoHintBadge.textContent = "MV checking";
+      header.appendChild(videoHintBadge);
       card.appendChild(header);
 
       const meta = document.createElement("div");
@@ -3045,6 +3131,8 @@ function renderMusicModeResults(response, query = "") {
       card.appendChild(action);
       container.appendChild(card);
     });
+    // Async hint enrichment for likely official music-video availability.
+    hydrateMusicVideoHints(orderedTracks, renderToken).catch(() => {});
   }
 }
 

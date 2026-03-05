@@ -15,6 +15,7 @@ _require_python_311()
 
 import asyncio
 import functools
+import concurrent.futures
 import base64
 import binascii
 import hmac
@@ -78,6 +79,8 @@ from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
 from engine.musicbrainz_binding import resolve_best_mb_pair, search_music_metadata
 from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
+from engine.search_adapters import YouTubeAdapter
+import engine.community_cache as community_cache
 from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
@@ -198,6 +201,81 @@ def _log_transition(event: str, **fields) -> None:
 
 def _mb_service():
     return get_musicbrainz_service()
+
+
+def _extract_mb_youtube_urls(entity: dict) -> list[str]:
+    urls: list[str] = []
+    rels = entity.get("url-relation-list") if isinstance(entity, dict) else None
+    if not isinstance(rels, list):
+        return urls
+    for rel in rels:
+        if not isinstance(rel, dict):
+            continue
+        url_obj = rel.get("target") if isinstance(rel.get("target"), dict) else {}
+        resource = str(url_obj.get("resource") or "").strip()
+        if not resource:
+            continue
+        lowered = resource.lower()
+        if "youtube.com" not in lowered and "youtu.be" not in lowered:
+            continue
+        if resource not in urls:
+            urls.append(resource)
+        if len(urls) >= 3:
+            break
+    return urls
+
+
+def _bounded_call(timeout_seconds: float, fn):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(fn)
+        return future.result(timeout=max(0.2, float(timeout_seconds)))
+
+
+def _quick_youtube_mv_precheck(artist: str, track: str, album: str | None = None) -> dict:
+    artist_text = str(artist or "").strip()
+    track_text = str(track or "").strip()
+    album_text = str(album or "").strip()
+    if not artist_text and not track_text:
+        return {"matched": False, "reason": "missing_query"}
+    query_parts = [artist_text, track_text]
+    if album_text:
+        query_parts.append(album_text)
+    query_parts.append("official music video")
+    query = " ".join(part for part in query_parts if part).strip()
+    if not query:
+        return {"matched": False, "reason": "missing_query"}
+    adapter = YouTubeAdapter()
+    try:
+        candidates = _bounded_call(2.8, lambda: adapter.search_music_track(query, limit=3))
+    except Exception:
+        return {"matched": False, "reason": "search_timeout"}
+    if not isinstance(candidates, list) or not candidates:
+        return {"matched": False, "reason": "no_candidates"}
+    artist_lower = artist_text.lower()
+    track_lower = track_text.lower()
+    for candidate in candidates[:3]:
+        title = str(candidate.get("title") or "").strip()
+        if not title:
+            continue
+        title_lower = title.lower()
+        if (
+            ("official video" in title_lower or "music video" in title_lower)
+            and (not artist_lower or artist_lower in title_lower)
+            and (not track_lower or track_lower in title_lower)
+        ):
+            return {
+                "matched": True,
+                "reason": "title_match",
+                "title": title,
+                "url": candidate.get("url"),
+            }
+    first = candidates[0] if isinstance(candidates[0], dict) else {}
+    return {
+        "matched": False,
+        "reason": "weak_match",
+        "title": first.get("title"),
+        "url": first.get("url"),
+    }
 
 
 def get_loaded_config() -> dict:
@@ -6468,6 +6546,81 @@ def music_search(
         offset=int(offset),
         limit=int(limit),
     )
+
+
+@app.post("/api/music/video/availability")
+def music_video_availability(data: dict = Body(...)):
+    payload = data if isinstance(data, dict) else {}
+    recording_mbid = str(payload.get("recording_mbid") or "").strip()
+    artist = str(payload.get("artist") or "").strip()
+    track = str(payload.get("track") or "").strip()
+    album = str(payload.get("album") or "").strip()
+    include_youtube_probe = bool(payload.get("include_youtube_probe", True))
+
+    signals: dict[str, object] = {
+        "mb_linked": False,
+        "community_seeded": False,
+        "youtube_precheck": None,
+    }
+    score = 0
+
+    if recording_mbid:
+        try:
+            recording_payload = _bounded_call(
+                2.8,
+                lambda: _mb_service().get_recording(
+                    recording_mbid,
+                    includes=["url-rels"],
+                ),
+            )
+            recording = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
+            mb_urls = _extract_mb_youtube_urls(recording)
+            if mb_urls:
+                signals["mb_linked"] = True
+                signals["mb_youtube_urls"] = mb_urls
+                score += 2
+        except Exception:
+            signals["mb_lookup_error"] = "lookup_failed"
+
+        cfg = get_loaded_config()
+        community_lookup_enabled = bool(
+            cfg.get("community_cache_lookup_enabled", cfg.get("community_cache_enabled", False))
+        )
+        if community_lookup_enabled:
+            try:
+                community_record = _bounded_call(
+                    1.6,
+                    lambda: community_cache.cached_lookup(recording_mbid),
+                )
+                if isinstance(community_record, dict) and str(community_record.get("video_id") or "").strip():
+                    signals["community_seeded"] = True
+                    signals["community_video_id"] = str(community_record.get("video_id") or "").strip()
+                    signals["community_confidence"] = community_record.get("confidence")
+                    score += 2
+            except Exception:
+                signals["community_lookup_error"] = "lookup_failed"
+
+    if include_youtube_probe:
+        precheck = _quick_youtube_mv_precheck(artist, track, album=album)
+        signals["youtube_precheck"] = precheck
+        if isinstance(precheck, dict) and bool(precheck.get("matched")):
+            score += 1
+
+    if score >= 4:
+        likelihood = "high"
+    elif score >= 2:
+        likelihood = "medium"
+    elif score >= 1:
+        likelihood = "low"
+    else:
+        likelihood = "none"
+
+    return {
+        "recording_mbid": recording_mbid or None,
+        "likelihood": likelihood,
+        "score": score,
+        "signals": signals,
+    }
 
 
 @app.post("/api/music/enqueue")

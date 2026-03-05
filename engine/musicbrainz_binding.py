@@ -426,8 +426,19 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
     limit_value = min(max(1, int(limit or 20)), 15)
     offset_value = max(0, int(offset or 0))
 
+    forced_track_mode = mode_value == "track"
+
     resolved_mode = mode_value
-    if artist_value and album_value and track_value:
+    if forced_track_mode and artist_value and album_value and not track_value:
+        resolved_mode = "track"
+        route_case = "artist_album_forced_track"
+    elif forced_track_mode and album_value and not artist_value and not track_value:
+        resolved_mode = "track"
+        route_case = "album_forced_track"
+    elif forced_track_mode and artist_value and not album_value and not track_value:
+        resolved_mode = "track"
+        route_case = "artist_forced_track"
+    elif artist_value and album_value and track_value:
         resolved_mode = "track"
         route_case = "artist_album_track"
     elif artist_value and track_value:
@@ -562,11 +573,20 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
                 f"recording:{_field(track_value)} AND "
                 f"release:{_field(album_value)}"
             )
+        elif route_case == "artist_album_forced_track":
+            recording_query = (
+                f"artist:{_field(artist_value)} AND "
+                f"release:{_field(album_value)}"
+            )
         elif route_case == "artist_track":
             recording_query = (
                 f"artist:{_field(artist_value)} AND "
                 f"recording:{_field(track_value)}"
             )
+        elif route_case == "album_forced_track":
+            recording_query = f"release:{_field(album_value)}"
+        elif route_case == "artist_forced_track":
+            recording_query = f"artist:{_field(artist_value)}"
         else:
             recording_query = f"recording:{_field(track_value)}"
         logger.info(
