@@ -2551,9 +2551,13 @@ function setHomeSearchControlsEnabled(enabled) {
   }
 }
 
-function maybeReleaseHomeSearchControls(requestId, requestStatus) {
+function maybeReleaseHomeSearchControls(requestId, requestStatus, hasVisibleCandidates = false) {
   if (!requestId) return;
   if (state.homeSearchRequestId !== requestId) {
+    return;
+  }
+  if (hasVisibleCandidates) {
+    setHomeSearchControlsEnabled(true);
     return;
   }
   if (HOME_FINAL_STATUSES.has(requestStatus)) {
@@ -3834,7 +3838,15 @@ function updateHomeResultsStatusForRequest(requestId) {
   const info = buildHomeResultsStatusInfo(requestId);
   setHomeResultsStatus(info.text);
   setHomeResultsDetail(info.detail, info.isError);
-  maybeReleaseHomeSearchControls(requestId, info.status);
+  const context = state.homeRequestContext[requestId] || {};
+  const items = Array.isArray(context.items) ? context.items : [];
+  const hasVisibleCandidates = items.some((item) => {
+    const count = Number(item?.candidate_count || 0);
+    if (count > 0) return true;
+    const status = String(item?.status || "").toLowerCase();
+    return ["candidate_found", "selected", "enqueued", "completed", "skipped"].includes(status);
+  });
+  maybeReleaseHomeSearchControls(requestId, info.status, hasVisibleCandidates);
 }
 
 function recordHomeCandidateScore(requestId, score) {
