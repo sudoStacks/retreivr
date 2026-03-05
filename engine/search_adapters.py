@@ -15,6 +15,26 @@ def _is_http_url(value):
     except Exception:
         return False
 
+
+def _is_restricted_entry(entry):
+    if not isinstance(entry, dict):
+        return False
+    try:
+        age_limit = entry.get("age_limit")
+        if age_limit is not None and int(age_limit) >= 18:
+            return True
+    except Exception:
+        pass
+    availability = str(entry.get("availability") or "").strip().lower()
+    if availability and (
+        "age" in availability
+        or "adult" in availability
+        or availability in {"needs_auth", "login_required"}
+    ):
+        return True
+    return False
+
+
 class SearchAdapter:
     source = ""
 
@@ -72,6 +92,9 @@ class _YtDlpSearchMixin(SearchAdapter):
         results = []
         for entry in entries:
             if not isinstance(entry, dict):
+                continue
+            if _is_restricted_entry(entry):
+                logging.debug("Skipping restricted search result from %s", self.source)
                 continue
             url = entry.get("webpage_url")
             if not _is_http_url(url):

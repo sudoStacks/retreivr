@@ -1849,6 +1849,19 @@ class SearchResolutionService:
             url = _coerce_http_url(row.get("url"))
             if not url:
                 continue
+            raw_meta = self._parse_raw_meta(row.get("raw_meta_json"))
+            try:
+                if raw_meta.get("age_limit") is not None and int(raw_meta.get("age_limit")) >= 18:
+                    continue
+            except Exception:
+                pass
+            availability = str(raw_meta.get("availability") or "").strip().lower()
+            if availability and (
+                "age" in availability
+                or "adult" in availability
+                or availability in {"needs_auth", "login_required"}
+            ):
+                continue
             candidate = {
                 "source": row.get("source") or "youtube",
                 "url": url,

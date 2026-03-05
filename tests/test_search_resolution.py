@@ -377,6 +377,47 @@ class SearchResolutionTests(unittest.TestCase):
             )
         self.assertEqual(rows, [])
 
+    def test_search_cache_seed_filters_restricted_entries(self):
+        service = SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"stub": StubAdapter()},
+            config={"search_cache_enabled": True},
+            paths=self.paths,
+            canonical_resolver=StubCanonicalResolver(),
+        )
+        item = {"id": "item-1", "item_type": "track", "artist": "A", "track": "T"}
+        request_row = {"media_type": "generic", "source_priority_json": '["stub"]'}
+        cache_key, query = service._search_cache_key_for_item(item, request_row)  # type: ignore[attr-defined]
+        service.store.replace_search_cache(
+            cache_key=cache_key,
+            query_text=query,
+            media_type="generic",
+            candidates=[
+                {
+                    "source": "youtube",
+                    "url": "https://www.youtube.com/watch?v=adult000001",
+                    "title": "Restricted Candidate",
+                    "uploader": "Uploader",
+                    "duration_sec": 180,
+                    "candidate_id": "adult-1",
+                    "raw_meta_json": '{"age_limit": 18, "availability": "needs_auth"}',
+                }
+            ],
+        )
+        rows = service.store.list_search_cache(
+            cache_key=cache_key,
+            max_age_seconds=None,
+            limit=10,
+        )
+        self.assertEqual(len(rows), 1)
+        filtered = service._search_cache_candidates_for_item(  # type: ignore[attr-defined]
+            item,
+            request_row,
+            limit=10,
+        )
+        self.assertEqual(filtered, [])
+
     def test_refresh_search_cache_seeds_up_to_top_30_by_default(self):
         service = SearchResolutionService(
             search_db_path=self.search_db,
