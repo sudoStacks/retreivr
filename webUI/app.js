@@ -2527,7 +2527,7 @@ function renderMusicModeResults(response, query = "") {
     appendSection("Artists");
     artists.forEach((artistItem) => {
       const card = document.createElement("article");
-      card.className = "home-result-card album-card";
+      card.className = "home-result-card";
       const title = document.createElement("div");
       title.className = "home-candidate-title";
       title.textContent = artistItem?.name || "";
@@ -2589,7 +2589,7 @@ function renderMusicModeResults(response, query = "") {
     albums.forEach((albumItem) => {
       const releaseGroupMbid = String(albumItem?.release_group_mbid || "").trim();
       const card = document.createElement("article");
-      card.className = "home-result-card";
+      card.className = "home-result-card album-card";
       card.dataset.releaseGroupMbid = releaseGroupMbid;
       const title = document.createElement("div");
       title.className = "home-candidate-title";
