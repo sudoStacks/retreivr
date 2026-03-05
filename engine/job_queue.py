@@ -2244,6 +2244,7 @@ class DownloadWorkerEngine:
                     mb_youtube_urls=mb_youtube_urls,
                     recording_mbid=recording_mbid,
                     is_ep_release=is_ep_release,
+                    prefer_music_video=str(getattr(job, "media_type", "") or "").strip().lower() == "video",
                 )
             except Exception as exc:
                 self._metric_record_resolve_latency((time.perf_counter() - search_started) * 1000.0)
@@ -6933,6 +6934,8 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
     track = meta.get("track")
     track_number = meta.get("track_number")
     disc = meta.get("disc")
+    if disc is None:
+        disc = meta.get("disc_number")
     release_date = meta.get("release_date")
     upload_date = meta.get("upload_date") or ""
     description = meta.get("description") or ""
@@ -7017,30 +7020,38 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
     def _add_common_metadata(cmd_list: list[str]):
         if title:
             cmd_list.extend(["-metadata", f"title={title}"])
+            cmd_list.extend(["-metadata", f"TITLE={title}"])
         if artist:
             cmd_list.extend(["-metadata", f"artist={artist}"])
+            cmd_list.extend(["-metadata", f"ARTIST={artist}"])
         if album:
             cmd_list.extend(["-metadata", f"album={album}"])
+            cmd_list.extend(["-metadata", f"ALBUM={album}"])
         if album_artist:
             cmd_list.extend(["-metadata", f"album_artist={album_artist}"])
+            cmd_list.extend(["-metadata", f"ALBUMARTIST={album_artist}"])
         if track:
             # Track name
             cmd_list.extend(["-metadata", f"track={track}"])
+            cmd_list.extend(["-metadata", f"TRACK={track}"])
         if track_number is not None:
             # Prefer common track number tag in a safe form
             try:
                 tn = int(track_number)
                 cmd_list.extend(["-metadata", f"track_number={tn}"])
+                cmd_list.extend(["-metadata", f"TRACKNUMBER={tn}"])
             except Exception:
                 pass
         if disc is not None:
             try:
                 dn = int(disc)
                 cmd_list.extend(["-metadata", f"disc={dn}"])
+                cmd_list.extend(["-metadata", f"DISCNUMBER={dn}"])
             except Exception:
                 pass
         if date_tag:
             cmd_list.extend(["-metadata", f"date={date_tag}"])
+            cmd_list.extend(["-metadata", f"DATE={date_tag}"])
         if description:
             cmd_list.extend(["-metadata", f"description={description}"])
         if channel_id:

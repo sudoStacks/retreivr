@@ -369,6 +369,69 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         self.assertEqual(best.get("source"), "youtube_music")
         self.assertGreaterEqual(float(best.get("final_score") or 0.0), 0.78)
 
+    def test_music_video_prefers_official_channel_when_official_tag_not_from_official_channel(self):
+        service = self._service(
+            {
+                "youtube": [
+                    _candidate(
+                        source="youtube",
+                        candidate_id="non-authority-official-title",
+                        title="Artist - Song (Official Music Video)",
+                        uploader="Fan Uploads",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=200,
+                        authority_channel_match=False,
+                    ),
+                    _candidate(
+                        source="youtube",
+                        candidate_id="authority-channel",
+                        title="Artist - Song",
+                        uploader="Artist",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=200,
+                        authority_channel_match=True,
+                    ),
+                ],
+            }
+        )
+        best = service.search_music_track_best_match(
+            "Artist",
+            "Song",
+            album="Album",
+            duration_ms=200000,
+            limit=6,
+            prefer_music_video=True,
+        )
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "authority-channel")
+
+    def test_music_video_prefers_official_title_from_official_channel_first(self):
+        service = self._service({"youtube": []})
+        authority_generic = {
+            "candidate_id": "authority-generic",
+            "source": "youtube",
+            "title": "Artist - Song",
+            "authority_channel_match": True,
+            "final_score": 0.95,
+        }
+        authority_official = {
+            "candidate_id": "authority-official-video",
+            "source": "youtube",
+            "title": "Artist - Song (Official Video)",
+            "authority_channel_match": True,
+            "final_score": 0.90,
+        }
+        picked = service._prefer_music_video_candidate(  # noqa: SLF001
+            [authority_generic, authority_official],
+            [authority_generic, authority_official],
+        )
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked.get("candidate_id"), "authority-official-video")
+
     def test_select_best_candidate_tie_break_order(self):
         candidates = [
             {

@@ -1729,7 +1729,62 @@ class SearchResolutionService:
                         f"[MUSIC] penalizing token={token} new_score={adjustment:.0f} "
                         f"for {candidate.get('url')}"
                     )
+        if bool(expected.get("prefer_music_video")):
+            source_lower = source.strip().lower()
+            is_youtube_family = source_lower in {"youtube", "youtube_music"}
+            authority_match = bool(candidate.get("authority_channel_match"))
+            has_official_video = ("official music video" in title_lower) or ("official video" in title_lower)
+            if is_youtube_family and authority_match and has_official_video:
+                adjustment += 18.0
+                reasons.append("mv_official_channel_official_title")
+            elif is_youtube_family and authority_match:
+                adjustment += 12.0
+                reasons.append("mv_official_channel")
+            elif has_official_video:
+                adjustment += 4.0
+                reasons.append("mv_official_title")
+            if "lyric" in title_lower or "visualizer" in title_lower:
+                adjustment -= 8.0
+                reasons.append("mv_non_primary_variant")
+            if "provided to youtube" in title_lower or "topic" in uploader.lower():
+                adjustment -= 6.0
+                reasons.append("mv_topic_audio_penalty")
         return adjustment, reasons
+
+    def _music_video_priority_bucket(self, candidate):
+        if not isinstance(candidate, dict):
+            return 0
+        source_lower = str(candidate.get("source") or "").strip().lower()
+        is_youtube_family = source_lower in {"youtube", "youtube_music"}
+        authority_match = bool(candidate.get("authority_channel_match"))
+        title_lower = str(candidate.get("title") or "").strip().lower()
+        has_official_video = ("official music video" in title_lower) or ("official video" in title_lower)
+        if is_youtube_family and authority_match and has_official_video:
+            return 3
+        if is_youtube_family and authority_match:
+            return 2
+        return 1
+
+    def _prefer_music_video_candidate(self, eligible, ranked):
+        if not eligible:
+            return None
+        index_map = {}
+        for idx, candidate in enumerate(ranked or []):
+            candidate_id = str(candidate.get("candidate_id") or "").strip()
+            if candidate_id and candidate_id not in index_map:
+                index_map[candidate_id] = idx
+        source_priority = {name: idx for idx, name in enumerate(MUSIC_TRACK_SOURCE_PRIORITY_WITH_MB)}
+        ordered = sorted(
+            eligible,
+            key=lambda candidate: (
+                -int(self._music_video_priority_bucket(candidate)),
+                -float(candidate.get("final_score") or 0.0),
+                int(source_priority.get(str(candidate.get("source") or "").strip().lower(), 999)),
+                int(index_map.get(str(candidate.get("candidate_id") or "").strip(), 99999)),
+                str(candidate.get("candidate_id") or ""),
+            ),
+        )
+        return ordered[0] if ordered else None
 
     def _build_music_track_query(self, artist, track, album=None, *, is_ep_release: bool = False):
         ladder = self._build_music_track_query_ladder(artist, track, album, is_ep_release=is_ep_release)
@@ -2456,6 +2511,7 @@ class SearchResolutionService:
 
     def rank_and_gate(self, ctx, candidates) -> MusicTrackSelectionResult:
         expected_base = dict((ctx or {}).get("expected_base") or {})
+        prefer_music_video = bool(expected_base.get("prefer_music_video"))
         coherence_key = (ctx or {}).get("coherence_key")
         query_label = str((ctx or {}).get("query_label") or "")
         rung = int((ctx or {}).get("rung") or 0)
@@ -2558,7 +2614,11 @@ class SearchResolutionService:
             if not c.get("rejection_reason")
             and float(c.get("final_score", 0.0)) >= float(self.music_source_match_threshold)
         ]
-        selected_a = eligible_a[0] if eligible_a else None
+        selected_a = (
+            self._prefer_music_video_candidate(eligible_a, ranked_a)
+            if prefer_music_video
+            else (eligible_a[0] if eligible_a else None)
+        )
         if selected_a is not None:
             selected = selected_a
             ranked_selected = ranked_a
@@ -2733,7 +2793,11 @@ class SearchResolutionService:
                     )
                 continue
             eligible_b.append(candidate)
-        selected_b = eligible_b[0] if eligible_b else None
+        selected_b = (
+            self._prefer_music_video_candidate(eligible_b, ranked_b)
+            if prefer_music_video
+            else (eligible_b[0] if eligible_b else None)
+        )
         if selected_b is not None:
             selected = selected_b
             ranked_selected = ranked_b
@@ -2828,6 +2892,7 @@ class SearchResolutionService:
         mb_youtube_urls=None,
         recording_mbid=None,
         is_ep_release=False,
+        prefer_music_video=False,
     ):
         expected_duration_hint_sec = (int(duration_ms) // 1000) if duration_ms is not None else None
         ladder = self._build_music_track_query_ladder(artist, track, album, is_ep_release=bool(is_ep_release))
@@ -2929,6 +2994,7 @@ class SearchResolutionService:
                 "variant_allow_tokens": {"live"} if self._music_track_is_live(artist, track, album) else set(),
                 "track_aliases": normalized_aliases,
                 "track_disambiguation": normalized_disambiguation,
+                "prefer_music_video": bool(prefer_music_video),
             }
             candidates = self.retrieve_candidates(
                 {
@@ -3090,6 +3156,7 @@ class SearchResolutionService:
                 "selected_candidate_variant_tags": sorted({str(tag) for tag in (decision_selected_variant_tags or []) if str(tag or "").strip()}),
                 "top_rejected_variant_tags": list(decision_top_rejected_variant_tags or []),
             },
+            "prefer_music_video": bool(prefer_music_video),
         }
         ranked = selected_ranked
         if self.debug_music_scoring:

@@ -1007,12 +1007,6 @@ body.home-page .home-source-panel .home-source-pill.selected {
   color: #f87171;
 }
 
-.home-result-badge.music-video-hint {
-  font-size: 11px;
-  padding: 3px 10px;
-  text-transform: none;
-}
-
 .music-card-click-target {
   cursor: pointer;
 }
