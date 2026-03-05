@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-13">
-  <script defer src="app.js?v=0.9.7-ui-13"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-15">
+  <script defer src="app.js?v=0.9.7-ui-15"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -24,7 +24,7 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
-      <button class="button ghost small nav-button" data-page="advanced" type="button">Info</button>
+      <button class="button ghost small nav-button" data-page="advanced" type="button">Advanced</button>
       <button class="button ghost small nav-button" data-page="status" type="button">Status</button>
       <button class="button ghost small nav-button" data-page="config" type="button">Config</button>
       <div id="nav-actions" class="nav-actions"></div>
@@ -599,12 +599,12 @@
 
       <div class="group">
         <div class="group-title">Scheduler</div>
-        <div class="row">
+        <div class="scheduler-controls">
           <label class="field inline">
             <span>Enabled</span>
             <input id="schedule-enabled" type="checkbox">
           </label>
-          <label class="field inline short">
+          <label class="field short">
             <span>Interval (hours)</span>
             <input id="schedule-interval" type="number" min="1" step="1" value="6">
           </label>
@@ -613,14 +613,14 @@
             <input id="schedule-startup" type="checkbox">
           </label>
         </div>
-        <div class="row">
+        <div class="scheduler-actions">
           <button id="schedule-save" class="button">Save Schedule</button>
           <button id="schedule-run-now" class="button ghost">Run now</button>
         </div>
-        <div class="row">
+        <div class="scheduler-message-row">
           <div id="schedule-message" class="notice" role="status"></div>
         </div>
-        <div class="row">
+        <div class="scheduler-status-row">
           <div class="stat">
             <span class="label">Last run</span>
             <span id="schedule-last-run">-</span>

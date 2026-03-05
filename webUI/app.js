@@ -139,7 +139,7 @@ function normalizePageName(page) {
     return "home";
   }
   const cleanPage = String(page).split("?")[0] || page;
-  if (cleanPage === "search") {
+  if (cleanPage === "search" || cleanPage === "info") {
     return "advanced";
   }
   if (["downloads", "history", "logs"].includes(cleanPage)) {

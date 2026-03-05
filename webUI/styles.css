@@ -1792,6 +1792,41 @@ a[aria-disabled="true"] {
   margin-top: 6px;
 }
 
+.scheduler-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.scheduler-controls .field {
+  min-width: 0;
+  max-width: none;
+}
+
+.scheduler-controls .field.inline {
+  justify-content: flex-start;
+}
+
+.scheduler-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.scheduler-message-row {
+  min-height: 20px;
+  margin-top: 2px;
+}
+
+.scheduler-status-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 6px;
+}
+
 .account-actions {
   display: flex;
   gap: 8px;
