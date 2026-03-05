@@ -28,14 +28,22 @@ This release adds cache-first acceleration for both metadata-first music resolut
   - cached search candidates are injected immediately as source-visible candidates
   - adapter results continue to stream in as they complete
   - cache failures degrade gracefully and never block request/resolution flow
+- Homepage/music search result card UX:
+  - music result cards now support artwork thumbnails (album + artist contexts) with loading/placeholder behavior
+  - album cards include `View Tracks`; track listings render in track-number order with track number shown
+  - music search UX supports Enter-key submit and improved card metadata visibility (MB IDs on music entities)
 - Candidate dedupe behavior improved:
   - preserves canonical transport identity dedupe while merging provenance/richer metadata deterministically
+  - adapter-returned candidates are deduped against already-seeded local cache candidates to avoid duplicate rows in progressive results
 - Config defaults and schema support expanded for:
   - community cache lookup/publish controls
   - local search cache controls
   - backward-compatible default application for missing keys
 
 ### Fixed
+- Search safety hardening for restricted content:
+  - age-restricted/auth-gated YouTube entries are filtered from adapter result normalization where restriction metadata is present
+  - restricted entries are also filtered out from local search-cache seed replay
 - Telegram run-summary hardening:
   - scheduler/watcher headers clarified by run type
   - downloaded item labels prefer track/title evidence and avoid leaking opaque job IDs
