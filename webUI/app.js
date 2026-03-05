@@ -30,6 +30,7 @@ const state = {
   homeQueuedAlbumReleaseGroups: new Set(),
   homeAlbumCoverCache: {},
   homeArtistCoverCache: {},
+  homeMusicRenderToken: 0,
   homeMusicResultMap: {},
   homeRequestContext: {},
   homeBestScores: {},
@@ -195,6 +196,32 @@ function toUserErrorMessage(err, fallback = "Unexpected error") {
     // Best effort only.
   }
   return fallback;
+}
+
+function runPrioritizedThumbnailJobs(jobs, renderToken, maxConcurrent = 4) {
+  const tasks = Array.isArray(jobs) ? jobs.filter((job) => typeof job === "function") : [];
+  if (!tasks.length) {
+    return;
+  }
+  const concurrency = Math.max(1, Math.min(maxConcurrent, tasks.length));
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= tasks.length) {
+        return;
+      }
+      try {
+        await tasks[index](renderToken);
+      } catch (_err) {
+        // Thumbnail hydration is best-effort only.
+      }
+    }
+  };
+  for (let i = 0; i < concurrency; i += 1) {
+    worker();
+  }
 }
 
 function triggerClientDeliveryDownload(downloadUrl, filename = "") {
@@ -2540,6 +2567,8 @@ function renderMusicModeResults(response, query = "") {
     return;
   }
   state.homeMusicResultMap = {};
+  const renderToken = ++state.homeMusicRenderToken;
+  const thumbnailJobs = [];
   container.innerHTML = "";
   setHomeSearchActive(false);
   stopHomeResultPolling();
@@ -2573,7 +2602,7 @@ function renderMusicModeResults(response, query = "") {
     appendSection("Artists");
     artists.forEach((artistItem) => {
       const card = document.createElement("article");
-      card.className = "home-result-card";
+      card.className = "home-result-card music-meta-card";
       const artistThumb = document.createElement("img");
       artistThumb.className = "music-card-thumb";
       artistThumb.alt = artistItem?.name ? `${artistItem.name} artwork` : "Artist artwork";
@@ -2586,19 +2615,22 @@ function renderMusicModeResults(response, query = "") {
       const title = document.createElement("div");
       title.className = "home-candidate-title";
       title.textContent = artistItem?.name || "";
-      card.appendChild(title);
+      const content = document.createElement("div");
+      content.className = "music-meta-main";
+      content.appendChild(title);
       const meta = document.createElement("div");
       meta.className = "home-candidate-meta";
       const metaParts = [];
       if (artistItem?.country) metaParts.push(String(artistItem.country));
       if (artistItem?.disambiguation) metaParts.push(String(artistItem.disambiguation));
       meta.textContent = metaParts.join(" • ");
-      card.appendChild(meta);
+      content.appendChild(meta);
       const artistRef = document.createElement("div");
       artistRef.className = "home-mb-entity-ref";
       const artistMbid = String(artistItem?.artist_mbid || "").trim();
       artistRef.textContent = artistMbid ? `MB: artist ${artistMbid}` : "MB: artist (unknown)";
-      card.appendChild(artistRef);
+      content.appendChild(artistRef);
+      card.appendChild(content);
       const action = document.createElement("div");
       action.className = "home-candidate-action";
       const button = document.createElement("button");
@@ -2639,12 +2671,17 @@ function renderMusicModeResults(response, query = "") {
 
       const artistMbidValue = String(artistItem?.artist_mbid || "").trim();
       if (artistMbidValue) {
-        const cachedCover = state.homeArtistCoverCache[artistMbidValue];
-        if (cachedCover) {
-          artistThumb.src = cachedCover;
-          artistThumb.classList.add("loaded");
+        if (Object.prototype.hasOwnProperty.call(state.homeArtistCoverCache, artistMbidValue)) {
+          const cachedCover = state.homeArtistCoverCache[artistMbidValue];
+          if (cachedCover) {
+            artistThumb.src = cachedCover;
+            artistThumb.classList.add("loaded");
+          }
         } else {
-          setTimeout(async () => {
+          thumbnailJobs.push(async (activeToken) => {
+            if (state.homeMusicRenderToken !== activeToken) {
+              return;
+            }
             try {
               const albums = await fetchMusicAlbumsByArtist({
                 name: String(artistItem?.name || "").trim(),
@@ -2662,12 +2699,15 @@ function renderMusicModeResults(response, query = "") {
                 return;
               }
               state.homeArtistCoverCache[artistMbidValue] = coverUrl;
+              if (state.homeMusicRenderToken !== activeToken) {
+                return;
+              }
               artistThumb.src = coverUrl;
               artistThumb.classList.add("loaded");
             } catch (_err) {
               state.homeArtistCoverCache[artistMbidValue] = null;
             }
-          }, 0);
+          });
         }
       }
     });
@@ -2678,7 +2718,7 @@ function renderMusicModeResults(response, query = "") {
     albums.forEach((albumItem) => {
       const releaseGroupMbid = String(albumItem?.release_group_mbid || "").trim();
       const card = document.createElement("article");
-      card.className = "home-result-card album-card";
+      card.className = "home-result-card album-card music-meta-card";
       card.dataset.releaseGroupMbid = releaseGroupMbid;
       const albumThumb = document.createElement("img");
       albumThumb.className = "music-card-thumb";
@@ -2689,19 +2729,22 @@ function renderMusicModeResults(response, query = "") {
         albumThumb.removeAttribute("src");
       });
       card.appendChild(albumThumb);
+      const content = document.createElement("div");
+      content.className = "music-meta-main";
       const title = document.createElement("div");
       title.className = "home-candidate-title";
       title.textContent = albumItem?.title || "";
-      card.appendChild(title);
+      content.appendChild(title);
       const meta = document.createElement("div");
       meta.className = "home-candidate-meta";
       const year = albumItem?.release_year ? ` (${albumItem.release_year})` : "";
       meta.textContent = `${albumItem?.artist || ""}${year}`;
-      card.appendChild(meta);
+      content.appendChild(meta);
       const albumRef = document.createElement("div");
       albumRef.className = "home-mb-entity-ref";
       albumRef.textContent = releaseGroupMbid ? `MB: release-group ${releaseGroupMbid}` : "MB: release-group (unknown)";
-      card.appendChild(albumRef);
+      content.appendChild(albumRef);
+      card.appendChild(content);
       const action = document.createElement("div");
       action.className = "home-candidate-action";
       const viewTracksButton = document.createElement("button");
@@ -2778,16 +2821,26 @@ function renderMusicModeResults(response, query = "") {
       container.appendChild(card);
 
       if (releaseGroupMbid) {
-        setTimeout(async () => {
-          const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
-          if (coverUrl) {
-            albumThumb.src = coverUrl;
+        if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid)) {
+          const cachedCover = state.homeAlbumCoverCache[releaseGroupMbid];
+          if (cachedCover) {
+            albumThumb.src = cachedCover;
             albumThumb.classList.add("loaded");
           }
-        }, 0);
+        } else {
+          thumbnailJobs.push(async (activeToken) => {
+            const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
+            if (!coverUrl || state.homeMusicRenderToken !== activeToken) {
+              return;
+            }
+            albumThumb.src = coverUrl;
+            albumThumb.classList.add("loaded");
+          });
+        }
       }
     });
   }
+  runPrioritizedThumbnailJobs(thumbnailJobs, renderToken, 4);
 
   if (tracks.length) {
     appendSection("Tracks");

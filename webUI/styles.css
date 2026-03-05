@@ -828,6 +828,24 @@ body.home-page .home-candidate-title {
   display: block;
 }
 
+.music-meta-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.music-meta-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.music-meta-card .home-candidate-action {
+  margin-left: auto;
+}
+
 body.home-page .home-candidate-source-tag {
   display: inline-flex;
   align-items: center;
