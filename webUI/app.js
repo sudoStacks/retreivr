@@ -3939,10 +3939,6 @@ function updateHomeResultItemCard(card, item) {
   } else if (header) {
     header.appendChild(newBadge);
   }
-  const detail = card.querySelector(".home-candidate-title");
-  if (detail) {
-    detail.textContent = `Source: ${item.media_type || "generic"} · ${item.position ? `Item ${item.position}` : ""}`.trim();
-  }
   const resolvedDestination = state.homeRequestContext[item.request_id]?.request?.resolved_destination;
   let destinationEl = card.querySelector(".home-result-destination");
   if (resolvedDestination) {
