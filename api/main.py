@@ -6617,6 +6617,152 @@ def music_albums_search(
     return _search_music_album_candidates(str(q or ""), limit=int(limit))
 
 
+@app.get("/api/music/albums/{release_group_mbid}/tracks")
+def music_album_tracks(
+    release_group_mbid: str,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    group_id = str(release_group_mbid or "").strip()
+    if not group_id:
+        raise HTTPException(status_code=400, detail="release_group_mbid required")
+
+    mb = _mb_service()
+    try:
+        release_group_payload = mb._call_with_retry(  # noqa: SLF001
+            lambda: musicbrainzngs.get_release_group_by_id(
+                group_id,
+                includes=["releases"],
+            )
+        )
+    except Exception:
+        logging.exception("music_album_tracks release-group fetch failed release_group_mbid=%s", group_id)
+        raise HTTPException(status_code=502, detail="musicbrainz_release_group_fetch_failed")
+
+    release_group = release_group_payload.get("release-group", {}) if isinstance(release_group_payload, dict) else {}
+    releases = release_group.get("release-list", []) if isinstance(release_group, dict) else []
+    release_dicts = [entry for entry in releases if isinstance(entry, dict)]
+    if not release_dicts:
+        return {
+            "release_group_mbid": group_id,
+            "release_mbid": None,
+            "tracks": [],
+        }
+
+    official = [rel for rel in release_dicts if str(rel.get("status") or "").strip().lower() == "official"]
+    us_official = [rel for rel in official if str(rel.get("country") or "").strip().upper() == "US"]
+    selected_release = us_official[0] if us_official else (official[0] if official else release_dicts[0])
+    release_mbid = str(selected_release.get("id") or "").strip()
+    if not release_mbid:
+        return {
+            "release_group_mbid": group_id,
+            "release_mbid": None,
+            "tracks": [],
+        }
+
+    try:
+        release_payload = mb._call_with_retry(  # noqa: SLF001
+            lambda: musicbrainzngs.get_release_by_id(
+                release_mbid,
+                includes=["recordings", "media", "artists"],
+            )
+        )
+    except Exception:
+        logging.exception("music_album_tracks release fetch failed release_mbid=%s", release_mbid)
+        raise HTTPException(status_code=502, detail="musicbrainz_release_fetch_failed")
+
+    release = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
+    release_title = str(release.get("title") or "").strip()
+    release_date = str(release.get("date") or "").strip()
+    release_year = release_date[:4] if len(release_date) >= 4 and release_date[:4].isdigit() else None
+    media = release.get("medium-list", []) if isinstance(release, dict) else []
+    if not isinstance(media, list):
+        media = []
+
+    def _credit_name(artist_credit):
+        if not isinstance(artist_credit, list):
+            return ""
+        parts = []
+        for item in artist_credit:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            artist_obj = item.get("artist") if isinstance(item.get("artist"), dict) else {}
+            name = str(item.get("name") or artist_obj.get("name") or "").strip()
+            joinphrase = str(item.get("joinphrase") or "")
+            if name:
+                parts.append(name)
+            if joinphrase:
+                parts.append(joinphrase)
+        return "".join(parts).strip()
+
+    release_artist = _credit_name(release.get("artist-credit"))
+    tracks: list[dict[str, object]] = []
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        try:
+            disc_number = int(medium.get("position")) if medium.get("position") is not None else 1
+        except Exception:
+            disc_number = 1
+        track_list = medium.get("track-list", []) if isinstance(medium.get("track-list"), list) else []
+        for track in track_list:
+            if not isinstance(track, dict):
+                continue
+            recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+            recording_mbid = str(recording.get("id") or "").strip()
+            title = str(track.get("title") or recording.get("title") or "").strip()
+            if not recording_mbid or not title:
+                continue
+            try:
+                track_number = int(track.get("position")) if track.get("position") is not None else None
+            except Exception:
+                track_number = None
+            duration_ms = None
+            for value in (recording.get("length"), track.get("length")):
+                try:
+                    parsed = int(value)
+                except Exception:
+                    parsed = None
+                if parsed and parsed > 0:
+                    duration_ms = parsed
+                    break
+            artist_name = (
+                _credit_name(recording.get("artist-credit"))
+                or _credit_name(track.get("artist-credit"))
+                or release_artist
+                or None
+            )
+            tracks.append(
+                {
+                    "recording_mbid": recording_mbid,
+                    "release_mbid": release_mbid,
+                    "release_group_mbid": group_id,
+                    "artist": artist_name,
+                    "track": title,
+                    "album": release_title or None,
+                    "release_year": release_year,
+                    "track_number": track_number,
+                    "disc_number": disc_number,
+                    "duration_ms": duration_ms,
+                }
+            )
+
+    tracks.sort(
+        key=lambda item: (
+            int(item.get("disc_number") or 0),
+            int(item.get("track_number") or 0),
+            str(item.get("track") or ""),
+        )
+    )
+    return {
+        "release_group_mbid": group_id,
+        "release_mbid": release_mbid,
+        "tracks": tracks[: int(limit)],
+    }
+
+
 @app.get("/api/music/search")
 def music_search(
     artist: str = Query(""),

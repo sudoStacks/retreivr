@@ -3325,6 +3325,19 @@ async function fetchMusicTracksByAlbum({ artist = "", album = "", releaseGroupMb
   const albumQuery = String(album || "").trim();
   const rgMbid = String(releaseGroupMbid || "").trim();
   const cappedLimit = Number.isFinite(Number(limit)) ? Math.min(100, Math.max(1, Number(limit))) : 100;
+  if (rgMbid) {
+    try {
+      const payload = await fetchJson(
+        `/api/music/albums/${encodeURIComponent(rgMbid)}/tracks?limit=${cappedLimit}`
+      );
+      const normalizedTracks = normalizeMusicSearchResults(payload?.tracks);
+      if (normalizedTracks.length) {
+        return normalizedTracks;
+      }
+    } catch (_err) {
+      // Fall back to legacy search query path.
+    }
+  }
   if (!artistQuery && !albumQuery) {
     return [];
   }
