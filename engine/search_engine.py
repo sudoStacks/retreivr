@@ -1753,6 +1753,12 @@ class SearchResolutionService:
             if "provided to youtube" in title_lower or "topic" in uploader.lower():
                 adjustment -= 6.0
                 reasons.append("mv_topic_audio_penalty")
+            if "official audio" in title_lower:
+                adjustment -= 18.0
+                reasons.append("mv_official_audio_penalty")
+            elif " audio" in title_lower and not has_official_video:
+                adjustment -= 12.0
+                reasons.append("mv_audio_penalty")
         return adjustment, reasons
 
     def _music_video_authority_like(self, candidate, expected_base=None):
@@ -1878,6 +1884,56 @@ class SearchResolutionService:
             seen.add(query)
             unique_ladder.append(entry)
         return unique_ladder
+
+    def _build_music_video_query_ladder(self, artist, track, album=None, *, is_ep_release: bool = False):
+        artist_v = str(artist or "").strip()
+        track_v = str(track or "").strip()
+        album_v = str(album or "").strip()
+        base_ladder = self._build_music_track_query_ladder(
+            artist,
+            track,
+            album,
+            is_ep_release=is_ep_release,
+        )
+        prefixed = [
+            {
+                "rung": -3,
+                "label": "mv_official_music_video",
+                "query": " ".join(
+                    part for part in [f'"{artist_v}"', f'"{track_v}"', '"official music video"'] if part
+                ).strip(),
+            },
+            {
+                "rung": -2,
+                "label": "mv_official_video",
+                "query": " ".join(
+                    part for part in [f'"{artist_v}"', f'"{track_v}"', '"official video"'] if part
+                ).strip(),
+            },
+            {
+                "rung": -1,
+                "label": "mv_artist_track_video",
+                "query": " ".join(
+                    part for part in [artist_v, track_v, "music video"] if part
+                ).strip(),
+            },
+            {
+                "rung": 0,
+                "label": "mv_official_music_video_with_album",
+                "query": " ".join(
+                    part for part in [f'"{artist_v}"', f'"{track_v}"', f'"{album_v}"' if album_v else "", '"official music video"'] if part
+                ).strip(),
+            },
+        ]
+        seen = set()
+        merged = []
+        for entry in prefixed + list(base_ladder):
+            query = str(entry.get("query") or "").strip()
+            if not query or query in seen:
+                continue
+            seen.add(query)
+            merged.append(entry)
+        return merged
 
     def _build_search_cache_query(self, item, request_row):
         if not isinstance(item, dict):
@@ -2916,7 +2972,11 @@ class SearchResolutionService:
         prefer_music_video=False,
     ):
         expected_duration_hint_sec = (int(duration_ms) // 1000) if duration_ms is not None else None
-        ladder = self._build_music_track_query_ladder(artist, track, album, is_ep_release=bool(is_ep_release))
+        ladder = (
+            self._build_music_video_query_ladder(artist, track, album, is_ep_release=bool(is_ep_release))
+            if bool(prefer_music_video)
+            else self._build_music_track_query_ladder(artist, track, album, is_ep_release=bool(is_ep_release))
+        )
         coherence_key = self._coherence_context_key(coherence_context)
         normalized_aliases = []
         if isinstance(track_aliases, (list, tuple, set)):

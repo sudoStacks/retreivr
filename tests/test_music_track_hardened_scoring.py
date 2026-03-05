@@ -459,6 +459,61 @@ class MusicTrackHardenedScoringTests(unittest.TestCase):
         self.assertIsNotNone(picked)
         self.assertEqual(picked.get("candidate_id"), "official-video")
 
+    def test_music_video_query_ladder_prioritizes_official_video_rungs(self):
+        mv_rung = '"Artist" "Song" "official music video"'
+        canonical_rung = '"Artist" "Song" "Album"'
+        adapter = _QueryAwareAdapter(
+            "youtube",
+            {
+                mv_rung: [
+                    _candidate(
+                        source="youtube",
+                        candidate_id="mv-hit",
+                        title="Artist - Song (Official Music Video)",
+                        uploader="Artist",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=200,
+                        authority_channel_match=True,
+                    )
+                ],
+                canonical_rung: [
+                    _candidate(
+                        source="youtube",
+                        candidate_id="audio-hit",
+                        title="Artist - Song (Official Audio)",
+                        uploader="Artist - Topic",
+                        artist="Artist",
+                        track="Song",
+                        album="Album",
+                        duration_sec=200,
+                        authority_channel_match=False,
+                    )
+                ],
+            },
+        )
+        service = self.se.SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"youtube": adapter},
+            config={},
+            paths=None,
+            canonical_resolver=_StubCanonicalResolver(),
+        )
+        best = service.search_music_track_best_match(
+            "Artist",
+            "Song",
+            album="Album",
+            duration_ms=200000,
+            limit=6,
+            prefer_music_video=True,
+        )
+        self.assertIsNotNone(best)
+        self.assertEqual(best.get("candidate_id"), "mv-hit")
+        self.assertGreaterEqual(len(adapter.calls), 1)
+        self.assertEqual(adapter.calls[0], mv_rung)
+
     def test_select_best_candidate_tie_break_order(self):
         candidates = [
             {
