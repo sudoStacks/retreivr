@@ -1816,24 +1816,45 @@ class SearchResolutionService:
 
     def _search_cache_key_for_item(self, item, request_row):
         query = self._build_search_cache_query(item, request_row)
+        return self._search_cache_key_for_query(query, request_row, item_type=(item or {}).get("item_type")), query
+
+    def _search_cache_key_for_query(self, query, request_row, *, item_type):
         media_type = str((request_row or {}).get("media_type") or "generic").strip().lower()
         source_priority = _parse_source_priority((request_row or {}).get("source_priority_json"))
         key_payload = {
-            "query": query.lower(),
+            "query": str(query or "").strip().lower(),
             "media_type": media_type,
             "sources": [str(s).strip().lower() for s in source_priority if str(s).strip()],
-            "item_type": str((item or {}).get("item_type") or "").strip().lower(),
+            "item_type": str(item_type or "").strip().lower(),
         }
-        return hashlib.sha1(safe_json_dumps(key_payload, sort_keys=True).encode("utf-8")).hexdigest(), query
+        return hashlib.sha1(safe_json_dumps(key_payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _build_search_cache_alias_query(self, item):
+        if not isinstance(item, dict):
+            return ""
+        track = str(item.get("track") or "").strip()
+        return track
 
     def _search_cache_candidates_for_item(self, item, request_row, *, limit):
-        cache_key, _query = self._search_cache_key_for_item(item, request_row)
+        cache_key, query = self._search_cache_key_for_item(item, request_row)
         try:
             rows = self.store.list_search_cache(
                 cache_key=cache_key,
                 max_age_seconds=self._search_cache_ttl_seconds(),
                 limit=max(1, int(limit)),
             )
+            alias_query = self._build_search_cache_alias_query(item)
+            if not rows and alias_query and alias_query.strip().lower() != str(query or "").strip().lower():
+                alias_key = self._search_cache_key_for_query(
+                    alias_query,
+                    request_row,
+                    item_type=(item or {}).get("item_type"),
+                )
+                rows = self.store.list_search_cache(
+                    cache_key=alias_key,
+                    max_age_seconds=self._search_cache_ttl_seconds(),
+                    limit=max(1, int(limit)),
+                )
         except Exception as exc:
             _log_event(
                 logging.WARNING,
@@ -1975,6 +1996,25 @@ class SearchResolutionService:
                 media_type=str((request_row or {}).get("media_type") or "generic"),
                 candidates=top_ranked,
             )
+            alias_seen = set()
+            item_type = str((item or {}).get("item_type") or "").strip().lower()
+            for candidate in top_ranked:
+                title_query = str(candidate.get("title") or "").strip()
+                title_query_key = title_query.lower()
+                if not title_query or title_query_key in alias_seen:
+                    continue
+                alias_seen.add(title_query_key)
+                alias_cache_key = self._search_cache_key_for_query(
+                    title_query,
+                    request_row,
+                    item_type=item_type,
+                )
+                self.store.replace_search_cache(
+                    cache_key=alias_cache_key,
+                    query_text=title_query,
+                    media_type=str((request_row or {}).get("media_type") or "generic"),
+                    candidates=[candidate],
+                )
             self.store.enforce_search_cache_max_entries(max_entries=self.search_cache_max_entries)
             _log_event(
                 logging.INFO,

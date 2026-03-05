@@ -453,6 +453,47 @@ class SearchResolutionTests(unittest.TestCase):
             )
         self.assertEqual(captured["count"], 30)
 
+    def test_search_cache_title_query_reuses_alias_seed(self):
+        service = SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters={"stub": StubAdapter()},
+            config={"search_cache_enabled": True},
+            paths=self.paths,
+            canonical_resolver=StubCanonicalResolver(),
+        )
+        request_row = {
+            "id": "req-1",
+            "media_type": "generic",
+            "source_priority_json": '["stub"]',
+            "max_candidates_per_source": 5,
+        }
+        broad_item = {"id": "item-1", "item_type": "track", "artist": "libra", "track": "libra"}
+        ranked = [
+            {
+                "candidate_id": "cand-1",
+                "source": "stub",
+                "url": "https://example.test/media/exact-song",
+                "title": "Exact Song Title",
+                "uploader": "Example Artist",
+                "duration_sec": 200,
+            }
+        ]
+        service._refresh_search_cache_for_item(  # type: ignore[attr-defined]
+            request_row,
+            broad_item,
+            ranked,
+        )
+        title_item = {"id": "item-2", "item_type": "track", "artist": "Exact Song Title", "track": "Exact Song Title"}
+        seeded = service._search_cache_candidates_for_item(  # type: ignore[attr-defined]
+            title_item,
+            request_row,
+            limit=5,
+        )
+        self.assertEqual(len(seeded), 1)
+        self.assertEqual(seeded[0].get("url"), "https://example.test/media/exact-song")
+        self.assertTrue(bool(seeded[0].get("search_cache_seeded")))
+
 
 if __name__ == "__main__":
     unittest.main()
