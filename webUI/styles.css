@@ -498,25 +498,6 @@ body.home-page .music-mode-toggle {
   width: fit-content;
 }
 
-body.home-page .music-search-max-candidates {
-  flex: 0 0 auto;
-  width: 132px;
-  max-width: 132px;
-  min-width: 132px;
-}
-
-body.home-page .music-search-options-row .music-search-max-candidates {
-  width: 132px;
-  max-width: 132px;
-  min-width: 132px;
-}
-
-body.home-page .music-search-max-candidates input {
-  width: 100%;
-  min-width: 0;
-  text-align: center;
-}
-
 body.home-page .music-search-video-format {
   flex: 0 0 auto;
   width: 132px;
@@ -2195,14 +2176,10 @@ a[aria-disabled="true"] {
 
   body.home-page .music-search-options-row > .field,
   body.home-page .music-search-options-row .music-search-mode-field,
-  body.home-page .music-search-options-row .music-search-max-candidates {
+  body.home-page .music-search-options-row .music-search-video-format {
     width: 100%;
     max-width: none;
     min-width: 0;
-  }
-
-  body.home-page .music-search-max-candidates input {
-    text-align: left;
   }
 
   body.home-page .music-search-force-redownload {

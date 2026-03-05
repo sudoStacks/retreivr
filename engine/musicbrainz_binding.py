@@ -423,7 +423,9 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
     if mode_value not in {"auto", "artist", "album", "track"}:
         mode_value = "auto"
 
-    limit_value = min(max(1, int(limit or 20)), 15)
+    requested_limit = max(1, int(limit or 100))
+    artist_limit = 10
+    catalog_limit = min(requested_limit, 100)
     offset_value = max(0, int(offset or 0))
 
     forced_track_mode = mode_value == "track"
@@ -459,13 +461,14 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
     else:
         route_case = "empty"
 
+    response_limit = artist_limit if resolved_mode == "artist" else catalog_limit
     response = {
         "artists": [],
         "albums": [],
         "tracks": [],
         "mode_used": resolved_mode,
         "offset": offset_value,
-        "limit": limit_value,
+        "limit": response_limit,
     }
     if route_case == "empty":
         return response
@@ -510,12 +513,12 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         payload = _mb_call(
             lambda: musicbrainzngs.search_artists(
                 query=artist_query,
-                limit=limit_value,
+                limit=artist_limit,
                 offset=offset_value,
             )
         )
         artist_list = payload.get("artist-list", []) if isinstance(payload, dict) else []
-        for artist_item in artist_list[:limit_value]:
+        for artist_item in artist_list[:artist_limit]:
             if not isinstance(artist_item, dict):
                 continue
             response["artists"].append(
@@ -545,12 +548,12 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         payload = _mb_call(
             lambda: musicbrainzngs.search_release_groups(
                 query=release_group_query,
-                limit=limit_value,
+                limit=catalog_limit,
                 offset=offset_value,
             )
         )
         group_list = payload.get("release-group-list", []) if isinstance(payload, dict) else []
-        for group in group_list[:limit_value]:
+        for group in group_list[:catalog_limit]:
             if not isinstance(group, dict):
                 continue
             if not _is_allowed_album_release_group_type(group.get("primary-type")):
@@ -596,12 +599,12 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         payload = _mb_call(
             lambda: musicbrainzngs.search_recordings(
                 query=recording_query,
-                limit=limit_value,
+                limit=catalog_limit,
                 offset=offset_value,
             )
         )
         recording_list = payload.get("recording-list", []) if isinstance(payload, dict) else []
-        for recording in recording_list[:limit_value]:
+        for recording in recording_list[:catalog_limit]:
             if not isinstance(recording, dict):
                 continue
             recording_mbid = str(recording.get("id") or "").strip()

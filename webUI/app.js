@@ -2053,7 +2053,8 @@ function buildSearchRequestPayload(sources, { autoEnqueue = true } = {}) {
   const track = $("#search-track").value.trim();
   const intent = $("#search-intent").value || "track";
   const minScoreRaw = parseFloat($("#search-min-score").value);
-  const maxCandidatesRaw = parseInt($("#search-max-candidates").value, 10);
+  const maxCandidatesNode = $("#search-max-candidates");
+  const maxCandidatesRaw = maxCandidatesNode ? parseInt(maxCandidatesNode.value, 10) : NaN;
   const destination = $("#search-destination").value.trim();
 
   return {
@@ -3226,11 +3227,11 @@ async function fetchMusicAlbumsByArtist(artist) {
   return out;
 }
 
-async function fetchMusicTracksByAlbum({ artist = "", album = "", releaseGroupMbid = "", limit = 100 } = {}) {
+async function fetchMusicTracksByAlbum({ artist = "", album = "", releaseGroupMbid = "", limit = 1000 } = {}) {
   const artistQuery = String(artist || "").trim();
   const albumQuery = String(album || "").trim();
   const rgMbid = String(releaseGroupMbid || "").trim();
-  const cappedLimit = Number.isFinite(Number(limit)) ? Math.min(100, Math.max(1, Number(limit))) : 100;
+  const cappedLimit = Number.isFinite(Number(limit)) ? Math.min(1000, Math.max(1, Number(limit))) : 1000;
   if (rgMbid) {
     try {
       const payload = await fetchJson(
@@ -3273,12 +3274,6 @@ async function performMusicModeSearch() {
   const artist = String(document.getElementById("search-artist")?.value || "").trim();
   const album = String(document.getElementById("search-album")?.value || "").trim();
   const track = String(document.getElementById("search-track")?.value || "").trim();
-  const maxCandidatesInput = document.getElementById("search-max-candidates");
-  const rawLimit = parseInt(String(maxCandidatesInput?.value || "10"), 10);
-  const limit = Number.isFinite(rawLimit) ? Math.min(15, Math.max(1, rawLimit)) : 10;
-  if (maxCandidatesInput && String(maxCandidatesInput.value || "") !== String(limit)) {
-    maxCandidatesInput.value = String(limit);
-  }
   const musicModeEnabledNow = !!state.homeMusicMode;
   if (!musicModeEnabledNow) {
     return;
@@ -3297,7 +3292,7 @@ async function performMusicModeSearch() {
   const modeSelect = document.getElementById("music-mode-select");
   const mode = modeSelect ? modeSelect.value : "auto";
   const response = await fetch(
-    `/api/music/search?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}&track=${encodeURIComponent(track)}&mode=${encodeURIComponent(mode)}&offset=0&limit=${limit}`
+    `/api/music/search?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}&track=${encodeURIComponent(track)}&mode=${encodeURIComponent(mode)}&offset=0&limit=100`
   );
   let payload = {};
   try {
@@ -3591,7 +3586,7 @@ function renderHomeAlbumCandidates(candidates, query = "") {
           artist: artistCredit,
           album: albumTitle,
           releaseGroupMbid: releaseGroupId,
-          limit: 100,
+          limit: 1000,
         });
         renderMusicModeResults(
           { artists: [], albums: [], tracks, mode_used: "track" },
