@@ -39,7 +39,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from typing import Optional
 
 import anyio
-from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -413,7 +413,7 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
     return summary
 
 
-def _run_playlist_import_job(job_id: str, filename: str, payload: bytes) -> None:
+def _run_playlist_import_job(job_id: str, filename: str, payload: bytes, media_mode: str = "music") -> None:
     try:
         _update_playlist_import_job(
             job_id,
@@ -472,6 +472,7 @@ def _run_playlist_import_job(job_id: str, filename: str, payload: bytes) -> None
             {
                 "queue_store": queue_store,
                 "app_config": runtime_config,
+                "media_mode": str(media_mode or "music"),
                 "base_dir": app.state.paths.single_downloads_dir,
                 "destination_dir": None,
                 "final_format": runtime_config.get("final_format"),
@@ -1336,6 +1337,12 @@ def normalize_search_payload(payload: dict | None, *, default_sources: list[str]
         media_type = _clean_str(payload.get("media_type"), "media_type")
         lossless_only = _coerce_bool(payload.get("lossless_only"), "lossless_only")
         music_mode = bool(lossless_only) or (media_type in {"music", "audio"})
+    raw_media_mode = _clean_str(payload.get("media_mode"), "media_mode")
+    media_mode = str(raw_media_mode or "").strip().lower() if raw_media_mode else ""
+    if media_mode and media_mode not in {"video", "music", "music_video"}:
+        raise ValueError("media_mode must be one of: video, music, music_video")
+    if not media_mode:
+        media_mode = "music" if bool(music_mode) else "video"
 
     final_format = _clean_str(payload.get("final_format"), "final_format")
     if final_format is None:
@@ -1359,6 +1366,7 @@ def normalize_search_payload(payload: dict | None, *, default_sources: list[str]
         "sources": sources,
         "search_only": bool(search_only),
         "music_mode": bool(music_mode),
+        "media_mode": media_mode,
         "final_format": final_format,
         "destination": destination,
         "destination_type": delivery_mode,
@@ -1481,6 +1489,7 @@ class RunRequest(BaseModel):
     final_format_override: str | None = None
     js_runtime: str | None = None
     music_mode: bool | None = None
+    media_mode: str | None = None
     delivery_mode: str | None = None
 
 
@@ -1557,6 +1566,7 @@ class SearchRequestPayload(BaseModel):
     quality_min_bitrate_kbps: int | None = None
     lossless_only: bool = False
     music_mode: bool = False
+    media_mode: str | None = None
     auto_enqueue: bool = True
     source_priority: list[str] | str | None = None
     max_candidates_per_source: int = 5
@@ -1693,6 +1703,7 @@ class _IntentQueueAdapter:
             recording_mbid: str | None = None,
             mb_release_id: str | None = None,
             mb_release_group_id: str | None = None,
+            media_mode: str | None = None,
         ) -> None:
             def _optional_pos_int(value):
                 if value is None or str(value).strip() == "":
@@ -1735,6 +1746,8 @@ class _IntentQueueAdapter:
                 return
             query = quote(f"{normalized_artist} {normalized_track}".strip())
             url = f"https://music.youtube.com/search?q={query}"
+            normalized_media_mode = str(media_mode or "").strip().lower()
+            target_media_type = "video" if normalized_media_mode == "music_video" else "music"
             canonical_metadata = {
                 "artist": normalized_artist,
                 "track": normalized_track,
@@ -1770,7 +1783,7 @@ class _IntentQueueAdapter:
                 config=runtime_config,
                 origin=origin,
                 origin_id=origin_id,
-                media_type="music",
+                media_type=target_media_type,
                 media_intent="music_track",
                 source="youtube_music",
                 url=url,
@@ -1780,7 +1793,7 @@ class _IntentQueueAdapter:
                 final_format_override=final_format,
                 resolved_metadata=canonical_metadata,
                 output_template_overrides={
-                    "audio_mode": True,
+                    "audio_mode": target_media_type == "music",
                     "album_artist": normalized_album_artist,
                     "track_number": normalized_track_number,
                     "disc_number": normalized_disc_number,
@@ -1826,6 +1839,7 @@ class _IntentQueueAdapter:
                 recording_mbid=recording_mbid,
                 mb_release_id=str(payload.get("mb_release_id") or payload.get("release_id") or ""),
                 mb_release_group_id=str(payload.get("mb_release_group_id") or payload.get("release_group_id") or ""),
+                media_mode=str(payload.get("media_mode") or ""),
             )
             return
 
@@ -1839,7 +1853,12 @@ class _IntentQueueAdapter:
             fallback_track = str(payload.get("track") or payload.get("title") or "").strip()
             fallback_album = str(payload.get("album") or "").strip() or None
             if fallback_artist and fallback_track:
-                _enqueue_music_query_job(fallback_artist, fallback_track, fallback_album)
+                _enqueue_music_query_job(
+                    fallback_artist,
+                    fallback_track,
+                    fallback_album,
+                    media_mode=str(payload.get("media_mode") or ""),
+                )
                 return
             logging.warning("Intent enqueue skipped: no media URL or searchable artist/title available")
             return
@@ -3241,6 +3260,7 @@ async def _start_run_with_config(
     final_format_override=None,
     js_runtime=None,
     music_mode=None,
+    media_mode=None,
     run_source="api",
     skip_downtime=False,
     run_id_override=None,
@@ -3310,6 +3330,7 @@ async def _start_run_with_config(
                         js_runtime_override=js_runtime,
                         stop_event=app.state.stop_event,
                         music_mode=bool(music_mode) if music_mode is not None else False,
+                        media_mode=media_mode,
                         mode=playlist_mode or "full",
                     )
                 else:
@@ -3317,7 +3338,10 @@ async def _start_run_with_config(
                         runtime_config = get_loaded_config() or config
                         if not isinstance(runtime_config, dict) or not runtime_config:
                             raise RuntimeError("direct_url_runtime_config_missing")
+                        requested_media_mode = str(media_mode or "").strip().lower()
                         resolved_music_mode = bool(music_mode) if music_mode is not None else False
+                        if requested_media_mode == "music":
+                            resolved_music_mode = True
                         if resolved_music_mode:
                             resolved_media_type = "music"
                             resolved_media_intent = "music_track"
@@ -4597,6 +4621,10 @@ async def _watcher_supervisor():
                         destination=pl.get("folder") or pl.get("directory"),
                         final_format_override=pl.get("final_format"),
                         music_mode=bool(pl.get("music_mode")),
+                        media_mode=(
+                            str(pl.get("media_mode") or "").strip().lower()
+                            or ("music_video" if bool(pl.get("music_video")) else ("music" if bool(pl.get("music_mode")) else "video"))
+                        ),
                         run_source="watcher",
                         now=now,
                     )
@@ -5289,6 +5317,7 @@ async def api_run(request: RunRequest):
                     {
                         "message": "direct_url_request_received",
                         "music_mode": bool(request.music_mode),
+                        "media_mode": str(request.media_mode or "").strip().lower() or None,
                         "url": request.single_url,
                     }
                 ),
@@ -5304,6 +5333,7 @@ async def api_run(request: RunRequest):
         final_format_override=request.final_format_override,
         js_runtime=request.js_runtime,
         music_mode=request.music_mode,
+        media_mode=request.media_mode,
         run_source="api",
         skip_downtime=bool(request.single_url),
         delivery_mode=request.delivery_mode,
@@ -5428,7 +5458,7 @@ async def create_search_request(request: dict = Body(...)):
         normalized = normalize_search_payload(raw_payload, default_sources=enabled_sources)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if bool(normalized.get("music_mode")):
+    if str(normalized.get("media_mode") or "video") != "video":
         raise HTTPException(
             status_code=400,
             detail="music_mode_requests_must_use_api_music_search",
@@ -5449,6 +5479,7 @@ async def create_search_request(request: dict = Body(...)):
             "detected_intent": intent.type.value,
             "identifier": intent.identifier,
             "music_mode": bool(normalized["music_mode"]),
+            "media_mode": str(normalized["media_mode"] or "video"),
             "music_candidates": [],
             "music_resolution": None,
         }
@@ -5461,6 +5492,8 @@ async def create_search_request(request: dict = Body(...)):
         raw_payload["media_type"] = "music" if normalized["music_mode"] else "generic"
     if "music_mode" not in raw_payload:
         raw_payload["music_mode"] = normalized["music_mode"]
+    if "media_mode" not in raw_payload:
+        raw_payload["media_mode"] = normalized["media_mode"]
     if "destination_dir" not in raw_payload and normalized["destination"] is not None:
         raw_payload["destination_dir"] = normalized["destination"]
 
@@ -5479,6 +5512,7 @@ async def create_search_request(request: dict = Body(...)):
         "quality_min_bitrate_kbps",
         "lossless_only",
         "music_mode",
+        "media_mode",
         "auto_enqueue",
         "source_priority",
         "max_candidates_per_source",
@@ -5505,13 +5539,17 @@ async def create_search_request(request: dict = Body(...)):
     return {
         "request_id": request_id,
         "music_mode": bool(normalized["music_mode"]),
+        "media_mode": str(normalized["media_mode"] or "video"),
         "music_candidates": [],
         "music_resolution": None,
     }
 
 
 @app.post("/api/import/playlist")
-async def import_playlist(file: UploadFile = File(...)):
+async def import_playlist(
+    file: UploadFile = File(...),
+    media_mode: str = Form("music"),
+):
     filename = str(getattr(file, "filename", "") or "").strip()
     ext = Path(filename).suffix.lower()
     if ext not in SUPPORTED_IMPORT_EXTENSIONS:
@@ -5555,7 +5593,7 @@ async def import_playlist(file: UploadFile = File(...)):
 
     thread = threading.Thread(
         target=_run_playlist_import_job,
-        args=(job_id, filename, payload),
+        args=(job_id, filename, payload, str(media_mode or "music").strip().lower() or "music"),
         name=f"playlist-import-{job_id[:8]}",
         daemon=True,
     )
@@ -6028,6 +6066,9 @@ def download_full_album(data: dict):
     if not release_group_mbid:
         raise HTTPException(status_code=400, detail="release_group_mbid required")
     force_redownload = bool((data or {}).get("force_redownload"))
+    requested_media_mode = str((data or {}).get("media_mode") or "").strip().lower()
+    if requested_media_mode not in {"music", "music_video"}:
+        requested_media_mode = "music"
 
     cfg = _read_config_or_404()
     threshold_raw = (cfg or {}).get("music_mb_binding_threshold", 0.78)
@@ -6248,6 +6289,7 @@ def download_full_album(data: dict):
                 payload = {
                     "origin": "music_album",
                     "origin_id": album_run_id,
+                    "media_mode": requested_media_mode,
                     "media_intent": "music_track",
                     "force_redownload": force_redownload,
                     "artist": resolved.get("artist") or artist,
@@ -6537,6 +6579,10 @@ def enqueue_music_track(data: dict = Body(...)):
     destination = str(payload.get("destination") or payload.get("destination_dir") or "").strip() or None
     final_format_override = str(payload.get("final_format") or "").strip() or None
     force_redownload = bool(payload.get("force_redownload"))
+    requested_media_mode = str(payload.get("media_mode") or "").strip().lower()
+    if requested_media_mode not in {"music", "music_video"}:
+        requested_media_mode = "music"
+    target_media_type = "video" if requested_media_mode == "music_video" else "music"
     runtime_config = _read_config_or_404()
     engine = getattr(app.state, "worker_engine", None)
     queue_store = getattr(engine, "store", None) if engine is not None else None
@@ -6559,7 +6605,7 @@ def enqueue_music_track(data: dict = Body(...)):
             config=runtime_config,
             origin="music_search",
             origin_id=recording_mbid,
-            media_type="music",
+            media_type=target_media_type,
             media_intent="music_track",
             source="music_search",
             url=placeholder_url,
@@ -6582,6 +6628,7 @@ def enqueue_music_track(data: dict = Body(...)):
                 "track_disambiguation": canonical_metadata.get("track_disambiguation"),
                 "mb_recording_title": canonical_metadata.get("mb_recording_title"),
                 "mb_youtube_urls": canonical_metadata.get("mb_youtube_urls"),
+                "audio_mode": target_media_type == "music",
             },
             canonical_id=canonical_id,
         )

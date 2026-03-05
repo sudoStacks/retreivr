@@ -382,6 +382,7 @@ def _enqueue_music_track_job(
     track_disambiguation: str | None = None,
     mb_recording_title: str | None = None,
     mb_youtube_urls: list[str] | None = None,
+    media_mode: str = "music",
 ) -> bool:
     canonical_id = build_music_track_canonical_id(
         artist,
@@ -410,12 +411,14 @@ def _enqueue_music_track_job(
         "mb_recording_title": mb_recording_title,
         "mb_youtube_urls": list(mb_youtube_urls or []),
     }
+    normalized_media_mode = str(media_mode or "music").strip().lower()
+    media_type = "video" if normalized_media_mode == "music_video" else "music"
     placeholder_url = f"musicbrainz://recording/{recording_mbid}"
     enqueue_payload = job_payload_builder(
         config=runtime_config,
         origin="import",
         origin_id=import_batch_id,
-        media_type="music",
+        media_type=media_type,
         media_intent="music_track",
         source="music_import",
         url=placeholder_url,
@@ -442,6 +445,7 @@ def _enqueue_music_track_job(
             "track_disambiguation": track_disambiguation,
             "mb_recording_title": mb_recording_title,
             "mb_youtube_urls": list(mb_youtube_urls or []),
+            "audio_mode": media_type == "music",
         },
         canonical_id=canonical_id,
     )
@@ -457,6 +461,11 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     failure_db_path = _resolve_failure_db_path(config, queue_store)
     confidence_threshold = _DEFAULT_CONFIDENCE_THRESHOLD
     runtime_config = config.get("app_config") if isinstance(config, dict) and isinstance(config.get("app_config"), dict) else (config if isinstance(config, dict) else {})
+    media_mode = "music"
+    if isinstance(config, dict):
+        requested_media_mode = str(config.get("media_mode") or "").strip().lower()
+        if requested_media_mode in {"music", "music_video"}:
+            media_mode = requested_media_mode
     base_dir = "/downloads"
     destination = None
     final_format_override = None
@@ -730,6 +739,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                         track_disambiguation=selected_track_disambiguation,
                         mb_recording_title=selected_recording_title,
                         mb_youtube_urls=normalized_mb_youtube_urls,
+                        media_mode=media_mode,
                     )
                     resolved_count += 1
                     resolved_mbids.append(recording_mbid)

@@ -134,3 +134,40 @@ def test_music_enqueue_returns_structured_binding_failure(monkeypatch) -> None:
     body = response.json()
     assert body["error"] == "music_mode_mb_binding_failed"
     assert "no_valid_release_for_recording" in body["reason"]
+
+
+def test_music_enqueue_music_video_mode_targets_video_media_type(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    monkeypatch.setattr("api.main._read_config_or_404", lambda: {})
+
+    captured: dict = {}
+
+    class _FakeStore:
+        def __init__(self, _db_path):
+            pass
+
+        def enqueue_job(self, **kwargs):
+            captured["enqueue_payload"] = dict(kwargs)
+            return "job-1", True, None
+
+    def _fake_builder(**kwargs):
+        captured["builder_kwargs"] = dict(kwargs)
+        return {"id": "job-1", "url": "musicbrainz://recording/rec-1"}
+
+    monkeypatch.setattr("api.main.DownloadJobStore", _FakeStore)
+    monkeypatch.setattr("api.main.build_download_job_payload", _fake_builder)
+
+    response = client.post(
+        "/api/music/enqueue",
+        json={
+            "recording_mbid": "rec-1",
+            "artist": "Artist",
+            "track": "Song",
+            "media_mode": "music_video",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["builder_kwargs"]["media_type"] == "video"
+    assert captured["builder_kwargs"]["media_intent"] == "music_track"
+    assert captured["builder_kwargs"]["output_template_overrides"]["audio_mode"] is False

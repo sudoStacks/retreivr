@@ -312,6 +312,9 @@ def validate_config(config):
             mode = pl.get("mode")
             if mode is not None and mode not in {"full", "subscribe"}:
                 errors.append(f"playlists[{idx}].mode must be 'full' or 'subscribe'")
+            media_mode = pl.get("media_mode")
+            if media_mode is not None and media_mode not in {"video", "music", "music_video"}:
+                errors.append(f"playlists[{idx}].media_mode must be 'video', 'music', or 'music_video'")
             media_type = pl.get("media_type")
             if media_type is not None and media_type not in {"music", "audio", "video"}:
                 errors.append(f"playlists[{idx}].media_type must be 'music', 'audio', or 'video'")
@@ -1154,7 +1157,10 @@ def run_single_playlist(
         return status
 
     normalized_final_format = str(final_format_override or "").strip().lower()
-    explicit_music_mode = bool(_ignored.get("music_mode"))
+    requested_media_mode = str(_ignored.get("media_mode") or "").strip().lower()
+    if requested_media_mode not in {"video", "music", "music_video"}:
+        requested_media_mode = "music_video" if bool(_ignored.get("music_video")) else ""
+    explicit_music_mode = bool(_ignored.get("music_mode")) or requested_media_mode == "music"
     configured_media_type = str((config or {}).get("media_type") or "").strip().lower()
     inferred_music_mode = explicit_music_mode or configured_media_type in {"music", "audio"} or normalized_final_format in {
         "mp3",
@@ -1176,7 +1182,11 @@ def run_single_playlist(
         "remove_after_download": False,
         "mode": "full",
     }
-    if inferred_music_mode:
+    if requested_media_mode:
+        entry["media_mode"] = requested_media_mode
+    if requested_media_mode == "music_video":
+        entry["media_type"] = "video"
+    elif inferred_music_mode:
         entry["media_type"] = "music"
     if account:
         entry["account"] = account

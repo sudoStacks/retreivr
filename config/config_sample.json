@@ -32,7 +32,7 @@
       "remove_after_download": false,
       "mode": "full",
       "final_format": "mkv",
-      "music_mode": false
+      "media_mode": "video"
     }
   ],
   "spotify_playlists": [

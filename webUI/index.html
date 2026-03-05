@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-10">
-  <script defer src="app.js?v=0.9.7-ui-10"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-12">
+  <script defer src="app.js?v=0.9.7-ui-12"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -41,10 +41,13 @@
     <section class="panel full page-full" id="home-panel" data-page="home">
       <div class="home-search-shell">
         <div class="music-mode-toggle-row">
-          <label class="music-mode-switch" for="music-mode-toggle">
-            <input id="music-mode-toggle" type="checkbox">
-            <span class="music-mode-slider" aria-hidden="true"></span>
-            <span class="music-mode-label">Music Mode</span>
+          <label class="field" for="home-media-mode">
+            <span>Mode</span>
+            <select id="home-media-mode">
+              <option value="video">Video Mode</option>
+              <option value="music_video">Music Video Mode</option>
+              <option value="music">Music Mode</option>
+            </select>
           </label>
         </div>
         <div id="standard-search-container">

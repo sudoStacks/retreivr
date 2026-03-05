@@ -24,6 +24,7 @@ const state = {
   homeSearchRequestId: null,
   homeResultsTimer: null,
   homeSearchMode: "searchOnly",
+  homeMediaMode: "video",
   homeMusicMode: false,
   homeMusicSearchSeq: 0,
   homeAlbumCandidatesRequestId: null,
@@ -2237,9 +2238,9 @@ function homeMusicDebugLog(...args) {
 }
 
 function updateHomeMusicModeUI() {
-  const toggle = $("#music-mode-toggle") || $("#home-music-mode");
-  if (toggle) {
-    toggle.checked = !!state.homeMusicMode;
+  const modeSelect = $("#home-media-mode");
+  if (modeSelect) {
+    modeSelect.value = state.homeMediaMode || "video";
   }
   const standardSearchContainer = $("#standard-search-container");
   if (standardSearchContainer) {
@@ -2252,15 +2253,43 @@ function updateHomeMusicModeUI() {
   // Keep this badge strictly tied to the live toggle state.
   const badge = $("#home-music-mode-badge");
   if (badge) {
-    const toggleEnabled = !!($("#music-mode-toggle")?.checked);
+    const toggleEnabled = state.homeMediaMode !== "video";
     const resultsVisible = !$("#home-results")?.classList.contains("hidden");
     badge.classList.toggle("hidden", !(toggleEnabled && state.homeMusicMode && resultsVisible));
   }
 }
 
-function setHomeMusicMode(enabled, { persist = true, clearResultsOnDisable = true } = {}) {
+function normalizeHomeMediaMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "video" || normalized === "music" || normalized === "music_video") {
+    return normalized;
+  }
+  return "video";
+}
+
+function loadHomeMediaModePreference() {
+  try {
+    const saved = localStorage.getItem(HOME_MUSIC_MODE_KEY);
+    if (!saved) {
+      return "video";
+    }
+    if (saved === "true") {
+      return "music";
+    }
+    if (saved === "false") {
+      return "video";
+    }
+    return normalizeHomeMediaMode(saved);
+  } catch (_err) {
+    return "video";
+  }
+}
+
+function setHomeMediaMode(mode, { persist = true, clearResultsOnDisable = true } = {}) {
+  const nextMode = normalizeHomeMediaMode(mode);
   const previous = !!state.homeMusicMode;
-  state.homeMusicMode = !!enabled;
+  state.homeMediaMode = nextMode;
+  state.homeMusicMode = nextMode !== "video";
   updateHomeMusicModeUI();
   if (previous && !state.homeMusicMode && clearResultsOnDisable) {
     // Invalidate any in-flight music metadata responses so stale results cannot render.
@@ -2276,8 +2305,12 @@ function setHomeMusicMode(enabled, { persist = true, clearResultsOnDisable = tru
   }
 }
 
+function setHomeMusicMode(enabled, { persist = true, clearResultsOnDisable = true } = {}) {
+  setHomeMediaMode(enabled ? "music" : "video", { persist, clearResultsOnDisable });
+}
+
 function saveHomeMusicModePreference() {
-  localStorage.setItem(HOME_MUSIC_MODE_KEY, state.homeMusicMode ? "true" : "false");
+  localStorage.setItem(HOME_MUSIC_MODE_KEY, state.homeMediaMode || "video");
 }
 
 function getHomeDeliveryMode() {
@@ -2336,7 +2369,7 @@ function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
   }
   const minScoreRaw = parseFloat($("#home-min-score")?.value);
   const destination = $("#home-destination")?.value.trim();
-  const treatAsMusic = !!state.homeMusicMode;
+  const treatAsMusic = state.homeMediaMode === "music";
   const formatOverride = $("#home-format")?.value.trim();
   const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const rawText = rawQuery || $("#home-search-input")?.value || "";
@@ -2364,6 +2397,7 @@ function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
     auto_enqueue: autoEnqueue,
     search_only: !autoEnqueue,
     music_mode: treatAsMusic,
+    media_mode: state.homeMediaMode || "video",
     final_format: formatOverride || null,
     source_priority: sources && sources.length ? sources : null,
     max_candidates_per_source: 10,
@@ -2541,7 +2575,8 @@ async function enqueueAlbum(releaseGroupMbid) {
       release_group_mbid: releaseGroupMbid,
       destination: $("#home-destination")?.value.trim() || null,
       final_format: $("#home-format")?.value.trim() || null,
-      music_mode: true,
+      music_mode: state.homeMediaMode === "music",
+      media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
       force_redownload: forceRedownload,
     }),
   });
@@ -2607,7 +2642,8 @@ async function enqueueMusicTrack(payload = {}) {
       duration_ms: Number.isFinite(Number(payload.duration_ms)) ? Number(payload.duration_ms) : null,
       destination: String(payload.destination || payload.destination_dir || "").trim() || null,
       final_format: String(payload.final_format || "").trim() || null,
-      music_mode: true,
+      music_mode: state.homeMediaMode === "music",
+      media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
       force_redownload: forceRedownload,
     }),
   });
@@ -3092,8 +3128,7 @@ async function performMusicModeSearch() {
   if (maxCandidatesInput && String(maxCandidatesInput.value || "") !== String(limit)) {
     maxCandidatesInput.value = String(limit);
   }
-  const musicToggle = document.getElementById("music-mode-toggle");
-  const musicModeEnabledNow = !!state.homeMusicMode && !!(musicToggle && musicToggle.checked);
+  const musicModeEnabledNow = !!state.homeMusicMode;
   if (!musicModeEnabledNow) {
     return;
   }
@@ -3101,7 +3136,7 @@ async function performMusicModeSearch() {
     if (requestSeq !== state.homeMusicSearchSeq) {
       return;
     }
-    if (!(state.homeMusicMode && musicToggle && musicToggle.checked)) {
+    if (!state.homeMusicMode) {
       return;
     }
     renderMusicModeResults({ artists: [], albums: [], tracks: [], mode_used: "auto" });
@@ -3125,7 +3160,7 @@ async function performMusicModeSearch() {
   if (requestSeq !== state.homeMusicSearchSeq) {
     return;
   }
-  const musicModeStillEnabled = !!state.homeMusicMode && !!(musicToggle && musicToggle.checked);
+  const musicModeStillEnabled = !!state.homeMusicMode;
   if (!musicModeStillEnabled) {
     return;
   }
@@ -3428,7 +3463,8 @@ function renderHomeAlbumCandidates(candidates, query = "") {
         release_group_mbid: releaseGroupId,
         destination: $("#home-destination")?.value.trim() || null,
         final_format: $("#home-format")?.value.trim() || null,
-        music_mode: true,
+        music_mode: state.homeMediaMode === "music",
+        media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
         force_redownload: !!document.getElementById("music-force-redownload")?.checked,
       };
       homeMusicDebugLog("[MUSIC UI] queue album", payload);
@@ -4940,8 +4976,7 @@ async function submitHomeSearch(autoEnqueue) {
   const messageEl = $("#home-search-message");
   const inputValue = $("#home-search-input")?.value.trim() || "";
   const query = inputValue;
-  const musicToggle = document.getElementById("music-mode-toggle");
-  const musicModeEnabled = musicToggle && musicToggle.checked;
+  const musicModeEnabled = !!state.homeMusicMode;
   if (musicModeEnabled) {
     clearLegacyHomeSearchState();
     await performMusicModeSearch();
@@ -5051,11 +5086,12 @@ async function handleHomePlaylistUrl(url, playlistId, destination, autoEnqueue, 
     return;
   }
   const formatOverride = $("#home-format")?.value.trim();
-  const musicToggle = document.querySelector("#music-mode-toggle");
-  const treatAsMusic = Boolean(state.homeMusicMode && musicToggle?.checked);
+  const mediaMode = state.homeMediaMode || "video";
+  const treatAsMusic = mediaMode === "music";
   const payload = {
     playlist_id: playlistId,
     music_mode: treatAsMusic,
+    media_mode: mediaMode,
   };
   if (destination) {
     payload.destination = destination;
@@ -5217,6 +5253,9 @@ async function importHomePlaylistFile() {
 
   const formData = new FormData();
   formData.append("file", file, file.name);
+  if (state.homeMusicMode) {
+    formData.append("media_mode", state.homeMediaMode === "music_video" ? "music_video" : "music");
+  }
 
   if (summaryEl) {
     summaryEl.textContent = "";
@@ -5244,8 +5283,8 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
   if (!messageEl) return;
   setHomeSearchActive(true);
   const formatOverride = $("#home-format")?.value.trim();
-  const musicToggle = document.querySelector("#music-mode-toggle");
-  const treatAsMusic = Boolean(state.homeMusicMode && musicToggle?.checked);
+  const mediaMode = state.homeMediaMode || "video";
+  const treatAsMusic = mediaMode === "music";
   const deliveryMode = ($("#home-delivery-mode")?.value || "server").toLowerCase();
   const playlistId = extractPlaylistIdFromUrl(url);
   if (playlistId) {
@@ -5273,6 +5312,7 @@ async function handleHomeDirectUrl(url, destination, messageEl) {
     payload.final_format_override = formatOverride;
   }
   payload.music_mode = treatAsMusic;
+  payload.media_mode = mediaMode;
   payload.delivery_mode = deliveryMode;
   setNotice(messageEl, "Direct URL download requested...", false);
   try {
@@ -5809,6 +5849,10 @@ function addAccountRow(name = "", data = {}) {
 
 function addPlaylistRow(entry = {}) {
   const folderValue = normalizeDownloadsRelative(entry.folder || entry.directory || "");
+  const configuredModeRaw = String(entry.media_mode || "").trim().toLowerCase();
+  const configuredMode = configuredModeRaw === "music_video"
+    ? "music_video"
+    : (configuredModeRaw === "music" ? "music" : (entry.music_video ? "music_video" : (entry.music_mode ? "music" : "video")));
   const row = document.createElement("div");
   row.className = "row playlist-row";
   row.dataset.original = JSON.stringify(entry || {});
@@ -5826,8 +5870,12 @@ function addPlaylistRow(entry = {}) {
       <option value="mp3">mp3</option>
     </select>
     <label class="field inline">
-      <span>Music mode</span>
-      <input class="playlist-music" type="checkbox" ${entry.music_mode ? "checked" : ""}>
+      <span>Media mode</span>
+      <select class="playlist-media-mode">
+        <option value="video">Video</option>
+        <option value="music">Music</option>
+        <option value="music_video">Music Video</option>
+      </select>
     </label>
     <label class="field inline">
       <span>Only download new videos (subscribe mode)</span>
@@ -5853,6 +5901,7 @@ function addPlaylistRow(entry = {}) {
     openBrowser(target, "downloads", "dir", "", resolveBrowseStart("downloads", target.value));
   });
   row.querySelector(".playlist-format").value = entry.final_format || "";
+  row.querySelector(".playlist-media-mode").value = configuredMode;
   $("#playlists-list").appendChild(row);
 }
 
@@ -6545,10 +6594,20 @@ function buildConfigFromForm() {
     } else {
       delete original.final_format;
     }
-    if (row.querySelector(".playlist-music").checked) {
+    const selectedMediaMode = String(row.querySelector(".playlist-media-mode")?.value || "video").trim().toLowerCase();
+    original.media_mode = selectedMediaMode === "music_video"
+      ? "music_video"
+      : (selectedMediaMode === "music" ? "music" : "video");
+    // Legacy compatibility flags retained for older runtimes/config readers.
+    if (original.media_mode === "music") {
       original.music_mode = true;
+      delete original.music_video;
+    } else if (original.media_mode === "music_video") {
+      original.music_video = true;
+      delete original.music_mode;
     } else {
       delete original.music_mode;
+      delete original.music_video;
     }
     if (row.querySelector(".playlist-subscribe").checked) {
       original.mode = "subscribe";
@@ -6853,10 +6912,10 @@ function bindEvents() {
   if (homeImportButton) {
     homeImportButton.addEventListener("click", importHomePlaylistFile);
   }
-  const musicToggle = document.getElementById("music-mode-toggle");
-  if (musicToggle) {
-    musicToggle.addEventListener("change", () => {
-      setHomeMusicMode(!!musicToggle.checked);
+  const mediaModeSelect = document.getElementById("home-media-mode");
+  if (mediaModeSelect) {
+    mediaModeSelect.addEventListener("change", () => {
+      setHomeMediaMode(mediaModeSelect.value || "video");
     });
   }
   const homeDeliveryToggle = $("#home-delivery-toggle");
@@ -7250,8 +7309,8 @@ async function init() {
   });
   applyTheme(resolveTheme());
   bindEvents();
-  // Home default: Music Mode OFF, standard search visible, music panel hidden.
-  setHomeMusicMode(false, { persist: false, clearResultsOnDisable: false });
+  // Home default: Video mode unless user set a persisted mode.
+  setHomeMediaMode(loadHomeMediaModePreference(), { persist: false, clearResultsOnDisable: false });
   setHomeDeliveryMode(getHomeDeliveryMode());
   setupNavActions();
   await loadPaths();

@@ -3658,7 +3658,7 @@ class YouTubeAdapter:
                 meta["mb_release_group_id"] = release_group_mbid
             effective_media_intent = media_intent or getattr(job, "media_intent", None)
             normalized_intent = str(effective_media_intent or "").strip().lower()
-            if is_music_media_type(effective_media_type) and is_music_track_intent(normalized_intent):
+            if is_music_track_intent(normalized_intent):
                 pre_fields = _release_fields_from_template(output_template, canonical)
                 if not _release_fields_complete(pre_fields):
                     _log_event(
@@ -4245,6 +4245,22 @@ def _classify_ytdlp_unavailability(message: str | None) -> str | None:
     return None
 
 def resolve_media_type(config, *, playlist_entry=None, url=None):
+    media_mode = None
+    if isinstance(playlist_entry, dict):
+        media_mode = playlist_entry.get("media_mode")
+        if media_mode is None and playlist_entry.get("music_video") is True:
+            media_mode = "music_video"
+    if media_mode is None and isinstance(config, dict):
+        media_mode = config.get("media_mode")
+        if media_mode is None and config.get("music_video") is True:
+            media_mode = "music_video"
+    if media_mode:
+        normalized_media_mode = str(media_mode).strip().lower()
+        if normalized_media_mode == "music":
+            return "music"
+        if normalized_media_mode in {"music_video", "video"}:
+            return "video"
+
     media_type = None
     if isinstance(playlist_entry, dict):
         media_type = playlist_entry.get("media_type") or playlist_entry.get("media")
