@@ -3710,6 +3710,23 @@ class YouTubeAdapter:
                 )
                 meta["mb_release_id"] = refreshed_canonical.get("mb_release_id")
                 meta["mb_release_group_id"] = refreshed_canonical.get("mb_release_group_id")
+                if (
+                    str(effective_media_type or "").strip().lower() == "video"
+                    and not audio_mode
+                    and normalized_intent == "music_track"
+                ):
+                    _log_event(
+                        logging.INFO,
+                        "music_video_mb_metadata_bound",
+                        job_id=getattr(job, "id", None),
+                        recording_mbid=meta.get("recording_mbid") or meta.get("mb_recording_id"),
+                        mb_release_id=meta.get("mb_release_id"),
+                        mb_release_group_id=meta.get("mb_release_group_id"),
+                        artist=str(meta.get("artist") or "").strip() or None,
+                        album=str(meta.get("album") or "").strip() or None,
+                        track=str(meta.get("track") or meta.get("title") or "").strip() or None,
+                        release_date=str(meta.get("release_date") or "").strip() or None,
+                    )
             video_id = meta.get("video_id") or job.id
             template = audio_template if audio_mode else filename_template
             enforce_music_contract = bool(
@@ -3721,6 +3738,24 @@ class YouTubeAdapter:
                     or _release_fields_complete(_release_fields_from_template(output_template, canonical))
                 )
             )
+            if (
+                str(effective_media_type or "").strip().lower() == "video"
+                and not audio_mode
+                and normalized_intent == "music_track"
+            ):
+                _log_event(
+                    logging.INFO,
+                    "music_video_metadata_embed_payload",
+                    job_id=getattr(job, "id", None),
+                    title=str(meta.get("title") or "").strip() or None,
+                    artist=str(meta.get("artist") or "").strip() or None,
+                    album=str(meta.get("album") or "").strip() or None,
+                    track=str(meta.get("track") or "").strip() or None,
+                    track_number=meta.get("track_number"),
+                    disc_number=meta.get("disc_number"),
+                    has_release_date=bool(str(meta.get("release_date") or "").strip()),
+                    has_description=bool(str(meta.get("description") or "").strip()),
+                )
 
             if stop_event and stop_event.is_set():
                 shutil.rmtree(temp_dir, ignore_errors=True)

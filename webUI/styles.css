@@ -532,6 +532,10 @@ body.home-page .music-search-options-row .music-search-video-format {
 body.home-page .music-search-video-format select {
   width: 100%;
   min-width: 0;
+  height: 38px;
+  min-height: 38px;
+  padding-top: 8px;
+  padding-bottom: 8px;
   text-transform: lowercase;
 }
 
