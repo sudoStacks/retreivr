@@ -431,6 +431,8 @@ function setPage(page) {
     }
     refreshSchedule();
   } else if (target === "info") {
+    refreshMetrics();
+    refreshVersion();
     if (!state.config) {
       fetchJson("/api/config")
         .then((cfg) => {
@@ -902,10 +904,12 @@ async function refreshVersion() {
     updateVersionDisplay(info);
     await checkRelease(info.app_version || "");
   } catch (err) {
-    const versionEl = $("#status-version");
-    if (versionEl) {
-      versionEl.textContent = "-";
-    }
+    const appEl = $("#status-version-app");
+    const ytdlpEl = $("#status-version-ytdlp");
+    const pyEl = $("#status-version-python");
+    if (appEl) appEl.textContent = "App -";
+    if (ytdlpEl) ytdlpEl.textContent = "yt-dlp -";
+    if (pyEl) pyEl.textContent = "Py -";
   }
 }
 

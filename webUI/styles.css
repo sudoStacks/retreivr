@@ -794,6 +794,8 @@ body.home-page .home-destination-row .button {
 
 body.home-page .home-delivery-toggle {
   display: inline-flex;
+  align-items: stretch;
+  height: 38px;
   border: 1px solid rgba(148, 163, 184, 0.25);
   border-radius: 10px;
   overflow: hidden;
@@ -804,6 +806,10 @@ body.home-page .home-delivery-toggle .button {
   border-right: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 0;
   min-width: 86px;
+  height: 38px;
+  min-height: 38px;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 body.home-page .home-delivery-toggle .button:last-child {
