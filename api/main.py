@@ -270,8 +270,36 @@ def _mv_has_intent(text: str) -> bool:
         return False
     if "official music video" in lowered or "official video" in lowered or "music video" in lowered:
         return True
+    if "lyric video" in lowered or "lyrics video" in lowered:
+        return True
+    if "visualizer" in lowered:
+        return True
+    if "official audio" in lowered or "audio" in lowered:
+        return True
     words = set(re.findall(r"[a-z0-9]+", lowered))
-    return "official" in words and "video" in words
+    return "official" in words and ("video" in words or "audio" in words)
+
+
+def _mv_intent_class(title: str, uploader: str | None = None) -> str:
+    title_lower = str(title or "").strip().lower()
+    uploader_lower = str(uploader or "").strip().lower()
+    if not title_lower and not uploader_lower:
+        return "none"
+    if "official music video" in title_lower or "official video" in title_lower or "music video" in title_lower:
+        return "official_video"
+    if "lyric video" in title_lower or "lyrics video" in title_lower:
+        return "lyric_video"
+    if "visualizer" in title_lower:
+        return "visualizer"
+    if "official audio" in title_lower:
+        return "official_audio"
+    if "audio" in title_lower and "official" in title_lower:
+        return "official_audio"
+    if "vevo" in uploader_lower and "official" in title_lower:
+        return "official_video"
+    if "vevo" in uploader_lower and ("lyric" in title_lower or "visualizer" in title_lower or "audio" in title_lower):
+        return "vevo_variant"
+    return "none"
 
 
 def _quick_youtube_mv_precheck(artist: str, track: str, album: str | None = None) -> dict:
@@ -318,10 +346,14 @@ def _quick_youtube_mv_precheck(artist: str, track: str, album: str | None = None
             track_ok = track_hits >= _mv_required_hits(track_tokens)
             # Fallback acceptance: for long names, one strong track + artist hit is enough for hinting.
             fallback_ok = artist_hits >= 1 and track_hits >= 1
-            if _mv_has_intent(title) and (artist_ok and track_ok or fallback_ok):
+            intent_class = _mv_intent_class(title, uploader)
+            has_intent = intent_class != "none" or _mv_has_intent(title)
+            # Guide-level indicator: accept official/lyric/visualizer/audio signals when artist/track evidence is present.
+            if has_intent and ((artist_ok and track_ok) or fallback_ok):
                 return {
                     "matched": True,
                     "reason": "token_match",
+                    "intent_class": intent_class,
                     "title": title,
                     "url": candidate.get("url"),
                     "uploader": uploader or None,
