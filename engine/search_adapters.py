@@ -170,11 +170,22 @@ def _rumble_oembed_enrich(url, *, timeout_sec):
         return {}
     if not isinstance(payload, dict):
         return {}
+    html_snippet = _coerce_text(payload.get("html")) or ""
+    embed_url = None
+    if html_snippet:
+        match = re.search(r'src=["\']([^"\']+)["\']', html_snippet, re.IGNORECASE)
+        if match:
+            candidate_url = str(match.group(1) or "").strip()
+            if candidate_url.startswith("//"):
+                candidate_url = f"https:{candidate_url}"
+            if _is_http_url(candidate_url):
+                embed_url = candidate_url
     return {
         "title": _coerce_text(payload.get("title")),
         "thumbnail_url": _coerce_text(payload.get("thumbnail_url")),
         "uploader": _coerce_text(payload.get("author_name")),
         "upload_date": _coerce_text(payload.get("upload_date") or payload.get("pubdate")),
+        "embed_url": embed_url,
     }
 
 
@@ -908,6 +919,8 @@ class RumbleAdapter(SiteSearchAdapter):
                             row["uploader"] = enriched.get("uploader")
                         if _coerce_text(enriched.get("upload_date")):
                             row["upload_date"] = enriched.get("upload_date")
+                        if _is_http_url(enriched.get("embed_url")):
+                            row["embed_url"] = enriched.get("embed_url")
         except Exception:
             rows = []
         logging.info(
@@ -939,6 +952,7 @@ class RumbleAdapter(SiteSearchAdapter):
                 "raw_meta_json": safe_json_dumps(
                     {
                         "upload_date": row.get("upload_date"),
+                        "embed_url": row.get("embed_url"),
                     }
                 ),
                 "official": False,

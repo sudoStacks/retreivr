@@ -622,7 +622,32 @@ function buildYouTubeHomePreviewEmbedUrl(url) {
   return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0&modestbranding=1`;
 }
 
-function buildRumbleHomePreviewEmbedUrl(url) {
+function buildRumbleHomePreviewEmbedUrl(url, candidate) {
+  const parseRawMeta = () => {
+    const raw = candidate?.raw_meta_json;
+    if (!raw || typeof raw !== "string") return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_err) {
+      return {};
+    }
+  };
+  const rawMeta = parseRawMeta();
+  const embedded = String(rawMeta.embed_url || "").trim();
+  if (embedded) {
+    try {
+      const parsed = new URL(embedded);
+      const host = (parsed.hostname || "").toLowerCase();
+      if (host.endsWith("rumble.com") && parsed.pathname.includes("/embed/")) {
+        const next = new URL(embedded);
+        next.searchParams.set("autoplay", "2");
+        return next.toString();
+      }
+    } catch (_err) {
+      // continue to URL-derived fallback
+    }
+  }
   const raw = String(url || "").trim();
   if (!raw) return null;
   try {

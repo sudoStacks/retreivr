@@ -82,6 +82,7 @@ def test_rumble_adapter_enriches_title_and_thumbnail_from_oembed(monkeypatch):
                 "title": "Sample Rumble Title",
                 "thumbnail_url": "https://sp.rmbl.ws/s8/1/ab/cd/ef/Sample.jpg",
                 "author_name": "Sample Channel",
+                "html": '<iframe src="https://rumble.com/embed/v5abcd/?pub=4"></iframe>',
             }
 
     def _fake_get(url, *args, **kwargs):
@@ -95,6 +96,8 @@ def test_rumble_adapter_enriches_title_and_thumbnail_from_oembed(monkeypatch):
     assert rows
     assert rows[0]["title"] == "Sample Rumble Title"
     assert rows[0]["thumbnail_url"] == "https://sp.rmbl.ws/s8/1/ab/cd/ef/Sample.jpg"
+    raw_meta = json.loads(rows[0]["raw_meta_json"])
+    assert raw_meta.get("embed_url") == "https://rumble.com/embed/v5abcd/?pub=4"
 
 
 def test_default_adapters_load_custom_site_adapter_from_json(tmp_path):
@@ -165,4 +168,3 @@ def test_site_search_adapter_dedupes_repeated_terms(monkeypatch):
     adapter = mod.SiteSearchAdapter(source="test_site", domains=["example.com"], query_suffix="video")
     adapter.search_track("fox news", "fox news", limit=5, lightweight=True)
     assert captured["query"] == "fox news video"
-
