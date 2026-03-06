@@ -174,6 +174,7 @@ def _rumble_oembed_enrich(url, *, timeout_sec):
         "title": _coerce_text(payload.get("title")),
         "thumbnail_url": _coerce_text(payload.get("thumbnail_url")),
         "uploader": _coerce_text(payload.get("author_name")),
+        "upload_date": _coerce_text(payload.get("upload_date") or payload.get("pubdate")),
     }
 
 
@@ -385,6 +386,7 @@ def youtube_fast_search(query: str, limit: int = 10):
             title = _extract_text_from_runs(renderer.get("title")) or f"YouTube Video ({video_id})"
             owner = renderer.get("ownerText") or renderer.get("longBylineText") or renderer.get("shortBylineText")
             channel = _extract_text_from_runs(owner) or "YouTube"
+            posted_label = _extract_text_from_runs(renderer.get("publishedTimeText"))
             results.append(
                 {
                     "video_id": video_id,
@@ -392,6 +394,7 @@ def youtube_fast_search(query: str, limit: int = 10):
                     "channel": channel,
                     "url": f"https://youtube.com/watch?v={video_id}",
                     "thumbnail_url": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                    "posted_label": posted_label,
                 }
             )
             if len(results) >= capped_limit:
@@ -649,9 +652,17 @@ class _YtDlpSearchMixin(SearchAdapter):
                     "artist_detected": uploader,
                     "album_detected": None,
                     "track_detected": title,
+                    "upload_date": entry.get("upload_date"),
                     "duration_sec": None,
                     "artwork_url": None,
-                    "raw_meta_json": "{}",
+                    "raw_meta_json": safe_json_dumps(
+                        {
+                            "upload_date": entry.get("upload_date"),
+                            "timestamp": entry.get("timestamp"),
+                            "release_timestamp": entry.get("release_timestamp"),
+                            "release_date": entry.get("release_date"),
+                        }
+                    ),
                     "official": False,
                     "isrc": None,
                     "track_count": None,
@@ -895,6 +906,8 @@ class RumbleAdapter(SiteSearchAdapter):
                             row["thumbnail_url"] = enriched.get("thumbnail_url")
                         if _coerce_text(enriched.get("uploader")):
                             row["uploader"] = enriched.get("uploader")
+                        if _coerce_text(enriched.get("upload_date")):
+                            row["upload_date"] = enriched.get("upload_date")
         except Exception:
             rows = []
         logging.info(
@@ -920,9 +933,14 @@ class RumbleAdapter(SiteSearchAdapter):
                 "artist_detected": row.get("uploader"),
                 "album_detected": None,
                 "track_detected": _clean_result_title(row.get("title"), fallback="Rumble Video"),
+                "upload_date": row.get("upload_date"),
                 "duration_sec": None,
                 "artwork_url": row.get("thumbnail_url"),
-                "raw_meta_json": "{}",
+                "raw_meta_json": safe_json_dumps(
+                    {
+                        "upload_date": row.get("upload_date"),
+                    }
+                ),
                 "official": False,
                 "isrc": None,
                 "track_count": None,
@@ -960,7 +978,7 @@ class ArchiveOrgAdapter(SiteSearchAdapter):
                 params={
                     # Prefer video-like records while keeping recall for broad queries.
                     "q": f"({q}) AND mediatype:(movies OR movingimage OR video)",
-                    "fl[]": ["identifier", "title", "creator", "mediatype"],
+                    "fl[]": ["identifier", "title", "creator", "mediatype", "publicdate", "date", "addeddate"],
                     "rows": max(1, int(limit or 5)),
                     "page": 1,
                     "output": "json",
@@ -986,6 +1004,7 @@ class ArchiveOrgAdapter(SiteSearchAdapter):
                         "title": title,
                         "uploader": _coerce_text(doc.get("creator")),
                         "thumbnail_url": thumbnail_url,
+                        "publish_date": _coerce_text(doc.get("publicdate") or doc.get("date") or doc.get("addeddate")),
                     }
                 )
                 if len(rows) >= max(1, int(limit or 5)):
@@ -1015,9 +1034,14 @@ class ArchiveOrgAdapter(SiteSearchAdapter):
                 "artist_detected": row.get("uploader"),
                 "album_detected": None,
                 "track_detected": row.get("title"),
+                "publish_date": row.get("publish_date"),
                 "duration_sec": None,
                 "artwork_url": row.get("thumbnail_url"),
-                "raw_meta_json": "{}",
+                "raw_meta_json": safe_json_dumps(
+                    {
+                        "publish_date": row.get("publish_date"),
+                    }
+                ),
                 "official": False,
                 "isrc": None,
                 "track_count": None,

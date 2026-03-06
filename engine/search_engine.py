@@ -45,9 +45,14 @@ def _run_adapter_search(
                         "artist_detected": row.get("channel"),
                         "album_detected": None,
                         "track_detected": row.get("title"),
+                        "posted_label": row.get("posted_label"),
                         "duration_sec": None,
                         "artwork_url": None,
-                        "raw_meta_json": "{}",
+                        "raw_meta_json": safe_json_dumps(
+                            {
+                                "posted_label": row.get("posted_label"),
+                            }
+                        ),
                         "official": False,
                         "isrc": None,
                         "track_count": None,

@@ -797,6 +797,10 @@ function formatCandidatePostedDate(candidate) {
   if (!candidate || typeof candidate !== "object") {
     return "";
   }
+  const postedLabel = String(candidate.posted_label || "").trim();
+  if (postedLabel) {
+    return postedLabel;
+  }
 
   const parseRawMeta = () => {
     const raw = candidate.raw_meta_json;
@@ -810,6 +814,12 @@ function formatCandidatePostedDate(candidate) {
   };
 
   const rawMeta = parseRawMeta();
+  const rawLabel = String(
+    rawMeta.posted_label || rawMeta.published_time_text || rawMeta.publishedTimeText || rawMeta.published_label || ""
+  ).trim();
+  if (rawLabel) {
+    return rawLabel;
+  }
   const direct = [
     candidate.posted_at,
     candidate.published_at,
