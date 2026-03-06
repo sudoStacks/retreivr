@@ -1,37 +1,108 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 MAX_PARALLEL_ADAPTERS = 4
 
 # Helper to run one adapter safely
-def _run_adapter_search(adapter, item, max_candidates, canonical_payload):
+def _run_adapter_search(
+    adapter,
+    item,
+    max_candidates,
+    canonical_payload,
+    *,
+    lightweight=False,
+    timeout_budget_sec=None,
+):
     """
     Execute a single adapter search safely.
     - Adapter exceptions are contained
     - Invalid URLs are dropped here
     - Never raises
     """
-    try:
+    def _invoke_adapter():
+        adapter_source = str(getattr(adapter, "source", "")).strip().lower()
+        if lightweight and adapter_source in {"youtube", "youtube_music"}:
+            if item["item_type"] == "album":
+                fast_query = f"{item.get('artist') or ''} {item.get('album') or ''}".strip()
+            else:
+                query_parts = [item.get("artist"), item.get("track")]
+                if item.get("album"):
+                    query_parts.append(item.get("album"))
+                fast_query = " ".join(
+                    str(part or "").strip()
+                    for part in query_parts
+                    if str(part or "").strip()
+                )
+            fast_rows = youtube_fast_search(fast_query, limit=max_candidates)
+            if fast_rows:
+                return [
+                    {
+                        "source": adapter_source or "youtube",
+                        "video_id": row.get("video_id"),
+                        "url": row.get("url"),
+                        "title": row.get("title"),
+                        "uploader": row.get("channel"),
+                        "channel": row.get("channel"),
+                        "thumbnail_url": row.get("thumbnail_url"),
+                        "artist_detected": row.get("channel"),
+                        "album_detected": None,
+                        "track_detected": row.get("title"),
+                        "duration_sec": None,
+                        "artwork_url": None,
+                        "raw_meta_json": "{}",
+                        "official": False,
+                        "isrc": None,
+                        "track_count": None,
+                        "view_count": None,
+                    }
+                    for row in fast_rows
+                    if isinstance(row, dict) and _is_http_url(row.get("url"))
+                ]
+        kwargs = {}
+        if lightweight:
+            kwargs["lightweight"] = True
+        if timeout_budget_sec is not None:
+            kwargs["timeout_budget_sec"] = timeout_budget_sec
         if item["item_type"] == "album":
-            candidates = adapter.search_album(
+            try:
+                return adapter.search_album(
+                    item["artist"],
+                    item.get("album"),
+                    max_candidates,
+                    **kwargs,
+                )
+            except TypeError:
+                return adapter.search_album(
+                    item["artist"],
+                    item.get("album"),
+                    max_candidates,
+                )
+        try:
+            return adapter.search_track(
                 item["artist"],
+                item.get("track"),
                 item.get("album"),
                 max_candidates,
+                **kwargs,
             )
-        else:
-            candidates = adapter.search_track(
+        except TypeError:
+            return adapter.search_track(
                 item["artist"],
                 item.get("track"),
                 item.get("album"),
                 max_candidates,
             )
+
+    try:
+        candidates = _invoke_adapter()
     except Exception as exc:
         logging.exception(
             "adapter_search_exception",
             extra={
-                "adapter": getattr(adapter, "name", repr(adapter)),
+                "adapter": getattr(adapter, "source", repr(adapter)),
                 "artist": item.get("artist"),
                 "album": item.get("album"),
                 "track": item.get("track"),
                 "error": str(exc),
+                "lightweight": bool(lightweight),
             },
         )
         return []
@@ -75,7 +146,7 @@ from engine.job_queue import (
 from engine import community_cache
 from engine.json_utils import safe_json_dumps
 from engine.paths import DATA_DIR
-from engine.search_adapters import default_adapters
+from engine.search_adapters import default_adapters, youtube_fast_search
 from engine.search_scoring import (
     classify_music_title_variants,
     rank_candidates,
@@ -434,39 +505,12 @@ def ensure_search_tables(conn):
     if "canonical_json" not in existing:
         cur.execute("ALTER TABLE search_candidates ADD COLUMN canonical_json TEXT")
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS search_query_cache (
-            id TEXT PRIMARY KEY,
-            cache_key TEXT NOT NULL,
-            query_text TEXT,
-            media_type TEXT,
-            source TEXT,
-            video_id TEXT,
-            url TEXT,
-            title TEXT,
-            uploader TEXT,
-            duration_sec INTEGER,
-            artwork_url TEXT,
-            thumbnail_url TEXT,
-            canonical_json TEXT,
-            raw_meta_json TEXT,
-            cached_at TEXT,
-            suspect INTEGER DEFAULT 0,
-            fail_count INTEGER DEFAULT 0,
-            last_failure_reason TEXT
-        )
-        """
-    )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_key ON search_query_cache (cache_key)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_video_id ON search_query_cache (video_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_search_query_cache_cached_at ON search_query_cache (cached_at)")
-    cur.execute("PRAGMA table_info(search_query_cache)")
-    existing_cache = {row[1] for row in cur.fetchall()}
-    if "artwork_url" not in existing_cache:
-        cur.execute("ALTER TABLE search_query_cache ADD COLUMN artwork_url TEXT")
-    if "thumbnail_url" not in existing_cache:
-        cur.execute("ALTER TABLE search_query_cache ADD COLUMN thumbnail_url TEXT")
+    # Local search result cache has been removed from discovery/acquisition flows.
+    # Drop legacy table/indexes on startup to keep schema clean.
+    cur.execute("DROP INDEX IF EXISTS idx_search_query_cache_key")
+    cur.execute("DROP INDEX IF EXISTS idx_search_query_cache_video_id")
+    cur.execute("DROP INDEX IF EXISTS idx_search_query_cache_cached_at")
+    cur.execute("DROP TABLE IF EXISTS search_query_cache")
 
     cur.execute(
         """
@@ -813,172 +857,16 @@ class SearchJobStore:
             conn.close()
 
     def list_search_cache(self, *, cache_key, max_age_seconds=None, limit=50):
-        if not cache_key:
-            return []
-        conn = self._connect()
-        try:
-            cur = conn.cursor()
-            params = [cache_key]
-            query = """
-                SELECT *
-                FROM search_query_cache
-                WHERE cache_key=?
-            """
-            if max_age_seconds is not None and float(max_age_seconds) > 0:
-                cutoff_iso = datetime.fromtimestamp(
-                    datetime.now(timezone.utc).timestamp() - float(max_age_seconds),
-                    tz=timezone.utc,
-                ).isoformat()
-                query += " AND cached_at >= ?"
-                params.append(cutoff_iso)
-            query += " ORDER BY suspect ASC, cached_at DESC, id ASC"
-            query += " LIMIT ?"
-            params.append(int(limit))
-            cur.execute(query, tuple(params))
-            return [dict(row) for row in cur.fetchall()]
-        finally:
-            conn.close()
+        return []
 
     def replace_search_cache(self, *, cache_key, query_text, media_type, candidates):
-        if not cache_key:
-            return
-        conn = self._connect()
-        try:
-            cur = conn.cursor()
-            cur.execute("DELETE FROM search_query_cache WHERE cache_key=?", (cache_key,))
-            now_iso = datetime.now(timezone.utc).isoformat()
-            seen_keys = set()
-            for candidate in candidates or []:
-                if not isinstance(candidate, dict):
-                    continue
-                url = _coerce_http_url(candidate.get("url"))
-                if not url:
-                    continue
-                video_id = extract_video_id(url) or extract_video_id(candidate.get("video_id"))
-                dedupe_key = (str(video_id or "").strip().lower() or url.lower())
-                if dedupe_key in seen_keys:
-                    continue
-                seen_keys.add(dedupe_key)
-                row_id = uuid4().hex
-                cur.execute(
-                    """
-                    INSERT INTO search_query_cache (
-                        id, cache_key, query_text, media_type, source, video_id, url,
-                        title, uploader, duration_sec, artwork_url, thumbnail_url, canonical_json, raw_meta_json,
-                        cached_at, suspect, fail_count, last_failure_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        row_id,
-                        cache_key,
-                        query_text,
-                        media_type,
-                        str(candidate.get("source") or ""),
-                        str(video_id or "").strip() or None,
-                        url,
-                        candidate.get("title"),
-                        candidate.get("uploader"),
-                        candidate.get("duration_sec"),
-                        candidate.get("artwork_url"),
-                        candidate.get("thumbnail_url"),
-                        candidate.get("canonical_json"),
-                        candidate.get("raw_meta_json"),
-                        now_iso,
-                        0,
-                        0,
-                        None,
-                    ),
-                )
-            conn.commit()
-        finally:
-            conn.close()
+        return
 
     def enforce_search_cache_max_entries(self, *, max_entries):
-        try:
-            max_allowed = int(max_entries)
-        except Exception:
-            return
-        if max_allowed <= 0:
-            return
-        conn = self._connect()
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM search_query_cache")
-            total = int(cur.fetchone()[0] or 0)
-            overflow = total - max_allowed
-            if overflow <= 0:
-                return
-            cur.execute(
-                """
-                SELECT id
-                FROM search_query_cache
-                ORDER BY cached_at ASC, id ASC
-                LIMIT ?
-                """,
-                (overflow,),
-            )
-            stale_ids = [str(row[0]) for row in cur.fetchall() if row and row[0]]
-            if not stale_ids:
-                return
-            placeholders = ",".join("?" for _ in stale_ids)
-            cur.execute(f"DELETE FROM search_query_cache WHERE id IN ({placeholders})", tuple(stale_ids))
-            conn.commit()
-        finally:
-            conn.close()
+        return
 
     def prune_search_cache_for_url(self, *, url, failure_reason=None, delete=False):
-        canonical_url = _coerce_http_url(url)
-        if not canonical_url:
-            return 0
-        normalized_video_id = extract_video_id(canonical_url)
-        conn = self._connect()
-        try:
-            cur = conn.cursor()
-            if delete:
-                if normalized_video_id:
-                    cur.execute(
-                        "DELETE FROM search_query_cache WHERE video_id=?",
-                        (normalized_video_id.lower(),),
-                    )
-                else:
-                    cur.execute(
-                        "DELETE FROM search_query_cache WHERE lower(url)=?",
-                        (canonical_url.lower(),),
-                    )
-                affected = int(cur.rowcount or 0)
-                conn.commit()
-                return affected
-
-            now_iso = datetime.now(timezone.utc).isoformat()
-            if normalized_video_id:
-                cur.execute(
-                    """
-                    UPDATE search_query_cache
-                    SET suspect=1,
-                        fail_count=COALESCE(fail_count, 0) + 1,
-                        last_failure_reason=?,
-                        cached_at=?
-                    WHERE video_id=?
-                    """,
-                    (failure_reason, now_iso, normalized_video_id.lower()),
-                )
-            else:
-                cur.execute(
-                    """
-                    UPDATE search_query_cache
-                    SET suspect=1,
-                        fail_count=COALESCE(fail_count, 0) + 1,
-                        last_failure_reason=?,
-                        cached_at=?
-                    WHERE lower(url)=?
-                    """,
-                    (failure_reason, now_iso, canonical_url.lower()),
-                )
-            affected = int(cur.rowcount or 0)
-            conn.commit()
-            return affected
-        finally:
-            conn.close()
+        return 0
 
     def reset_candidates_for_item(self, item_id):
         conn = self._connect()
@@ -1123,18 +1011,14 @@ class SearchResolutionService:
                 self.config.get("community_cache_enabled", True),
             )
         )
-        self.search_cache_enabled = self._as_bool(self.config.get("search_cache_enabled", True))
-        self.search_cache_prune_on_failure = self._as_bool(
-            self.config.get("search_cache_prune_on_failure", True)
+        self.lightweight_discovery_enabled = self._as_bool(
+            self.config.get("lightweight_discovery_enabled", True)
         )
-        self.search_cache_ttl_days = self._parse_cache_ttl_days(
-            self.config.get("search_cache_ttl_days", 0)
+        self.discovery_source_timeout_sec = self._parse_discovery_source_timeout(
+            self.config.get("discovery_source_timeout_sec", 2.0)
         )
-        self.search_cache_max_entries = self._parse_search_cache_max_entries(
-            self.config.get("search_cache_max_entries", 50000)
-        )
-        self.search_cache_seed_top_n = self._parse_search_cache_seed_top_n(
-            self.config.get("search_cache_seed_top_n", 30)
+        self.discovery_max_candidates_per_source = self._parse_discovery_max_candidates(
+            self.config.get("discovery_max_candidates_per_source", 10)
         )
         self._maybe_rebuild_community_reverse_index()
 
@@ -1154,24 +1038,19 @@ class SearchResolutionService:
             parsed = 0
         return max(0, parsed)
 
-    def _search_cache_ttl_seconds(self):
-        if int(self.search_cache_ttl_days or 0) <= 0:
-            return None
-        return int(self.search_cache_ttl_days) * 86400
+    def _parse_discovery_source_timeout(self, value):
+        try:
+            parsed = float(value)
+        except Exception:
+            parsed = 2.0
+        return max(0.5, min(10.0, parsed))
 
-    def _parse_search_cache_max_entries(self, value):
+    def _parse_discovery_max_candidates(self, value):
         try:
             parsed = int(value)
         except Exception:
-            parsed = 50000
-        return max(1000, parsed)
-
-    def _parse_search_cache_seed_top_n(self, value):
-        try:
-            parsed = int(value)
-        except Exception:
-            parsed = 30
-        return max(1, parsed)
+            parsed = 10
+        return max(1, min(50, parsed))
 
     def _community_dataset_root(self):
         configured = str(self.config.get("community_cache_dataset_dir") or "").strip()
@@ -1936,318 +1815,34 @@ class SearchResolutionService:
         return merged
 
     def _build_search_cache_query(self, item, request_row):
-        if not isinstance(item, dict):
-            return ""
-        artist = str(item.get("artist") or "").strip()
-        track = str(item.get("track") or "").strip()
-        album = str(item.get("album") or "").strip()
-        item_type = str(item.get("item_type") or "").strip().lower()
-        if item_type == "track":
-            return " ".join(part for part in [artist, track] if part).strip()
-        return " ".join(part for part in [artist, album] if part).strip()
+        return ""
 
     def _normalize_search_cache_query_text(self, query):
-        text = str(query or "").strip().lower()
-        if not text:
-            return ""
-        text = re.sub(r"[^\w\s]", " ", text)
-        tokens = [token for token in text.split() if token]
-        # Remove common transport noise so semantically similar queries map together.
-        drop_tokens = {
-            "official",
-            "video",
-            "music",
-            "mv",
-            "audio",
-            "lyrics",
-            "lyric",
-            "hd",
-            "4k",
-        }
-        normalized_tokens = [token for token in tokens if token not in drop_tokens]
-        if not normalized_tokens:
-            normalized_tokens = tokens
-        seen = set()
-        compact = []
-        for token in normalized_tokens:
-            if token in seen:
-                continue
-            seen.add(token)
-            compact.append(token)
-        return " ".join(compact).strip()
+        return ""
 
     def _search_cache_key_for_item(self, item, request_row):
-        query = self._build_search_cache_query(item, request_row)
-        return self._search_cache_key_for_query(query, request_row, item_type=(item or {}).get("item_type")), query
+        return "", ""
 
     def _search_cache_key_for_query(self, query, request_row, *, item_type):
-        normalized_query = self._normalize_search_cache_query_text(query)
-        media_type = str((request_row or {}).get("media_type") or "generic").strip().lower()
-        source_priority = _parse_source_priority((request_row or {}).get("source_priority_json"))
-        key_payload = {
-            "query": normalized_query,
-            "media_type": media_type,
-            "sources": [str(s).strip().lower() for s in source_priority if str(s).strip()],
-            "item_type": str(item_type or "").strip().lower(),
-        }
-        return hashlib.sha1(safe_json_dumps(key_payload, sort_keys=True).encode("utf-8")).hexdigest()
+        return ""
 
     def _search_cache_key_for_query_legacy(self, query, request_row, *, item_type):
-        media_type = str((request_row or {}).get("media_type") or "generic").strip().lower()
-        source_priority = _parse_source_priority((request_row or {}).get("source_priority_json"))
-        key_payload = {
-            "query": str(query or "").strip().lower(),
-            "media_type": media_type,
-            "sources": [str(s).strip().lower() for s in source_priority if str(s).strip()],
-            "item_type": str(item_type or "").strip().lower(),
-        }
-        return hashlib.sha1(safe_json_dumps(key_payload, sort_keys=True).encode("utf-8")).hexdigest()
+        return ""
 
     def _build_search_cache_alias_query(self, item):
-        if not isinstance(item, dict):
-            return ""
-        track = str(item.get("track") or "").strip()
-        return track
+        return ""
 
     def _search_cache_candidates_for_item(self, item, request_row, *, limit):
-        cache_key, query = self._search_cache_key_for_item(item, request_row)
-        try:
-            rows = self.store.list_search_cache(
-                cache_key=cache_key,
-                max_age_seconds=self._search_cache_ttl_seconds(),
-                limit=max(1, int(limit)),
-            )
-            if not rows:
-                legacy_key = self._search_cache_key_for_query_legacy(
-                    query,
-                    request_row,
-                    item_type=(item or {}).get("item_type"),
-                )
-                rows = self.store.list_search_cache(
-                    cache_key=legacy_key,
-                    max_age_seconds=self._search_cache_ttl_seconds(),
-                    limit=max(1, int(limit)),
-                )
-            alias_query = self._build_search_cache_alias_query(item)
-            if not rows and alias_query and alias_query.strip().lower() != str(query or "").strip().lower():
-                alias_key = self._search_cache_key_for_query(
-                    alias_query,
-                    request_row,
-                    item_type=(item or {}).get("item_type"),
-                )
-                rows = self.store.list_search_cache(
-                    cache_key=alias_key,
-                    max_age_seconds=self._search_cache_ttl_seconds(),
-                    limit=max(1, int(limit)),
-                )
-                if not rows:
-                    legacy_alias_key = self._search_cache_key_for_query_legacy(
-                        alias_query,
-                        request_row,
-                        item_type=(item or {}).get("item_type"),
-                    )
-                    rows = self.store.list_search_cache(
-                        cache_key=legacy_alias_key,
-                        max_age_seconds=self._search_cache_ttl_seconds(),
-                        limit=max(1, int(limit)),
-                    )
-        except Exception as exc:
-            _log_event(
-                logging.WARNING,
-                "search_cache_read_failed",
-                cache_key=cache_key,
-                error=str(exc),
-            )
-            return []
-        candidates = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            url = _coerce_http_url(row.get("url"))
-            if not url:
-                continue
-            raw_meta = self._parse_raw_meta(row.get("raw_meta_json"))
-            try:
-                if raw_meta.get("age_limit") is not None and int(raw_meta.get("age_limit")) >= 18:
-                    continue
-            except Exception:
-                pass
-            availability = str(raw_meta.get("availability") or "").strip().lower()
-            if availability and (
-                "age" in availability
-                or "adult" in availability
-                or availability in {"needs_auth", "login_required"}
-            ):
-                continue
-            candidate = {
-                "source": row.get("source") or "youtube",
-                "url": url,
-                "title": row.get("title"),
-                "uploader": row.get("uploader"),
-                "artist_detected": row.get("uploader"),
-                "track_detected": row.get("title"),
-                "duration_sec": row.get("duration_sec"),
-                "artwork_url": row.get("artwork_url"),
-                "thumbnail_url": row.get("thumbnail_url"),
-                "candidate_id": row.get("id") or hashlib.sha1(url.encode("utf-8")).hexdigest()[:16],
-                "raw_meta_json": row.get("raw_meta_json") or "{}",
-                "canonical_json": row.get("canonical_json"),
-                "search_cache_seeded": True,
-                "view_count": raw_meta.get("view_count") if isinstance(raw_meta, dict) else None,
-            }
-            candidates.append(self._annotate_candidate_with_community_reverse_lookup(candidate))
-        return candidates
+        return []
 
     def _seed_request_from_search_cache(self, request_id):
-        if not self.search_cache_enabled:
-            return
-        try:
-            request_row = self.store.get_request_row(request_id)
-        except Exception as exc:
-            _log_event(
-                logging.WARNING,
-                "search_cache_seed_failed",
-                request_id=request_id,
-                stage="get_request_row",
-                error=str(exc),
-            )
-            return
-        if not isinstance(request_row, dict):
-            return
-        try:
-            self.store.create_items_for_request(request_row)
-            items = self.store.list_items(request_id)
-        except Exception as exc:
-            _log_event(
-                logging.WARNING,
-                "search_cache_seed_failed",
-                request_id=request_id,
-                stage="list_items",
-                error=str(exc),
-            )
-            return
-        seeded_total = 0
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            try:
-                max_candidates = int(request_row.get("max_candidates_per_source") or 5)
-                cached_candidates = self._search_cache_candidates_for_item(
-                    item,
-                    request_row,
-                    limit=max(1, max_candidates * 3),
-                )
-                if not cached_candidates:
-                    _log_event(
-                        logging.INFO,
-                        "search_cache_miss",
-                        request_id=request_id,
-                        item_id=item.get("id"),
-                    )
-                    continue
-                source_priority = _parse_source_priority(request_row.get("source_priority_json"))
-                scored = []
-                for candidate in cached_candidates:
-                    source = str(candidate.get("source") or "").strip()
-                    adapter = self.adapters.get(source)
-                    source_modifier = adapter.source_modifier(candidate) if adapter else 1.0
-                    item_scored = dict(candidate)
-                    item_scored.update(score_candidate(item, item_scored, source_modifier=source_modifier))
-                    item_scored["id"] = uuid4().hex
-                    scored.append(item_scored)
-                ranked = rank_candidates(scored, source_priority=source_priority)
-                self.store.reset_candidates_for_item(item["id"])
-                self.store.insert_candidates(item["id"], ranked)
-                self.store.update_item_status(item["id"], "candidate_found")
-                seeded_total += len(ranked)
-                _log_event(
-                    logging.INFO,
-                    "search_cache_seeded",
-                    request_id=request_id,
-                    item_id=item.get("id"),
-                    candidates=len(ranked),
-                )
-            except Exception as exc:
-                _log_event(
-                    logging.WARNING,
-                    "search_cache_seed_item_failed",
-                    request_id=request_id,
-                    item_id=item.get("id"),
-                    error=str(exc),
-                )
-                continue
-        if seeded_total:
-            _log_event(logging.INFO, "search_cache_seeded_total", request_id=request_id, candidates=seeded_total)
+        return
 
     def _refresh_search_cache_for_item(self, request_row, item, ranked):
-        if not self.search_cache_enabled or not ranked:
-            return
-        try:
-            cache_key, query = self._search_cache_key_for_item(item, request_row)
-            max_candidates = int((request_row or {}).get("max_candidates_per_source") or 5)
-            seed_limit = max(int(self.search_cache_seed_top_n or 1), max(1, max_candidates * 3))
-            top_ranked = list(ranked)[:seed_limit]
-            self.store.replace_search_cache(
-                cache_key=cache_key,
-                query_text=query,
-                media_type=str((request_row or {}).get("media_type") or "generic"),
-                candidates=top_ranked,
-            )
-            alias_seen = set()
-            item_type = str((item or {}).get("item_type") or "").strip().lower()
-            for candidate in top_ranked:
-                title_query = str(candidate.get("title") or "").strip()
-                title_query_key = title_query.lower()
-                if not title_query or title_query_key in alias_seen:
-                    continue
-                alias_seen.add(title_query_key)
-                alias_cache_key = self._search_cache_key_for_query(
-                    title_query,
-                    request_row,
-                    item_type=item_type,
-                )
-                self.store.replace_search_cache(
-                    cache_key=alias_cache_key,
-                    query_text=title_query,
-                    media_type=str((request_row or {}).get("media_type") or "generic"),
-                    candidates=[candidate],
-                )
-            self.store.enforce_search_cache_max_entries(max_entries=self.search_cache_max_entries)
-            _log_event(
-                logging.INFO,
-                "search_cache_refreshed",
-                request_id=(request_row or {}).get("id"),
-                item_id=(item or {}).get("id"),
-                candidates=len(top_ranked),
-            )
-        except Exception as exc:
-            _log_event(
-                logging.WARNING,
-                "search_cache_write_failed",
-                request_id=(request_row or {}).get("id"),
-                item_id=(item or {}).get("id"),
-                error=str(exc),
-            )
-            return
+        return
 
     def invalidate_search_cache_entry(self, *, url, reason=None):
-        if not self.search_cache_enabled:
-            return 0
-        removed = self.store.prune_search_cache_for_url(
-            url=url,
-            failure_reason=str(reason or "").strip() or None,
-            delete=bool(self.search_cache_prune_on_failure),
-        )
-        if removed:
-            _log_event(
-                logging.INFO,
-                "search_cache_entry_pruned",
-                url=url,
-                reason=reason,
-                removed=removed,
-                delete=bool(self.search_cache_prune_on_failure),
-            )
-        return removed
+        return 0
 
     def _annotate_candidate_with_community_reverse_lookup(self, candidate):
         if not isinstance(candidate, dict):
@@ -3313,16 +2908,6 @@ class SearchResolutionService:
             )
             return None
         request_id = self.store.create_request(payload)
-        try:
-            self._seed_request_from_search_cache(request_id)
-        except Exception as exc:
-            _log_event(
-                logging.WARNING,
-                "search_cache_seed_failed",
-                request_id=request_id,
-                stage="create_request_hook",
-                error=str(exc),
-            )
         return request_id
 
     def get_search_request(self, request_id):
@@ -3362,7 +2947,9 @@ class SearchResolutionService:
             return None
 
         request_id = request_row["id"]
+        request_started_monotonic = time.perf_counter()
         intent = request_row["intent"]
+        request_media_type = request_row.get("media_type") or "generic"
 
         auto_enqueue_value = request_row.get("auto_enqueue")
         auto_enqueue = True if auto_enqueue_value is None else bool(auto_enqueue_value)
@@ -3381,6 +2968,7 @@ class SearchResolutionService:
         items = self.store.list_items(request_id)
 
         for item in items:
+            item_started_monotonic = time.perf_counter()
             if stop_event and stop_event.is_set():
                 return request_id
             if item.get("status") in {"enqueued", "failed", "skipped"}:
@@ -3398,7 +2986,10 @@ class SearchResolutionService:
             )
 
             canonical_payload = None
-            if self.canonical_resolver:
+            should_resolve_canonical_presearch = (
+                bool(self.canonical_resolver) and request_media_type == "music"
+            )
+            if should_resolve_canonical_presearch:
                 if item["item_type"] == "album":
                     canonical_payload = self.canonical_resolver.resolve_album(item["artist"], item.get("album"))
                 else:
@@ -3410,6 +3001,8 @@ class SearchResolutionService:
 
             source_priority = _parse_source_priority(request_row.get("source_priority_json"))
             max_candidates = int(request_row.get("max_candidates_per_source") or 5)
+            if request_media_type in {"generic", "video"}:
+                max_candidates = min(max_candidates, int(self.discovery_max_candidates_per_source))
             scored = []
 
             def _is_blank(value):
@@ -3436,7 +3029,7 @@ class SearchResolutionService:
                 merged = dict(base or {})
                 incoming_candidate = dict(incoming or {})
                 for key, value in incoming_candidate.items():
-                    if key in {"search_cache_seeded", "community_seeded", "mb_injected", "community_verified_transport"}:
+                    if key in {"community_seeded", "mb_injected", "community_verified_transport"}:
                         merged[key] = bool(merged.get(key)) or bool(value)
                         continue
                     if _is_blank(merged.get(key)) and not _is_blank(value):
@@ -3478,152 +3071,221 @@ class SearchResolutionService:
                         return
                 scored.append(candidate)
 
-            # Keep cache-seeded candidates in the working set so they remain visible
-            # while adapter batches arrive.
-            try:
-                seeded_rows = self.store.list_candidates(item["id"])
-            except Exception:
-                seeded_rows = []
-            for seeded in seeded_rows or []:
-                if not isinstance(seeded, dict):
-                    continue
-                if not _is_http_url(seeded.get("url")):
-                    continue
-                seeded_candidate = dict(seeded)
-                seeded_candidate["id"] = str(seeded_candidate.get("id") or uuid4().hex)
-                _append_or_merge_candidate(seeded_candidate)
-
-            # --- Parallel adapter execution (bounded) ---
-            futures = {}
-            with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ADAPTERS, len(source_priority))) as pool:
-                for source in source_priority:
-                    adapter = self.adapters.get(source)
-                    if not adapter:
-                        _log_event(
-                            logging.ERROR,
-                            "adapter_missing",
-                            request_id=request_id,
-                            item_id=item["id"],
-                            source=source,
-                        )
-                        adapters_completed += 1
-                        self.store.update_request_progress(
-                            request_id,
-                            adapters_completed=adapters_completed,
-                        )
-                        continue
-
-                    self.store.update_item_status(item["id"], "searching_source")
-                    _log_event(
-                        logging.INFO,
-                        "adapter_search_started",
-                        request_id=request_id,
-                        item_id=item["id"],
-                        source=source,
-                        adapters_completed=adapters_completed,
-                        adapters_total=adapters_total,
-                    )
-
-                    futures[
-                        pool.submit(
-                            _run_adapter_search,
-                            adapter,
-                            item,
-                            max_candidates,
-                            canonical_payload,
-                        )
-                    ] = source
-
-                for fut in as_completed(futures):
-                    source = futures[fut]
-                    try:
-                        candidates = fut.result()
-                    except Exception as exc:
-                        _log_event(
-                            logging.ERROR,
-                            "adapter_search_failed",
-                            request_id=request_id,
-                            item_id=item["id"],
-                            source=source,
-                            error=str(exc),
-                        )
-                        adapters_completed += 1
-                        self.store.update_request_progress(
-                            request_id,
-                            adapters_completed=adapters_completed,
-                        )
-                        continue
-
-                    for cand in candidates:
-                        if not _is_http_url(cand.get("url")):
+            use_lightweight_discovery = (
+                bool(self.lightweight_discovery_enabled) and request_media_type in {"generic", "video"}
+            )
+            def _execute_adapter_pass(*, lightweight_mode):
+                nonlocal adapters_completed
+                futures = {}
+                adapter_started_at = {}
+                pass_started_monotonic = time.perf_counter()
+                pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ADAPTERS, len(source_priority)))
+                try:
+                    for source in source_priority:
+                        adapter = self.adapters.get(source)
+                        if not adapter:
                             _log_event(
-                                logging.WARNING,
-                                "adapter_candidate_invalid_url",
+                                logging.ERROR,
+                                "adapter_missing",
                                 request_id=request_id,
                                 item_id=item["id"],
                                 source=source,
-                                url=cand.get("url"),
+                            )
+                            adapters_completed += 1
+                            self.store.update_request_progress(
+                                request_id,
+                                adapters_completed=adapters_completed,
                             )
                             continue
-                        cand["source"] = source
-                        cand = self._annotate_candidate_with_community_reverse_lookup(cand)
-                        cand["candidate_id"] = str(
-                            cand.get("candidate_id")
-                            or cand.get("external_id")
-                            or cand.get("url")
-                            or ""
-                        )
-                        modifier = self.adapters[source].source_modifier(cand)
-                        scores = score_candidate(item, cand, source_modifier=modifier)
-                        cand.update(scores)
-                        cand["canonical_json"] = safe_json_dumps(canonical_payload) if canonical_payload else None
-                        cand["id"] = uuid4().hex
-                        _append_or_merge_candidate(cand)
 
-                    if candidates:
-                        # Insert partial candidates immediately for progressive UI updates
-                        partial_ranked = rank_candidates(
-                            scored,
-                            source_priority=source_priority,
-                        )
-                        self.store.reset_candidates_for_item(item["id"])
-                        self.store.insert_candidates(item["id"], partial_ranked)
+                        self.store.update_item_status(item["id"], "searching_source")
                         _log_event(
                             logging.INFO,
-                            "adapter_candidates_emitted",
+                            "adapter_search_started",
                             request_id=request_id,
                             item_id=item["id"],
                             source=source,
-                            candidates_total=len(partial_ranked),
                             adapters_completed=adapters_completed,
                             adapters_total=adapters_total,
+                            search_mode=("lightweight" if lightweight_mode else "full"),
                         )
+                        adapter_started_at[source] = time.perf_counter()
+                        futures[
+                            pool.submit(
+                                _run_adapter_search,
+                                adapter,
+                                item,
+                                max_candidates,
+                                canonical_payload,
+                                lightweight=lightweight_mode,
+                                timeout_budget_sec=(self.discovery_source_timeout_sec if lightweight_mode else None),
+                            )
+                        ] = source
 
-                    adapters_completed += 1
+                    pending = set(futures.keys())
+                    while pending:
+                        done, not_done = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
+                        for fut in done:
+                            pending.discard(fut)
+                            source = futures[fut]
+                            source_started = adapter_started_at.get(source, pass_started_monotonic)
+                            try:
+                                candidates = fut.result()
+                            except Exception as exc:
+                                _log_event(
+                                    logging.ERROR,
+                                    "adapter_search_failed",
+                                    request_id=request_id,
+                                    item_id=item["id"],
+                                    source=source,
+                                    error=str(exc),
+                                    search_mode=("lightweight" if lightweight_mode else "full"),
+                                    duration_ms=int((time.perf_counter() - source_started) * 1000),
+                                )
+                                adapters_completed += 1
+                                self.store.update_request_progress(
+                                    request_id,
+                                    adapters_completed=adapters_completed,
+                                )
+                                continue
+
+                            for cand in candidates:
+                                if not _is_http_url(cand.get("url")):
+                                    _log_event(
+                                        logging.WARNING,
+                                        "adapter_candidate_invalid_url",
+                                        request_id=request_id,
+                                        item_id=item["id"],
+                                        source=source,
+                                        url=cand.get("url"),
+                                    )
+                                    continue
+                                cand["source"] = source
+                                cand = self._annotate_candidate_with_community_reverse_lookup(cand)
+                                cand["candidate_id"] = str(
+                                    cand.get("candidate_id")
+                                    or cand.get("external_id")
+                                    or cand.get("url")
+                                    or ""
+                                )
+                                modifier = self.adapters[source].source_modifier(cand)
+                                scores = score_candidate(item, cand, source_modifier=modifier)
+                                cand.update(scores)
+                                cand["canonical_json"] = safe_json_dumps(canonical_payload) if canonical_payload else None
+                                cand["id"] = uuid4().hex
+                                _append_or_merge_candidate(cand)
+
+                            if candidates:
+                                # Insert partial candidates immediately for progressive UI updates
+                                partial_ranked = rank_candidates(
+                                    scored,
+                                    source_priority=source_priority,
+                                )
+                                self.store.reset_candidates_for_item(item["id"])
+                                self.store.insert_candidates(item["id"], partial_ranked)
+                                _log_event(
+                                    logging.INFO,
+                                    "adapter_candidates_emitted",
+                                    request_id=request_id,
+                                    item_id=item["id"],
+                                    source=source,
+                                    candidates_total=len(partial_ranked),
+                                    adapters_completed=adapters_completed,
+                                    adapters_total=adapters_total,
+                                    search_mode=("lightweight" if lightweight_mode else "full"),
+                                )
+
+                            adapters_completed += 1
+                            _log_event(
+                                logging.INFO,
+                                "adapter_search_completed",
+                                request_id=request_id,
+                                item_id=item["id"],
+                                source=source,
+                                adapters_completed=adapters_completed,
+                                adapters_total=adapters_total,
+                                search_mode=("lightweight" if lightweight_mode else "full"),
+                                duration_ms=int((time.perf_counter() - source_started) * 1000),
+                            )
+                            self.store.update_request_progress(
+                                request_id,
+                                adapters_completed=adapters_completed,
+                            )
+
+                        if lightweight_mode and not_done:
+                            now = time.perf_counter()
+                            expired = []
+                            for fut in list(not_done):
+                                source = futures[fut]
+                                started = adapter_started_at.get(source, pass_started_monotonic)
+                                if (now - started) >= float(self.discovery_source_timeout_sec):
+                                    expired.append((fut, source, started))
+                            for fut, source, started in expired:
+                                pending.discard(fut)
+                                fut.cancel()
+                                adapters_completed += 1
+                                self.store.update_request_progress(
+                                    request_id,
+                                    adapters_completed=adapters_completed,
+                                )
+                                _log_event(
+                                    logging.WARNING,
+                                    "adapter_search_timeout_budget_exceeded",
+                                    request_id=request_id,
+                                    item_id=item["id"],
+                                    source=source,
+                                    search_mode="lightweight",
+                                    timeout_budget_sec=float(self.discovery_source_timeout_sec),
+                                    duration_ms=int((time.perf_counter() - started) * 1000),
+                                )
+                finally:
+                    pool.shutdown(wait=False, cancel_futures=True)
                     _log_event(
                         logging.INFO,
-                        "adapter_search_completed",
+                        "search_adapter_pass_complete",
                         request_id=request_id,
                         item_id=item["id"],
-                        source=source,
-                        adapters_completed=adapters_completed,
+                        search_mode=("lightweight" if lightweight_mode else "full"),
+                        duration_ms=int((time.perf_counter() - pass_started_monotonic) * 1000),
                         adapters_total=adapters_total,
                     )
-                    self.store.update_request_progress(
-                        request_id,
-                        adapters_completed=adapters_completed,
-                    )
+
+            # --- Parallel adapter execution (bounded) ---
+            _execute_adapter_pass(lightweight_mode=use_lightweight_discovery)
+
+            if use_lightweight_discovery and not scored:
+                _log_event(
+                    logging.INFO,
+                    "adapter_lightweight_fallback_full",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    reason="no_candidates_after_lightweight_pass",
+                )
+                adapters_completed = 0
+                self.store.update_request_progress(
+                    request_id,
+                    adapters_total=adapters_total,
+                    adapters_completed=0,
+                )
+                _execute_adapter_pass(lightweight_mode=False)
 
             # --- Final selection logic below: do not change ---
             if not scored:
                 self.store.update_item_status(item["id"], "failed", error="no_candidates")
                 _log_event(logging.WARNING, "item_failed", request_id=request_id, item_id=item["id"], error="no_candidates")
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="failed",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+                )
                 continue
 
             ranked = rank_candidates(scored, source_priority=source_priority)
             self.store.reset_candidates_for_item(item["id"])
             self.store.insert_candidates(item["id"], ranked)
-            self._refresh_search_cache_for_item(request_row, item, ranked)
             self.store.update_item_status(item["id"], "candidate_found")
             _log_event(logging.INFO, "item_candidate_found", request_id=request_id, item_id=item["id"])
 
@@ -3641,6 +3303,14 @@ class SearchResolutionService:
                     item_id=item["id"],
                     error="no_candidate_above_threshold",
                 )
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="failed",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+                )
                 continue
 
             self.store.update_item_status(item["id"], "selected", chosen=chosen)
@@ -3656,12 +3326,28 @@ class SearchResolutionService:
             if not auto_enqueue:
                 # Invariant B: search-only requests never auto-enqueue download jobs.
                 # Manual enqueue via API is always allowed.
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="selected",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+                )
                 continue
 
             # Do not enqueue downloads from search for playlists (must bypass search)
             if chosen.get("url") and "list=" in chosen.get("url", ""):
                 self.store.update_item_status(
                     item["id"], "skipped", error="playlist_url_bypass"
+                )
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="skipped",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
                 )
                 continue
 
@@ -3726,6 +3412,14 @@ class SearchResolutionService:
                     item_id=item["id"],
                     error=f"invalid_destination: {exc}",
                 )
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="failed",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+                )
                 continue
             job_id, created, dedupe_reason = self.queue_store.enqueue_job(**enqueue_payload)
 
@@ -3747,6 +3441,14 @@ class SearchResolutionService:
                     destination=resolved_destination,
                     media_type=item["media_type"],
                     dedupe_result=dedupe_reason,
+                )
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="skipped",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
                 )
                 continue
 
@@ -3786,6 +3488,14 @@ class SearchResolutionService:
                 destination=resolved_destination,
                 media_type=item["media_type"],
             )
+            _log_event(
+                logging.INFO,
+                "search_item_complete",
+                request_id=request_id,
+                item_id=item["id"],
+                status="enqueued",
+                duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+            )
 
         items = self.store.list_items(request_id)
         if not auto_enqueue:
@@ -3798,6 +3508,14 @@ class SearchResolutionService:
                 self.store.update_request_status(request_id, "completed")
             else:
                 self.store.update_request_status(request_id, "failed", error="no_candidates")
+            _log_event(
+                logging.INFO,
+                "search_discovery_complete",
+                request_id=request_id,
+                media_type=request_media_type,
+                auto_enqueue=False,
+                duration_ms=int((time.perf_counter() - request_started_monotonic) * 1000),
+            )
             return request_id
 
         has_enqueued = any(item.get("status") == "enqueued" for item in items)
@@ -3813,6 +3531,14 @@ class SearchResolutionService:
                 request_id,
                 adapters_completed=adapters_total,
             )
+        _log_event(
+            logging.INFO,
+            "search_discovery_complete",
+            request_id=request_id,
+            media_type=request_media_type,
+            auto_enqueue=True,
+            duration_ms=int((time.perf_counter() - request_started_monotonic) * 1000),
+        )
         return request_id
 
     def enqueue_item_candidate(self, item_id, candidate_id, *, final_format_override=None):
