@@ -5982,7 +5982,11 @@ async def list_search_requests(status: str | None = None, limit: int | None = No
     except Exception:
         logging.exception("Failed to list search requests")
         raise HTTPException(status_code=500, detail="Failed to load search requests")
-    return _sanitize_non_http_urls({"requests": requests})
+    payload = _sanitize_non_http_urls({"requests": requests})
+    return JSONResponse(
+        content=payload,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/api/search/requests/{request_id}")
@@ -5991,7 +5995,11 @@ async def get_search_request(request_id: str):
     result = service.get_search_request(request_id)
     if not result:
         raise HTTPException(status_code=404, detail="Search request not found")
-    return _sanitize_non_http_urls(result)
+    payload = _sanitize_non_http_urls(result)
+    return JSONResponse(
+        content=payload,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.post("/api/search/requests/{request_id}/cancel")
@@ -7424,7 +7432,10 @@ async def spotify_oauth_disconnect():
 async def get_search_candidates(item_id: str):
     service = app.state.search_service
     candidates = service.list_item_candidates(item_id)
-    return {"candidates": candidates}
+    return JSONResponse(
+        content={"candidates": candidates},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/api/search/sources")

@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.8 — Fast Discovery + Video Preview + Adapter Extensibility
+
+### High-Level
+This release focuses on homepage search UX and discovery speed: incremental/as-resolved rendering, lightweight video discovery, and embedded preview support for supported sources, while keeping deterministic acquisition/download behavior unchanged.
+
+### Added
+- Homepage video preview flow with `Preview` action on result cards for supported adapters.
+- Preview can be triggered from video title/thumbnail clicks (same behavior as `Preview` button).
+- Structured custom adapter framework with user-facing `config/custom_search_adapters.example.yaml` template.
+- New video discovery adapters integrated for `rumble` and `archive_org`.
+- Discovery timing instrumentation and source-level adapter progress logging.
+- New API endpoint `GET /api/version/latest` to resolve latest version from GHCR tags (with release fallback).
+
+### Changed
+- Search discovery pipeline refactored for lightweight-first behavior:
+  - canonical metadata resolution removed from initial generic/video discovery path
+  - strict per-source timeout budget for discovery
+  - bounded discovery result set per source
+  - fallback/retry behavior for timed-out sources without blocking first visible results
+- YouTube lightweight discovery migrated to Innertube search (`youtubei/v1/search`) for fast candidate return.
+- Homepage results rendering now updates progressively as adapters resolve (no all-at-once batch wait).
+- Candidate row rendering is now non-blocking: rows render first, job-state enrichment follows asynchronously.
+- Home polling loop hardened to prevent overlapping async polls and reduce UI update latency.
+- Search DB connections tuned for concurrent read/write responsiveness (`WAL`, `busy_timeout`) during progressive candidate writes.
+- Source selection UX refined:
+  - dynamic source list from backend
+  - video-mode source filtering to remove non-video adapters from the selection list
+- Info page version check now tracks GHCR-published versions (container-first) instead of browser-side GitHub release lookup.
+
+### Removed
+- Legacy local YouTube search cache pipeline and schema artifacts (`search_query_cache` and related indexes).
+- `x` and `bitchute` default source adapter exposure from active source selection paths.
+
+### Fixed
+- Multi-source visibility issue where one adapter’s results could hide or starve others in combined searches.
+- Homepage candidate refresh race conditions that caused delayed or dropped incremental rows.
+- Rumble/archive preview wiring and embed behavior reliability on homepage preview modal.
+- Search-card metadata regressions (including posted-date rendering on result cards).
+
 ## v0.9.7 — Community Cache + Local Search Cache + Watcher/Telegram Hardening
 
 ### High-Level

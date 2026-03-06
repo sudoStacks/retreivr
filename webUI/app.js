@@ -4499,7 +4499,10 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
     placeholder.textContent = "Fetching candidates…";
     let candidates = Array.isArray(preloadedCandidates) ? preloadedCandidates : [];
     if (!candidates.length) {
-      const data = await fetchJson(`/api/search/items/${encodeURIComponent(item.id)}/candidates`);
+      const data = await fetchJson(
+        `/api/search/items/${encodeURIComponent(item.id)}/candidates`,
+        { cache: "no-store" }
+      );
       candidates = data.candidates || [];
     }
     if (!candidates.length) {
@@ -5353,7 +5356,10 @@ async function refreshHomeResults(requestId) {
   if (!container) return null;
   try {
     const previousContext = state.homeRequestContext[requestId] || {};
-    const data = await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}`);
+    const data = await fetchJson(
+      `/api/search/requests/${encodeURIComponent(requestId)}`,
+      { cache: "no-store" }
+    );
     const requestStatus = data.request?.status || "queued";
     const requestMediaType = data.request?.media_type || "";
     const items = data.items || [];
