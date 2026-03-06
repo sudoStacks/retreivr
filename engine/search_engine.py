@@ -3079,6 +3079,11 @@ class SearchResolutionService:
                 return merged
 
             def _append_or_merge_candidate(candidate):
+                # For Home generic/video discovery, preserve per-source candidates as-is.
+                # Do not merge across identities; users should see each adapter's results.
+                if request_media_type in {"generic", "video"}:
+                    scored.append(candidate)
+                    return
                 identity = _candidate_identity(candidate)
                 if not identity:
                     scored.append(candidate)
