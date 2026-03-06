@@ -755,6 +755,14 @@ body.home-page .home-advanced-row {
   gap: 12px 16px;
 }
 
+body.home-page .home-advanced-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+}
+
 body.home-page .home-advanced-field select,
 body.home-page .home-advanced-field input[type="text"] {
   height: 38px;
