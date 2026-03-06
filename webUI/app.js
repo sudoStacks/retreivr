@@ -124,6 +124,8 @@ const HOME_VIDEO_KEYWORDS = ["show", "podcast", "episode", "interview"];
 const HOME_PREVIEW_EMBED_BUILDERS = {
   youtube: buildYouTubeHomePreviewEmbedUrl,
   youtube_music: buildYouTubeHomePreviewEmbedUrl,
+  rumble: buildRumbleHomePreviewEmbedUrl,
+  archive_org: buildArchiveOrgHomePreviewEmbedUrl,
 };
 const HOME_STATUS_LABELS = {
   queued: "Searching",
@@ -620,6 +622,44 @@ function buildYouTubeHomePreviewEmbedUrl(url) {
   return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0&modestbranding=1`;
 }
 
+function buildRumbleHomePreviewEmbedUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (!host.endsWith("rumble.com")) return null;
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (!parts.length) return null;
+    const slug = String(parts[0] || "").toLowerCase();
+    // Common Rumble video path is /v<id>-title.html
+    const idMatch = slug.match(/^(v[a-z0-9]+)/i);
+    if (!idMatch || !idMatch[1]) return null;
+    return `https://rumble.com/embed/${encodeURIComponent(idMatch[1])}/?autoplay=2`;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function buildArchiveOrgHomePreviewEmbedUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (!host.endsWith("archive.org")) return null;
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length >= 2 && parts[0] === "details") {
+      const identifier = String(parts[1] || "").trim();
+      if (!identifier) return null;
+      return `https://archive.org/embed/${encodeURIComponent(identifier)}`;
+    }
+  } catch (_err) {
+    return null;
+  }
+  return null;
+}
+
 function buildHomePreviewDescriptor(candidate) {
   if (!candidate || typeof candidate !== "object") {
     return null;
@@ -658,6 +698,8 @@ function openHomePreviewModal(descriptor) {
   const sourceLabels = {
     youtube: "YouTube",
     youtube_music: "YouTube Music",
+    rumble: "Rumble",
+    archive_org: "Archive.org",
   };
   previewState.open = true;
   previewState.source = descriptor.source || "";
