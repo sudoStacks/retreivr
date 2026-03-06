@@ -76,6 +76,12 @@ const oauthState = {
   authUrl: "",
   account: "",
 };
+const previewState = {
+  open: false,
+  source: "",
+  title: "",
+  embedUrl: "",
+};
 const BROWSE_DEFAULTS = {
   configDir: "",
   mediaRoot: "",
@@ -99,6 +105,10 @@ const HOME_SOURCE_PRIORITY_MAP = {
 const HOME_GENERIC_SOURCE_PRIORITY = ["youtube_music", "soundcloud", "bandcamp", "youtube"];
 const HOME_VIDEO_SOURCE_PRIORITY = ["youtube", "youtube_music", "soundcloud", "bandcamp"];
 const HOME_VIDEO_KEYWORDS = ["show", "podcast", "episode", "interview"];
+const HOME_PREVIEW_EMBED_BUILDERS = {
+  youtube: buildYouTubeHomePreviewEmbedUrl,
+  youtube_music: buildYouTubeHomePreviewEmbedUrl,
+};
 const HOME_STATUS_LABELS = {
   queued: "Searching",
   searching: "Searching",
@@ -502,6 +512,109 @@ function extractPlaylistIdFromUrl(value) {
   return null;
 }
 
+function normalizePreviewSourceKey(source) {
+  return String(source || "").trim().toLowerCase();
+}
+
+function extractYouTubeVideoIdFromUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (host === "youtu.be") {
+      const id = parsed.pathname.replace(/^\/+/, "").split("/")[0];
+      return id || null;
+    }
+    if (host.includes("youtube.com")) {
+      const id = parsed.searchParams.get("v");
+      if (id) return id;
+      const parts = parsed.pathname.split("/").filter(Boolean);
+      const embedIdx = parts.findIndex((part) => part === "embed" || part === "shorts");
+      if (embedIdx >= 0 && parts[embedIdx + 1]) {
+        return parts[embedIdx + 1];
+      }
+    }
+  } catch (_err) {
+    return null;
+  }
+  return null;
+}
+
+function buildYouTubeHomePreviewEmbedUrl(url) {
+  const videoId = extractYouTubeVideoIdFromUrl(url);
+  if (!videoId) {
+    return null;
+  }
+  return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0&modestbranding=1`;
+}
+
+function buildHomePreviewDescriptor(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  const source = normalizePreviewSourceKey(candidate.source);
+  const url = String(candidate.url || "").trim();
+  if (!source || !url || !isValidHttpUrl(url)) {
+    return null;
+  }
+  const builder = HOME_PREVIEW_EMBED_BUILDERS[source];
+  if (typeof builder !== "function") {
+    return null;
+  }
+  const embedUrl = builder(url, candidate);
+  if (!embedUrl || !isValidHttpUrl(embedUrl)) {
+    return null;
+  }
+  return {
+    source,
+    title: String(candidate.title || "").trim() || "Preview",
+    embedUrl,
+  };
+}
+
+function openHomePreviewModal(descriptor) {
+  if (!descriptor || !descriptor.embedUrl) {
+    return;
+  }
+  const modal = $("#home-preview-modal");
+  const frame = $("#home-preview-frame");
+  const titleEl = $("#home-preview-title");
+  const sourceEl = $("#home-preview-source");
+  if (!modal || !frame || !titleEl || !sourceEl) {
+    return;
+  }
+  const sourceLabels = {
+    youtube: "YouTube",
+    youtube_music: "YouTube Music",
+  };
+  previewState.open = true;
+  previewState.source = descriptor.source || "";
+  previewState.title = descriptor.title || "Preview";
+  previewState.embedUrl = descriptor.embedUrl;
+  titleEl.textContent = descriptor.title || "Preview";
+  sourceEl.textContent = `Source: ${sourceLabels[descriptor.source] || descriptor.source || "Unknown"}`;
+  frame.src = descriptor.embedUrl;
+  modal.classList.remove("hidden");
+  updatePollingState();
+}
+
+function closeHomePreviewModal() {
+  const modal = $("#home-preview-modal");
+  const frame = $("#home-preview-frame");
+  if (frame) {
+    frame.src = "about:blank";
+  }
+  if (modal) {
+    modal.classList.add("hidden");
+  }
+  previewState.open = false;
+  previewState.source = "";
+  previewState.title = "";
+  previewState.embedUrl = "";
+  updatePollingState();
+}
+
 function computeResolvedDestinationPath(raw) {
   const base = BROWSE_DEFAULTS.mediaRoot || "/downloads";
   const trimmed = (raw || "").trim();
@@ -575,7 +688,7 @@ function setupNavActions() {
 
 function updatePollingState() {
   const importModalOpen = !$("#import-progress-modal")?.classList.contains("hidden");
-  state.pollingPaused = browserState.open || oauthState.open || importModalOpen || state.configDirty || state.inputFocused;
+  state.pollingPaused = browserState.open || oauthState.open || previewState.open || importModalOpen || state.configDirty || state.inputFocused;
 }
 
 function withPollingGuard(fn) {
@@ -4251,35 +4364,10 @@ function renderHomeCandidateRow(candidate, item) {
     row.dataset.url = candidate.url;
   }
 
-  const extractYouTubeVideoId = (value) => {
-    const raw = String(value || "").trim();
-    if (!raw) return null;
-    try {
-      const parsed = new URL(raw);
-      const host = (parsed.hostname || "").toLowerCase();
-      if (host === "youtu.be") {
-        const id = parsed.pathname.replace(/^\/+/, "").split("/")[0];
-        return id || null;
-      }
-      if (host.includes("youtube.com")) {
-        const id = parsed.searchParams.get("v");
-        if (id) return id;
-        const parts = parsed.pathname.split("/").filter(Boolean);
-        const embedIdx = parts.findIndex((part) => part === "embed" || part === "shorts");
-        if (embedIdx >= 0 && parts[embedIdx + 1]) {
-          return parts[embedIdx + 1];
-        }
-      }
-    } catch (_) {
-      return null;
-    }
-    return null;
-  };
-
   const fallbackYouTubeThumb = (() => {
     const source = String(candidate.source || "").toLowerCase();
     if (!source.startsWith("youtube")) return null;
-    const videoId = extractYouTubeVideoId(candidate.url);
+    const videoId = extractYouTubeVideoIdFromUrl(candidate.url);
     return videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : null;
   })();
 
@@ -4385,6 +4473,19 @@ function renderHomeCandidateRow(candidate, item) {
     openLink.target = "_blank";
     openLink.rel = "noopener noreferrer";
     action.appendChild(openLink);
+
+    const previewDescriptor = buildHomePreviewDescriptor(candidate);
+    if (previewDescriptor) {
+      const previewButton = document.createElement("button");
+      previewButton.type = "button";
+      previewButton.className = "button ghost small home-candidate-preview";
+      previewButton.textContent = "Preview";
+      previewButton.dataset.action = "home-preview";
+      previewButton.dataset.previewEmbedUrl = previewDescriptor.embedUrl;
+      previewButton.dataset.previewSource = previewDescriptor.source;
+      previewButton.dataset.previewTitle = previewDescriptor.title;
+      action.appendChild(previewButton);
+    }
   }
   row.appendChild(action);
 
@@ -7237,6 +7338,19 @@ function bindEvents() {
         }
         return;
       }
+      const previewButton = event.target.closest('button[data-action="home-preview"]');
+      if (previewButton) {
+        const previewEmbedUrl = String(previewButton.dataset.previewEmbedUrl || "").trim();
+        if (!previewEmbedUrl || !isValidHttpUrl(previewEmbedUrl)) {
+          return;
+        }
+        openHomePreviewModal({
+          embedUrl: previewEmbedUrl,
+          source: String(previewButton.dataset.previewSource || "").trim(),
+          title: String(previewButton.dataset.previewTitle || "").trim() || "Preview",
+        });
+        return;
+      }
       const directButton = event.target.closest('button[data-action="home-direct-download"]');
       if (directButton) {
         if (directButton.disabled) return;
@@ -7469,6 +7583,18 @@ function bindEvents() {
     importProgressModal.addEventListener("click", (event) => {
       if (event.target === importProgressModal) {
         closeImportProgressModal();
+      }
+    });
+  }
+  const homePreviewClose = $("#home-preview-close");
+  if (homePreviewClose) {
+    homePreviewClose.addEventListener("click", closeHomePreviewModal);
+  }
+  const homePreviewModal = $("#home-preview-modal");
+  if (homePreviewModal) {
+    homePreviewModal.addEventListener("click", (event) => {
+      if (event.target === homePreviewModal) {
+        closeHomePreviewModal();
       }
     });
   }

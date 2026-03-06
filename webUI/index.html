@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.7-ui-28">
-  <script defer src="app.js?v=0.9.7-ui-28"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.8-ui-1">
+  <script defer src="app.js?v=0.9.8-ui-1"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -1116,6 +1116,27 @@
       <div id="import-progress-error" class="notice" role="status"></div>
       <div class="meta">
         Please avoid starting other downloads or heavy actions until the import completes.
+      </div>
+    </div>
+  </div>
+
+  <div id="home-preview-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="home-preview-title">
+    <div class="modal-card home-preview-card">
+      <div class="row space-between">
+        <div id="home-preview-title" class="panel-title">Preview</div>
+        <button id="home-preview-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div id="home-preview-source" class="meta home-preview-meta"></div>
+      <div class="home-preview-frame-wrap">
+        <iframe
+          id="home-preview-frame"
+          title="Video preview"
+          src="about:blank"
+          loading="lazy"
+          allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+          allowfullscreen
+          referrerpolicy="strict-origin-when-cross-origin"
+        ></iframe>
       </div>
     </div>
   </div>

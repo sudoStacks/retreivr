@@ -1171,7 +1171,8 @@ body.home-page .home-candidate-source-tag {
   color: var(--muted);
 }
 
-.home-candidate-open {
+.home-candidate-open,
+.home-candidate-preview {
   text-transform: none;
   padding: 6px 10px;
   font-size: 12px;
@@ -2468,4 +2469,29 @@ body.home-page .home-search-actions {
   color: #111827;
   background: rgba(239, 68, 68, 0.14);
   border-color: rgba(239, 68, 68, 0.45);
+}
+
+.home-preview-card {
+  width: min(960px, 95vw);
+}
+
+.home-preview-meta {
+  margin-top: 6px;
+  margin-bottom: 10px;
+}
+
+.home-preview-frame-wrap {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
+#home-preview-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
 }
