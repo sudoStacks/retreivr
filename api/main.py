@@ -178,6 +178,11 @@ DIRECT_URL_PLAYLIST_ERROR = (
     "Playlist URLs are not supported in Direct URL mode. "
     "Please add this playlist via Scheduler or Playlist settings."
 )
+GHCR_PACKAGE_REPO = str(os.environ.get("RETREIVR_GHCR_REPO") or "sudostacks/retreivr").strip().lower()
+GHCR_TOKEN_URL = "https://ghcr.io/token"
+GHCR_TAGS_URL_TEMPLATE = "https://ghcr.io/v2/{repo}/tags/list"
+GITHUB_RELEASES_LATEST_URL = "https://api.github.com/repos/sudoStacks/retreivr/releases/latest"
+_SEMVER_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$", re.IGNORECASE)
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
 MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024
@@ -681,6 +686,68 @@ def _run_playlist_import_job(job_id: str, filename: str, payload: bytes, media_m
                 active_count = _playlist_imports_active_count()
                 app.state.playlist_import_active_count = max(0, active_count - 1)
                 _trim_playlist_import_jobs_locked()
+
+
+def _parse_semver_tag(tag: str | None) -> tuple[int, int, int] | None:
+    text = str(tag or "").strip()
+    if not text:
+        return None
+    match = _SEMVER_TAG_RE.match(text)
+    if not match:
+        return None
+    try:
+        return tuple(int(part) for part in match.groups())
+    except Exception:
+        return None
+
+
+def _resolve_latest_version_tag(timeout_seconds: float = 2.5) -> tuple[str | None, str]:
+    # Prefer GHCR tag inventory because runtime distribution is container-first.
+    try:
+        token_resp = requests.get(
+            GHCR_TOKEN_URL,
+            params={"service": "ghcr.io", "scope": f"repository:{GHCR_PACKAGE_REPO}:pull"},
+            timeout=max(0.5, float(timeout_seconds)),
+        )
+        token_resp.raise_for_status()
+        token = str((token_resp.json() or {}).get("token") or "").strip()
+        if not token:
+            raise RuntimeError("ghcr_token_missing")
+
+        tags_resp = requests.get(
+            GHCR_TAGS_URL_TEMPLATE.format(repo=GHCR_PACKAGE_REPO),
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=max(0.5, float(timeout_seconds)),
+        )
+        tags_resp.raise_for_status()
+        tags_json = tags_resp.json()
+        tags_payload = tags_json if isinstance(tags_json, dict) else {}
+        tags = tags_payload.get("tags") if isinstance(tags_payload, dict) else []
+        if isinstance(tags, list):
+            semver_tags = [str(tag).strip() for tag in tags if _parse_semver_tag(str(tag).strip())]
+            if semver_tags:
+                best = max(semver_tags, key=lambda value: _parse_semver_tag(value) or (0, 0, 0))
+                return best, "ghcr_tags"
+    except Exception as exc:
+        logging.warning("version_check_ghcr_failed: %s", exc)
+
+    # Fallback to GitHub releases if GHCR is unavailable.
+    try:
+        response = requests.get(
+            GITHUB_RELEASES_LATEST_URL,
+            timeout=max(0.5, float(timeout_seconds)),
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        response.raise_for_status()
+        payload_json = response.json()
+        payload = payload_json if isinstance(payload_json, dict) else {}
+        tag_name = str(payload.get("tag_name") or "").strip()
+        if tag_name:
+            return tag_name, "github_releases_latest"
+    except Exception as exc:
+        logging.warning("version_check_release_fallback_failed: %s", exc)
+
+    return None, "unavailable"
 
 
 def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
@@ -5333,6 +5400,25 @@ async def api_metrics():
 @app.get("/api/version")
 async def api_version():
     return get_runtime_info()
+
+
+@app.get("/api/version/latest")
+async def api_version_latest():
+    runtime = get_runtime_info() or {}
+    latest_tag, source = _resolve_latest_version_tag()
+    current = str(runtime.get("app_version") or "").strip()
+    latest = str(latest_tag or "").strip()
+    update_available = False
+    current_semver = _parse_semver_tag(current)
+    latest_semver = _parse_semver_tag(latest)
+    if current_semver is not None and latest_semver is not None:
+        update_available = current_semver < latest_semver
+    return {
+        "current_version": current,
+        "latest_version": latest,
+        "source": source,
+        "update_available": bool(update_available),
+    }
 
 
 @app.post("/api/yt-dlp/update")

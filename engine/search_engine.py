@@ -659,7 +659,7 @@ class SearchJobStore:
                 )
                 item["candidate_count"] = cur.fetchone()[0]
                 cur.execute(
-                    "SELECT * FROM search_candidates WHERE item_id=? ORDER BY rank LIMIT 50",
+                    "SELECT * FROM search_candidates WHERE item_id=? ORDER BY rank",
                     (item["id"],),
                 )
                 candidate_rows = []
@@ -3098,14 +3098,23 @@ class SearchResolutionService:
                 bool(self.lightweight_discovery_enabled) and request_media_type in {"generic", "video"}
             )
             lightweight_had_timeouts = False
-            def _execute_adapter_pass(*, lightweight_mode):
+            timed_out_sources = set()
+
+            def _execute_adapter_pass(*, lightweight_mode, source_subset=None, track_progress=True):
                 nonlocal adapters_completed, lightweight_had_timeouts
                 futures = {}
                 adapter_started_at = {}
                 pass_started_monotonic = time.perf_counter()
-                pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ADAPTERS, len(source_priority)))
+                active_sources = (
+                    [src for src in source_priority if src in set(source_subset or [])]
+                    if source_subset is not None
+                    else list(source_priority)
+                )
+                if not active_sources:
+                    return
+                pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ADAPTERS, len(active_sources)))
                 try:
-                    for source in source_priority:
+                    for source in active_sources:
                         adapter = self.adapters.get(source)
                         if not adapter:
                             _log_event(
@@ -3115,11 +3124,12 @@ class SearchResolutionService:
                                 item_id=item["id"],
                                 source=source,
                             )
-                            adapters_completed += 1
-                            self.store.update_request_progress(
-                                request_id,
-                                adapters_completed=adapters_completed,
-                            )
+                            if track_progress:
+                                adapters_completed += 1
+                                self.store.update_request_progress(
+                                    request_id,
+                                    adapters_completed=adapters_completed,
+                                )
                             continue
 
                         self.store.update_item_status(item["id"], "searching_source")
@@ -3166,11 +3176,12 @@ class SearchResolutionService:
                                     search_mode=("lightweight" if lightweight_mode else "full"),
                                     duration_ms=int((time.perf_counter() - source_started) * 1000),
                                 )
-                                adapters_completed += 1
-                                self.store.update_request_progress(
-                                    request_id,
-                                    adapters_completed=adapters_completed,
-                                )
+                                if track_progress:
+                                    adapters_completed += 1
+                                    self.store.update_request_progress(
+                                        request_id,
+                                        adapters_completed=adapters_completed,
+                                    )
                                 continue
 
                             for cand in candidates:
@@ -3219,7 +3230,8 @@ class SearchResolutionService:
                                     search_mode=("lightweight" if lightweight_mode else "full"),
                                 )
 
-                            adapters_completed += 1
+                            if track_progress:
+                                adapters_completed += 1
                             _log_event(
                                 logging.INFO,
                                 "adapter_search_completed",
@@ -3231,10 +3243,11 @@ class SearchResolutionService:
                                 search_mode=("lightweight" if lightweight_mode else "full"),
                                 duration_ms=int((time.perf_counter() - source_started) * 1000),
                             )
-                            self.store.update_request_progress(
-                                request_id,
-                                adapters_completed=adapters_completed,
-                            )
+                            if track_progress:
+                                self.store.update_request_progress(
+                                    request_id,
+                                    adapters_completed=adapters_completed,
+                                )
 
                         if lightweight_mode and not_done:
                             now = time.perf_counter()
@@ -3248,11 +3261,13 @@ class SearchResolutionService:
                                 pending.discard(fut)
                                 fut.cancel()
                                 lightweight_had_timeouts = True
-                                adapters_completed += 1
-                                self.store.update_request_progress(
-                                    request_id,
-                                    adapters_completed=adapters_completed,
-                                )
+                                timed_out_sources.add(source)
+                                if track_progress:
+                                    adapters_completed += 1
+                                    self.store.update_request_progress(
+                                        request_id,
+                                        adapters_completed=adapters_completed,
+                                    )
                                 _log_event(
                                     logging.WARNING,
                                     "adapter_search_timeout_budget_exceeded",
@@ -3272,7 +3287,7 @@ class SearchResolutionService:
                         item_id=item["id"],
                         search_mode=("lightweight" if lightweight_mode else "full"),
                         duration_ms=int((time.perf_counter() - pass_started_monotonic) * 1000),
-                        adapters_total=adapters_total,
+                        adapters_total=(len(active_sources) if source_subset is not None else adapters_total),
                     )
 
             # --- Parallel adapter execution (bounded) ---
@@ -3300,6 +3315,12 @@ class SearchResolutionService:
                     request_id=request_id,
                     item_id=item["id"],
                     candidates=len(scored),
+                )
+                # Recover missing adapters without blocking initial fast results.
+                _execute_adapter_pass(
+                    lightweight_mode=False,
+                    source_subset=timed_out_sources,
+                    track_progress=False,
                 )
 
             # --- Final selection logic below: do not change ---

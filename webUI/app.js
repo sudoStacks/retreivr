@@ -87,12 +87,11 @@ const BROWSE_DEFAULTS = {
   mediaRoot: "",
   tokensDir: "",
 };
-const GITHUB_REPO = "Retreivr/retreivr";
-const GITHUB_RELEASE_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const GITHUB_RELEASE_PAGE = "https://github.com/Retreivr/retreivr/releases";
-const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at";
-const RELEASE_CACHE_KEY = "yt_archiver_release_cache";
-const RELEASE_VERSION_KEY = "yt_archiver_release_app_version";
+const VERSION_LATEST_URL = "/api/version/latest";
+const VERSION_REFERENCE_PAGE = "https://github.com/sudoStacks/retreivr/pkgs/container/retreivr";
+const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at_v2";
+const RELEASE_CACHE_KEY = "yt_archiver_release_cache_v2";
+const RELEASE_VERSION_KEY = "yt_archiver_release_app_version_v2";
 const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
 const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
 const HOME_SOURCE_PRIORITY_MAP = {
@@ -1177,7 +1176,7 @@ function applyReleaseStatus(currentVersion, latestTag) {
   }
   const safeTag = sanitizeVersionTag(latest);
   const link = document.createElement("a");
-  link.href = GITHUB_RELEASE_PAGE;
+  link.href = VERSION_REFERENCE_PAGE;
   link.target = "_blank";
   link.rel = "noopener";
   link.textContent = `v${safeTag}`;
@@ -1225,12 +1224,12 @@ async function checkRelease(currentVersion) {
   }
 
   try {
-    const response = await fetch(GITHUB_RELEASE_URL, { cache: "no-store" });
+    const response = await fetch(VERSION_LATEST_URL, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
     const data = await response.json();
-    const tag = data.tag_name || "";
+    const tag = data.latest_version || "";
     localStorage.setItem(RELEASE_CHECK_KEY, String(now));
     localStorage.setItem(RELEASE_CACHE_KEY, JSON.stringify({ tag }));
     localStorage.setItem(RELEASE_VERSION_KEY, normalizedVersion);
