@@ -975,7 +975,9 @@ function syncSettingsMainWidthLock() {
     width = Math.floor((layout.clientWidth || 0) - sidebarWidth - gap);
   }
   if (width > 0) {
-    panel.style.setProperty("--settings-main-locked-width", `${width}px`);
+    requestAnimationFrame(() => {
+      panel.style.setProperty("--settings-main-locked-width", `${width}px`);
+    });
   }
 }
 

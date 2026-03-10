@@ -1727,8 +1727,8 @@ body.home-page .home-footer-brand .sudostacks-logo {
   align-items: stretch;
   align-self: stretch;
   gap: 12px;
-  width: var(--settings-main-inline-size);
-  max-width: var(--settings-main-inline-size);
+  width: 100%;
+  max-width: 100%;
 }
 
 #config-panel .settings-section > *,
@@ -2165,6 +2165,13 @@ body.home-page .home-footer-brand .sudostacks-logo {
 
 #settings-tagging .music-meta-layout .row > .field {
   width: 100%;
+  max-width: none;
+}
+
+#settings-tagging .music-meta-layout .field.tiny,
+#settings-tagging .music-meta-layout .field.short,
+#settings-tagging .music-meta-layout .field.medium,
+#settings-tagging .music-meta-layout .field.long {
   max-width: none;
 }
 
