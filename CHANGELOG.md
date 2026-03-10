@@ -2,6 +2,61 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.9 — Settings IA Overhaul + UX Consistency + Runtime Notification Fixes
+
+### High-Level
+This release focuses on end-to-end usability and configuration safety: the former long Config page was reworked into a sectioned Settings experience, cross-mode Home controls were unified, and key operational regressions (scheduler state persistence and Telegram title reporting) were fixed.
+
+### Added
+- New Settings information architecture with:
+  - sticky left sidebar categories
+  - `All Settings` view
+  - single-section focus mode
+  - mobile section selector fallback
+- Advanced-mode gating controls for settings navigation and field visibility.
+- Explicit `Spotify Integration` enabled toggle with collapsed-details behavior when disabled.
+- New Home default destination config controls for mode-specific defaults:
+  - Music download folder (Home default)
+  - Music Video download folder (Home default)
+- Unified destination input + `Browse` picker presentation pattern applied broadly across settings paths.
+
+### Changed
+- Config page restructured and retitled as `Settings` with clearer section grouping and hierarchy.
+- Settings layout/responsiveness hardened:
+  - fixed sidebar column behavior
+  - deterministic main-column width locking across section switches and browser resize
+  - consistent container sizing logic across desktop/tablet/mobile breakpoints
+- Advanced mode behavior tightened:
+  - advanced sidebar entries hide when advanced mode is off
+  - advanced fields in mixed sections hide when advanced mode is off
+  - advanced mode defaults off on load
+- General settings reorganized for clarity:
+  - `Default Destinations` renamed to `Download Defaults`
+  - filename-related fields consolidated into `Filename Templates`
+  - runtime/cookies controls moved under config-file/runtime grouping
+- Home controls normalized across Video/MV/Music flows:
+  - shared `Delivery` control persists across mode changes
+  - destination control de-duplicated while preserving per-mode defaults
+  - control order and labeling standardized (`Mode`, `Delivery`, `Format`, `Destination`, `Redownload`)
+  - `m4a` surfaced as a selectable output format where applicable
+- Playlist/account cards and controls polished:
+  - `Add Account` / `Add Playlist` converted to green add-CTAs with `+`
+  - delete actions clarified and styled consistently
+  - playlist media mode uses the same 3-way pill control family as Home
+  - playlist account constrained to `Public` or configured accounts
+  - pasted playlist URLs normalize to stored/displayed playlist IDs
+- Visual consistency improvements:
+  - toggle states standardized to red-off / green-on semantics
+  - header theme toggle simplified to icon-only
+  - footer brand/link treatment unified (Home + Info), centered and responsive
+  - Info `Metrics` panel expanded to full-width with version/update block aligned in-panel
+
+### Fixed
+- Scheduler enabled-state save/apply flow now respects user toggles after `Save Schedule` / `Save Config`.
+- Telegram scheduler/watcher summaries now resolve and display human-readable video titles (instead of only YouTube IDs) in attempted-item lists.
+- Settings section navigation no longer causes unintended hash/scroll jump behavior when selecting categories.
+- Multiple settings-page control-size inconsistencies resolved (destination inputs, selects, and aligned 40px control heights where standardized).
+
 ## v0.9.8 — Fast Discovery + Video Preview + Adapter Extensibility
 
 ### High-Level
