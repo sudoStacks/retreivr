@@ -238,6 +238,79 @@ def test_notify_run_summary_uses_run_type_header_and_resolves_track_labels(monke
     assert "0123456789abcdef0123456789abcdef" not in msg
 
 
+def test_notify_run_summary_resolves_video_titles_from_download_history_for_scheduler_and_watcher(monkeypatch) -> None:
+    module = _load_api_main()
+    captured_messages: list[str] = []
+
+    def _fake_send(_config, message):
+        captured_messages.append(str(message))
+        return {"ok": True, "message_id": 910}
+
+    monkeypatch.setattr(module, "telegram_notify_result", _fake_send)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = f"{tmpdir}/db.sqlite"
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS download_jobs (
+                    id TEXT PRIMARY KEY,
+                    status TEXT,
+                    file_path TEXT,
+                    output_template TEXT,
+                    url TEXT,
+                    external_id TEXT
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS download_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT,
+                    title TEXT,
+                    completed_at TEXT
+                )
+                """
+            )
+            cur.execute(
+                "INSERT INTO download_jobs (id, status, file_path, output_template, url, external_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "completed",
+                    None,
+                    "{}",
+                    "https://www.youtube.com/watch?v=KhIjNfUCKUQ",
+                    "KhIjNfUCKUQ",
+                ),
+            )
+            cur.execute(
+                "INSERT INTO download_history (video_id, title, completed_at) VALUES (?, ?, ?)",
+                ("KhIjNfUCKUQ", "My Real Video Title", "2026-02-26T00:00:01+00:00"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        module.app.state.paths = SimpleNamespace(db_path=db_path)
+        for run_type in ("scheduled", "watcher"):
+            status = SimpleNamespace(run_successes=["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], run_failures=[])
+            result = module.notify_run_summary(
+                {},
+                run_type=run_type,
+                status=status,
+                started_at="2026-02-26T00:00:00+00:00",
+                finished_at="2026-02-26T00:00:10+00:00",
+            )
+            assert result["sent"] is True
+
+    assert len(captured_messages) == 2
+    assert all("My Real Video Title" in msg for msg in captured_messages)
+    assert all("YouTube Video (KhIjNfUCKUQ)" not in msg for msg in captured_messages)
+
+
 def test_notify_run_summary_skips_when_only_enqueued_not_attempted(monkeypatch) -> None:
     module = _load_api_main()
     captured = {"called": 0}

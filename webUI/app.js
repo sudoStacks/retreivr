@@ -48,6 +48,7 @@ const state = {
   spotifyPlaylistStatus: {},
   homeNoCandidateStreaks: {},
   homeDestinationInvalid: false,
+  homeLastDefaultDestination: "",
   homeDirectPreview: null,
   homeDirectJob: null,
   homeDirectJobTimer: null,
@@ -58,6 +59,8 @@ const state = {
   playlistImportJobId: null,
   playlistImportPollTimer: null,
   playlistImportInProgress: false,
+  settingsActiveSectionId: "settings-core",
+  settingsLayoutObserver: null,
   logsStickToBottom: true,
 };
 const browserState = {
@@ -122,6 +125,10 @@ const HOME_VIDEO_SOURCE_PRIORITY = [
   "bandcamp",
 ];
 const HOME_VIDEO_KEYWORDS = ["show", "podcast", "episode", "interview"];
+const HOME_MUSIC_MODE_FORMATS = ["mp3", "m4a"];
+const HOME_MUSIC_VIDEO_MODE_FORMATS = ["mp4", "mkv", "webm"];
+const SETTINGS_ADVANCED_MODE_KEY = "retreivr_settings_advanced_mode";
+const SETTINGS_ALL_SECTION_ID = "settings-all";
 const HOME_PREVIEW_EMBED_BUILDERS = {
   youtube: buildYouTubeHomePreviewEmbedUrl,
   youtube_music: buildYouTubeHomePreviewEmbedUrl,
@@ -226,6 +233,9 @@ function normalizePageName(page) {
     return "home";
   }
   const cleanPage = String(page).split("?")[0] || page;
+  if (cleanPage === "settings" || String(cleanPage).startsWith("settings-")) {
+    return "config";
+  }
   if (cleanPage === "search" || cleanPage === "advanced") {
     return "info";
   }
@@ -507,6 +517,12 @@ function setPage(page) {
     if (!state.config || !state.configDirty) {
       loadConfig().then(async () => {
         await refreshSpotifyConfig();
+        const sectionHash = String(window.location.hash || "").replace("#", "");
+        if (sectionHash.startsWith("settings-")) {
+          setActiveSettingsSection(sectionHash, { jump: false, smooth: false });
+        } else {
+          setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false });
+        }
         if (consumeSpotifyConnectedHashFlag()) {
           await refreshSpotifyConfig();
           setConfigNotice("Spotify connected successfully.", false, true);
@@ -514,6 +530,12 @@ function setPage(page) {
       });
     }
     refreshSchedule();
+    const sectionHash = String(window.location.hash || "").replace("#", "");
+    if (sectionHash.startsWith("settings-")) {
+      requestAnimationFrame(() => setActiveSettingsSection(sectionHash, { jump: false, smooth: false }));
+    } else {
+      requestAnimationFrame(() => setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false }));
+    }
   } else if (target === "info") {
     refreshMetrics();
     refreshVersion();
@@ -585,6 +607,22 @@ function extractPlaylistIdFromUrl(value) {
     return null;
   }
   return null;
+}
+
+function normalizeYouTubePlaylistIdentifier(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const extracted = extractPlaylistIdFromUrl(raw);
+  if (extracted) {
+    return String(extracted).trim();
+  }
+  const fallbackMatch = raw.match(/[?&]list=([A-Za-z0-9_-]+)/i);
+  if (fallbackMatch && fallbackMatch[1]) {
+    return String(fallbackMatch[1]).trim();
+  }
+  return raw;
 }
 
 function normalizePreviewSourceKey(source) {
@@ -813,6 +851,235 @@ function updateHomeDestinationResolved() {
   display.textContent = `Resolved: ${resolved}`;
 }
 
+function loadSettingsAdvancedModePreference() {
+  return false;
+}
+
+function isSettingsAdvancedModeEnabled() {
+  return !!$("#settings-advanced-mode")?.checked;
+}
+
+function getAllowedSettingsSectionIds() {
+  const advancedEnabled = isSettingsAdvancedModeEnabled();
+  return $$(".settings-section[data-settings-section]")
+    .filter((section) => {
+      const isAdvanced = String(section.dataset.settingsLevel || "").trim().toLowerCase() === "advanced";
+      return advancedEnabled || !isAdvanced;
+    })
+    .map((section) => section.id)
+    .filter(Boolean);
+}
+
+function updateSettingsSectionNavState(activeSectionId = "") {
+  const normalizedActive = String(activeSectionId || "").trim();
+  const advancedEnabled = isSettingsAdvancedModeEnabled();
+  $$(".settings-nav-link[data-settings-link]").forEach((link) => {
+    const href = String(link.getAttribute("href") || "");
+    const sectionId = href.startsWith("#") ? href.slice(1) : href;
+    const isAdvanced = String(link.dataset.settingsLevel || "").trim().toLowerCase() === "advanced";
+    link.classList.toggle("hidden", isAdvanced && !advancedEnabled);
+    link.classList.toggle("active", normalizedActive && sectionId === normalizedActive);
+  });
+  const select = $("#settings-section-select");
+  if (select) {
+    Array.from(select.options).forEach((option) => {
+      const isAdvanced = String(option.dataset.settingsLevel || "").trim().toLowerCase() === "advanced";
+      const shouldHide = isAdvanced && !advancedEnabled;
+      option.hidden = shouldHide;
+      option.disabled = shouldHide;
+    });
+    if (normalizedActive) {
+      select.value = normalizedActive;
+    }
+  }
+}
+
+function setActiveSettingsSection(sectionId, { jump = false, smooth = true } = {}) {
+  const allowed = getAllowedSettingsSectionIds();
+  if (!allowed.length) {
+    return;
+  }
+  const requested = String(sectionId || "").trim();
+  const nextActive = requested === SETTINGS_ALL_SECTION_ID
+    ? SETTINGS_ALL_SECTION_ID
+    : (allowed.includes(requested) ? requested : (allowed[0] || "settings-core"));
+  state.settingsActiveSectionId = nextActive;
+  $$(".settings-section[data-settings-section]").forEach((section) => {
+    const isAllowed = allowed.includes(section.id);
+    const shouldShow = nextActive === SETTINGS_ALL_SECTION_ID ? isAllowed : (isAllowed && section.id === nextActive);
+    section.classList.toggle("hidden", !shouldShow);
+    section.dataset.settingsVisible = shouldShow ? "1" : "0";
+    section.setAttribute("aria-hidden", shouldShow ? "false" : "true");
+  });
+  syncSettingsMainWidthLock();
+  updateSettingsSectionNavState(nextActive);
+  if (jump) {
+    if (nextActive === SETTINGS_ALL_SECTION_ID) {
+      const firstVisible = $$(".settings-section[data-settings-section]").find((section) => !section.classList.contains("hidden"));
+      if (firstVisible) {
+        firstVisible.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+      }
+      return;
+    }
+    const activeSection = document.getElementById(nextActive);
+    if (activeSection) {
+      activeSection.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+    }
+  }
+}
+
+function applySettingsAdvancedMode(enabled, { persist = true } = {}) {
+  const normalized = !!enabled;
+  const toggle = $("#settings-advanced-mode");
+  if (toggle) {
+    toggle.checked = normalized;
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(SETTINGS_ADVANCED_MODE_KEY, normalized ? "1" : "0");
+    } catch {
+      // ignore storage failures
+    }
+  }
+  $$("[data-settings-level='advanced']").forEach((node) => {
+    const tag = String(node.tagName || "").toUpperCase();
+    const isStructural = tag === "OPTION"
+      || node.classList.contains("settings-nav-link")
+      || node.classList.contains("settings-section");
+    if (isStructural) {
+      return;
+    }
+    node.classList.toggle("hidden", !normalized);
+  });
+  setActiveSettingsSection(state.settingsActiveSectionId);
+}
+
+function syncSettingsMainWidthLock() {
+  const panel = $("#config-panel");
+  const layout = panel?.querySelector(".settings-layout");
+  if (!panel || !layout) {
+    return;
+  }
+  const isStacked = window.matchMedia("(max-width: 1200px)").matches;
+  let width = 0;
+  if (isStacked) {
+    width = Math.floor(layout.clientWidth || 0);
+  } else {
+    const sidebar = layout.querySelector(".settings-sidebar");
+    const sidebarWidth = sidebar ? Math.floor(sidebar.getBoundingClientRect().width || 0) : 0;
+    const computed = window.getComputedStyle(layout);
+    const gapValue = (computed.columnGap && computed.columnGap !== "normal")
+      ? computed.columnGap
+      : computed.gap;
+    const gap = Number.parseFloat(gapValue || "0") || 0;
+    width = Math.floor((layout.clientWidth || 0) - sidebarWidth - gap);
+  }
+  if (width > 0) {
+    requestAnimationFrame(() => {
+      panel.style.setProperty("--settings-main-locked-width", `${width}px`);
+    });
+  }
+}
+
+function syncConfigSectionCollapsedStates() {
+  const watcherEnabled = !!$("#cfg-watcher-enabled")?.checked;
+  const watcherDetails = $("#watcher-details");
+  if (watcherDetails) {
+    watcherDetails.classList.toggle("hidden", !watcherEnabled);
+  }
+
+  const schedulerEnabled = !!$("#schedule-enabled")?.checked;
+  const schedulerDetails = $("#scheduler-details");
+  if (schedulerDetails) {
+    schedulerDetails.classList.toggle("hidden", !schedulerEnabled);
+  }
+
+  const musicMetaEnabled = !!$("#cfg-music-meta-enabled")?.checked;
+  const musicMetaDetails = $("#music-meta-details");
+  if (musicMetaDetails) {
+    musicMetaDetails.classList.toggle("hidden", !musicMetaEnabled);
+  }
+
+  const spotifyEnabled = !!$("#spotify-enabled")?.checked;
+  const spotifyDetails = $("#spotify-details");
+  if (spotifyDetails) {
+    spotifyDetails.classList.toggle("hidden", !spotifyEnabled);
+  }
+}
+
+function getHomeDefaultDestination(mode = state.homeMediaMode) {
+  const cfg = state.config || {};
+  const normalized = normalizeHomeMediaMode(mode);
+  if (normalized === "music") {
+    return (
+      cfg.home_music_download_folder
+      || cfg.music_download_folder
+      || cfg.single_download_folder
+      || ""
+    );
+  }
+  if (normalized === "music_video") {
+    return (
+      cfg.home_music_video_download_folder
+      || cfg.single_download_folder
+      || cfg.home_music_download_folder
+      || cfg.music_download_folder
+      || ""
+    );
+  }
+  return (
+    cfg.single_download_folder
+    || cfg.home_music_video_download_folder
+    || cfg.home_music_download_folder
+    || cfg.music_download_folder
+    || ""
+  );
+}
+
+function setHomeDestinationValue(value) {
+  const normalized = normalizeDownloadsRelative(String(value || "").trim());
+  const primary = $("#home-destination");
+  if (primary) {
+    primary.value = normalized;
+  }
+  updateHomeDestinationResolved();
+}
+
+function applyHomeDefaultDestination({ force = false } = {}) {
+  const primary = $("#home-destination");
+  if (!primary) return;
+  const current = String(primary.value || "").trim();
+  const nextDefault = normalizeDownloadsRelative(getHomeDefaultDestination(state.homeMediaMode));
+  const canReplace = force || !current || current === (state.homeLastDefaultDestination || "");
+  if (canReplace) {
+    setHomeDestinationValue(nextDefault);
+  } else {
+    updateHomeDestinationResolved();
+  }
+  state.homeLastDefaultDestination = nextDefault;
+}
+
+function updateMusicModeFormatControl() {
+  const field = $("#music-video-format-field");
+  const selector = $("#music-video-final-format");
+  if (!field || !selector) return;
+  const activeMode = normalizeHomeMediaMode(state.homeMediaMode);
+  const isMusicLikeMode = activeMode === "music" || activeMode === "music_video";
+  field.classList.toggle("hidden", !isMusicLikeMode);
+  if (!isMusicLikeMode) {
+    selector.innerHTML = "";
+    return;
+  }
+  const options = activeMode === "music" ? HOME_MUSIC_MODE_FORMATS : HOME_MUSIC_VIDEO_MODE_FORMATS;
+  const current = String(selector.value || "").trim().toLowerCase();
+  const homeFormatCurrent = String($("#home-format")?.value || "").trim().toLowerCase();
+  const preferred = options.includes(homeFormatCurrent)
+    ? homeFormatCurrent
+    : (options.includes(current) ? current : options[0]);
+  selector.innerHTML = options.map((value) => `<option value="${value}">${value}</option>`).join("");
+  selector.value = preferred;
+}
+
 function setupNavActions() {
   const topActions = $("#top-actions");
   const navActions = $("#nav-actions");
@@ -1024,6 +1291,22 @@ function resolveTheme() {
   return "dark";
 }
 
+function getThemeToggleIconSvg(theme) {
+  if (theme === "light") {
+    return (
+      '<svg viewBox="0 0 24 24" aria-hidden="true">'
+      + '<path d="M14.5 3.5a8.5 8.5 0 1 0 6 13.9A9.5 9.5 0 0 1 14.5 3.5Z" fill="currentColor"></path>'
+      + '</svg>'
+    );
+  }
+  return (
+    '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + '<circle cx="12" cy="12" r="4.5" fill="currentColor"></circle>'
+    + '<path d="M12 2.5v2.5M12 19v2.5M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2.5 12H5M19 12h2.5M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"></path>'
+    + '</svg>'
+  );
+}
+
 function applyTheme(theme) {
   const root = document.documentElement;
   if (theme === "light") {
@@ -1033,7 +1316,10 @@ function applyTheme(theme) {
   }
   const button = $("#toggle-theme");
   if (button) {
-    button.textContent = theme === "light" ? "Dark mode" : "Light mode";
+    const nextModeLabel = theme === "light" ? "dark mode" : "light mode";
+    button.innerHTML = getThemeToggleIconSvg(theme);
+    button.setAttribute("aria-label", `Switch to ${nextModeLabel}`);
+    button.setAttribute("title", `Switch to ${nextModeLabel}`);
   }
   localStorage.setItem("yt_archiver_theme", theme);
 }
@@ -2261,28 +2547,61 @@ async function refreshSchedule() {
     $("#schedule-enabled").checked = !!schedule.enabled;
     $("#schedule-interval").value = schedule.interval_hours ?? 6;
     $("#schedule-startup").checked = !!schedule.run_on_startup;
+    if (state.config && typeof state.config === "object") {
+      state.config.schedule = {
+        enabled: !!schedule.enabled,
+        mode: "interval",
+        interval_hours: Number.isFinite(Number(schedule.interval_hours)) ? Number(schedule.interval_hours) : 6,
+        run_on_startup: !!schedule.run_on_startup,
+      };
+    }
     $("#schedule-last-run").textContent = data.last_run ? formatTimestamp(data.last_run) : "-";
     $("#schedule-next-run").textContent = data.next_run ? formatTimestamp(data.next_run) : "-";
+    syncConfigSectionCollapsedStates();
     setNotice($("#schedule-message"), "", false);
   } catch (err) {
     setNotice($("#schedule-message"), `Schedule error: ${err.message}`, true);
   }
 }
 
-async function saveSchedule() {
-  const interval = parseInt($("#schedule-interval").value, 10);
-  const payload = {
-    enabled: $("#schedule-enabled").checked,
+function buildSchedulePayloadFromForm() {
+  const enabledEl = $("#schedule-enabled");
+  const intervalEl = $("#schedule-interval");
+  const startupEl = $("#schedule-startup");
+  const fallbackSchedule = (state.config && typeof state.config.schedule === "object")
+    ? state.config.schedule
+    : {};
+  const interval = parseInt(intervalEl?.value || "", 10);
+  const fallbackInterval = Number.isFinite(Number(fallbackSchedule.interval_hours))
+    ? Number(fallbackSchedule.interval_hours)
+    : 6;
+  return {
+    enabled: !!enabledEl?.checked,
     mode: "interval",
-    interval_hours: Number.isFinite(interval) ? interval : 1,
-    run_on_startup: $("#schedule-startup").checked,
+    interval_hours: Number.isFinite(interval) ? Math.max(1, interval) : Math.max(1, fallbackInterval),
+    run_on_startup: !!startupEl?.checked,
   };
+}
+
+async function saveSchedule() {
+  const payload = buildSchedulePayloadFromForm();
   try {
-    await fetchJson("/api/schedule", {
+    const data = await fetchJson("/api/schedule", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (state.config && typeof state.config === "object") {
+      const returnedSchedule = data?.schedule || payload;
+      state.config.schedule = {
+        enabled: !!returnedSchedule.enabled,
+        mode: "interval",
+        interval_hours: Number.isFinite(Number(returnedSchedule.interval_hours))
+          ? Number(returnedSchedule.interval_hours)
+          : payload.interval_hours,
+        run_on_startup: !!returnedSchedule.run_on_startup,
+      };
+    }
     setNotice($("#schedule-message"), "Schedule updated", false);
     await refreshSchedule();
   } catch (err) {
@@ -2579,7 +2898,8 @@ function homeMusicDebugLog(...args) {
 }
 
 function getMusicModeFinalFormatOverride() {
-  if (state.homeMediaMode !== "music_video") {
+  const activeMode = normalizeHomeMediaMode(state.homeMediaMode);
+  if (activeMode !== "music_video" && activeMode !== "music") {
     return null;
   }
   const selector = document.getElementById("music-video-final-format");
@@ -2587,10 +2907,37 @@ function getMusicModeFinalFormatOverride() {
   if (!value || value === "default") {
     return null;
   }
-  if (!["mkv", "webm", "mp4"].includes(value)) {
+  const allowed = activeMode === "music" ? HOME_MUSIC_MODE_FORMATS : HOME_MUSIC_VIDEO_MODE_FORMATS;
+  if (!allowed.includes(value)) {
     return null;
   }
   return value;
+}
+
+function placeHomeDeliveryControl() {
+  const field = $("#home-delivery-field");
+  if (!field) return;
+  const target = state.homeMusicMode ? $("#home-delivery-music-slot") : $("#home-delivery-video-slot");
+  if (!target) return;
+  if (field.parentElement !== target) {
+    target.appendChild(field);
+  }
+  field.classList.toggle("field", !!state.homeMusicMode);
+  field.classList.toggle("music-search-delivery-field", !!state.homeMusicMode);
+  field.classList.toggle("home-advanced-field", !state.homeMusicMode);
+}
+
+function placeHomeDestinationControl() {
+  const field = $("#home-destination-field");
+  if (!field) return;
+  const target = state.homeMusicMode ? $("#home-destination-music-slot") : $("#home-destination-video-slot");
+  if (!target) return;
+  if (field.parentElement !== target) {
+    target.appendChild(field);
+  }
+  field.classList.toggle("field", !!state.homeMusicMode);
+  field.classList.toggle("medium", !!state.homeMusicMode);
+  field.classList.toggle("home-advanced-field", !state.homeMusicMode);
 }
 
 function updateHomeMusicModeUI() {
@@ -2614,17 +2961,10 @@ function updateHomeMusicModeUI() {
   if (musicModeConsole) {
     musicModeConsole.classList.toggle("hidden", !state.homeMusicMode);
   }
-  const musicVideoFormatField = $("#music-video-format-field");
-  if (musicVideoFormatField) {
-    musicVideoFormatField.classList.toggle("hidden", state.homeMediaMode !== "music_video");
-  }
-  const musicVideoFormatSelector = $("#music-video-final-format");
-  if (musicVideoFormatSelector && state.homeMediaMode === "music_video") {
-    const current = String(musicVideoFormatSelector.value || "").trim().toLowerCase();
-    if (!current) {
-      musicVideoFormatSelector.value = "mp4";
-    }
-  }
+  placeHomeDeliveryControl();
+  placeHomeDestinationControl();
+  updateMusicModeFormatControl();
+  applyHomeDefaultDestination();
   // Keep this badge strictly tied to the live toggle state.
   const badge = $("#home-music-mode-badge");
   if (badge) {
@@ -2689,6 +3029,7 @@ function setHomeMediaMode(mode, { persist = true, clearResultsOnDisable = true }
   state.homeMediaMode = nextMode;
   state.homeMusicMode = nextMode !== "video";
   updateHomeMusicModeUI();
+  updateHomeDeliveryModeUI();
   refreshHomeSourceOptions();
   if (previous !== state.homeMusicMode) {
     clearMusicResultsHistory();
@@ -2743,6 +3084,9 @@ function updateHomeDeliveryModeUI() {
   if (mode === "client" && destinationInput) {
     destinationInput.value = "";
   }
+  if (mode === "client") {
+    updateHomeDestinationResolved();
+  }
 
   const downloadButton = $("#home-search-download");
   if (downloadButton) {
@@ -2761,6 +3105,61 @@ function updateHomeDeliveryModeUI() {
       btn.setAttribute("aria-pressed", String(btn.dataset.mode === mode));
     });
   }
+}
+
+function bindHomeDeliveryToggle(element) {
+  if (!element) return;
+  element.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-mode]");
+    if (!button) return;
+    setHomeDeliveryMode(button.dataset.mode || "server");
+  });
+}
+
+function updateMusicForceToggleUI() {
+  const checkbox = document.getElementById("music-force-redownload");
+  const toggle = document.getElementById("music-force-toggle");
+  if (!checkbox || !toggle) {
+    return;
+  }
+  const enabled = !!checkbox.checked;
+  toggle.querySelectorAll("button[data-force]").forEach((button) => {
+    const isOn = String(button.dataset.force || "").trim().toLowerCase() === "on";
+    const isActive = enabled ? isOn : !isOn;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
+}
+
+function bindMusicForceToggle(element) {
+  const checkbox = document.getElementById("music-force-redownload");
+  if (!element || !checkbox) return;
+  element.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-force]");
+    if (!button) return;
+    checkbox.checked = String(button.dataset.force || "").trim().toLowerCase() === "on";
+    updateMusicForceToggleUI();
+  });
+  checkbox.addEventListener("change", updateMusicForceToggleUI);
+  updateMusicForceToggleUI();
+}
+
+function getMusicModeDestinationValue() {
+  return $("#home-destination")?.value.trim() || "";
+}
+
+function getMusicModeDeliveryMode() {
+  return getHomeDeliveryMode();
+}
+
+function assertMusicModeDeliveryAllowed(messageEl) {
+  const mode = getMusicModeDeliveryMode();
+  const destination = getMusicModeDestinationValue();
+  if (mode === "client" && destination) {
+    setNotice(messageEl || $("#home-search-message"), "Client delivery does not use a server destination.", true);
+    return false;
+  }
+  return true;
 }
 
 function setHomeDeliveryMode(mode) {
@@ -3000,14 +3399,18 @@ function clearMusicResultsHistory() {
 }
 
 async function enqueueAlbum(releaseGroupMbid) {
+  if (!assertMusicModeDeliveryAllowed($("#home-search-message"))) {
+    throw new Error("Client delivery does not use a server destination.");
+  }
   const forceRedownload = !!document.getElementById("music-force-redownload")?.checked;
   return fetchJson("/api/music/album/download", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       release_group_mbid: releaseGroupMbid,
-      destination: $("#home-destination")?.value.trim() || null,
+      destination: getMusicModeDestinationValue() || null,
       final_format: getMusicModeFinalFormatOverride(),
+      delivery_mode: getMusicModeDeliveryMode(),
       music_mode: state.homeMediaMode === "music",
       media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
       force_redownload: forceRedownload,
@@ -3058,6 +3461,9 @@ function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
 }
 
 async function enqueueMusicTrack(payload = {}) {
+  if (!assertMusicModeDeliveryAllowed($("#home-search-message"))) {
+    throw new Error("Client delivery does not use a server destination.");
+  }
   const forceRedownload = !!document.getElementById("music-force-redownload")?.checked;
   return fetchJson("/api/music/enqueue", {
     method: "POST",
@@ -3075,6 +3481,7 @@ async function enqueueMusicTrack(payload = {}) {
       duration_ms: Number.isFinite(Number(payload.duration_ms)) ? Number(payload.duration_ms) : null,
       destination: String(payload.destination || payload.destination_dir || "").trim() || null,
       final_format: String(payload.final_format || "").trim() || null,
+      delivery_mode: getMusicModeDeliveryMode(),
       music_mode: state.homeMediaMode === "music",
       media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
       force_redownload: forceRedownload,
@@ -3090,7 +3497,7 @@ function buildMusicTrackEnqueuePayload({ button, result }) {
     recording_mbid: recording,
     release_mbid: release,
     release_group_mbid: releaseGroup,
-    destination: String($("#home-destination")?.value || "").trim() || null,
+    destination: getMusicModeDestinationValue() || null,
     final_format: getMusicModeFinalFormatOverride(),
   };
   if (result && typeof result === "object") {
@@ -6379,28 +6786,32 @@ function addAccountRow(name = "", data = {}) {
     <input class="account-name" type="text" placeholder="name" value="${name}">
     <label class="field">
       <span>Client Secret</span>
-      <div class="row tight">
+      <div class="row tight path-picker">
         <input class="account-client" type="text" placeholder="tokens/client_secret.json" value="${data.client_secret || ""}">
         <button class="button ghost small browse-client" type="button">Browse</button>
       </div>
     </label>
     <label class="field">
       <span>Token</span>
-      <div class="row tight">
+      <div class="row tight path-picker">
         <input class="account-token" type="text" placeholder="tokens/token.json" value="${data.token || ""}">
         <button class="button ghost small browse-token" type="button">Browse</button>
       </div>
     </label>
     <div class="account-actions">
       <button class="button ghost small oauth-run" type="button">Run OAuth</button>
-      <button class="button ghost remove">Remove</button>
+      <button class="button small danger remove account-delete-button">Delete</button>
     </div>
   `;
   row.querySelector(".remove").addEventListener("click", () => {
-    if (!window.confirm("Remove this account?")) {
+    if (!window.confirm("Delete this account?")) {
       return;
     }
     row.remove();
+    refreshPlaylistAccountSelects();
+  });
+  row.querySelector(".account-name").addEventListener("input", () => {
+    refreshPlaylistAccountSelects();
   });
   row.querySelector(".oauth-run").addEventListener("click", () => {
     startOauthForRow(row);
@@ -6414,10 +6825,49 @@ function addAccountRow(name = "", data = {}) {
     openBrowser(input, "tokens", "file", ".json", resolveBrowseStart("tokens", input.value));
   });
   $("#accounts-list").appendChild(row);
+  refreshPlaylistAccountSelects();
+}
+
+function getConfiguredAccountNamesFromForm() {
+  const seen = new Set();
+  const names = [];
+  $$(".account-row .account-name").forEach((input) => {
+    const name = String(input?.value || "").trim();
+    if (!name || seen.has(name)) {
+      return;
+    }
+    seen.add(name);
+    names.push(name);
+  });
+  return names.sort((a, b) => a.localeCompare(b));
+}
+
+function setPlaylistAccountSelectOptions(selectEl, selectedValue = "") {
+  if (!selectEl) return;
+  const desired = String(selectedValue || "").trim();
+  const accountNames = getConfiguredAccountNamesFromForm();
+  const options = ['<option value="">Public</option>'];
+  accountNames.forEach((name) => {
+    options.push(`<option value="${name}">${name}</option>`);
+  });
+  selectEl.innerHTML = options.join("");
+  if (desired && accountNames.includes(desired)) {
+    selectEl.value = desired;
+  } else {
+    selectEl.value = "";
+  }
+}
+
+function refreshPlaylistAccountSelects() {
+  $$(".playlist-row .playlist-account").forEach((selectEl) => {
+    const current = String(selectEl?.value || "").trim();
+    setPlaylistAccountSelectOptions(selectEl, current);
+  });
 }
 
 function addPlaylistRow(entry = {}) {
   const folderValue = normalizeDownloadsRelative(entry.folder || entry.directory || "");
+  const normalizedPlaylistId = normalizeYouTubePlaylistIdentifier(entry.playlist_id || entry.id || "");
   const configuredModeRaw = String(entry.media_mode || "").trim().toLowerCase();
   const configuredMode = configuredModeRaw === "music_video"
     ? "music_video"
@@ -6426,41 +6876,67 @@ function addPlaylistRow(entry = {}) {
   row.className = "row playlist-row";
   row.dataset.original = JSON.stringify(entry || {});
   row.innerHTML = `
-    <input class="playlist-name" type="text" placeholder="name" value="${entry.name || ""}">
-    <input class="playlist-id" type="text" placeholder="playlist id" value="${entry.playlist_id || entry.id || ""}">
-    <input class="playlist-folder" type="text" placeholder="folder" value="${folderValue}">
-    <button class="button ghost small browse-folder" type="button">Browse</button>
-    <input class="playlist-account" type="text" placeholder="account" value="${entry.account || ""}">
-    <select class="playlist-format">
-      <option value="">(default)</option>
-      <option value="mkv">mkv</option>
-      <option value="mp4">mp4</option>
-      <option value="webm">webm</option>
-      <option value="mp3">mp3</option>
-    </select>
-    <label class="field inline">
+    <label class="field playlist-cell playlist-cell-name">
+      <span>Name</span>
+      <input class="playlist-name" type="text" placeholder="playlist name" value="${entry.name || ""}">
+    </label>
+    <label class="field playlist-cell playlist-cell-id">
+      <span>Playlist URL or ID</span>
+      <input class="playlist-id" type="text" placeholder="https://www.youtube.com/playlist?list=... or PL..." value="${normalizedPlaylistId}">
+    </label>
+    <label class="field playlist-cell playlist-cell-folder">
+      <span>Destination</span>
+      <div class="row tight path-picker destination-picker">
+        <input class="playlist-folder" type="text" placeholder="downloads/folder" value="${folderValue}">
+        <button class="button ghost small browse-folder" type="button">Browse</button>
+      </div>
+    </label>
+    <label class="field playlist-cell playlist-cell-account">
+      <span>Account</span>
+      <select class="playlist-account"></select>
+    </label>
+    <label class="field inline playlist-cell playlist-cell-mode">
       <span>Media mode</span>
-      <select class="playlist-media-mode">
+      <select class="playlist-media-mode hidden" aria-hidden="true" tabindex="-1">
         <option value="video">Video</option>
         <option value="music">Music</option>
         <option value="music_video">Music Video</option>
       </select>
+      <div class="home-media-mode-toggle playlist-media-mode-toggle" role="radiogroup" aria-label="Playlist media mode">
+        <button type="button" class="home-media-mode-pill" data-mode="video" role="radio" aria-checked="false">Video</button>
+        <button type="button" class="home-media-mode-pill" data-mode="music_video" role="radio" aria-checked="false">MV</button>
+        <button type="button" class="home-media-mode-pill" data-mode="music" role="radio" aria-checked="false">Music</button>
+      </div>
     </label>
-    <label class="field inline">
-      <span>Only download new videos (subscribe mode)</span>
+    <label class="field inline playlist-cell playlist-cell-format">
+      <span>Format</span>
+      <select class="playlist-format">
+        <option value="">(default)</option>
+        <option value="mkv">mkv</option>
+        <option value="mp4">mp4</option>
+        <option value="webm">webm</option>
+        <option value="mp3">mp3</option>
+        <option value="m4a">m4a</option>
+      </select>
+    </label>
+    <label class="field inline playlist-cell playlist-cell-subscribe">
+      <span class="playlist-subscribe-label">
+        <span class="playlist-subscribe-primary">Only download new videos</span>
+        <span class="playlist-subscribe-secondary">(subscribe mode)</span>
+      </span>
       <input class="playlist-subscribe" type="checkbox" ${entry.mode === "subscribe" ? "checked" : ""}>
     </label>
-    <label class="field inline">
+    <label class="field inline playlist-cell playlist-cell-remove-toggle">
       <span>Remove after</span>
       <input class="playlist-remove" type="checkbox" ${entry.remove_after_download ? "checked" : ""}>
     </label>
-    <button class="button ghost remove">Remove</button>
+    <button class="button danger remove playlist-remove-button">Delete</button>
   `;
   const separator = document.createElement("div");
   separator.className = "playlist-separator";
   row.appendChild(separator);
   row.querySelector(".remove").addEventListener("click", () => {
-    if (!window.confirm("Remove this playlist?")) {
+    if (!window.confirm("Delete this playlist?")) {
       return;
     }
     row.remove();
@@ -6469,8 +6945,40 @@ function addPlaylistRow(entry = {}) {
     const target = row.querySelector(".playlist-folder");
     openBrowser(target, "downloads", "dir", "", resolveBrowseStart("downloads", target.value));
   });
+  row.querySelector(".playlist-id").addEventListener("blur", () => {
+    const input = row.querySelector(".playlist-id");
+    const normalized = normalizeYouTubePlaylistIdentifier(input?.value || "");
+    if (input) {
+      input.value = normalized;
+    }
+  });
+  setPlaylistAccountSelectOptions(row.querySelector(".playlist-account"), entry.account || "");
   row.querySelector(".playlist-format").value = entry.final_format || "";
-  row.querySelector(".playlist-media-mode").value = configuredMode;
+  const mediaModeSelect = row.querySelector(".playlist-media-mode");
+  const mediaModeToggle = row.querySelector(".playlist-media-mode-toggle");
+  const syncPlaylistMediaModeToggle = () => {
+    const selected = String(mediaModeSelect?.value || "video").trim().toLowerCase();
+    mediaModeToggle?.querySelectorAll("button[data-mode]").forEach((button) => {
+      const mode = String(button.dataset.mode || "").trim().toLowerCase();
+      const active = mode === selected;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-checked", active ? "true" : "false");
+    });
+  };
+  if (mediaModeSelect) {
+    mediaModeSelect.value = configuredMode;
+    mediaModeSelect.addEventListener("change", syncPlaylistMediaModeToggle);
+  }
+  if (mediaModeToggle && mediaModeSelect) {
+    mediaModeToggle.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-mode]");
+      if (!button) return;
+      const next = String(button.dataset.mode || "video").trim().toLowerCase();
+      mediaModeSelect.value = next === "music_video" ? "music_video" : (next === "music" ? "music" : "video");
+      syncPlaylistMediaModeToggle();
+    });
+  }
+  syncPlaylistMediaModeToggle();
   $("#playlists-list").appendChild(row);
 }
 
@@ -6481,6 +6989,12 @@ function renderConfig(cfg) {
   $("#cfg-final-format").value = cfg.final_format ?? "";
   $("#cfg-js-runtime").value = cfg.js_runtime ?? "";
   $("#cfg-single-download-folder").value = normalizeDownloadsRelative(cfg.single_download_folder ?? "");
+  $("#cfg-home-music-download-folder").value = normalizeDownloadsRelative(
+    cfg.home_music_download_folder ?? cfg.music_download_folder ?? ""
+  );
+  $("#cfg-home-music-video-download-folder").value = normalizeDownloadsRelative(
+    cfg.home_music_video_download_folder ?? ""
+  );
   $("#cfg-music-template").value = cfg.music_filename_template ?? "";
   $("#cfg-yt-dlp-cookies").value = cfg.yt_dlp_cookies ?? "";
   const musicMetaDefaults = {
@@ -6569,6 +7083,11 @@ function renderConfig(cfg) {
   const telegram = cfg.telegram || {};
   $("#cfg-telegram-token").value = telegram.bot_token ?? "";
   $("#cfg-telegram-chat").value = telegram.chat_id ?? "";
+  const spotify = cfg.spotify || {};
+  const spotifyEnabledToggle = $("#spotify-enabled");
+  if (spotifyEnabledToggle) {
+    spotifyEnabledToggle.checked = typeof spotify.enabled === "boolean" ? spotify.enabled : true;
+  }
 
   $("#accounts-list").textContent = "";
   const accounts = cfg.accounts || {};
@@ -6582,6 +7101,7 @@ function renderConfig(cfg) {
 
   const opts = cfg.yt_dlp_opts || {};
   $("#cfg-yt-dlp-opts").value = Object.keys(opts).length ? JSON.stringify(opts, null, 2) : "";
+  syncConfigSectionCollapsedStates();
   state.suppressDirty = false;
 }
 
@@ -6650,7 +7170,13 @@ async function refreshSpotifyPlaylistStatus() {
 
 function applySpotifyConfigState(cfg, oauthStatus) {
   const spotifyCfg = (cfg && cfg.spotify) || {};
+  const spotifyEnabled = typeof spotifyCfg.enabled === "boolean" ? spotifyCfg.enabled : true;
   const connected = !!(oauthStatus && oauthStatus.connected);
+
+  const spotifyEnabledToggle = $("#spotify-enabled");
+  if (spotifyEnabledToggle) {
+    spotifyEnabledToggle.checked = spotifyEnabled;
+  }
 
   const spotifyClientId = $("#spotify-client-id");
   if (spotifyClientId) {
@@ -6745,6 +7271,7 @@ function applySpotifyConfigState(cfg, oauthStatus) {
       helperEl.remove();
     }
   }
+  syncConfigSectionCollapsedStates();
 }
 
 async function refreshSpotifyConfig() {
@@ -6900,17 +7427,7 @@ async function loadConfig() {
     state.config = cfg;
     renderConfig(cfg);
     updateSearchDestinationDisplay();
-    const homeDestInput = $("#home-destination");
-    if (homeDestInput) {
-      const defaultHomeDest =
-        (state.config && state.config.single_download_folder) ||
-        (state.config && state.config.music_download_folder) ||
-        "";
-      if (!homeDestInput.value && defaultHomeDest) {
-        homeDestInput.value = defaultHomeDest;
-      }
-      updateHomeDestinationResolved();
-    }
+    applyHomeDefaultDestination({ force: false });
     state.configDirty = false;
     updatePollingState();
     setConfigNotice("Config loaded", false);
@@ -7052,6 +7569,24 @@ function buildConfigFromForm() {
     delete base.single_download_folder;
   }
 
+  let homeMusicFolder = $("#cfg-home-music-download-folder").value.trim();
+  homeMusicFolder = normalizeDownloadsRelative(homeMusicFolder);
+  if (homeMusicFolder) {
+    base.home_music_download_folder = homeMusicFolder;
+  } else {
+    delete base.home_music_download_folder;
+  }
+
+  let homeMusicVideoFolder = $("#cfg-home-music-video-download-folder").value.trim();
+  homeMusicVideoFolder = normalizeDownloadsRelative(homeMusicVideoFolder);
+  if (homeMusicVideoFolder) {
+    base.home_music_video_download_folder = homeMusicVideoFolder;
+  } else {
+    delete base.home_music_video_download_folder;
+  }
+
+  base.schedule = buildSchedulePayloadFromForm();
+
   const telegramToken = $("#cfg-telegram-token").value.trim();
   const telegramChat = $("#cfg-telegram-chat").value.trim();
   if (telegramToken || telegramChat) {
@@ -7064,6 +7599,7 @@ function buildConfigFromForm() {
   }
 
   base.spotify = base.spotify || {};
+  base.spotify.enabled = !!$("#spotify-enabled")?.checked;
   const spotifyClientId = $("#spotify-client-id")?.value.trim() || "";
   const spotifyClientSecret = $("#spotify-client-secret")?.value.trim() || "";
   const spotifyRedirectUri = $("#spotify-redirect-uri")?.value.trim() || "";
@@ -7131,7 +7667,8 @@ function buildConfigFromForm() {
   const playlists = [];
   $$(".playlist-row").forEach((row, idx) => {
     const name = row.querySelector(".playlist-name").value.trim();
-    const playlistId = row.querySelector(".playlist-id").value.trim();
+    const playlistInput = row.querySelector(".playlist-id").value.trim();
+    const playlistId = normalizeYouTubePlaylistIdentifier(playlistInput);
     let folder = row.querySelector(".playlist-folder").value.trim();
     folder = normalizeDownloadsRelative(folder);
     if (!playlistId && !folder) {
@@ -7232,6 +7769,10 @@ async function saveConfig() {
     });
     setConfigNotice("Spotify playlists updated", false, true);
     state.config = result.config;
+    renderConfig(state.config);
+    applyHomeDefaultDestination({ force: false });
+    updateSearchDestinationDisplay();
+    await refreshSchedule();
     state.configDirty = false;
     updatePollingState();
   } catch (err) {
@@ -7348,7 +7889,8 @@ function bindEvents() {
     button.addEventListener("click", () => {
       const page = button.dataset.page || "home";
       setPage(page);
-      window.location.hash = page;
+      const hashTarget = button.dataset.hash || page;
+      window.location.hash = hashTarget;
     });
   });
 
@@ -7511,13 +8053,9 @@ function bindEvents() {
     });
   }
   const homeDeliveryToggle = $("#home-delivery-toggle");
-  if (homeDeliveryToggle) {
-    homeDeliveryToggle.addEventListener("click", (event) => {
-      const button = event.target.closest("button[data-mode]");
-      if (!button) return;
-      setHomeDeliveryMode(button.dataset.mode || "server");
-    });
-  }
+  bindHomeDeliveryToggle(homeDeliveryToggle);
+  const musicForceToggle = $("#music-force-toggle");
+  bindMusicForceToggle(musicForceToggle);
   const importToggle = document.getElementById("import-playlist-toggle");
   const importPanel = document.getElementById("import-playlist-panel");
   if (importToggle && importPanel) {
@@ -7751,6 +8289,7 @@ function bindEvents() {
 
   $("#schedule-save").addEventListener("click", saveSchedule);
   $("#schedule-run-now").addEventListener("click", runScheduleNow);
+  $("#schedule-enabled").addEventListener("change", syncConfigSectionCollapsedStates);
   $("#save-config").addEventListener("click", saveConfig);
   const ytdlpUpdate = $("#ytdlp-update");
   if (ytdlpUpdate) {
@@ -7769,13 +8308,27 @@ function bindEvents() {
     const input = $("#cfg-single-download-folder");
     openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input.value));
   });
+  const browseHomeMusicFolder = $("#browse-home-music-download");
+  if (browseHomeMusicFolder) {
+    browseHomeMusicFolder.addEventListener("click", () => {
+      const input = $("#cfg-home-music-download-folder");
+      openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input?.value || ""));
+    });
+  }
+  const browseHomeMusicVideoFolder = $("#browse-home-music-video-download");
+  if (browseHomeMusicVideoFolder) {
+    browseHomeMusicVideoFolder.addEventListener("click", () => {
+      const input = $("#cfg-home-music-video-download-folder");
+      openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input?.value || ""));
+    });
+  }
   // TODO(webUI/app.js::legacy-run): keep this marker while legacy-run removal rolls out across user docs.
   const homeBrowse = $("#home-destination-browse");
   if (homeBrowse) {
     homeBrowse.addEventListener("click", () => {
       const target = $("#home-destination");
       if (!target) return;
-      const defaultStart = (state.config && state.config.single_download_folder) || "";
+      const defaultStart = getHomeDefaultDestination(state.homeMediaMode);
       const startValue = target.value.trim() || defaultStart;
       openBrowser(target, "downloads", "dir", "", resolveBrowseStart("downloads", startValue));
     });
@@ -7923,6 +8476,48 @@ function bindEvents() {
   document.addEventListener("click", clearConfigNotice);
   document.addEventListener("input", clearConfigNotice);
 
+  const settingsAdvancedToggle = $("#settings-advanced-mode");
+  if (settingsAdvancedToggle) {
+    settingsAdvancedToggle.addEventListener("change", () => {
+      applySettingsAdvancedMode(settingsAdvancedToggle.checked, { persist: false });
+    });
+    settingsAdvancedToggle.checked = false;
+    applySettingsAdvancedMode(false, { persist: false });
+  }
+
+  const settingsNav = $("#settings-nav");
+  if (settingsNav) {
+    settingsNav.addEventListener("click", (event) => {
+      const link = event.target.closest(".settings-nav-link");
+      if (!link) return;
+      event.preventDefault();
+      const href = String(link.getAttribute("href") || "");
+      const targetId = href.startsWith("#") ? href.slice(1) : "";
+      if (targetId) {
+        setActiveSettingsSection(targetId, { jump: false, smooth: false });
+        if (window.location.hash !== `#${targetId}`) {
+          history.replaceState(null, "", `#${targetId}`);
+        }
+      }
+    });
+  }
+
+  const settingsSelect = $("#settings-section-select");
+  if (settingsSelect) {
+    settingsSelect.addEventListener("change", () => {
+      const targetId = String(settingsSelect.value || "").trim();
+      if (!targetId) return;
+      setActiveSettingsSection(targetId, { jump: false, smooth: false });
+      if (window.location.hash !== `#${targetId}`) {
+        history.replaceState(null, "", `#${targetId}`);
+      }
+    });
+  }
+
+  window.addEventListener("resize", () => {
+    syncSettingsMainWidthLock();
+  });
+
   const configPanel = $("#config-panel");
   if (configPanel) {
     configPanel.addEventListener("input", () => {
@@ -7932,7 +8527,43 @@ function bindEvents() {
       state.configDirty = true;
       updatePollingState();
     });
+    if (typeof ResizeObserver === "function") {
+      const layout = configPanel.querySelector(".settings-layout");
+      if (layout) {
+        if (state.settingsLayoutObserver) {
+          state.settingsLayoutObserver.disconnect();
+        }
+        state.settingsLayoutObserver = new ResizeObserver(() => {
+          syncSettingsMainWidthLock();
+        });
+        state.settingsLayoutObserver.observe(layout);
+        const sidebar = layout.querySelector(".settings-sidebar");
+        if (sidebar) {
+          state.settingsLayoutObserver.observe(sidebar);
+        }
+        const main = layout.querySelector(".settings-main");
+        if (main) {
+          state.settingsLayoutObserver.observe(main);
+        }
+      }
+    }
   }
+
+  const watcherEnabledToggle = $("#cfg-watcher-enabled");
+  if (watcherEnabledToggle) {
+    watcherEnabledToggle.addEventListener("change", syncConfigSectionCollapsedStates);
+  }
+  const musicMetaEnabledToggle = $("#cfg-music-meta-enabled");
+  if (musicMetaEnabledToggle) {
+    musicMetaEnabledToggle.addEventListener("change", syncConfigSectionCollapsedStates);
+  }
+  const spotifyEnabledToggle = $("#spotify-enabled");
+  if (spotifyEnabledToggle) {
+    spotifyEnabledToggle.addEventListener("change", syncConfigSectionCollapsedStates);
+  }
+  syncConfigSectionCollapsedStates();
+  syncSettingsMainWidthLock();
+  setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false });
 
 }
 

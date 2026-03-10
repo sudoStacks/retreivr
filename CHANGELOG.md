@@ -2,14 +2,33 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.9 — Settings IA Overhaul + UX Consistency + Runtime Notification Fixes
+
+### High-Level
+This release focuses on configuration clarity, safer control flow, and runtime reliability. The former long Config page was redesigned into a structured Settings experience, Home mode controls were unified, and key operational regressions in scheduler persistence and Telegram reporting were fixed.
+
+### Added
+- Redesigned Settings information architecture (sectioned navigation, focused section view, advanced-mode gating, and mobile selector fallback).
+- Mode-specific Home destination defaults for Video/Music/Music Video were formalized in settings.
+
+### Changed
+- Home control behavior was unified across Video/MV/Music flows (shared delivery semantics, consistent destination handling, and expanded format surfacing including `m4a` where applicable).
+- YouTube playlist/account configuration flow was streamlined (normalized playlist ID handling, constrained account selection, and clearer add/delete actions).
+- Settings layout responsiveness was hardened across desktop/tablet/mobile to reduce section-switch and resize inconsistencies.
+
+### Fixed
+- Scheduler enabled-state save/apply flow now respects user toggles after `Save Schedule` / `Save Config`.
+- Telegram scheduler/watcher summaries now resolve and display human-readable video titles (instead of only YouTube IDs) in attempted-item lists.
+- Settings section navigation/selection no longer triggers unintended scroll/hash jumps during category changes.
+
 ## v0.9.8 — Fast Discovery + Video Preview + Adapter Extensibility
 
 ### High-Level
-This release focuses on homepage search UX and discovery speed: incremental/as-resolved rendering, lightweight video discovery, and embedded preview support for supported sources, while keeping deterministic acquisition/download behavior unchanged.
+This release focuses on homepage discovery responsiveness and operator usability. Search now renders incrementally as sources resolve, lightweight video discovery is prioritized, and supported sources can be previewed inline before enqueue. Deterministic acquisition and download behavior remain unchanged.
 
 ### Added
 - Homepage video preview flow with `Preview` action on result cards for supported adapters.
-- Preview can be triggered from video title/thumbnail clicks (same behavior as `Preview` button).
+- Preview trigger parity on title/thumbnail clicks (same behavior as the `Preview` button).
 - Structured custom adapter framework with user-facing `config/custom_search_adapters.example.yaml` template.
 - New video discovery adapters integrated for `rumble` and `archive_org`.
 - Discovery timing instrumentation and source-level adapter progress logging.

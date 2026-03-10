@@ -79,6 +79,8 @@
     "chat_id": ""
   },
   "music_download_folder": "Music",
+  "home_music_download_folder": "Music",
+  "home_music_video_download_folder": "Videos/Music Videos",
   "single_download_folder": "Singles",
   "community_cache_lookup_enabled": true,
   "community_cache_publish_enabled": false,
