@@ -1191,6 +1191,7 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
 
         job_id_to_path: dict[str, str] = {}
         job_id_to_label: dict[str, str] = {}
+        job_id_to_video_id: dict[str, str] = {}
         if pending_job_ids:
             db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
             if db_path:
@@ -1198,11 +1199,29 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
                     conn = sqlite3.connect(db_path)
                     cur = conn.cursor()
                     placeholders = ",".join("?" for _ in pending_job_ids)
+                    cur.execute("PRAGMA table_info(download_jobs)")
+                    download_job_columns = {str(row[1]).strip() for row in cur.fetchall() if len(row) > 1}
+                    selected_columns = ["id", "file_path", "output_template", "url"]
+                    for optional_col in ("source", "external_id", "input_url", "canonical_url"):
+                        if optional_col in download_job_columns:
+                            selected_columns.append(optional_col)
                     cur.execute(
-                        f"SELECT id, file_path, output_template, url FROM download_jobs WHERE id IN ({placeholders})",
+                        f"SELECT {', '.join(selected_columns)} FROM download_jobs WHERE id IN ({placeholders})",
                         pending_job_ids,
                     )
-                    for job_id, file_path, output_template_raw, url in cur.fetchall():
+                    for row in cur.fetchall():
+                        row_map = {
+                            selected_columns[index]: row[index]
+                            for index in range(min(len(selected_columns), len(row)))
+                        }
+                        job_id = row_map.get("id")
+                        file_path = row_map.get("file_path")
+                        output_template_raw = row_map.get("output_template")
+                        url = row_map.get("url")
+                        source = str(row_map.get("source") or "").strip().lower()
+                        external_id = str(row_map.get("external_id") or "").strip()
+                        input_url = str(row_map.get("input_url") or "").strip()
+                        canonical_url = str(row_map.get("canonical_url") or "").strip()
                         if job_id and output_template_raw:
                             try:
                                 parsed = json.loads(output_template_raw)
@@ -1218,16 +1237,67 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
                                 )
                                 if label:
                                     job_id_to_label[str(job_id)] = str(label).strip()
-                        if job_id and not job_id_to_label.get(str(job_id)):
-                            fallback_url = str(url or "").strip()
-                            if fallback_url:
-                                parsed_url = urlparse(fallback_url)
-                                qs = parse_qs(parsed_url.query)
-                                video_id = (qs.get("v") or [None])[0]
-                                if video_id:
-                                    job_id_to_label[str(job_id)] = f"YouTube Video ({video_id})"
+                        job_key = str(job_id or "").strip()
+                        if job_key:
+                            video_id = external_id
+                            if not video_id:
+                                for fallback_url in (str(url or "").strip(), input_url, canonical_url):
+                                    if not fallback_url:
+                                        continue
+                                    parsed_url = urlparse(fallback_url)
+                                    qs = parse_qs(parsed_url.query)
+                                    video_id = str((qs.get("v") or [None])[0] or "").strip()
+                                    if not video_id and "youtu.be" in parsed_url.netloc and parsed_url.path:
+                                        video_id = str(parsed_url.path.lstrip("/").split("/")[0] or "").strip()
+                                    if video_id:
+                                        break
+                            if video_id:
+                                job_id_to_video_id[job_key] = video_id
+                            # Preserve source-based video id extraction for old rows that omitted external_id.
+                            if not video_id and source in {"youtube", "youtube_music"}:
+                                fallback_url = str(url or "").strip() or input_url or canonical_url
+                                if fallback_url:
+                                    parsed_url = urlparse(fallback_url)
+                                    qs = parse_qs(parsed_url.query)
+                                    parsed_video_id = str((qs.get("v") or [None])[0] or "").strip()
+                                    if parsed_video_id:
+                                        job_id_to_video_id[job_key] = parsed_video_id
                         if job_id and file_path:
                             job_id_to_path[str(job_id)] = str(file_path)
+
+                    unresolved_video_ids = sorted(
+                        {
+                            video_id
+                            for job_id, video_id in job_id_to_video_id.items()
+                            if video_id and not job_id_to_label.get(job_id)
+                        }
+                    )
+                    if unresolved_video_ids:
+                        cur.execute("PRAGMA table_info(download_history)")
+                        history_columns = {str(row[1]).strip() for row in cur.fetchall() if len(row) > 1}
+                        if {"video_id", "title"}.issubset(history_columns):
+                            history_sort_col = "completed_at" if "completed_at" in history_columns else "id"
+                            history_placeholders = ",".join("?" for _ in unresolved_video_ids)
+                            cur.execute(
+                                "SELECT video_id, title "
+                                f"FROM download_history WHERE video_id IN ({history_placeholders}) "
+                                "AND title IS NOT NULL AND TRIM(title) != '' "
+                                f"ORDER BY {history_sort_col} DESC",
+                                unresolved_video_ids,
+                            )
+                            video_id_to_title: dict[str, str] = {}
+                            for raw_video_id, raw_title in cur.fetchall():
+                                video_key = str(raw_video_id or "").strip()
+                                title_text = str(raw_title or "").strip()
+                                if not video_key or not title_text or video_key in video_id_to_title:
+                                    continue
+                                video_id_to_title[video_key] = title_text
+                            for job_id, video_id in job_id_to_video_id.items():
+                                if job_id_to_label.get(job_id):
+                                    continue
+                                resolved_title = video_id_to_title.get(video_id)
+                                if resolved_title:
+                                    job_id_to_label[job_id] = resolved_title
                 except Exception:
                     logging.exception("Failed to resolve run success labels from download_jobs")
                 finally:
@@ -1238,11 +1308,17 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
 
         seen: set[str] = set()
         for raw in raw_values:
-            candidate = job_id_to_path.get(raw, raw)
-            if os.path.sep in candidate:
-                candidate = os.path.basename(candidate)
-            elif raw in job_id_to_label:
-                candidate = job_id_to_label[raw]
+            candidate = job_id_to_label.get(raw)
+            if not candidate:
+                candidate = job_id_to_path.get(raw, raw)
+                if os.path.sep in candidate:
+                    candidate = os.path.basename(candidate)
+            if (
+                isinstance(candidate, str)
+                and raw in job_id_to_video_id
+                and candidate == raw
+            ):
+                candidate = f"YouTube Video ({job_id_to_video_id.get(raw)})"
             candidate = str(candidate or "").strip()
             if not candidate:
                 continue
