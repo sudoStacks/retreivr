@@ -60,6 +60,7 @@ const state = {
   playlistImportPollTimer: null,
   playlistImportInProgress: false,
   settingsActiveSectionId: "settings-core",
+  settingsLayoutObserver: null,
   logsStickToBottom: true,
 };
 const browserState = {
@@ -8524,6 +8525,26 @@ function bindEvents() {
       state.configDirty = true;
       updatePollingState();
     });
+    if (typeof ResizeObserver === "function") {
+      const layout = configPanel.querySelector(".settings-layout");
+      if (layout) {
+        if (state.settingsLayoutObserver) {
+          state.settingsLayoutObserver.disconnect();
+        }
+        state.settingsLayoutObserver = new ResizeObserver(() => {
+          syncSettingsMainWidthLock();
+        });
+        state.settingsLayoutObserver.observe(layout);
+        const sidebar = layout.querySelector(".settings-sidebar");
+        if (sidebar) {
+          state.settingsLayoutObserver.observe(sidebar);
+        }
+        const main = layout.querySelector(".settings-main");
+        if (main) {
+          state.settingsLayoutObserver.observe(main);
+        }
+      }
+    }
   }
 
   const watcherEnabledToggle = $("#cfg-watcher-enabled");
