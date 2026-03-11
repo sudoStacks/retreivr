@@ -16,6 +16,7 @@ _require_python_311()
 import asyncio
 import functools
 import concurrent.futures
+import importlib
 import base64
 import binascii
 import hmac
@@ -5530,6 +5531,43 @@ def _set_watcher_status(state=None, **fields):
         status[key] = value
 
 
+def _acoustid_runtime_status(config: dict | None) -> dict[str, object]:
+    music_meta = (config or {}).get("music_metadata") if isinstance(config, dict) else {}
+    if not isinstance(music_meta, dict):
+        music_meta = {}
+    metadata_enabled = bool(music_meta.get("enabled", False))
+    use_acoustid = bool(music_meta.get("use_acoustid", False))
+    key_configured = bool(str(music_meta.get("acoustid_api_key") or "").strip())
+    fpcalc_available = bool(shutil.which("fpcalc"))
+    pyacoustid_available = False
+    try:
+        importlib.import_module("acoustid")
+        pyacoustid_available = True
+    except Exception:
+        pyacoustid_available = False
+
+    configured = bool(metadata_enabled and use_acoustid)
+    missing_requirements: list[str] = []
+    if configured and not key_configured:
+        missing_requirements.append("api_key")
+    if configured and not fpcalc_available:
+        missing_requirements.append("fpcalc")
+    if configured and not pyacoustid_available:
+        missing_requirements.append("pyacoustid")
+
+    ready = bool(configured and key_configured and fpcalc_available and pyacoustid_available)
+    return {
+        "configured": configured,
+        "metadata_enabled": metadata_enabled,
+        "use_acoustid": use_acoustid,
+        "key_configured": key_configured,
+        "fpcalc_available": fpcalc_available,
+        "pyacoustid_available": pyacoustid_available,
+        "missing_requirements": missing_requirements,
+        "ready": ready,
+    }
+
+
 @app.get("/api/status")
 async def api_status():
     status = get_status(app.state.status)
@@ -5589,6 +5627,7 @@ async def api_status():
     watcher_status = dict(getattr(app.state, "watcher_status", {}) or {})
     if not bool(getattr(app.state, "watcher_lock", None)):
         watcher_status["state"] = "disabled"
+    acoustid_status = _acoustid_runtime_status(loaded_cfg)
     playlist_import = _get_playlist_import_snapshot()
     queue_status = _get_download_queue_snapshot()
     telegram_delivery = _telegram_delivery_stats_snapshot()
@@ -5624,6 +5663,8 @@ async def api_status():
             },
         },
         "queue": queue_status,
+        "acoustid_ready": bool(acoustid_status.get("ready")),
+        "acoustid": acoustid_status,
         "playlist_import": playlist_import,
         "watcher_errors": watcher_errors,
         "telegram_delivery": telegram_delivery,

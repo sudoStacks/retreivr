@@ -265,6 +265,39 @@ def test_telegram_summary_content_includes_titles_for_scheduler_and_watcher(api_
     assert job_id not in captured[1]
 
 
+def test_acoustid_runtime_status_ready_and_missing_requirements(api_module, monkeypatch) -> None:
+    module = api_module
+    fake_acoustid = types.ModuleType("acoustid")
+    monkeypatch.setitem(sys.modules, "acoustid", fake_acoustid)
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/fpcalc" if name == "fpcalc" else None)
+
+    ready = module._acoustid_runtime_status(
+        {
+            "music_metadata": {
+                "enabled": True,
+                "use_acoustid": True,
+                "acoustid_api_key": "client-key",
+            }
+        }
+    )
+    assert ready["ready"] is True
+    assert ready["missing_requirements"] == []
+
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    missing = module._acoustid_runtime_status(
+        {
+            "music_metadata": {
+                "enabled": True,
+                "use_acoustid": True,
+                "acoustid_api_key": "",
+            }
+        }
+    )
+    assert missing["ready"] is False
+    assert "api_key" in missing["missing_requirements"]
+    assert "fpcalc" in missing["missing_requirements"]
+
+
 def test_playlist_add_persists_via_config_api(api_client: TestClient) -> None:
     payload = {
         "enable_watcher": True,
