@@ -1,7 +1,11 @@
 import logging
+import shutil
 
 
 def match_recording(file_path, api_key):
+    if not shutil.which("fpcalc"):
+        logging.warning("fpcalc not found; skipping acoustid lookup")
+        return None
     try:
         import acoustid
     except Exception:
