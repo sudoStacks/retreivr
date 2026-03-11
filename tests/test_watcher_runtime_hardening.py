@@ -64,11 +64,15 @@ def test_watcher_supervisor_task_done_schedules_restart_on_crash(monkeypatch) ->
     module.app.state.loop = _Loop()
     module.app.state.watcher_lock = 1
     module.app.state.watcher_task = object()
+    module.app.state.watcher_status = {"state": "running_batch", "batch_active": True, "pending_playlists_count": 3}
+    monkeypatch.setattr(module, "_ensure_watcher_lock_runtime", lambda: True)
 
     module._watcher_supervisor_task_done(_Task())
 
     assert scheduled["count"] == 1
     assert module.app.state.watcher_task is None
+    assert module.app.state.watcher_status.get("state") == "recovering"
+    assert module.app.state.watcher_status.get("batch_active") is False
 
 
 def test_watcher_supervisor_task_done_ignores_cancelled_task() -> None:
@@ -84,6 +88,28 @@ def test_watcher_supervisor_task_done_ignores_cancelled_task() -> None:
     module.app.state.watcher_task = "sentinel"
     module._watcher_supervisor_task_done(_Task())
     assert module.app.state.watcher_task == "sentinel"
+
+
+def test_ensure_watcher_lock_runtime_recovers_invalid_handle(monkeypatch) -> None:
+    module = _load_api_main()
+    module.app.state.watcher_lock = "invalid-fd"
+    monkeypatch.setattr(module, "_acquire_watcher_lock", lambda _lock_dir: 99)
+
+    recovered = module._ensure_watcher_lock_runtime()
+
+    assert recovered is True
+    assert module.app.state.watcher_lock == 99
+
+
+def test_ensure_watcher_lock_runtime_disables_when_recovery_fails(monkeypatch) -> None:
+    module = _load_api_main()
+    module.app.state.watcher_lock = "invalid-fd"
+    monkeypatch.setattr(module, "_acquire_watcher_lock", lambda _lock_dir: None)
+
+    recovered = module._ensure_watcher_lock_runtime()
+
+    assert recovered is False
+    assert module.app.state.watcher_lock is None
 
 
 def test_api_put_config_hot_applies_watcher_enable_toggle(monkeypatch) -> None:
@@ -131,3 +157,19 @@ def test_send_watcher_batch_telegram_returns_message_id(monkeypatch) -> None:
     result = module._send_watcher_batch_telegram({}, "test")
     assert result["sent"] is True
     assert result["message_id"] == 777
+
+
+def test_restart_watcher_supervisor_respects_lock_recovery(monkeypatch) -> None:
+    module = _load_api_main()
+    starts = {"count": 0}
+
+    monkeypatch.setattr(module, "_start_watcher_supervisor_task", lambda: starts.__setitem__("count", starts["count"] + 1))
+    monkeypatch.setattr(module, "_ensure_watcher_lock_runtime", lambda: False)
+    module.app.state.watcher_task = None
+    module.app.state.watcher_status = {"state": "running_batch", "batch_active": True}
+
+    asyncio.run(module._restart_watcher_supervisor(delay_seconds=0))
+
+    assert starts["count"] == 0
+    assert module.app.state.watcher_status.get("state") == "disabled"
+    assert module.app.state.watcher_status.get("batch_active") is False

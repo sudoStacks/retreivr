@@ -635,6 +635,11 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def _get_job_status_with_cursor(self, cur, job_id):
+        cur.execute("SELECT status FROM download_jobs WHERE id=?", (job_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
     def merge_output_template_fields(self, job_id, updates):
         if not isinstance(updates, dict) or not updates:
             return
@@ -1299,20 +1304,36 @@ class DownloadJobStore:
                     """
                     UPDATE download_jobs
                     SET status=?, completed=?, updated_at=?, file_path=?
-                    WHERE id=? AND status!=?
+                    WHERE id=? AND status IN (?, ?)
                     """,
-                    (JOB_STATUS_COMPLETED, now, now, file_path, job_id, JOB_STATUS_FAILED),
+                    (
+                        JOB_STATUS_COMPLETED,
+                        now,
+                        now,
+                        file_path,
+                        job_id,
+                        JOB_STATUS_DOWNLOADING,
+                        JOB_STATUS_POSTPROCESSING,
+                    ),
                 )
             else:
                 cur.execute(
                     """
                     UPDATE download_jobs
                     SET status=?, completed=?, updated_at=?
-                    WHERE id=? AND status!=?
+                    WHERE id=? AND status IN (?, ?)
                     """,
-                    (JOB_STATUS_COMPLETED, now, now, job_id, JOB_STATUS_FAILED),
+                    (
+                        JOB_STATUS_COMPLETED,
+                        now,
+                        now,
+                        job_id,
+                        JOB_STATUS_DOWNLOADING,
+                        JOB_STATUS_POSTPROCESSING,
+                    ),
                 )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1367,11 +1388,22 @@ class DownloadJobStore:
                 """
                 UPDATE download_jobs
                 SET status=?, canceled=?, updated_at=?, last_error=?
-                WHERE id=?
+                WHERE id=? AND status IN (?, ?, ?, ?)
                 """,
-                (JOB_STATUS_CANCELLED, now, now, reason, job_id),
+                (
+                    JOB_STATUS_CANCELLED,
+                    now,
+                    now,
+                    reason,
+                    job_id,
+                    JOB_STATUS_QUEUED,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                ),
             )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1421,10 +1453,24 @@ class DownloadJobStore:
                         progress_speed_bps=NULL,
                         progress_eta_seconds=NULL,
                         progress_updated_at=NULL
-                    WHERE id=?
+                    WHERE id=? AND status IN (?, ?, ?)
                     """,
-                    (JOB_STATUS_QUEUED, queued_at, now, attempts, error_message, job.id),
+                    (
+                        JOB_STATUS_QUEUED,
+                        queued_at,
+                        now,
+                        attempts,
+                        error_message,
+                        job.id,
+                        JOB_STATUS_CLAIMED,
+                        JOB_STATUS_DOWNLOADING,
+                        JOB_STATUS_POSTPROCESSING,
+                    ),
                 )
+                if cur.rowcount != 1:
+                    conn.commit()
+                    current = self._get_job_status_with_cursor(cur, job.id)
+                    return current or JOB_STATUS_FAILED
                 conn.commit()
                 return JOB_STATUS_QUEUED
 
@@ -1432,10 +1478,24 @@ class DownloadJobStore:
                 """
                 UPDATE download_jobs
                 SET status=?, failed=?, updated_at=?, attempts=?, last_error=?
-                WHERE id=?
+                WHERE id=? AND status IN (?, ?, ?)
                 """,
-                (JOB_STATUS_FAILED, now, now, attempts, error_message, job.id),
+                (
+                    JOB_STATUS_FAILED,
+                    now,
+                    now,
+                    attempts,
+                    error_message,
+                    job.id,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                ),
             )
+            if cur.rowcount != 1:
+                conn.commit()
+                current = self._get_job_status_with_cursor(cur, job.id)
+                return current or JOB_STATUS_FAILED
             conn.commit()
             return JOB_STATUS_FAILED
         finally:
@@ -1456,11 +1516,12 @@ class DownloadJobStore:
                     progress_speed_bps=NULL,
                     progress_eta_seconds=NULL,
                     progress_updated_at=NULL
-                WHERE id=?
+                WHERE id=? AND status=?
                 """,
-                (JOB_STATUS_DOWNLOADING, now, now, job_id),
+                (JOB_STATUS_DOWNLOADING, now, now, job_id, JOB_STATUS_CLAIMED),
             )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1517,11 +1578,12 @@ class DownloadJobStore:
                 """
                 UPDATE download_jobs
                 SET status=?, postprocessing=?, updated_at=?
-                WHERE id=? AND status!=?
+                WHERE id=? AND status=?
                 """,
-                (JOB_STATUS_POSTPROCESSING, now, now, job_id, JOB_STATUS_FAILED),
+                (JOB_STATUS_POSTPROCESSING, now, now, job_id, JOB_STATUS_DOWNLOADING),
             )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -3322,7 +3384,17 @@ class DownloadWorkerEngine:
                 )
                 self._write_album_run_summary_artifact(job)
                 return
-            self.store.mark_downloading(job.id)
+            if not self.store.mark_downloading(job.id):
+                current_status = self.store.get_job_status(job.id)
+                _log_event(
+                    logging.INFO,
+                    "job_start_skipped_non_claimed",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    status=current_status,
+                )
+                return
             _log_event(
                 logging.INFO,
                 "job_started",
@@ -3379,14 +3451,34 @@ class DownloadWorkerEngine:
                     media_intent=job.media_intent,
                 )
                 return
-            self.store.mark_postprocessing(job.id)
+            if not self.store.mark_postprocessing(job.id):
+                current_status = self.store.get_job_status(job.id)
+                _log_event(
+                    logging.INFO,
+                    "job_postprocessing_skipped_invalid_state",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    status=current_status,
+                )
+                return
             record_download_history(
                 self.db_path,
                 job,
                 final_path,
                 meta=meta,
             )
-            self.store.mark_completed(job.id, file_path=final_path)
+            if not self.store.mark_completed(job.id, file_path=final_path):
+                current_status = self.store.get_job_status(job.id)
+                _log_event(
+                    logging.INFO,
+                    "job_complete_skipped_invalid_state",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    status=current_status,
+                )
+                return
             if str(getattr(job, "media_intent", "") or "").strip().lower() == "music_track":
                 try:
                     self._emit_community_publish_proposal(job, final_path=final_path, meta=meta)
