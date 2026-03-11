@@ -1240,7 +1240,16 @@ def _telegram_preflight_error(config) -> str | None:
         return "telegram_chat_id_missing"
     return None
 
-def notify_run_summary(config, *, run_type: str, status, started_at, finished_at, force_send: bool = False):
+def notify_run_summary(
+    config,
+    *,
+    run_type: str,
+    status,
+    started_at,
+    finished_at,
+    force_send: bool = False,
+    attempted_override: int | None = None,
+):
     if run_type not in {"scheduled", "watcher", "api"}:
         return {"attempted": 0, "sent": False, "telegram_message_id": None}
 
@@ -1521,6 +1530,13 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
         summary_values = raw_success_values
 
     # Attempt-driven summaries only: no synthetic sends when nothing was attempted.
+    if attempted <= 0 and isinstance(attempted_override, int) and attempted_override > 0:
+        # Watcher batches enqueue jobs asynchronously; terminal states may not be visible
+        # at summary time yet. Allow caller to provide a queue-backed attempted count.
+        attempted = attempted_override
+        successes = attempted_override
+        failures = 0
+
     if attempted <= 0:
         _record_telegram_delivery(
             run_type=run_type,
@@ -5279,6 +5295,7 @@ async def _watcher_supervisor():
                             status=watcher_summary_status,
                             started_at=batch_started_at,
                             finished_at=batch_finished_at,
+                            attempted_override=attempted_total,
                         )
                         if isinstance(result, dict) and bool(result.get("sent")):
                             batch_state["last_telegram_sent_ts"] = time.monotonic()
