@@ -72,8 +72,7 @@ def _collect_dict_key_paths(payload: dict, prefix: str = "") -> set[str]:
 
 def test_apply_config_defaults_backfills_missing_keys_from_sample() -> None:
     core = _load_engine_core()
-    sample_path = Path(__file__).resolve().parents[1] / "config" / "config_sample.json"
-    sample = json.loads(sample_path.read_text(encoding="utf-8"))
+    sample = core._load_default_config_template()  # noqa: SLF001
 
     normalized = core.apply_config_defaults({"accounts": {}})
 
@@ -83,12 +82,22 @@ def test_apply_config_defaults_backfills_missing_keys_from_sample() -> None:
     assert not missing
 
 
+def test_apply_config_defaults_does_not_inject_sample_entities() -> None:
+    core = _load_engine_core()
+    normalized = core.apply_config_defaults({})
+
+    assert normalized.get("accounts") == {}
+    assert normalized.get("playlists") == []
+    assert normalized.get("spotify_playlists") == []
+
+
 def test_apply_config_defaults_preserves_user_values() -> None:
     core = _load_engine_core()
     user = {
         "schedule": {"enabled": True, "interval_hours": 2},
         "music_metadata": {"enabled": False, "use_acoustid": True},
         "music_skip_metadata_probe": False,
+        "accounts": {"my_account": {"client_secret": "a.json", "token": "b.json"}},
     }
 
     normalized = core.apply_config_defaults(user)
@@ -98,6 +107,7 @@ def test_apply_config_defaults_preserves_user_values() -> None:
     assert normalized["music_metadata"]["enabled"] is False
     assert normalized["music_metadata"]["use_acoustid"] is True
     assert normalized["music_skip_metadata_probe"] is False
+    assert normalized["accounts"] == {"my_account": {"client_secret": "a.json", "token": "b.json"}}
 
 
 def test_load_config_write_back_defaults_persists_missing_entries(tmp_path: Path) -> None:
@@ -113,3 +123,6 @@ def test_load_config_write_back_defaults_persists_missing_entries(tmp_path: Path
     assert "community_cache_lookup_enabled" in persisted
     assert "music_skip_metadata_probe" in persisted
     assert "music_candidate_cooldown_enabled" in persisted
+    assert persisted.get("accounts") == {}
+    assert persisted.get("playlists") == []
+    assert persisted.get("spotify_playlists") == []

@@ -50,6 +50,19 @@ def _deep_copy_json_compatible(value):
     return json.loads(json.dumps(value))
 
 
+def _sanitize_default_config_template(defaults: dict) -> dict:
+    sanitized = _deep_copy_json_compatible(defaults if isinstance(defaults, dict) else {})
+    # Never inject sample/demo entities into user configs during upgrade backfill.
+    # These collections are user-managed and should only contain user-provided entries.
+    if isinstance(sanitized.get("accounts"), dict):
+        sanitized["accounts"] = {}
+    if isinstance(sanitized.get("playlists"), list):
+        sanitized["playlists"] = []
+    if isinstance(sanitized.get("spotify_playlists"), list):
+        sanitized["spotify_playlists"] = []
+    return sanitized
+
+
 def _load_default_config_template():
     global _DEFAULT_CONFIG_TEMPLATE
     if isinstance(_DEFAULT_CONFIG_TEMPLATE, dict):
@@ -62,10 +75,12 @@ def _load_default_config_template():
         with sample_path.open("r", encoding="utf-8") as handle:
             loaded = json.load(handle)
         if isinstance(loaded, dict):
-            defaults = loaded
+            defaults = _sanitize_default_config_template(loaded)
     except Exception:
         logging.warning("Failed to load config sample defaults", exc_info=True)
-    _DEFAULT_CONFIG_TEMPLATE = defaults if isinstance(defaults, dict) else {}
+    _DEFAULT_CONFIG_TEMPLATE = (
+        defaults if isinstance(defaults, dict) else _sanitize_default_config_template({})
+    )
     return _deep_copy_json_compatible(_DEFAULT_CONFIG_TEMPLATE)
 
 
