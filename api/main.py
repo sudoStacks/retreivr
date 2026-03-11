@@ -16,6 +16,7 @@ _require_python_311()
 import asyncio
 import functools
 import concurrent.futures
+import importlib
 import base64
 import binascii
 import hmac
@@ -30,6 +31,7 @@ import shutil
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import requests
 import musicbrainzngs
 from pathlib import Path
@@ -160,6 +162,10 @@ USER_PLAYLISTS_JOB_ID = "spotify_user_playlists_watch"
 SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
+WATCHER_BATCH_MAX_WAIT_SECONDS = 300
+WATCHER_TELEGRAM_COOLDOWN_SECONDS = 300
+WATCHER_SUMMARY_WAIT_SECONDS = 900
+WATCHER_SUMMARY_POLL_SECONDS = 2
 COVER_ART_CACHE_TTL_SECONDS = 3600
 COVER_ART_NEGATIVE_CACHE_TTL_SECONDS = 120
 DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
@@ -1158,7 +1164,94 @@ def _write_persisted_run_summary_dispatch(run_type: str, run_id: str, record: di
             except Exception:
                 pass
 
-def notify_run_summary(config, *, run_type: str, status, started_at, finished_at, force_send: bool = False):
+
+def _default_telegram_delivery_stats() -> dict[str, object]:
+    return {
+        "sent_count": 0,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "last_error": None,
+        "last_attempt_at": None,
+        "last_success_at": None,
+        "last_message_id": None,
+        "last_run_type": None,
+    }
+
+
+def _telegram_delivery_stats_snapshot() -> dict[str, object]:
+    stats = getattr(app.state, "telegram_delivery_stats", None)
+    lock = getattr(app.state, "telegram_delivery_stats_lock", None)
+    if not isinstance(stats, dict):
+        return _default_telegram_delivery_stats()
+    if lock is not None:
+        with lock:
+            return safe_json(dict(stats))
+    return safe_json(dict(stats))
+
+
+def _record_telegram_delivery(
+    *,
+    run_type: str | None,
+    sent: bool,
+    skipped: bool = False,
+    error: str | None = None,
+    message_id: str | None = None,
+) -> None:
+    stats = getattr(app.state, "telegram_delivery_stats", None)
+    lock = getattr(app.state, "telegram_delivery_stats_lock", None)
+    if not isinstance(stats, dict):
+        stats = _default_telegram_delivery_stats()
+        app.state.telegram_delivery_stats = stats
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    def _mutate() -> None:
+        stats["last_attempt_at"] = now_iso
+        stats["last_run_type"] = str(run_type or "").strip() or None
+        if message_id is not None:
+            stats["last_message_id"] = str(message_id).strip() or None
+        if skipped:
+            stats["skipped_count"] = int(stats.get("skipped_count") or 0) + 1
+            return
+        if sent:
+            stats["sent_count"] = int(stats.get("sent_count") or 0) + 1
+            stats["last_success_at"] = now_iso
+            stats["last_error"] = None
+        else:
+            stats["failed_count"] = int(stats.get("failed_count") or 0) + 1
+            stats["last_error"] = str(error or "").strip() or "telegram_send_failed"
+
+    if lock is not None:
+        with lock:
+            _mutate()
+    else:
+        _mutate()
+
+
+def _telegram_preflight_error(config) -> str | None:
+    telegram_cfg = config.get("telegram") if isinstance(config, dict) else None
+    if not isinstance(telegram_cfg, dict):
+        return "telegram_not_configured"
+    if "enabled" in telegram_cfg and not bool(telegram_cfg.get("enabled")):
+        return "telegram_disabled"
+    bot_token = str(telegram_cfg.get("bot_token") or "").strip()
+    chat_id = str(telegram_cfg.get("chat_id") or "").strip()
+    if not bot_token:
+        return "telegram_bot_token_missing"
+    if not chat_id:
+        return "telegram_chat_id_missing"
+    return None
+
+def notify_run_summary(
+    config,
+    *,
+    run_type: str,
+    status,
+    started_at,
+    finished_at,
+    force_send: bool = False,
+    attempted_override: int | None = None,
+):
     if run_type not in {"scheduled", "watcher", "api"}:
         return {"attempted": 0, "sent": False, "telegram_message_id": None}
 
@@ -1370,16 +1463,13 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
 
     def _build_message(success_count: int, failure_count: int, duration_text: str, downloaded_labels: list[str]) -> str:
         status_text = "completed" if failure_count <= 0 else "completed_with_errors"
-        success_label = "Success"
-        failure_label = "Failed"
-        downloaded_heading = "Downloaded:"
+        success_label = "Attempted successes"
+        failure_label = "Attempted failures"
+        downloaded_heading = "Attempted:"
         if run_type == "scheduled":
             title = "Retreivr Scheduler Run Summary\nYouTube Playlist Download Attempts"
-            success_label = "Attempted successes"
-            failure_label = "Attempted failures"
-            downloaded_heading = "Attempted:"
         elif run_type == "watcher":
-            title = "Retreivr Watcher Run Summary\nYouTube Playlist Archive Completed"
+            title = "Retreivr Watcher Run Summary\nYouTube Playlist Download Attempts"
         else:
             title = "YouTube Archiver Summary"
         header = (
@@ -1421,8 +1511,16 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
         return capped
 
     raw_successes = getattr(status, "run_successes", []) or []
+    raw_success_values = list(raw_successes) if isinstance(raw_successes, (list, tuple, set)) else []
+    has_job_ids = any(re.fullmatch(r"[0-9a-f]{32}", str(v or "").strip()) for v in raw_success_values)
     completed_ids, failed_ids = _resolve_attempted_job_outcomes(raw_successes)
-    if completed_ids or failed_ids:
+    if has_job_ids:
+        # For queue-backed runs, only terminal jobs count as attempted.
+        successes = len(completed_ids)
+        failures = len(failed_ids)
+        attempted = successes + failures
+        summary_values = list(completed_ids) + list(failed_ids)
+    elif completed_ids or failed_ids:
         successes = len(completed_ids)
         failures = len(failed_ids)
         attempted = successes + failures
@@ -1431,10 +1529,24 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
         successes = _count(raw_successes)
         failures = _count(getattr(status, "run_failures", 0))
         attempted = successes + failures
-        summary_values = list(raw_successes) if isinstance(raw_successes, (list, tuple, set)) else []
+        summary_values = raw_success_values
 
     # Attempt-driven summaries only: no synthetic sends when nothing was attempted.
+    if attempted <= 0 and isinstance(attempted_override, int) and attempted_override > 0:
+        # Watcher batches enqueue jobs asynchronously; terminal states may not be visible
+        # at summary time yet. Allow caller to provide a queue-backed attempted count.
+        attempted = attempted_override
+        successes = attempted_override
+        failures = 0
+
     if attempted <= 0:
+        _record_telegram_delivery(
+            run_type=run_type,
+            sent=False,
+            skipped=True,
+            error="no_attempted_jobs",
+            message_id=None,
+        )
         return {"attempted": 0, "sent": False, "telegram_message_id": None}
 
     duration_label = "unknown"
@@ -1462,6 +1574,22 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
         logging.exception("Telegram notify failed (run_type=%s)", run_type)
         sent = False
         telegram_message_id = None
+        _record_telegram_delivery(
+            run_type=run_type,
+            sent=False,
+            skipped=False,
+            error="telegram_exception",
+            message_id=None,
+        )
+    else:
+        preflight_error = None if sent else _telegram_preflight_error(config)
+        _record_telegram_delivery(
+            run_type=run_type,
+            sent=sent,
+            skipped=False,
+            error=preflight_error or ("telegram_api_not_ok" if not sent else None),
+            message_id=telegram_message_id,
+        )
 
     return {
         "attempted": attempted,
@@ -1792,6 +1920,32 @@ def _acquire_watcher_lock(lock_dir):
     os.ftruncate(fd, 0)
     os.write(fd, str(os.getpid()).encode("utf-8"))
     return fd
+
+
+def _watcher_lock_is_valid(lock_fd) -> bool:
+    if lock_fd is None:
+        return False
+    try:
+        os.fstat(int(lock_fd))
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _ensure_watcher_lock_runtime() -> bool:
+    lock_fd = getattr(app.state, "watcher_lock", None)
+    if _watcher_lock_is_valid(lock_fd):
+        return True
+    if lock_fd is not None:
+        logging.warning("Watcher lock handle invalid; attempting reacquire")
+    app.state.watcher_lock = None
+    recovered = _acquire_watcher_lock(DATA_DIR)
+    if recovered is None:
+        logging.warning("Watcher lock recovery failed; watcher disabled")
+        return False
+    app.state.watcher_lock = recovered
+    logging.info("Watcher lock recovered")
+    return True
 
 
 class RunRequest(BaseModel):
@@ -2273,6 +2427,8 @@ async def startup():
     app.state.stop_event = threading.Event()
     app.state.run_task = None
     app.state.run_summary_dispatch = {}
+    app.state.telegram_delivery_stats_lock = threading.Lock()
+    app.state.telegram_delivery_stats = _default_telegram_delivery_stats()
     app.state.loop = asyncio.get_running_loop()
     app.state.schedule_lock = threading.Lock()
     app.state.ytdlp_update_lock = threading.Lock()
@@ -2404,7 +2560,19 @@ async def startup():
     app.state.watch_policy = watch_policy
     app.state.watch_config_cache = startup_cfg
     app.state.watcher_clients_cache = {}
-    enable_watcher = bool(startup_cfg.get("enable_watcher")) if isinstance(startup_cfg, dict) else False
+    enable_watcher = _config_watcher_enabled(startup_cfg)
+    if enable_watcher:
+        reset_count = _reset_watch_state_for_startup(
+            app.state.paths.db_path,
+            startup_cfg.get("playlists") or [],
+            watch_policy,
+        )
+        if reset_count:
+            logging.info(
+                "Watcher startup state reset playlists=%s min_interval=%s",
+                reset_count,
+                watch_policy.get("min_interval_minutes") or 5,
+            )
     if not enable_watcher:
         app.state.watcher_lock = None
         app.state.watcher_task = None
@@ -3269,6 +3437,17 @@ def _merge_schedule_config(schedule):
     return merged
 
 
+def _config_watcher_enabled(config: dict | None) -> bool:
+    if not isinstance(config, dict):
+        return False
+    if isinstance(config.get("enable_watcher"), bool):
+        return config.get("enable_watcher")
+    watcher_cfg = config.get("watcher")
+    if isinstance(watcher_cfg, dict) and isinstance(watcher_cfg.get("enabled"), bool):
+        return watcher_cfg.get("enabled")
+    return False
+
+
 def _merge_watch_policy(policy):
     merged = _default_watch_policy()
     if isinstance(policy, dict):
@@ -3588,6 +3767,18 @@ async def _start_run_with_config(
     if not runtime_config:
         runtime_config = _read_config_or_404()
     config = runtime_config
+
+    # Enforce downtime guardrail for automated runs before taking the run lock.
+    if not skip_downtime and run_source in {"scheduled", "watcher"}:
+        in_dt, next_allowed = _check_downtime(config, now=now)
+        if in_dt:
+            next_allowed_iso = _format_iso(next_allowed) if next_allowed else None
+            logging.info(
+                "%s run deferred due to downtime window%s",
+                run_source.capitalize(),
+                f" (next_allowed={next_allowed_iso})" if next_allowed_iso else "",
+            )
+            return "deferred", next_allowed
 
     async with app.state.run_lock:
         if app.state.running:
@@ -3937,6 +4128,15 @@ async def _handle_scheduled_run():
     config = _read_config_for_scheduler()
     if not config:
         _set_schedule_state(next_run=_get_next_run_iso())
+        return
+    downtime_active, next_allowed = _check_downtime(config)
+    if downtime_active:
+        next_iso = _format_iso(next_allowed) if next_allowed else _get_next_run_iso()
+        logging.info(
+            "Scheduled run skipped due to downtime window%s",
+            f" (next_allowed={next_iso})" if next_iso else "",
+        )
+        _set_schedule_state(next_run=next_iso)
         return
     result, next_allowed = await _start_run_with_config(config, run_source="scheduled")
     if result == "started":
@@ -4531,6 +4731,44 @@ def _write_watch_state(
     conn.close()
 
 
+def _reset_watch_state_for_startup(db_path, playlists, policy):
+    if not isinstance(playlists, list) or not playlists:
+        return 0
+    min_interval = 5
+    if isinstance(policy, dict):
+        try:
+            min_interval = int(policy.get("min_interval_minutes") or min_interval)
+        except Exception:
+            min_interval = 5
+    min_interval = max(1, min_interval)
+    now_iso = _format_iso(datetime.now(timezone.utc))
+    existing = _read_watch_state(db_path)
+    reset_count = 0
+    for pl in playlists:
+        if not isinstance(pl, dict):
+            continue
+        playlist_key = pl.get("playlist_id") or pl.get("id")
+        playlist_id = extract_playlist_id(playlist_key) or playlist_key
+        if not playlist_id:
+            continue
+        prior = existing.get(playlist_id) or {}
+        _write_watch_state(
+            db_path,
+            playlist_id,
+            last_checked_at=prior.get("last_checked_at"),
+            next_poll_at=now_iso,
+            idle_count=0,
+            current_interval_min=min_interval,
+            consecutive_no_change=0,
+            last_change_at=prior.get("last_change_at"),
+            skip_reason=None,
+            last_error=None,
+            last_error_at=prior.get("last_error_at"),
+        )
+        reset_count += 1
+    return reset_count
+
+
 def _playlist_label(playlist_id, playlist_name):
     label = playlist_name or playlist_id
     return label if label else "unknown"
@@ -4581,87 +4819,103 @@ async def _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batc
 
     account = pl.get("account")
     yt = yt_clients.get(account) if account else None
+    videos = []
     if not yt:
-        skip_reason = _log_skip_reason(playlist_id, "oauth missing", watch)
-        error_at = _format_iso(now)
-        consecutive_no_change += 1
-        current_interval = min(current_interval * backoff_factor, max_interval)
-        logging.debug(
-            "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
-            playlist_id,
-            current_interval,
-            consecutive_no_change,
+        cookie_file = resolve_cookie_file(config)
+        videos, fallback_error = await anyio.to_thread.run_sync(
+            lambda: get_playlist_videos_fallback(playlist_id, cookie_file=cookie_file)
         )
-        _write_watch_state(
-            app.state.paths.db_path,
+        if fallback_error:
+            skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
+            error_at = _format_iso(now)
+            consecutive_no_change += 1
+            current_interval = min(current_interval * backoff_factor, max_interval)
+            logging.debug(
+                "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
+                playlist_id,
+                current_interval,
+                consecutive_no_change,
+            )
+            error_message = (
+                "oauth missing and yt-dlp fallback failed"
+                if account
+                else "yt-dlp fallback failed"
+            )
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=watch.get("last_checked_at"),
+                next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
+                idle_count=consecutive_no_change,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=skip_reason,
+                last_error=error_message,
+                last_error_at=error_at,
+            )
+            return
+        logging.info(
+            "Watcher poll using yt-dlp fallback playlist_id=%s account=%s",
             playlist_id,
-            last_checked_at=watch.get("last_checked_at"),
-            next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
-            idle_count=consecutive_no_change,
-            current_interval_min=current_interval,
-            consecutive_no_change=consecutive_no_change,
-            last_change_at=watch.get("last_change_at"),
-            skip_reason=skip_reason,
-            last_error="oauth missing",
-            last_error_at=error_at,
+            account or "public",
         )
-        return
-
-    try:
-        # Google client calls are blocking; run off the event loop thread.
-        videos = await anyio.to_thread.run_sync(get_playlist_videos, yt, playlist_id)
-    except RefreshError as exc:
-        logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
-        skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
-        error_at = _format_iso(now)
-        consecutive_no_change += 1
-        current_interval = min(current_interval * backoff_factor, max_interval)
-        logging.debug(
-            "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
-            playlist_id,
-            current_interval,
-            consecutive_no_change,
-        )
-        _write_watch_state(
-            app.state.paths.db_path,
-            playlist_id,
-            last_checked_at=_format_iso(now),
-            next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
-            idle_count=consecutive_no_change,
-            current_interval_min=current_interval,
-            consecutive_no_change=consecutive_no_change,
-            last_change_at=watch.get("last_change_at"),
-            skip_reason=skip_reason,
-            last_error=f"api error: {exc}",
-            last_error_at=error_at,
-        )
-        return
-    except HttpError as exc:
-        logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
-        skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
-        error_at = _format_iso(now)
-        consecutive_no_change += 1
-        current_interval = min(current_interval * backoff_factor, max_interval)
-        logging.debug(
-            "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
-            playlist_id,
-            current_interval,
-            consecutive_no_change,
-        )
-        _write_watch_state(
-            app.state.paths.db_path,
-            playlist_id,
-            last_checked_at=_format_iso(now),
-            next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
-            idle_count=consecutive_no_change,
-            current_interval_min=current_interval,
-            consecutive_no_change=consecutive_no_change,
-            last_change_at=watch.get("last_change_at"),
-            skip_reason=skip_reason,
-            last_error=f"api error: {exc}",
-            last_error_at=error_at,
-        )
-        return
+    else:
+        try:
+            # Google client calls are blocking; run off the event loop thread.
+            videos = await anyio.to_thread.run_sync(get_playlist_videos, yt, playlist_id)
+        except RefreshError as exc:
+            logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
+            skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
+            error_at = _format_iso(now)
+            consecutive_no_change += 1
+            current_interval = min(current_interval * backoff_factor, max_interval)
+            logging.debug(
+                "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
+                playlist_id,
+                current_interval,
+                consecutive_no_change,
+            )
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=_format_iso(now),
+                next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
+                idle_count=consecutive_no_change,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=skip_reason,
+                last_error=f"api error: {exc}",
+                last_error_at=error_at,
+            )
+            return
+        except HttpError as exc:
+            logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
+            skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
+            error_at = _format_iso(now)
+            consecutive_no_change += 1
+            current_interval = min(current_interval * backoff_factor, max_interval)
+            logging.debug(
+                "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
+                playlist_id,
+                current_interval,
+                consecutive_no_change,
+            )
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=_format_iso(now),
+                next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
+                idle_count=consecutive_no_change,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=skip_reason,
+                last_error=f"api error: {exc}",
+                last_error_at=error_at,
+            )
+            return
 
     if not videos:
         logging.debug("Watcher polled playlist_id=%s items=0", playlist_id)
@@ -4743,9 +4997,13 @@ async def _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batc
                 vid = entry.get("videoId") or entry.get("id")
                 if not vid:
                     continue
-                if is_video_seen(conn, playlist_id, vid):
-                    break
-                new_ids.append(vid)
+                if not is_video_seen(conn, playlist_id, vid):
+                    new_ids.append(vid)
+                    # Mark as seen when detected to avoid re-triggering the same
+                    # IDs on subsequent polls before/after batch execution.
+                    mark_video_seen(conn, playlist_id, vid, downloaded=False)
+            if new_ids:
+                conn.commit()
         else:
             for entry in videos:
                 vid = entry.get("videoId") or entry.get("id")
@@ -4810,14 +5068,19 @@ async def _watcher_supervisor():
     logging.info("Watcher started")
     _set_watcher_status("idle")
     startup_logged = False
+    startup_fast_poll_done = False
     last_candidate_state = None
     batch_state = {
         "pending_playlists": set(),
         "last_detection_ts": None,
         "batch_active": False,
+        "batch_opened_ts": None,
+        "batch_opened_at": None,
+        "polled_playlists": set(),
+        "last_telegram_sent_ts": None,
     }
     while True:
-        if getattr(app.state, "watcher_lock", None) is None:
+        if not _ensure_watcher_lock_runtime():
             _set_watcher_status("disabled", batch_active=False, pending_playlists_count=0, quiet_window_remaining_sec=None)
             return
         config = _read_config_for_watcher()
@@ -4843,14 +5106,18 @@ async def _watcher_supervisor():
         now = local_now.astimezone(tzinfo)
 
         downtime_active = False
+        next_allowed_dt = None
         if downtime.get("enabled"):
-            downtime_active, _next_allowed = in_downtime(
+            downtime_active, next_allowed_dt = in_downtime(
                 now,
                 downtime.get("start"),
                 downtime.get("end"),
             )
             if downtime_active and not app.state.was_in_downtime:
-                logging.info("Watcher entering downtime window")
+                logging.info(
+                    "Watcher entering downtime window%s",
+                    f" (next_allowed={_format_iso(next_allowed_dt)})" if next_allowed_dt else "",
+                )
             if not downtime_active and app.state.was_in_downtime:
                 logging.info("Watcher exiting downtime window")
             if downtime_active:
@@ -4894,7 +5161,17 @@ async def _watcher_supervisor():
         if (pending_count and batch_state["last_detection_ts"] is not None
                 and not batch_state["batch_active"]):
             elapsed = time.monotonic() - batch_state["last_detection_ts"]
-            if elapsed >= WATCHER_QUIET_WINDOW_SECONDS:
+            opened_elapsed = (
+                time.monotonic() - batch_state["batch_opened_ts"]
+                if batch_state.get("batch_opened_ts") is not None
+                else elapsed
+            )
+            required_playlists = set(playlist_map.keys())
+            polled_playlists = set(batch_state.get("polled_playlists") or set())
+            all_playlists_polled = bool(required_playlists) and required_playlists.issubset(polled_playlists)
+            if elapsed >= WATCHER_QUIET_WINDOW_SECONDS and (
+                all_playlists_polled or opened_elapsed >= WATCHER_BATCH_MAX_WAIT_SECONDS
+            ):
                 _set_watcher_status(
                     "batch_ready",
                     pending_playlists_count=pending_count,
@@ -4902,8 +5179,13 @@ async def _watcher_supervisor():
                     batch_active=False,
                 )
                 logging.info(
-                    "Watcher: quiet window elapsed (%ss), preparing batch run",
+                    "Watcher: quiet window elapsed (%ss), preparing batch run all_playlists_polled=%s "
+                    "opened_elapsed=%ss required=%s polled=%s",
                     WATCHER_QUIET_WINDOW_SECONDS,
+                    all_playlists_polled,
+                    int(opened_elapsed),
+                    len(required_playlists),
+                    len(polled_playlists),
                 )
                 batch_state["batch_active"] = True
                 batch_playlists = list(batch_state["pending_playlists"])
@@ -4918,7 +5200,7 @@ async def _watcher_supervisor():
                     "Watcher: starting batch run playlists=%s",
                     ",".join(batch_playlists),
                 )
-                batch_start = time.monotonic()
+                batch_started_at = batch_state.get("batch_opened_at") or datetime.now(timezone.utc).isoformat()
                 batch_job_ids: list[str] = []
                 for playlist_id in batch_playlists:
                     pl = playlist_map.get(playlist_id)
@@ -4954,34 +5236,57 @@ async def _watcher_supervisor():
                         logging.info("Watcher: batch deferred playlist_id=%s", playlist_id)
                     else:
                         logging.debug("Watcher: batch skipped (run active) playlist_id=%s", playlist_id)
-                duration_seconds = max(0, int(time.monotonic() - batch_start))
-                attempted_success = 0
-                attempted_failed = 0
-                if batch_job_ids:
-                    conn = None
-                    try:
-                        conn = sqlite3.connect(app.state.paths.db_path)
-                        cur = conn.cursor()
-                        placeholders = ",".join("?" for _ in batch_job_ids)
-                        cur.execute(
-                            f"SELECT status, COUNT(*) FROM download_jobs WHERE id IN ({placeholders}) GROUP BY status",
-                            batch_job_ids,
-                        )
-                        for raw_status, count in cur.fetchall():
-                            normalized = str(raw_status or "").strip().lower()
-                            if normalized == "completed":
-                                attempted_success += int(count or 0)
-                            elif normalized in {"failed", "cancelled"}:
-                                attempted_failed += int(count or 0)
-                    except Exception:
-                        logging.exception("Watcher batch attempted-summary query failed")
-                    finally:
-                        if conn is not None:
-                            try:
-                                conn.close()
-                            except Exception:
-                                pass
-                attempted_total = attempted_success + attempted_failed
+                attempted_job_ids = list(dict.fromkeys(batch_job_ids))
+                completed_job_ids: list[str] = []
+                failed_job_ids: list[str] = []
+                if attempted_job_ids:
+                    pending_job_ids = set(attempted_job_ids)
+                    summary_deadline = time.monotonic() + WATCHER_SUMMARY_WAIT_SECONDS
+                    while pending_job_ids:
+                        conn = None
+                        try:
+                            conn = sqlite3.connect(app.state.paths.db_path)
+                            cur = conn.cursor()
+                            placeholders = ",".join("?" for _ in attempted_job_ids)
+                            cur.execute(
+                                f"SELECT id, status FROM download_jobs WHERE id IN ({placeholders})",
+                                attempted_job_ids,
+                            )
+                            seen_terminal: set[str] = set()
+                            for raw_id, raw_status in cur.fetchall():
+                                job_id = str(raw_id)
+                                normalized = str(raw_status or "").strip().lower()
+                                if normalized == "completed":
+                                    completed_job_ids.append(job_id)
+                                    seen_terminal.add(job_id)
+                                elif normalized in {"failed", "cancelled"}:
+                                    failed_job_ids.append(job_id)
+                                    seen_terminal.add(job_id)
+                            completed_job_ids = list(dict.fromkeys(completed_job_ids))
+                            failed_job_ids = list(dict.fromkeys(failed_job_ids))
+                            pending_job_ids = set(attempted_job_ids) - seen_terminal
+                        except Exception:
+                            logging.exception("Watcher batch attempted-summary query failed")
+                            break
+                        finally:
+                            if conn is not None:
+                                try:
+                                    conn.close()
+                                except Exception:
+                                    pass
+                        if not pending_job_ids:
+                            break
+                        if time.monotonic() >= summary_deadline:
+                            logging.info(
+                                "Watcher: summary wait timeout pending_jobs=%s waited=%ss",
+                                len(pending_job_ids),
+                                WATCHER_SUMMARY_WAIT_SECONDS,
+                            )
+                            break
+                        await asyncio.sleep(WATCHER_SUMMARY_POLL_SECONDS)
+                attempted_success = len(completed_job_ids)
+                attempted_failed = len(failed_job_ids)
+                attempted_total = len(attempted_job_ids)
                 logging.info(
                     "Watcher: batch complete playlists=%s attempted_total=%s attempted_success=%s attempted_failed=%s",
                     len(batch_playlists),
@@ -4990,17 +5295,43 @@ async def _watcher_supervisor():
                     attempted_failed,
                 )
                 if batch_playlists and attempted_total > 0:
-                    minutes = duration_seconds // 60
-                    seconds = duration_seconds % 60
-                    duration_label = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
-                    msg = (
-                        "Retreivr Watcher Batch\n"
-                        f"Playlists: {len(batch_playlists)}\n"
-                        f"Attempted successes: {attempted_success}\n"
-                        f"Attempted failures: {attempted_failed}\n"
-                        f"Duration: {duration_label}"
-                    )
-                    _send_watcher_batch_telegram(config, msg)
+                    cooldown_remaining = None
+                    if batch_state.get("last_telegram_sent_ts") is not None:
+                        elapsed_since_tg = time.monotonic() - batch_state["last_telegram_sent_ts"]
+                        if elapsed_since_tg < WATCHER_TELEGRAM_COOLDOWN_SECONDS:
+                            cooldown_remaining = int(WATCHER_TELEGRAM_COOLDOWN_SECONDS - elapsed_since_tg)
+                    if cooldown_remaining is not None and cooldown_remaining > 0:
+                        logging.info(
+                            "Watcher: batch telegram skipped (cooldown) remaining=%ss attempted=%s",
+                            cooldown_remaining,
+                            attempted_total,
+                        )
+                    else:
+                        batch_finished_at = datetime.now(timezone.utc).isoformat()
+                        summary_job_ids = (
+                            list(completed_job_ids) + list(failed_job_ids)
+                            if (completed_job_ids or failed_job_ids)
+                            else list(attempted_job_ids)
+                        )
+                        watcher_summary_status = SimpleNamespace(
+                            run_successes=summary_job_ids,
+                            run_failures=0,
+                        )
+                        result = notify_run_summary(
+                            config,
+                            run_type="watcher",
+                            status=watcher_summary_status,
+                            started_at=batch_started_at,
+                            finished_at=batch_finished_at,
+                            attempted_override=attempted_total,
+                        )
+                        if isinstance(result, dict) and bool(result.get("sent")):
+                            batch_state["last_telegram_sent_ts"] = time.monotonic()
+                        logging.info(
+                            "Watcher: batch telegram dispatched sent=%s attempted=%s",
+                            bool(result.get("sent")) if isinstance(result, dict) else False,
+                            int(result.get("attempted") or 0) if isinstance(result, dict) else 0,
+                        )
                 elif batch_playlists:
                     logging.info(
                         "Watcher: batch telegram skipped (no attempted downloads) playlists=%s",
@@ -5008,6 +5339,9 @@ async def _watcher_supervisor():
                     )
                 batch_state["batch_active"] = False
                 batch_state["last_detection_ts"] = None
+                batch_state["batch_opened_ts"] = None
+                batch_state["batch_opened_at"] = None
+                batch_state["polled_playlists"] = set()
                 _set_watcher_status("idle", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
                 logging.info("Watcher: batch state reset, resuming monitoring")
                 continue
@@ -5021,7 +5355,20 @@ async def _watcher_supervisor():
             _set_watcher_status("idle", pending_playlists_count=pending_count, quiet_window_remaining_sec=None, batch_active=batch_state["batch_active"])
 
         if downtime.get("enabled") and downtime_active:
-            await asyncio.sleep(60)
+            sleep_seconds = 60.0
+            if next_allowed_dt is not None:
+                until_resume = max(0.0, (next_allowed_dt - now).total_seconds())
+                if until_resume > 0:
+                    # Poll at most once per minute but wake exactly at boundary when close.
+                    sleep_seconds = min(60.0, max(1.0, until_resume))
+            _set_watcher_status(
+                "paused_downtime",
+                pending_playlists_count=pending_count,
+                quiet_window_remaining_sec=None,
+                batch_active=batch_state["batch_active"],
+                next_poll_ts=_format_iso(next_allowed_dt) if next_allowed_dt else None,
+            )
+            await asyncio.sleep(sleep_seconds)
             continue
 
         watch_state = _read_watch_state(app.state.paths.db_path)
@@ -5080,7 +5427,18 @@ async def _watcher_supervisor():
             continue
 
         candidates.sort(key=lambda item: item[0])
-        next_poll_at, pl, watch = candidates[0]
+        selected = candidates[0]
+        if pending_count and not batch_state["batch_active"]:
+            polled = set(batch_state.get("polled_playlists") or set())
+            unpolled = []
+            for item in candidates:
+                item_playlist_key = item[1].get("playlist_id") or item[1].get("id")
+                item_playlist_id = extract_playlist_id(item_playlist_key) or item_playlist_key
+                if item_playlist_id and item_playlist_id not in polled:
+                    unpolled.append(item)
+            if unpolled:
+                selected = sorted(unpolled, key=lambda item: item[0])[0]
+        next_poll_at, pl, watch = selected
         if last_candidate_state != "available":
             logging.info("Watcher: candidates available")
             last_candidate_state = "available"
@@ -5098,9 +5456,38 @@ async def _watcher_supervisor():
                 bool(getattr(app.state, "watcher_lock", None)),
             )
             startup_logged = True
+        # Ensure watcher restarts do not sit idle for hours due to persisted backoff.
+        # We only do this once per supervisor lifecycle, then adaptive intervals resume.
+        if not startup_fast_poll_done and next_poll_at > now + timedelta(seconds=30):
+            playlist_key = pl.get("playlist_id") or pl.get("id")
+            playlist_id = extract_playlist_id(playlist_key) or playlist_key
+            consecutive_no_change = watch.get("consecutive_no_change") or 0
+            current_interval = watch.get("current_interval_min")
+            if not isinstance(current_interval, int):
+                current_interval = min_interval_minutes
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=watch.get("last_checked_at"),
+                next_poll_at=_format_iso(now),
+                idle_count=watch.get("idle_count") or 0,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=watch.get("skip_reason"),
+                last_error=watch.get("last_error"),
+                last_error_at=watch.get("last_error_at"),
+            )
+            logging.info(
+                "Watcher startup fast poll forced playlist_id=%s previous_next_poll_at=%s",
+                playlist_id,
+                _format_iso(next_poll_at),
+            )
+            next_poll_at = now
+        startup_fast_poll_done = True
         min_interval_minutes = policy.get("min_interval_minutes") or 5
         interval_seconds = max(60, int(min_interval_minutes * 60))
-        max_sleep_seconds = max(interval_seconds * 3, 900)
+        max_sleep_seconds = _watcher_next_poll_skew_limit_seconds(policy, watch)
         if delta_seconds > max_sleep_seconds:
             clamped = now + timedelta(seconds=min(30, interval_seconds))
             logging.warning(
@@ -5159,6 +5546,8 @@ async def _watcher_supervisor():
             else {}
         )
         pending_before = len(batch_state["pending_playlists"])
+        polled_playlist_key = pl.get("playlist_id") or pl.get("id")
+        polled_playlist_id = extract_playlist_id(polled_playlist_key) or polled_playlist_key
         _set_watcher_status(
             "polling",
             last_poll_ts=_format_iso(now),
@@ -5168,6 +5557,19 @@ async def _watcher_supervisor():
         )
         await _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batch_state)
         pending_after = len(batch_state["pending_playlists"])
+        if pending_after > 0 and polled_playlist_id:
+            polled_set = batch_state.get("polled_playlists")
+            if not isinstance(polled_set, set):
+                polled_set = set()
+                batch_state["polled_playlists"] = polled_set
+            polled_set.add(polled_playlist_id)
+            if batch_state.get("batch_opened_ts") is None:
+                batch_state["batch_opened_ts"] = time.monotonic()
+                batch_state["batch_opened_at"] = datetime.now(timezone.utc).isoformat()
+        if pending_after == 0 and not batch_state["batch_active"]:
+            batch_state["batch_opened_ts"] = None
+            batch_state["batch_opened_at"] = None
+            batch_state["polled_playlists"] = set()
         if pending_after > pending_before:
             logging.info("Watcher poll complete: updates detected")
         else:
@@ -5200,7 +5602,10 @@ def _watcher_supervisor_task_done(task: asyncio.Task):
         return
     logging.exception("Watcher supervisor crashed; scheduling restart", exc_info=(type(exc), exc, exc.__traceback__))
     app.state.watcher_task = None
-    if getattr(app.state, "watcher_lock", None) is None:
+    # Prevent stale UI/runtime state after a crash.
+    _set_watcher_status("recovering", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
+    if not _ensure_watcher_lock_runtime():
+        _set_watcher_status("disabled", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
         return
     loop = app.state.loop
     if not loop or loop.is_closed():
@@ -5208,9 +5613,38 @@ def _watcher_supervisor_task_done(task: asyncio.Task):
     loop.create_task(_restart_watcher_supervisor())
 
 
+def _watcher_next_poll_skew_limit_seconds(policy, watch):
+    min_interval = 5
+    max_interval = 360
+    if isinstance(policy, dict):
+        try:
+            min_interval = int(policy.get("min_interval_minutes") or min_interval)
+        except Exception:
+            min_interval = 5
+        try:
+            max_interval = int(policy.get("max_interval_minutes") or max_interval)
+        except Exception:
+            max_interval = 360
+    min_interval = max(1, min_interval)
+    max_interval = max(min_interval, max_interval)
+    current_interval = None
+    if isinstance(watch, dict):
+        try:
+            current_interval = int(watch.get("current_interval_min"))
+        except Exception:
+            current_interval = None
+    if isinstance(current_interval, int):
+        effective_interval = max(min_interval, min(max_interval, current_interval))
+    else:
+        effective_interval = min_interval
+    # Skew should exceed plausible adaptive cadence by a wide margin.
+    return max(900, effective_interval * 60 * 3, max_interval * 60 * 2)
+
+
 async def _restart_watcher_supervisor(delay_seconds: int = 5):
     await asyncio.sleep(max(0, int(delay_seconds)))
-    if getattr(app.state, "watcher_lock", None) is None:
+    if not _ensure_watcher_lock_runtime():
+        _set_watcher_status("disabled", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
         return
     current = getattr(app.state, "watcher_task", None)
     if current and not current.done():
@@ -5229,28 +5663,6 @@ def _start_watcher_supervisor_task():
     task.add_done_callback(_watcher_supervisor_task_done)
     app.state.watcher_task = task
     return task
-
-
-def _send_watcher_batch_telegram(config, message: str) -> dict[str, object]:
-    telegram_message_id = None
-    sent = False
-    try:
-        result = telegram_notify_result(config, message)
-        if isinstance(result, dict):
-            sent = bool(result.get("ok"))
-            telegram_message_id = result.get("message_id")
-        else:
-            sent = bool(telegram_notify(config, message))
-        logging.info(
-            "Watcher: batch telegram dispatched sent=%s message_id=%s",
-            sent,
-            telegram_message_id,
-        )
-    except Exception:
-        logging.exception("Watcher: batch telegram dispatch failed")
-        sent = False
-        telegram_message_id = None
-    return {"sent": sent, "message_id": telegram_message_id}
 
 
 async def _disable_watcher_runtime(reason: str | None = None):
@@ -5357,6 +5769,43 @@ def _set_watcher_status(state=None, **fields):
         status[key] = value
 
 
+def _acoustid_runtime_status(config: dict | None) -> dict[str, object]:
+    music_meta = (config or {}).get("music_metadata") if isinstance(config, dict) else {}
+    if not isinstance(music_meta, dict):
+        music_meta = {}
+    metadata_enabled = bool(music_meta.get("enabled", False))
+    use_acoustid = bool(music_meta.get("use_acoustid", False))
+    key_configured = bool(str(music_meta.get("acoustid_api_key") or "").strip())
+    fpcalc_available = bool(shutil.which("fpcalc"))
+    pyacoustid_available = False
+    try:
+        importlib.import_module("acoustid")
+        pyacoustid_available = True
+    except Exception:
+        pyacoustid_available = False
+
+    configured = bool(metadata_enabled and use_acoustid)
+    missing_requirements: list[str] = []
+    if configured and not key_configured:
+        missing_requirements.append("api_key")
+    if configured and not fpcalc_available:
+        missing_requirements.append("fpcalc")
+    if configured and not pyacoustid_available:
+        missing_requirements.append("pyacoustid")
+
+    ready = bool(configured and key_configured and fpcalc_available and pyacoustid_available)
+    return {
+        "configured": configured,
+        "metadata_enabled": metadata_enabled,
+        "use_acoustid": use_acoustid,
+        "key_configured": key_configured,
+        "fpcalc_available": fpcalc_available,
+        "pyacoustid_available": pyacoustid_available,
+        "missing_requirements": missing_requirements,
+        "ready": ready,
+    }
+
+
 @app.get("/api/status")
 async def api_status():
     status = get_status(app.state.status)
@@ -5383,11 +5832,43 @@ async def api_status():
     paused = False
     if watcher_downtime.get("enabled"):
         paused, _ = in_downtime(now, watcher_downtime.get("start"), watcher_downtime.get("end"))
+    loaded_cfg = get_loaded_config()
+    watcher_config_enabled = _config_watcher_enabled(loaded_cfg)
+    watcher_lock_enabled = bool(getattr(app.state, "watcher_lock", None))
+    single_worker_enforced = bool(getattr(app.state, "single_worker_enforced", False))
+    watcher_disabled_reasons: list[str] = []
+    if not watcher_config_enabled:
+        watcher_disabled_reasons.append("config")
+    if watcher_config_enabled and not single_worker_enforced:
+        watcher_disabled_reasons.append("multi-worker")
+    if watcher_config_enabled and single_worker_enforced and not watcher_lock_enabled:
+        watcher_disabled_reasons.append("lock")
+    if paused:
+        watcher_disabled_reasons.append("downtime")
+
+    schedule_cfg = app.state.schedule_config or {}
+    scheduler_config_enabled = bool(schedule_cfg.get("enabled", False))
+    scheduler_instance = getattr(app.state, "scheduler", None)
+    scheduler_running = bool(scheduler_instance and getattr(scheduler_instance, "running", False))
+    scheduler_disabled_reasons: list[str] = []
+    if not scheduler_config_enabled:
+        scheduler_disabled_reasons.append("config")
+    if scheduler_config_enabled and paused:
+        scheduler_disabled_reasons.append("downtime")
+    scheduler_effective_enabled = bool(scheduler_config_enabled and scheduler_running and not paused)
+    watcher_effective_enabled = bool(
+        watcher_config_enabled
+        and single_worker_enforced
+        and watcher_lock_enabled
+        and not paused
+    )
     watcher_status = dict(getattr(app.state, "watcher_status", {}) or {})
     if not bool(getattr(app.state, "watcher_lock", None)):
         watcher_status["state"] = "disabled"
+    acoustid_status = _acoustid_runtime_status(loaded_cfg)
     playlist_import = _get_playlist_import_snapshot()
     queue_status = _get_download_queue_snapshot()
+    telegram_delivery = _telegram_delivery_stats_snapshot()
     return safe_json({
         "schema_version": STATUS_SCHEMA_VERSION,
         "server_time": datetime.now(timezone.utc).isoformat(),
@@ -5398,16 +5879,33 @@ async def api_status():
         "finished_at": app.state.finished_at,
         "error": app.state.last_error,
         "watcher": {
-            "enabled": bool(getattr(app.state, "watcher_lock", None)),
+            "enabled": watcher_lock_enabled,
             "paused": bool(paused),
         },
         "watcher_status": watcher_status,
         "scheduler": {
-            "enabled": bool((app.state.schedule_config or {}).get("enabled", False)),
+            "enabled": scheduler_config_enabled,
+        },
+        "automation_effective": {
+            "watcher": {
+                "config_enabled": watcher_config_enabled,
+                "runtime_enabled": watcher_lock_enabled,
+                "effective_enabled": watcher_effective_enabled,
+                "disabled_reasons": watcher_disabled_reasons,
+            },
+            "scheduler": {
+                "config_enabled": scheduler_config_enabled,
+                "runtime_enabled": scheduler_running,
+                "effective_enabled": scheduler_effective_enabled,
+                "disabled_reasons": scheduler_disabled_reasons,
+            },
         },
         "queue": queue_status,
+        "acoustid_ready": bool(acoustid_status.get("ready")),
+        "acoustid": acoustid_status,
         "playlist_import": playlist_import,
         "watcher_errors": watcher_errors,
+        "telegram_delivery": telegram_delivery,
         "status": status,
     })
 
@@ -5453,6 +5951,8 @@ async def api_update_schedule(payload: ScheduleRequest):
     app.state.schedule_config = current
     _apply_schedule_config(current)
     _apply_spotify_schedule(config or {})
+    app.state.loaded_config = safe_json(config) if isinstance(config, dict) else {}
+    app.state.config = app.state.loaded_config
     return _schedule_response()
 
 
@@ -5470,6 +5970,7 @@ async def api_metrics():
         "disk_free_bytes": disk["free_bytes"],
         "disk_used_bytes": disk["used_bytes"],
         "disk_free_percent": disk["free_percent"],
+        "telegram_delivery": _telegram_delivery_stats_snapshot(),
     }
 
 
@@ -8187,7 +8688,7 @@ async def api_put_config(payload: dict = Body(...)):
         app.state.watch_policy = policy
         _apply_watch_policy(policy)
         app.state.watch_config_cache = payload
-    enable_watcher = bool(payload.get("enable_watcher")) if isinstance(payload, dict) else False
+    enable_watcher = _config_watcher_enabled(payload)
     if enable_watcher:
         _enable_watcher_runtime()
     else:

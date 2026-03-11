@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 import urllib.parse
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Thread
@@ -42,6 +43,61 @@ _SPOTIFY_PLAYLIST_RE = re.compile(
     r"^(?:https?://open\.spotify\.com/playlist/|spotify:playlist:)([A-Za-z0-9]+)"
 )
 _COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
+_DEFAULT_CONFIG_TEMPLATE = None
+
+
+def _deep_copy_json_compatible(value):
+    return json.loads(json.dumps(value))
+
+
+def _sanitize_default_config_template(defaults: dict) -> dict:
+    sanitized = _deep_copy_json_compatible(defaults if isinstance(defaults, dict) else {})
+    # Never inject sample/demo entities into user configs during upgrade backfill.
+    # These collections are user-managed and should only contain user-provided entries.
+    if isinstance(sanitized.get("accounts"), dict):
+        sanitized["accounts"] = {}
+    if isinstance(sanitized.get("playlists"), list):
+        sanitized["playlists"] = []
+    if isinstance(sanitized.get("spotify_playlists"), list):
+        sanitized["spotify_playlists"] = []
+    return sanitized
+
+
+def _load_default_config_template():
+    global _DEFAULT_CONFIG_TEMPLATE
+    if isinstance(_DEFAULT_CONFIG_TEMPLATE, dict):
+        return _deep_copy_json_compatible(_DEFAULT_CONFIG_TEMPLATE)
+
+    defaults = {}
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        sample_path = repo_root / "config" / "config_sample.json"
+        with sample_path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            defaults = _sanitize_default_config_template(loaded)
+    except Exception:
+        logging.warning("Failed to load config sample defaults", exc_info=True)
+    _DEFAULT_CONFIG_TEMPLATE = (
+        defaults if isinstance(defaults, dict) else _sanitize_default_config_template({})
+    )
+    return _deep_copy_json_compatible(_DEFAULT_CONFIG_TEMPLATE)
+
+
+def _merge_missing_defaults(current, defaults):
+    if isinstance(current, dict) and isinstance(defaults, dict):
+        merged = {}
+        for key, default_value in defaults.items():
+            if key in current:
+                merged[key] = _merge_missing_defaults(current[key], default_value)
+            else:
+                merged[key] = _deep_copy_json_compatible(default_value)
+        for key, current_value in current.items():
+            if key not in merged:
+                merged[key] = current_value
+        return merged
+    # Lists and scalars: user value wins whenever present.
+    return current
 
 
 def _install_google_auth_filter():
@@ -50,7 +106,7 @@ def _install_google_auth_filter():
         match = _GOOGLE_AUTH_RETRY.search(msg)
         if match:
             attempt, total = match.groups()
-            record.msg = f"Signing into Google OAuth. Attempt {attempt}/{total}."
+            record.msg = f"Refreshing credentials - Attempt {attempt}/{total}"
             record.args = ()
         return True
 
@@ -259,7 +315,28 @@ def apply_config_defaults(config):
     if not isinstance(config, dict):
         return config
 
+    original = dict(config)
     normalized = dict(config)
+
+    template_defaults = _load_default_config_template()
+    if isinstance(template_defaults, dict) and template_defaults:
+        normalized = _merge_missing_defaults(normalized, template_defaults)
+
+    # Preserve prior behavior for upgrades: if watcher policy didn't exist before,
+    # keep downtime disabled by default instead of inheriting sample downtime=true.
+    if "watch_policy" not in original:
+        normalized["watch_policy"] = {
+            "min_interval_minutes": 5,
+            "max_interval_minutes": 360,
+            "idle_backoff_factor": 2,
+            "active_reset_minutes": 5,
+            "downtime": {
+                "enabled": False,
+                "start": "23:00",
+                "end": "09:00",
+                "timezone": "local",
+            },
+        }
 
     lookup_enabled = normalized.get("community_cache_lookup_enabled")
     legacy_lookup = normalized.get("community_cache_enabled")
@@ -275,6 +352,10 @@ def apply_config_defaults(config):
     normalized.setdefault("community_cache_publish_min_score", 0.78)
     normalized.setdefault("community_cache_publish_outbox_dir", "")
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
+    normalized.setdefault("music_skip_metadata_probe", True)
+    normalized.setdefault("music_candidate_cooldown_enabled", True)
+    normalized.setdefault("music_candidate_cooldown_seconds", 21600)
+    normalized.setdefault("music_candidate_cooldown_min_failures", 1)
 
     return normalized
 
@@ -372,6 +453,18 @@ def validate_config(config):
     cookie_file = config.get("yt_dlp_cookies")
     if cookie_file is not None and not isinstance(cookie_file, str):
         errors.append("yt_dlp_cookies must be a string")
+    music_skip_probe = config.get("music_skip_metadata_probe")
+    if music_skip_probe is not None and not isinstance(music_skip_probe, bool):
+        errors.append("music_skip_metadata_probe must be true/false")
+    music_candidate_cooldown_enabled = config.get("music_candidate_cooldown_enabled")
+    if music_candidate_cooldown_enabled is not None and not isinstance(music_candidate_cooldown_enabled, bool):
+        errors.append("music_candidate_cooldown_enabled must be true/false")
+    music_candidate_cooldown_seconds = config.get("music_candidate_cooldown_seconds")
+    if music_candidate_cooldown_seconds is not None and not isinstance(music_candidate_cooldown_seconds, int):
+        errors.append("music_candidate_cooldown_seconds must be an integer")
+    music_candidate_cooldown_min_failures = config.get("music_candidate_cooldown_min_failures")
+    if music_candidate_cooldown_min_failures is not None and not isinstance(music_candidate_cooldown_min_failures, int):
+        errors.append("music_candidate_cooldown_min_failures must be an integer")
 
     youtube_cfg = config.get("youtube")
     if youtube_cfg is not None:
@@ -772,9 +865,9 @@ def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=Non
                 try:
                     creds.refresh(Request())
                     if name in refresh_log_state:
-                        logging.debug("OAuth refreshed for account=%s", name)
+                        logging.debug("[Success] Credentials Refreshed account=%s", name)
                     else:
-                        logging.info("OAuth refreshed for account=%s", name)
+                        logging.info("[Success] Credentials Refreshed account=%s", name)
                         refresh_log_state.add(name)
                     cached["client"] = youtube_service(creds)
                 except RefreshError as exc:
@@ -791,9 +884,9 @@ def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=Non
                 try:
                     creds.refresh(Request())
                     if name in refresh_log_state:
-                        logging.debug("OAuth refreshed for account=%s", name)
+                        logging.debug("[Success] Credentials Refreshed account=%s", name)
                     else:
-                        logging.info("OAuth refreshed for account=%s", name)
+                        logging.info("[Success] Credentials Refreshed account=%s", name)
                         refresh_log_state.add(name)
                 except RefreshError as exc:
                     logging.error("OAuth refresh failed for account %s: %s", name, exc)

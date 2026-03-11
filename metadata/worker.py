@@ -54,16 +54,43 @@ def _process_item(item):
         album=source.get("album"),
     )
 
+    acoustid_hit = None
     if config.get("use_acoustid"):
         api_key = (config.get("acoustid_api_key") or "").strip()
         if api_key:
+            logging.info(
+                "Music metadata: acoustid lookup started file=%s",
+                os.path.basename(file_path),
+            )
             acoustid_hit = acoustid_provider.match_recording(file_path, api_key)
             if acoustid_hit:
+                before_count = len(candidates) if isinstance(candidates, list) else 0
                 candidates = matcher.merge_candidates(candidates, [acoustid_hit])
+                after_count = len(candidates) if isinstance(candidates, list) else before_count
+                logging.info(
+                    "Music metadata: acoustid lookup matched recording_id=%s score=%.3f merged_candidates=%s->%s",
+                    acoustid_hit.get("recording_id"),
+                    float(acoustid_hit.get("acoustid_score") or 0.0),
+                    before_count,
+                    after_count,
+                )
+            else:
+                logging.info(
+                    "Music metadata: acoustid lookup returned no match file=%s",
+                    os.path.basename(file_path),
+                )
         else:
             logging.warning("Music metadata: acoustid enabled but API key is missing")
 
     best, score, score_breakdown = matcher.select_best_match(source, candidates, duration)
+    if isinstance(acoustid_hit, dict):
+        acoustid_recording_id = str(acoustid_hit.get("recording_id") or "").strip()
+        best_recording_id = str((best or {}).get("recording_id") or "").strip()
+        if acoustid_recording_id and best_recording_id and acoustid_recording_id == best_recording_id:
+            logging.info(
+                "Music metadata: acoustid-assisted candidate selected recording_id=%s",
+                best_recording_id,
+            )
     threshold = config.get("confidence_threshold", 70)
     best = best if isinstance(best, dict) else {}
     match_ok = bool(best) and score >= threshold

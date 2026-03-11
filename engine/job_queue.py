@@ -268,6 +268,8 @@ _COMMUNITY_PUBLISH_SCHEMA_VERSION = 1
 _COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
 _COMMUNITY_PUBLISH_RECENT_MAX_ENTRIES = 4096
 _COMMUNITY_PUBLISH_RECENT_WINDOW_SECONDS = 24 * 3600
+_MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS = 6 * 3600
+_MUSIC_CANDIDATE_FAILURE_MIN_COUNT = 1
 
 
 @dataclass(frozen=True)
@@ -513,6 +515,35 @@ def ensure_download_history_table(conn):
     )
     conn.commit()
 
+
+def ensure_music_candidate_failures_table(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS music_candidate_failures (
+            recording_mbid TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            unavailable_class TEXT NOT NULL,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            first_failed_at TEXT NOT NULL,
+            last_failed_at TEXT NOT NULL,
+            cooldown_until TEXT NOT NULL,
+            last_error TEXT,
+            PRIMARY KEY (recording_mbid, candidate_id, unavailable_class)
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_music_candidate_failures_active "
+        "ON music_candidate_failures (recording_mbid, cooldown_until)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_music_candidate_failures_candidate "
+        "ON music_candidate_failures (candidate_id, recording_mbid)"
+    )
+    conn.commit()
+
+
 def is_music_media_type(value):
     if value is None:
         return False
@@ -635,6 +666,11 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def _get_job_status_with_cursor(self, cur, job_id):
+        cur.execute("SELECT status FROM download_jobs WHERE id=?", (job_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
     def merge_output_template_fields(self, job_id, updates):
         if not isinstance(updates, dict) or not updates:
             return
@@ -660,6 +696,115 @@ class DownloadJobStore:
             cur.execute(
                 "UPDATE download_jobs SET output_template=?, updated_at=? WHERE id=?",
                 (safe_json_dumps(existing), utc_now(), job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_blocked_music_candidate_ids(
+        self,
+        *,
+        recording_mbid,
+        now_iso=None,
+        min_failure_count=_MUSIC_CANDIDATE_FAILURE_MIN_COUNT,
+        limit=64,
+    ):
+        rec = str(recording_mbid or "").strip().lower()
+        if not rec:
+            return set()
+        now_iso = str(now_iso or utc_now())
+        try:
+            min_count = max(1, int(min_failure_count))
+        except Exception:
+            min_count = _MUSIC_CANDIDATE_FAILURE_MIN_COUNT
+        try:
+            max_rows = max(1, int(limit))
+        except Exception:
+            max_rows = 64
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT DISTINCT candidate_id
+                FROM music_candidate_failures
+                WHERE recording_mbid=?
+                  AND failure_count>=?
+                  AND cooldown_until>?
+                ORDER BY cooldown_until DESC
+                LIMIT ?
+                """,
+                (rec, min_count, now_iso, max_rows),
+            )
+            return {
+                str(row[0] or "").strip()
+                for row in cur.fetchall()
+                if str(row[0] or "").strip()
+            }
+        finally:
+            conn.close()
+
+    def note_music_candidate_unavailable(
+        self,
+        *,
+        recording_mbid,
+        candidate_id,
+        unavailable_class,
+        cooldown_seconds=_MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS,
+        error_message=None,
+    ):
+        rec = str(recording_mbid or "").strip().lower()
+        cand = str(candidate_id or "").strip()
+        unavailable = str(unavailable_class or "").strip().lower()
+        if not rec or not cand or not unavailable:
+            return
+        try:
+            cooldown = max(60, int(cooldown_seconds))
+        except Exception:
+            cooldown = _MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        now_iso = now_dt.isoformat()
+        cooldown_until = (now_dt + timedelta(seconds=cooldown)).isoformat()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                """
+                INSERT INTO music_candidate_failures (
+                    recording_mbid,
+                    candidate_id,
+                    unavailable_class,
+                    failure_count,
+                    first_failed_at,
+                    last_failed_at,
+                    cooldown_until,
+                    last_error
+                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+                ON CONFLICT(recording_mbid, candidate_id, unavailable_class)
+                DO UPDATE SET
+                    failure_count = music_candidate_failures.failure_count + 1,
+                    last_failed_at = excluded.last_failed_at,
+                    cooldown_until = excluded.cooldown_until,
+                    last_error = excluded.last_error
+                """,
+                (rec, cand, unavailable, now_iso, now_iso, cooldown_until, str(error_message or "")[:1024]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def clear_music_candidate_failures(self, *, recording_mbid, candidate_id):
+        rec = str(recording_mbid or "").strip().lower()
+        cand = str(candidate_id or "").strip()
+        if not rec or not cand:
+            return
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM music_candidate_failures WHERE recording_mbid=? AND candidate_id=?",
+                (rec, cand),
             )
             conn.commit()
         finally:
@@ -1299,20 +1444,36 @@ class DownloadJobStore:
                     """
                     UPDATE download_jobs
                     SET status=?, completed=?, updated_at=?, file_path=?
-                    WHERE id=? AND status!=?
+                    WHERE id=? AND status IN (?, ?)
                     """,
-                    (JOB_STATUS_COMPLETED, now, now, file_path, job_id, JOB_STATUS_FAILED),
+                    (
+                        JOB_STATUS_COMPLETED,
+                        now,
+                        now,
+                        file_path,
+                        job_id,
+                        JOB_STATUS_DOWNLOADING,
+                        JOB_STATUS_POSTPROCESSING,
+                    ),
                 )
             else:
                 cur.execute(
                     """
                     UPDATE download_jobs
                     SET status=?, completed=?, updated_at=?
-                    WHERE id=? AND status!=?
+                    WHERE id=? AND status IN (?, ?)
                     """,
-                    (JOB_STATUS_COMPLETED, now, now, job_id, JOB_STATUS_FAILED),
+                    (
+                        JOB_STATUS_COMPLETED,
+                        now,
+                        now,
+                        job_id,
+                        JOB_STATUS_DOWNLOADING,
+                        JOB_STATUS_POSTPROCESSING,
+                    ),
                 )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1367,11 +1528,22 @@ class DownloadJobStore:
                 """
                 UPDATE download_jobs
                 SET status=?, canceled=?, updated_at=?, last_error=?
-                WHERE id=?
+                WHERE id=? AND status IN (?, ?, ?, ?)
                 """,
-                (JOB_STATUS_CANCELLED, now, now, reason, job_id),
+                (
+                    JOB_STATUS_CANCELLED,
+                    now,
+                    now,
+                    reason,
+                    job_id,
+                    JOB_STATUS_QUEUED,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                ),
             )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1421,10 +1593,24 @@ class DownloadJobStore:
                         progress_speed_bps=NULL,
                         progress_eta_seconds=NULL,
                         progress_updated_at=NULL
-                    WHERE id=?
+                    WHERE id=? AND status IN (?, ?, ?)
                     """,
-                    (JOB_STATUS_QUEUED, queued_at, now, attempts, error_message, job.id),
+                    (
+                        JOB_STATUS_QUEUED,
+                        queued_at,
+                        now,
+                        attempts,
+                        error_message,
+                        job.id,
+                        JOB_STATUS_CLAIMED,
+                        JOB_STATUS_DOWNLOADING,
+                        JOB_STATUS_POSTPROCESSING,
+                    ),
                 )
+                if cur.rowcount != 1:
+                    conn.commit()
+                    current = self._get_job_status_with_cursor(cur, job.id)
+                    return current or JOB_STATUS_FAILED
                 conn.commit()
                 return JOB_STATUS_QUEUED
 
@@ -1432,10 +1618,24 @@ class DownloadJobStore:
                 """
                 UPDATE download_jobs
                 SET status=?, failed=?, updated_at=?, attempts=?, last_error=?
-                WHERE id=?
+                WHERE id=? AND status IN (?, ?, ?)
                 """,
-                (JOB_STATUS_FAILED, now, now, attempts, error_message, job.id),
+                (
+                    JOB_STATUS_FAILED,
+                    now,
+                    now,
+                    attempts,
+                    error_message,
+                    job.id,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                ),
             )
+            if cur.rowcount != 1:
+                conn.commit()
+                current = self._get_job_status_with_cursor(cur, job.id)
+                return current or JOB_STATUS_FAILED
             conn.commit()
             return JOB_STATUS_FAILED
         finally:
@@ -1456,11 +1656,12 @@ class DownloadJobStore:
                     progress_speed_bps=NULL,
                     progress_eta_seconds=NULL,
                     progress_updated_at=NULL
-                WHERE id=?
+                WHERE id=? AND status=?
                 """,
-                (JOB_STATUS_DOWNLOADING, now, now, job_id),
+                (JOB_STATUS_DOWNLOADING, now, now, job_id, JOB_STATUS_CLAIMED),
             )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1517,11 +1718,12 @@ class DownloadJobStore:
                 """
                 UPDATE download_jobs
                 SET status=?, postprocessing=?, updated_at=?
-                WHERE id=? AND status!=?
+                WHERE id=? AND status=?
                 """,
-                (JOB_STATUS_POSTPROCESSING, now, now, job_id, JOB_STATUS_FAILED),
+                (JOB_STATUS_POSTPROCESSING, now, now, job_id, JOB_STATUS_DOWNLOADING),
             )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1558,6 +1760,7 @@ class DownloadWorkerEngine:
         try:
             ensure_download_jobs_table(conn)
             ensure_downloads_table(conn)
+            ensure_music_candidate_failures_table(conn)
         finally:
             conn.close()
         self._locks = {}
@@ -1596,6 +1799,98 @@ class DownloadWorkerEngine:
         url = getattr(resolved, "url", None)
         source = getattr(resolved, "source", None)
         return url, source
+
+    def _music_candidate_cooldown_enabled(self) -> bool:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        value = cfg.get("music_candidate_cooldown_enabled")
+        if value is None:
+            return True
+        return bool(value)
+
+    def _music_candidate_cooldown_seconds(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        raw = cfg.get("music_candidate_cooldown_seconds")
+        try:
+            value = int(raw) if raw is not None else _MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        except Exception:
+            value = _MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        return max(60, min(value, 7 * 24 * 3600))
+
+    def _music_candidate_cooldown_min_failures(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        raw = cfg.get("music_candidate_cooldown_min_failures")
+        try:
+            value = int(raw) if raw is not None else _MUSIC_CANDIDATE_FAILURE_MIN_COUNT
+        except Exception:
+            value = _MUSIC_CANDIDATE_FAILURE_MIN_COUNT
+        return max(1, min(value, 10))
+
+    def _blocked_music_candidate_ids(self, recording_mbid: str | None) -> set[str]:
+        if not self._music_candidate_cooldown_enabled():
+            return set()
+        rec = str(recording_mbid or "").strip().lower()
+        if not rec:
+            return set()
+        try:
+            return self.store.get_blocked_music_candidate_ids(
+                recording_mbid=rec,
+                min_failure_count=self._music_candidate_cooldown_min_failures(),
+            )
+        except Exception:
+            logger.exception("[MUSIC] failed querying blocked candidate ids recording_mbid=%s", rec)
+            return set()
+
+    def _note_music_candidate_unavailable(self, job, *, unavailable_class: str | None, error_message: str | None = None) -> None:
+        if not self._music_candidate_cooldown_enabled():
+            return
+        if str(getattr(job, "media_intent", "") or "").strip().lower() != "music_track":
+            return
+        if not unavailable_class:
+            return
+        recording_mbid, _ = _extract_music_binding_ids(job)
+        candidate_id = getattr(job, "external_id", None) or extract_video_id(getattr(job, "url", None))
+        if not recording_mbid or not candidate_id:
+            return
+        try:
+            self.store.note_music_candidate_unavailable(
+                recording_mbid=recording_mbid,
+                candidate_id=candidate_id,
+                unavailable_class=unavailable_class,
+                cooldown_seconds=self._music_candidate_cooldown_seconds(),
+                error_message=error_message,
+            )
+            _log_event(
+                logging.WARNING,
+                "music_candidate_cooldown_recorded",
+                job_id=getattr(job, "id", None),
+                recording_mbid=recording_mbid,
+                candidate_id=candidate_id,
+                unavailable_class=unavailable_class,
+            )
+        except Exception:
+            logger.exception(
+                "[MUSIC] failed to record candidate cooldown recording_mbid=%s candidate_id=%s",
+                recording_mbid,
+                candidate_id,
+            )
+
+    def _clear_music_candidate_cooldown(self, job) -> None:
+        if not self._music_candidate_cooldown_enabled():
+            return
+        if str(getattr(job, "media_intent", "") or "").strip().lower() != "music_track":
+            return
+        recording_mbid, _ = _extract_music_binding_ids(job)
+        candidate_id = getattr(job, "external_id", None) or extract_video_id(getattr(job, "url", None))
+        if not recording_mbid or not candidate_id:
+            return
+        try:
+            self.store.clear_music_candidate_failures(recording_mbid=recording_mbid, candidate_id=candidate_id)
+        except Exception:
+            logger.exception(
+                "[MUSIC] failed clearing candidate cooldown recording_mbid=%s candidate_id=%s",
+                recording_mbid,
+                candidate_id,
+            )
 
     def _community_publish_min_score(self):
         raw = self.config.get("community_cache_publish_min_score", _MUSIC_TRACK_THRESHOLD)
@@ -2173,6 +2468,15 @@ class DownloadWorkerEngine:
 
         search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
         logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
+        blocked_candidate_ids = self._blocked_music_candidate_ids(recording_mbid)
+        if blocked_candidate_ids:
+            _log_event(
+                logging.INFO,
+                "music_candidate_cooldown_active",
+                job_id=job.id,
+                recording_mbid=recording_mbid,
+                blocked_candidates=len(blocked_candidate_ids),
+            )
         resolved = self._extract_runtime_pre_resolved(
             payload,
             recording_mbid=recording_mbid,
@@ -2194,6 +2498,22 @@ class DownloadWorkerEngine:
                 used_pre_resolved=used_pre_resolved,
                 used_cached_resolved=used_cached_resolved,
             )
+            candidate_from_resolved = None
+            if isinstance(resolved, dict):
+                candidate_from_resolved = str(resolved.get("candidate_id") or "").strip()
+                if not candidate_from_resolved:
+                    candidate_from_resolved = str(extract_video_id(resolved.get("url")) or "").strip()
+            if candidate_from_resolved and candidate_from_resolved in blocked_candidate_ids:
+                _log_event(
+                    logging.WARNING,
+                    "music_track_preresolved_candidate_blocked",
+                    job_id=job.id,
+                    recording_mbid=recording_mbid,
+                    candidate_id=candidate_from_resolved,
+                )
+                resolved = None
+                used_pre_resolved = False
+                used_cached_resolved = False
         retry_start_rung = 0
         track_total_value = None
         for candidate_total in (
@@ -2245,6 +2565,7 @@ class DownloadWorkerEngine:
                     recording_mbid=recording_mbid,
                     is_ep_release=is_ep_release,
                     prefer_music_video=str(getattr(job, "media_type", "") or "").strip().lower() == "video",
+                    excluded_candidate_ids=blocked_candidate_ids,
                 )
             except Exception as exc:
                 self._metric_record_resolve_latency((time.perf_counter() - search_started) * 1000.0)
@@ -3322,7 +3643,17 @@ class DownloadWorkerEngine:
                 )
                 self._write_album_run_summary_artifact(job)
                 return
-            self.store.mark_downloading(job.id)
+            if not self.store.mark_downloading(job.id):
+                current_status = self.store.get_job_status(job.id)
+                _log_event(
+                    logging.INFO,
+                    "job_start_skipped_non_claimed",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    status=current_status,
+                )
+                return
             _log_event(
                 logging.INFO,
                 "job_started",
@@ -3379,14 +3710,35 @@ class DownloadWorkerEngine:
                     media_intent=job.media_intent,
                 )
                 return
-            self.store.mark_postprocessing(job.id)
+            if not self.store.mark_postprocessing(job.id):
+                current_status = self.store.get_job_status(job.id)
+                _log_event(
+                    logging.INFO,
+                    "job_postprocessing_skipped_invalid_state",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    status=current_status,
+                )
+                return
             record_download_history(
                 self.db_path,
                 job,
                 final_path,
                 meta=meta,
             )
-            self.store.mark_completed(job.id, file_path=final_path)
+            if not self.store.mark_completed(job.id, file_path=final_path):
+                current_status = self.store.get_job_status(job.id)
+                _log_event(
+                    logging.INFO,
+                    "job_complete_skipped_invalid_state",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    status=current_status,
+                )
+                return
+            self._clear_music_candidate_cooldown(job)
             if str(getattr(job, "media_intent", "") or "").strip().lower() == "music_track":
                 try:
                     self._emit_community_publish_proposal(job, final_path=final_path, meta=meta)
@@ -3456,6 +3808,11 @@ class DownloadWorkerEngine:
             retryable = is_retryable_error(exc)
             error_text_lower = error_message.lower()
             unavailable_class = _classify_ytdlp_unavailability(error_message)
+            self._note_music_candidate_unavailable(
+                job,
+                unavailable_class=unavailable_class,
+                error_message=error_message,
+            )
             if "yt_dlp_source_unavailable:" in error_text_lower or unavailable_class:
                 failure_domain = "source_unavailable"
             elif "metadata_probe" in error_text_lower or "yt_dlp_metadata_probe_failed" in error_text_lower:
@@ -5521,6 +5878,9 @@ def download_with_ytdlp(
         opts["cookiefile"] = resolved_cookiefile
 
     normalized_intent = str(media_intent or "").strip().lower()
+    is_music_track_download = bool(
+        audio_mode and is_music_media_type(media_type) and is_music_track_intent(normalized_intent)
+    )
     if audio_mode and is_music_media_type(media_type) and is_music_track_intent(normalized_intent):
         if "format" not in opts:
             _log_event(
@@ -5626,97 +5986,110 @@ def download_with_ytdlp(
 
     from subprocess import CalledProcessError
     info = None
-    # Always get metadata via API (for output file info, etc.)
-    try:
-        probe_opts = copy.deepcopy(opts)
-        probe_opts.pop("format", None)
-        probe_opts.pop("postprocessors", None)
-        probe_opts.pop("merge_output_format", None)
-        probe_opts.pop("recodevideo", None)
-        probe_opts.pop("final_format", None)
-        probe_opts.pop("writethumbnail", None)
-        probe_opts.pop("embedthumbnail", None)
-        probe_opts["skip_download"] = True
-        logger.info(
-            {
-                "message": "metadata_probe_invocation",
-                "job_id": job_id,
-                "url": url,
-                "format_present": "format" in probe_opts,
-                "postprocessors_present": "postprocessors" in probe_opts,
-            }
-        )
-        with YoutubeDL(probe_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as exc:
-        probe_error = str(exc)
-        lower_probe_error = probe_error.lower()
-        format_unavailable_probe = "requested format is not available" in lower_probe_error
-        unavailable_class = _classify_ytdlp_unavailability(probe_error)
+    skip_probe_for_music = bool((config or {}).get("music_skip_metadata_probe", True))
+    should_skip_probe = bool(is_music_track_download and skip_probe_for_music)
+    if should_skip_probe:
         _log_event(
-            logging.WARNING if format_unavailable_probe else logging.ERROR,
-            "ytdlp_metadata_probe_failed",
+            logging.INFO,
+            "metadata_probe_skipped_for_music",
             job_id=job_id,
             url=url,
-            error=probe_error,
-            failure_domain=(
-                "metadata_probe_unavailable"
-                if unavailable_class
-                else ("metadata_probe_format" if format_unavailable_probe else "metadata_probe")
-            ),
-            error_message=probe_error,
-            candidate_id=extract_video_id(url),
-            unavailable_class=unavailable_class,
+            media_type=media_type,
+            media_intent=media_intent,
         )
-        should_escalate_probe_js = any(
-            marker in lower_probe_error
-            for marker in (
-                "signature solving failed",
-                "n challenge solving failed",
+        info = {"id": extract_video_id(url), "webpage_url": url}
+    else:
+        # Always get metadata via API (for output file info, etc.)
+        try:
+            probe_opts = copy.deepcopy(opts)
+            probe_opts.pop("format", None)
+            probe_opts.pop("postprocessors", None)
+            probe_opts.pop("merge_output_format", None)
+            probe_opts.pop("recodevideo", None)
+            probe_opts.pop("final_format", None)
+            probe_opts.pop("writethumbnail", None)
+            probe_opts.pop("embedthumbnail", None)
+            probe_opts["skip_download"] = True
+            logger.info(
+                {
+                    "message": "metadata_probe_invocation",
+                    "job_id": job_id,
+                    "url": url,
+                    "format_present": "format" in probe_opts,
+                    "postprocessors_present": "postprocessors" in probe_opts,
+                }
             )
-        )
-        if should_escalate_probe_js:
-            js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
-            if js_runtime_map:
-                retry_probe_opts = copy.deepcopy(probe_opts)
-                retry_probe_opts["js_runtimes"] = js_runtime_map
-                retry_probe_opts["remote_components"] = "ejs:github"
+            with YoutubeDL(probe_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            probe_error = str(exc)
+            lower_probe_error = probe_error.lower()
+            format_unavailable_probe = "requested format is not available" in lower_probe_error
+            unavailable_class = _classify_ytdlp_unavailability(probe_error)
+            _log_event(
+                logging.WARNING if format_unavailable_probe else logging.ERROR,
+                "ytdlp_metadata_probe_failed",
+                job_id=job_id,
+                url=url,
+                error=probe_error,
+                failure_domain=(
+                    "metadata_probe_unavailable"
+                    if unavailable_class
+                    else ("metadata_probe_format" if format_unavailable_probe else "metadata_probe")
+                ),
+                error_message=probe_error,
+                candidate_id=extract_video_id(url),
+                unavailable_class=unavailable_class,
+            )
+            should_escalate_probe_js = any(
+                marker in lower_probe_error
+                for marker in (
+                    "signature solving failed",
+                    "n challenge solving failed",
+                )
+            )
+            if should_escalate_probe_js:
+                js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+                if js_runtime_map:
+                    retry_probe_opts = copy.deepcopy(probe_opts)
+                    retry_probe_opts["js_runtimes"] = js_runtime_map
+                    retry_probe_opts["remote_components"] = "ejs:github"
+                    _log_event(
+                        logging.WARNING,
+                        "ytdlp_metadata_probe_js_retry",
+                        job_id=job_id,
+                        url=url,
+                        media_type=media_type,
+                        media_intent=media_intent,
+                        error=probe_error,
+                    )
+                    try:
+                        with YoutubeDL(retry_probe_opts) as ydl:
+                            info = ydl.extract_info(url, download=False)
+                    except Exception as retry_exc:
+                        _log_event(
+                            logging.WARNING,
+                            "ytdlp_metadata_probe_js_retry_failed",
+                            job_id=job_id,
+                            url=url,
+                            media_type=media_type,
+                            media_intent=media_intent,
+                            error=str(retry_exc),
+                        )
+                        info = None
+
+            if info is None:
                 _log_event(
                     logging.WARNING,
-                    "ytdlp_metadata_probe_js_retry",
+                    "ytdlp_metadata_probe_nonfatal_proceeding",
                     job_id=job_id,
                     url=url,
                     media_type=media_type,
                     media_intent=media_intent,
                     error=probe_error,
+                    unavailable_class=unavailable_class,
                 )
-                try:
-                    with YoutubeDL(retry_probe_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                except Exception as retry_exc:
-                    _log_event(
-                        logging.WARNING,
-                        "ytdlp_metadata_probe_js_retry_failed",
-                        job_id=job_id,
-                        url=url,
-                        media_type=media_type,
-                        media_intent=media_intent,
-                        error=str(retry_exc),
-                    )
-                    info = None
-
-        if info is None:
-            _log_event(
-                logging.WARNING,
-                "ytdlp_metadata_probe_nonfatal_proceeding",
-                job_id=job_id,
-                url=url,
-                media_type=media_type,
-                media_intent=media_intent,
-                error=probe_error,
-                unavailable_class=unavailable_class,
-            )
-            info = {"id": extract_video_id(url), "webpage_url": url}
+                info = {"id": extract_video_id(url), "webpage_url": url}
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""
@@ -5746,8 +6119,14 @@ def download_with_ytdlp(
     keep_cookies_first_attempt = bool(audio_mode and configured_cookiefile)
     if not keep_cookies_first_attempt:
         configured_cookiefile = opts_for_run.pop("cookiefile", None)
-    opts_for_run.pop("js_runtimes", None)
-    opts_for_run.pop("remote_components", None)
+    js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+    keep_js_first_attempt = bool(is_music_track_download and js_runtime_map)
+    if keep_js_first_attempt:
+        opts_for_run["js_runtimes"] = js_runtime_map
+        opts_for_run["remote_components"] = "ejs:github"
+    else:
+        opts_for_run.pop("js_runtimes", None)
+        opts_for_run.pop("remote_components", None)
     # Always request sidecar metadata from successful download attempts.
     opts_for_run["writeinfojson"] = True
     opts_for_run["newline"] = True
@@ -5803,16 +6182,21 @@ def download_with_ytdlp(
         )
 
         retry_attempts = []
-        if audio_mode and "requested format is not available" in lower_error:
+        if audio_mode and "requested format is not available" in lower_error and not is_music_track_download:
             retry_attempts.append("audio_best")
-        if should_escalate_js:
+        first_attempt_had_js = bool(opts_for_run.get("js_runtimes"))
+        first_attempt_had_cookies = bool(opts_for_run.get("cookiefile"))
+        if should_escalate_js and not first_attempt_had_js:
             retry_attempts.append("js")
-        if should_try_cookies and configured_cookiefile:
+        if should_try_cookies and configured_cookiefile and not first_attempt_had_cookies:
             retry_attempts.append("cookies")
-        if should_escalate_js and should_try_cookies and configured_cookiefile:
+        if (
+            should_escalate_js
+            and should_try_cookies
+            and configured_cookiefile
+            and not (first_attempt_had_js and first_attempt_had_cookies)
+        ):
             retry_attempts.append("js+cookies")
-
-        js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
         for attempt in retry_attempts:
             retry_opts = dict(opts_for_run)
             if attempt == "audio_best":

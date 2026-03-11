@@ -19,6 +19,8 @@ This release focuses on configuration clarity, safer control flow, and runtime r
 ### Fixed
 - Scheduler enabled-state save/apply flow now respects user toggles after `Save Schedule` / `Save Config`.
 - Telegram scheduler/watcher summaries now resolve and display human-readable video titles (instead of only YouTube IDs) in attempted-item lists.
+- Watcher runtime was hardened to improve poll/startup reliability, adaptive state recovery, and batch execution resilience.
+- Watcher Telegram dispatch was hardened to reduce notification spam and improve batch-summary timing/delivery consistency.
 - Settings section navigation/selection no longer triggers unintended scroll/hash jumps during category changes.
 
 ## v0.9.8 — Fast Discovery + Video Preview + Adapter Extensibility

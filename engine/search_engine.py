@@ -2597,6 +2597,7 @@ class SearchResolutionService:
         recording_mbid=None,
         is_ep_release=False,
         prefer_music_video=False,
+        excluded_candidate_ids=None,
     ):
         expected_duration_hint_sec = (int(duration_ms) // 1000) if duration_ms is not None else None
         ladder = (
@@ -2684,6 +2685,12 @@ class SearchResolutionService:
         decision_top_rejected_variant_tags = []
         ep_refinement_attempted = False
         ep_refinement_candidates_considered = 0
+        excluded_ids = {
+            str(value or "").strip()
+            for value in (excluded_candidate_ids or [])
+            if str(value or "").strip()
+        }
+        excluded_candidates_total = 0
 
         for ladder_entry in ladder[first_rung:]:
             query = str(ladder_entry.get("query") or "").strip()
@@ -2715,6 +2722,26 @@ class SearchResolutionService:
                     "community_seeded_candidates": community_seeded_candidates,
                 }
             )
+            if excluded_ids:
+                filtered = []
+                excluded_this_rung = 0
+                for candidate in candidates or []:
+                    candidate_id = str(candidate.get("candidate_id") or "").strip()
+                    if candidate_id and candidate_id in excluded_ids:
+                        excluded_this_rung += 1
+                        continue
+                    filtered.append(candidate)
+                if excluded_this_rung:
+                    excluded_candidates_total += excluded_this_rung
+                    _log_event(
+                        logging.INFO,
+                        "music_candidates_excluded_by_cooldown",
+                        rung=rung,
+                        query_label=query_label,
+                        query=query,
+                        excluded=excluded_this_rung,
+                    )
+                candidates = filtered
             rung_meta = {
                 "rung": rung,
                 "query_label": query_label,
@@ -2865,6 +2892,7 @@ class SearchResolutionService:
                 "top_rejected_variant_tags": list(decision_top_rejected_variant_tags or []),
             },
             "prefer_music_video": bool(prefer_music_video),
+            "excluded_candidates_total": int(excluded_candidates_total),
         }
         ranked = selected_ranked
         if self.debug_music_scoring:

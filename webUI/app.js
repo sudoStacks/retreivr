@@ -7041,7 +7041,9 @@ function renderConfig(cfg) {
     ? musicMeta.dry_run
     : musicMetaDefaults.dry_run;
   const watcher = cfg.watcher || {};
-  const watcherEnabled = typeof watcher.enabled === "boolean" ? watcher.enabled : true;
+  const watcherEnabled = typeof cfg.enable_watcher === "boolean"
+    ? cfg.enable_watcher
+    : (typeof watcher.enabled === "boolean" ? watcher.enabled : true);
   const watcherToggle = $("#cfg-watcher-enabled");
   if (watcherToggle) {
     watcherToggle.checked = watcherEnabled;
@@ -7515,7 +7517,8 @@ function buildConfigFromForm() {
   };
 
   const watcherEnabled = $("#cfg-watcher-enabled").checked;
-  base.watcher = { enabled: watcherEnabled };
+  base.enable_watcher = watcherEnabled;
+  base.watcher = { ...(base.watcher || {}), enabled: watcherEnabled };
   const watcherPolicy = {
     min_interval_minutes: parseInt($("#cfg-watcher-min-interval").value, 10),
     max_interval_minutes: parseInt($("#cfg-watcher-max-interval").value, 10),
@@ -7589,11 +7592,22 @@ function buildConfigFromForm() {
 
   const telegramToken = $("#cfg-telegram-token").value.trim();
   const telegramChat = $("#cfg-telegram-chat").value.trim();
-  if (telegramToken || telegramChat) {
-    base.telegram = {
-      bot_token: telegramToken,
-      chat_id: telegramChat,
-    };
+  const existingTelegram = (base.telegram && typeof base.telegram === "object")
+    ? base.telegram
+    : {};
+  const hasExplicitTelegramEnabled = Object.prototype.hasOwnProperty.call(existingTelegram, "enabled");
+  if (telegramToken || telegramChat || hasExplicitTelegramEnabled) {
+    base.telegram = { ...existingTelegram };
+    if (telegramToken) {
+      base.telegram.bot_token = telegramToken;
+    } else {
+      delete base.telegram.bot_token;
+    }
+    if (telegramChat) {
+      base.telegram.chat_id = telegramChat;
+    } else {
+      delete base.telegram.chat_id;
+    }
   } else {
     delete base.telegram;
   }
