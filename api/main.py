@@ -2541,6 +2541,18 @@ async def startup():
     app.state.watch_config_cache = startup_cfg
     app.state.watcher_clients_cache = {}
     enable_watcher = _config_watcher_enabled(startup_cfg)
+    if enable_watcher:
+        reset_count = _reset_watch_state_for_startup(
+            app.state.paths.db_path,
+            startup_cfg.get("playlists") or [],
+            watch_policy,
+        )
+        if reset_count:
+            logging.info(
+                "Watcher startup state reset playlists=%s min_interval=%s",
+                reset_count,
+                watch_policy.get("min_interval_minutes") or 5,
+            )
     if not enable_watcher:
         app.state.watcher_lock = None
         app.state.watcher_task = None
@@ -4699,6 +4711,44 @@ def _write_watch_state(
     conn.close()
 
 
+def _reset_watch_state_for_startup(db_path, playlists, policy):
+    if not isinstance(playlists, list) or not playlists:
+        return 0
+    min_interval = 5
+    if isinstance(policy, dict):
+        try:
+            min_interval = int(policy.get("min_interval_minutes") or min_interval)
+        except Exception:
+            min_interval = 5
+    min_interval = max(1, min_interval)
+    now_iso = _format_iso(datetime.now(timezone.utc))
+    existing = _read_watch_state(db_path)
+    reset_count = 0
+    for pl in playlists:
+        if not isinstance(pl, dict):
+            continue
+        playlist_key = pl.get("playlist_id") or pl.get("id")
+        playlist_id = extract_playlist_id(playlist_key) or playlist_key
+        if not playlist_id:
+            continue
+        prior = existing.get(playlist_id) or {}
+        _write_watch_state(
+            db_path,
+            playlist_id,
+            last_checked_at=prior.get("last_checked_at"),
+            next_poll_at=now_iso,
+            idle_count=0,
+            current_interval_min=min_interval,
+            consecutive_no_change=0,
+            last_change_at=prior.get("last_change_at"),
+            skip_reason=None,
+            last_error=None,
+            last_error_at=prior.get("last_error_at"),
+        )
+        reset_count += 1
+    return reset_count
+
+
 def _playlist_label(playlist_id, playlist_name):
     label = playlist_name or playlist_id
     return label if label else "unknown"
@@ -4749,87 +4799,103 @@ async def _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batc
 
     account = pl.get("account")
     yt = yt_clients.get(account) if account else None
+    videos = []
     if not yt:
-        skip_reason = _log_skip_reason(playlist_id, "oauth missing", watch)
-        error_at = _format_iso(now)
-        consecutive_no_change += 1
-        current_interval = min(current_interval * backoff_factor, max_interval)
-        logging.debug(
-            "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
-            playlist_id,
-            current_interval,
-            consecutive_no_change,
+        cookie_file = resolve_cookie_file(config)
+        videos, fallback_error = await anyio.to_thread.run_sync(
+            lambda: get_playlist_videos_fallback(playlist_id, cookie_file=cookie_file)
         )
-        _write_watch_state(
-            app.state.paths.db_path,
+        if fallback_error:
+            skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
+            error_at = _format_iso(now)
+            consecutive_no_change += 1
+            current_interval = min(current_interval * backoff_factor, max_interval)
+            logging.debug(
+                "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
+                playlist_id,
+                current_interval,
+                consecutive_no_change,
+            )
+            error_message = (
+                "oauth missing and yt-dlp fallback failed"
+                if account
+                else "yt-dlp fallback failed"
+            )
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=watch.get("last_checked_at"),
+                next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
+                idle_count=consecutive_no_change,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=skip_reason,
+                last_error=error_message,
+                last_error_at=error_at,
+            )
+            return
+        logging.info(
+            "Watcher poll using yt-dlp fallback playlist_id=%s account=%s",
             playlist_id,
-            last_checked_at=watch.get("last_checked_at"),
-            next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
-            idle_count=consecutive_no_change,
-            current_interval_min=current_interval,
-            consecutive_no_change=consecutive_no_change,
-            last_change_at=watch.get("last_change_at"),
-            skip_reason=skip_reason,
-            last_error="oauth missing",
-            last_error_at=error_at,
+            account or "public",
         )
-        return
-
-    try:
-        # Google client calls are blocking; run off the event loop thread.
-        videos = await anyio.to_thread.run_sync(get_playlist_videos, yt, playlist_id)
-    except RefreshError as exc:
-        logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
-        skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
-        error_at = _format_iso(now)
-        consecutive_no_change += 1
-        current_interval = min(current_interval * backoff_factor, max_interval)
-        logging.debug(
-            "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
-            playlist_id,
-            current_interval,
-            consecutive_no_change,
-        )
-        _write_watch_state(
-            app.state.paths.db_path,
-            playlist_id,
-            last_checked_at=_format_iso(now),
-            next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
-            idle_count=consecutive_no_change,
-            current_interval_min=current_interval,
-            consecutive_no_change=consecutive_no_change,
-            last_change_at=watch.get("last_change_at"),
-            skip_reason=skip_reason,
-            last_error=f"api error: {exc}",
-            last_error_at=error_at,
-        )
-        return
-    except HttpError as exc:
-        logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
-        skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
-        error_at = _format_iso(now)
-        consecutive_no_change += 1
-        current_interval = min(current_interval * backoff_factor, max_interval)
-        logging.debug(
-            "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
-            playlist_id,
-            current_interval,
-            consecutive_no_change,
-        )
-        _write_watch_state(
-            app.state.paths.db_path,
-            playlist_id,
-            last_checked_at=_format_iso(now),
-            next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
-            idle_count=consecutive_no_change,
-            current_interval_min=current_interval,
-            consecutive_no_change=consecutive_no_change,
-            last_change_at=watch.get("last_change_at"),
-            skip_reason=skip_reason,
-            last_error=f"api error: {exc}",
-            last_error_at=error_at,
-        )
-        return
+    else:
+        try:
+            # Google client calls are blocking; run off the event loop thread.
+            videos = await anyio.to_thread.run_sync(get_playlist_videos, yt, playlist_id)
+        except RefreshError as exc:
+            logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
+            skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
+            error_at = _format_iso(now)
+            consecutive_no_change += 1
+            current_interval = min(current_interval * backoff_factor, max_interval)
+            logging.debug(
+                "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
+                playlist_id,
+                current_interval,
+                consecutive_no_change,
+            )
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=_format_iso(now),
+                next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
+                idle_count=consecutive_no_change,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=skip_reason,
+                last_error=f"api error: {exc}",
+                last_error_at=error_at,
+            )
+            return
+        except HttpError as exc:
+            logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
+            skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
+            error_at = _format_iso(now)
+            consecutive_no_change += 1
+            current_interval = min(current_interval * backoff_factor, max_interval)
+            logging.debug(
+                "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
+                playlist_id,
+                current_interval,
+                consecutive_no_change,
+            )
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=_format_iso(now),
+                next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
+                idle_count=consecutive_no_change,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=skip_reason,
+                last_error=f"api error: {exc}",
+                last_error_at=error_at,
+            )
+            return
 
     if not videos:
         logging.debug("Watcher polled playlist_id=%s items=0", playlist_id)
@@ -4911,9 +4977,13 @@ async def _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batc
                 vid = entry.get("videoId") or entry.get("id")
                 if not vid:
                     continue
-                if is_video_seen(conn, playlist_id, vid):
-                    break
-                new_ids.append(vid)
+                if not is_video_seen(conn, playlist_id, vid):
+                    new_ids.append(vid)
+                    # Mark as seen when detected to avoid re-triggering the same
+                    # IDs on subsequent polls before/after batch execution.
+                    mark_video_seen(conn, playlist_id, vid, downloaded=False)
+            if new_ids:
+                conn.commit()
         else:
             for entry in videos:
                 vid = entry.get("videoId") or entry.get("id")
@@ -4978,6 +5048,7 @@ async def _watcher_supervisor():
     logging.info("Watcher started")
     _set_watcher_status("idle")
     startup_logged = False
+    startup_fast_poll_done = False
     last_candidate_state = None
     batch_state = {
         "pending_playlists": set(),
@@ -5290,6 +5361,35 @@ async def _watcher_supervisor():
                 bool(getattr(app.state, "watcher_lock", None)),
             )
             startup_logged = True
+        # Ensure watcher restarts do not sit idle for hours due to persisted backoff.
+        # We only do this once per supervisor lifecycle, then adaptive intervals resume.
+        if not startup_fast_poll_done and next_poll_at > now + timedelta(seconds=30):
+            playlist_key = pl.get("playlist_id") or pl.get("id")
+            playlist_id = extract_playlist_id(playlist_key) or playlist_key
+            consecutive_no_change = watch.get("consecutive_no_change") or 0
+            current_interval = watch.get("current_interval_min")
+            if not isinstance(current_interval, int):
+                current_interval = min_interval_minutes
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=watch.get("last_checked_at"),
+                next_poll_at=_format_iso(now),
+                idle_count=watch.get("idle_count") or 0,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=watch.get("skip_reason"),
+                last_error=watch.get("last_error"),
+                last_error_at=watch.get("last_error_at"),
+            )
+            logging.info(
+                "Watcher startup fast poll forced playlist_id=%s previous_next_poll_at=%s",
+                playlist_id,
+                _format_iso(next_poll_at),
+            )
+            next_poll_at = now
+        startup_fast_poll_done = True
         min_interval_minutes = policy.get("min_interval_minutes") or 5
         interval_seconds = max(60, int(min_interval_minutes * 60))
         max_sleep_seconds = _watcher_next_poll_skew_limit_seconds(policy, watch)
