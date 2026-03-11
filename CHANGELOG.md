@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.10 — Watcher/Telegram Hardening + Config Upgrade Safety
+
+### High-Level
+This release is a focused hardening pass after `v0.9.9`: watcher reliability was tightened, watcher Telegram batching was made less noisy and more accurate, and config upgrade/default behavior was made safer for existing user installations.
+
+### Changed
+- Music download flow now de-emphasizes/skips pre-download metadata probe in music paths to reduce avoidable retries and improve determinism.
+- Added music candidate cooldown controls to avoid repeatedly selecting recently failing candidates.
+- Config loading now backfills missing keys recursively from defaults and persists them on load without overwriting existing user-provided values.
+- Default-template backfill no longer injects sample/demo entities (for example `example_account`, sample playlists) into real user configs.
+
+### Fixed
+- Watcher startup now resets persisted poll state for configured playlists, forcing immediate polling after container/app restart before adaptive backoff resumes.
+- Watcher polling no longer hard-skips when OAuth client is unavailable; it now attempts yt-dlp fallback for playlist fetch.
+- Subscribe-mode watcher detection no longer misses new videos when seen entries appear first; newly detected subscribe IDs are marked seen at detection time.
+- Watcher batch orchestration now prefers full poll coverage across watched playlists (with bounded max wait), reducing one-item/one-message spam behavior.
+- Watcher Telegram dispatch now includes cooldown-aware batching and improved attempted-count accounting.
+- Watcher summary dispatch now waits for terminal job states (bounded) before send, improving post-download summary timing and attempted-item resolution.
+- Watcher skew/startup idle behavior hardened to prevent long “stuck waiting” windows from stale persisted `next_poll_at` values.
+- OAuth refresh logging wording clarified (`Refreshing credentials - Attempt X/Y` and explicit success line).
+- OAuth helper modal sizing in the web UI now respects viewport height and keeps controls reachable on smaller browser windows.
+
 ## v0.9.9 — Settings IA Overhaul + UX Consistency + Runtime Notification Fixes
 
 ### High-Level
@@ -19,8 +41,6 @@ This release focuses on configuration clarity, safer control flow, and runtime r
 ### Fixed
 - Scheduler enabled-state save/apply flow now respects user toggles after `Save Schedule` / `Save Config`.
 - Telegram scheduler/watcher summaries now resolve and display human-readable video titles (instead of only YouTube IDs) in attempted-item lists.
-- Watcher runtime was hardened to improve poll/startup reliability, adaptive state recovery, and batch execution resilience.
-- Watcher Telegram dispatch was hardened to reduce notification spam and improve batch-summary timing/delivery consistency.
 - Settings section navigation/selection no longer triggers unintended scroll/hash jumps during category changes.
 
 ## v0.9.8 — Fast Discovery + Video Preview + Adapter Extensibility
