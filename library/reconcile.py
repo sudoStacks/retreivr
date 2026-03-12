@@ -135,6 +135,9 @@ def _scan_root(conn: sqlite3.Connection, root: Path, summary: ReconcileSummary) 
     for path in root.rglob("*"):
         if not path.is_file():
             continue
+        if _should_skip_reconcile_path(path):
+            summary.skipped_unsupported += 1
+            continue
         summary.files_seen += 1
         suffix = path.suffix.lower()
         if suffix not in _SUPPORTED_AUDIO_EXTENSIONS and suffix not in _SUPPORTED_VIDEO_EXTENSIONS:
@@ -519,6 +522,17 @@ def _extract_youtube_id_from_url(url: str | None) -> str | None:
     if match:
         return match.group(1)
     return None
+
+
+def _should_skip_reconcile_path(path: Path) -> bool:
+    name = path.name
+    if not name:
+        return True
+    if name == ".DS_Store":
+        return True
+    if name.startswith("._"):
+        return True
+    return False
 
 
 def _is_relative_to(path: Path, other: Path) -> bool:

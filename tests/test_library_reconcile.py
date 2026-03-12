@@ -175,3 +175,26 @@ def test_reconcile_library_backfills_video_jobs_and_history(tmp_path, monkeypatc
         "channel-1",
         "completed",
     )
+
+
+def test_reconcile_library_skips_macos_appledouble_sidecars(tmp_path, monkeypatch) -> None:
+    downloads_root = tmp_path / "downloads"
+    video_root = downloads_root / "Videos"
+    sidecar_path = video_root / "._Clip.webm"
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_bytes(b"\x00\x01\x02")
+
+    db_path = tmp_path / "db.sqlite"
+    _prepare_db(db_path)
+
+    monkeypatch.setattr(reconcile_module, "DOWNLOADS_DIR", downloads_root)
+
+    first = reconcile_module.reconcile_library(
+        db_path=str(db_path),
+        config={"single_download_folder": "Videos"},
+    )
+
+    assert first["files_seen"] == 0
+    assert first["video_files_seen"] == 0
+    assert first["errors"] == 0
+    assert first["skipped_unsupported"] == 1
