@@ -49,6 +49,7 @@ const state = {
   homeNoCandidateStreaks: {},
   homeDestinationInvalid: false,
   homeLastDefaultDestination: "",
+  homeLastDefaultVideoFormat: "",
   homeDirectPreview: null,
   homeDirectJob: null,
   homeDirectJobTimer: null,
@@ -1022,16 +1023,36 @@ function getHomeDefaultDestination(mode = state.homeMediaMode) {
     return (
       cfg.home_music_video_download_folder
       || cfg.single_download_folder
-      || cfg.home_music_download_folder
-      || cfg.music_download_folder
       || ""
     );
   }
   return (
     cfg.single_download_folder
-    || cfg.home_music_video_download_folder
-    || cfg.home_music_download_folder
-    || cfg.music_download_folder
+    || ""
+  );
+}
+
+function getHomeDefaultFormat(mode = state.homeMediaMode) {
+  const cfg = state.config || {};
+  const normalized = normalizeHomeMediaMode(mode);
+  if (normalized === "music") {
+    return (
+      cfg.home_music_final_format
+      || cfg.music_final_format
+      || ""
+    );
+  }
+  if (normalized === "music_video") {
+    return (
+      cfg.home_music_video_final_format
+      || cfg.final_format
+      || cfg.video_final_format
+      || ""
+    );
+  }
+  return (
+    cfg.final_format
+    || cfg.video_final_format
     || ""
   );
 }
@@ -1059,6 +1080,18 @@ function applyHomeDefaultDestination({ force = false } = {}) {
   state.homeLastDefaultDestination = nextDefault;
 }
 
+function applyHomeDefaultVideoFormat({ force = false } = {}) {
+  const selector = $("#home-format");
+  if (!selector) return;
+  const current = String(selector.value || "").trim().toLowerCase();
+  const nextDefault = String(getHomeDefaultFormat("video") || "").trim().toLowerCase();
+  const canReplace = force || !current || current === (state.homeLastDefaultVideoFormat || "");
+  if (canReplace) {
+    selector.value = nextDefault;
+  }
+  state.homeLastDefaultVideoFormat = nextDefault;
+}
+
 function updateMusicModeFormatControl() {
   const field = $("#music-video-format-field");
   const selector = $("#music-video-final-format");
@@ -1072,9 +1105,9 @@ function updateMusicModeFormatControl() {
   }
   const options = activeMode === "music" ? HOME_MUSIC_MODE_FORMATS : HOME_MUSIC_VIDEO_MODE_FORMATS;
   const current = String(selector.value || "").trim().toLowerCase();
-  const homeFormatCurrent = String($("#home-format")?.value || "").trim().toLowerCase();
-  const preferred = options.includes(homeFormatCurrent)
-    ? homeFormatCurrent
+  const configuredDefault = String(getHomeDefaultFormat(activeMode) || "").trim().toLowerCase();
+  const preferred = options.includes(configuredDefault)
+    ? configuredDefault
     : (options.includes(current) ? current : options[0]);
   selector.innerHTML = options.map((value) => `<option value="${value}">${value}</option>`).join("");
   selector.value = preferred;
@@ -2744,6 +2777,9 @@ function buildSearchRequestPayload(sources, { autoEnqueue = true } = {}) {
 
 
 function getSearchDefaultDestination() {
+  if (state.config && state.config.home_music_download_folder) {
+    return state.config.home_music_download_folder;
+  }
   if (state.config && state.config.music_download_folder) {
     return state.config.music_download_folder;
   }
@@ -2965,6 +3001,9 @@ function updateHomeMusicModeUI() {
   placeHomeDestinationControl();
   updateMusicModeFormatControl();
   applyHomeDefaultDestination();
+  if (!state.homeMusicMode) {
+    applyHomeDefaultVideoFormat();
+  }
   // Keep this badge strictly tied to the live toggle state.
   const badge = $("#home-music-mode-badge");
   if (badge) {
@@ -6987,6 +7026,8 @@ function renderConfig(cfg) {
   $("#cfg-upload-date-format").value = cfg.upload_date_format ?? "";
   $("#cfg-filename-template").value = cfg.filename_template ?? "";
   $("#cfg-final-format").value = cfg.final_format ?? "";
+  $("#cfg-home-music-final-format").value = cfg.home_music_final_format ?? cfg.music_final_format ?? "";
+  $("#cfg-home-music-video-final-format").value = cfg.home_music_video_final_format ?? cfg.final_format ?? "";
   $("#cfg-js-runtime").value = cfg.js_runtime ?? "";
   $("#cfg-single-download-folder").value = normalizeDownloadsRelative(cfg.single_download_folder ?? "");
   $("#cfg-home-music-download-folder").value = normalizeDownloadsRelative(
@@ -7430,6 +7471,8 @@ async function loadConfig() {
     renderConfig(cfg);
     updateSearchDestinationDisplay();
     applyHomeDefaultDestination({ force: false });
+    applyHomeDefaultVideoFormat({ force: true });
+    updateMusicModeFormatControl();
     state.configDirty = false;
     updatePollingState();
     setConfigNotice("Config loaded", false);
@@ -7461,6 +7504,20 @@ function buildConfigFromForm() {
     base.final_format = finalFormat;
   } else {
     delete base.final_format;
+  }
+
+  const homeMusicFinalFormat = $("#cfg-home-music-final-format").value.trim();
+  if (homeMusicFinalFormat) {
+    base.home_music_final_format = homeMusicFinalFormat;
+  } else {
+    delete base.home_music_final_format;
+  }
+
+  const homeMusicVideoFinalFormat = $("#cfg-home-music-video-final-format").value.trim();
+  if (homeMusicVideoFinalFormat) {
+    base.home_music_video_final_format = homeMusicVideoFinalFormat;
+  } else {
+    delete base.home_music_video_final_format;
   }
 
   const jsRuntime = $("#cfg-js-runtime").value.trim();
@@ -7785,6 +7842,8 @@ async function saveConfig() {
     state.config = result.config;
     renderConfig(state.config);
     applyHomeDefaultDestination({ force: false });
+    applyHomeDefaultVideoFormat({ force: true });
+    updateMusicModeFormatControl();
     updateSearchDestinationDisplay();
     await refreshSchedule();
     state.configDirty = false;
@@ -7804,21 +7863,23 @@ async function updateYtdlp() {
   }
 }
 
-async function reconcileMusicLibrary() {
+async function reconcileLibrary() {
   const button = $("#library-reconcile-button");
   const messageEl = $("#library-reconcile-message");
-  const originalLabel = button ? button.textContent : "Reconcile Music Library";
+  const originalLabel = button ? button.textContent : "Reconcile Library";
   try {
     if (button) {
       button.disabled = true;
       button.textContent = "Reconciling...";
     }
-    setNotice(messageEl, "Scanning existing music files and backfilling database entries...", false);
+    setNotice(messageEl, "Scanning existing music, video, and music-video files and backfilling database entries...", false);
     const data = await fetchJson("/api/library/reconcile", { method: "POST" });
     const summary = [
       `${data.jobs_inserted || 0} jobs`,
       `${data.history_inserted || 0} history`,
       `${data.isrc_records_inserted || 0} ISRC`,
+      `${data.audio_files_seen || 0} audio scanned`,
+      `${data.video_files_seen || 0} video scanned`,
       `${data.skipped_existing_jobs || 0} already known`,
       `${data.skipped_missing_identity || 0} missing tags`,
       `${data.errors || 0} errors`,
@@ -8483,7 +8544,7 @@ function bindEvents() {
   }
   const libraryReconcileButton = $("#library-reconcile-button");
   if (libraryReconcileButton) {
-    libraryReconcileButton.addEventListener("click", reconcileMusicLibrary);
+    libraryReconcileButton.addEventListener("click", reconcileLibrary);
   }
 
   $("#add-account").addEventListener("click", () => addAccountRow("", {}));
@@ -8610,6 +8671,8 @@ function bindEvents() {
     spotifyEnabledToggle.addEventListener("change", syncConfigSectionCollapsedStates);
   }
   syncConfigSectionCollapsedStates();
+  applyHomeDefaultVideoFormat({ force: true });
+  updateMusicModeFormatControl();
   syncSettingsMainWidthLock();
   setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false });
 

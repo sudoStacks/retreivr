@@ -23,11 +23,12 @@ def test_api_library_reconcile_returns_summary(monkeypatch) -> None:
     client = _build_client(monkeypatch)
 
     monkeypatch.setattr(
-        "api.main.reconcile_music_library",
+        "api.main.reconcile_library",
         lambda *, db_path, config: {
             "scan_roots": ["/downloads/Music"],
             "files_seen": 10,
             "audio_files_seen": 4,
+            "video_files_seen": 2,
             "jobs_inserted": 3,
             "history_inserted": 3,
             "isrc_records_inserted": 2,
@@ -46,3 +47,4 @@ def test_api_library_reconcile_returns_summary(monkeypatch) -> None:
     assert payload["jobs_inserted"] == 3
     assert payload["history_inserted"] == 3
     assert payload["isrc_records_inserted"] == 2
+    assert payload["video_files_seen"] == 2

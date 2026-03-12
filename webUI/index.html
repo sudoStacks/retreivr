@@ -586,50 +586,59 @@
               <div class="settings-section-heading">General</div>
               <div class="group">
                 <div class="group-title">Download Defaults</div>
-                <div class="grid two">
-                  <label class="field medium">
-                    <span>Single download folder</span>
+                <div class="stack">
+                  <label class="field full">
+                    <div class="download-defaults-header-row">
+                      <span class="download-defaults-destination-label">Single download folder</span>
+                      <span class="download-defaults-format-label">Format</span>
+                    </div>
                     <div class="row path-picker destination-picker">
                       <input id="cfg-single-download-folder" type="text" placeholder="downloads">
                       <button id="browse-single-download" class="button ghost small">Browse</button>
+                      <select id="cfg-final-format" class="download-defaults-format-select">
+                        <option value="">Default format</option>
+                        <option value="mkv">mkv</option>
+                        <option value="mp4">mp4</option>
+                        <option value="webm">webm</option>
+                      </select>
                     </div>
                   </label>
-                  <label class="field medium">
-                    <span>Music download folder (Home default)</span>
-                    <div class="row path-picker destination-picker">
-                      <input id="cfg-home-music-download-folder" type="text" placeholder="Music">
-                      <button id="browse-home-music-download" class="button ghost small">Browse</button>
-                    </div>
-                  </label>
-                  <label class="field medium">
+                  <label class="field full">
                     <span>Music Video download folder (Home default)</span>
                     <div class="row path-picker destination-picker">
                       <input id="cfg-home-music-video-download-folder" type="text" placeholder="Videos/Music Videos">
                       <button id="browse-home-music-video-download" class="button ghost small">Browse</button>
+                      <select id="cfg-home-music-video-final-format">
+                        <option value="">Default format</option>
+                        <option value="mp4">mp4</option>
+                        <option value="mkv">mkv</option>
+                        <option value="webm">webm</option>
+                      </select>
                     </div>
                   </label>
-                  <label class="field short">
-                    <span>Final format</span>
-                    <select id="cfg-final-format">
-                      <option value="">(not set)</option>
-                      <option value="mkv">mkv (default)</option>
-                      <option value="mp4">mp4</option>
-                      <option value="webm">webm</option>
-                      <option value="mp3">mp3</option>
-                      <option value="m4a">m4a</option>
-                    </select>
+                  <label class="field full">
+                    <span>Music download folder (Home default)</span>
+                    <div class="row path-picker destination-picker">
+                      <input id="cfg-home-music-download-folder" type="text" placeholder="Music">
+                      <button id="browse-home-music-download" class="button ghost small">Browse</button>
+                      <select id="cfg-home-music-final-format">
+                        <option value="">Default format</option>
+                        <option value="mp3">mp3</option>
+                        <option value="m4a">m4a</option>
+                      </select>
+                    </div>
                   </label>
-                  <div class="notice">Final format currently applies to video output; music uses <code>music_final_format</code> from config.json.</div>
+                  <div class="notice">These format selectors define the default Home-page format selection for Video/Single, Music Video, and Music modes.</div>
                 </div>
               </div>
               <div class="group">
                 <div class="group-title">Library Reconcile</div>
                 <div class="grid two">
                   <div class="notice">
-                    Scan music files under the configured downloads/music folders and backfill database entries for existing tracks.
+                    Scan existing music, video, and music-video files under the configured downloads folders and backfill database entries for known Retreivr-managed media.
                   </div>
                   <div class="row">
-                    <button id="library-reconcile-button" class="button ghost" type="button">Reconcile Music Library</button>
+                    <button id="library-reconcile-button" class="button ghost" type="button">Reconcile Library</button>
                   </div>
                 </div>
                 <div id="library-reconcile-message" class="notice" role="status"></div>

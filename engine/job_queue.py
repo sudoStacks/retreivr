@@ -35,6 +35,7 @@ from media.path_builder import build_music_relative_layout
 from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
 from metadata.services.musicbrainz_service import get_musicbrainz_service
+from library.provenance import build_file_provenance
 
 try:
     from engine.musicbrainz_binding import _normalize_title_for_mb_lookup, resolve_best_mb_pair
@@ -4122,6 +4123,14 @@ class YouTubeAdapter:
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
 
+            if isinstance(meta, dict):
+                provenance = build_file_provenance(
+                    job=job,
+                    source=getattr(job, "source", None),
+                    source_id=meta.get("video_id") or getattr(job, "external_id", None) or video_id,
+                )
+                meta.update(provenance)
+
             final_path, meta = finalize_download_artifact(
                 local_file=local_file,
                 meta=meta,
@@ -7441,6 +7450,20 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
             cmd_list.extend(["-metadata", f"DATE={date_tag}"])
         if description:
             cmd_list.extend(["-metadata", f"description={description}"])
+        if meta.get("retreivr_managed"):
+            cmd_list.extend(["-metadata", f"retreivr_managed={meta.get('retreivr_managed')}"])
+        if meta.get("retreivr_job_id"):
+            cmd_list.extend(["-metadata", f"retreivr_job_id={meta.get('retreivr_job_id')}"])
+        if meta.get("retreivr_trace_id"):
+            cmd_list.extend(["-metadata", f"retreivr_trace_id={meta.get('retreivr_trace_id')}"])
+        if meta.get("retreivr_version"):
+            cmd_list.extend(["-metadata", f"retreivr_version={meta.get('retreivr_version')}"])
+        if meta.get("retreivr_acquired_at"):
+            cmd_list.extend(["-metadata", f"retreivr_acquired_at={meta.get('retreivr_acquired_at')}"])
+        if meta.get("retreivr_source"):
+            cmd_list.extend(["-metadata", f"retreivr_source={meta.get('retreivr_source')}"])
+        if meta.get("retreivr_source_id"):
+            cmd_list.extend(["-metadata", f"retreivr_source_id={meta.get('retreivr_source_id')}"])
         if channel_id:
             cmd_list.extend(["-metadata", f"source_channel_id={channel_id}"])
         if keywords:

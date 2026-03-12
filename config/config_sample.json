@@ -77,6 +77,8 @@
   "upload_date_format": "MM-YYYY",
   "final_format": "mkv",
   "music_final_format": "mp3",
+  "home_music_final_format": "mp3",
+  "home_music_video_final_format": "mp4",
   "js_runtimes": ["node:/usr/bin/node"],
   "telegram": {
     "bot_token": "",

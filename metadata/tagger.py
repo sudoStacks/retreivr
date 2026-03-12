@@ -62,6 +62,14 @@ def _apply_id3_tags(file_path, tags, artwork, source_title, allow_overwrite):
         changed |= _set_id3_txxx(audio, "MBID", tags.get("recording_id"), allow_overwrite)
     if tags.get("mb_release_id"):
         changed |= _set_id3_txxx(audio, "MUSICBRAINZ_RELEASEID", tags.get("mb_release_id"), allow_overwrite)
+    changed |= _set_id3_txxx(audio, "RETREIVR_MANAGED", tags.get("retreivr_managed"), allow_overwrite)
+    changed |= _set_id3_txxx(audio, "RETREIVR_JOB_ID", tags.get("retreivr_job_id"), allow_overwrite)
+    changed |= _set_id3_txxx(audio, "RETREIVR_TRACE_ID", tags.get("retreivr_trace_id"), allow_overwrite)
+    changed |= _set_id3_txxx(audio, "RETREIVR_VERSION", tags.get("retreivr_version"), allow_overwrite)
+    changed |= _set_id3_txxx(audio, "RETREIVR_ACQUIRED_AT", tags.get("retreivr_acquired_at"), allow_overwrite)
+    changed |= _set_id3_txxx(audio, "RETREIVR_SOURCE", tags.get("retreivr_source"), allow_overwrite)
+    changed |= _set_id3_txxx(audio, "RETREIVR_SOURCE_ID", tags.get("retreivr_source_id"), allow_overwrite)
+    changed |= _set_id3_txxx(audio, "ISRC", tags.get("isrc"), allow_overwrite)
     lyrics = tags.get("lyrics")
     if lyrics:
         if allow_overwrite:
@@ -129,6 +137,14 @@ def _apply_mp4_tags(file_path, tags, artwork, source_title, allow_overwrite):
         changed |= _set_mp4_freeform(mp4_tags, "MBID", tags.get("recording_id"), allow_overwrite)
     if tags.get("mb_release_id"):
         changed |= _set_mp4_freeform(mp4_tags, "MUSICBRAINZ_RELEASEID", tags.get("mb_release_id"), allow_overwrite)
+    changed |= _set_mp4_freeform(mp4_tags, "RETREIVR_MANAGED", tags.get("retreivr_managed"), allow_overwrite)
+    changed |= _set_mp4_freeform(mp4_tags, "RETREIVR_JOB_ID", tags.get("retreivr_job_id"), allow_overwrite)
+    changed |= _set_mp4_freeform(mp4_tags, "RETREIVR_TRACE_ID", tags.get("retreivr_trace_id"), allow_overwrite)
+    changed |= _set_mp4_freeform(mp4_tags, "RETREIVR_VERSION", tags.get("retreivr_version"), allow_overwrite)
+    changed |= _set_mp4_freeform(mp4_tags, "RETREIVR_ACQUIRED_AT", tags.get("retreivr_acquired_at"), allow_overwrite)
+    changed |= _set_mp4_freeform(mp4_tags, "RETREIVR_SOURCE", tags.get("retreivr_source"), allow_overwrite)
+    changed |= _set_mp4_freeform(mp4_tags, "RETREIVR_SOURCE_ID", tags.get("retreivr_source_id"), allow_overwrite)
+    changed |= _set_mp4_freeform(mp4_tags, "ISRC", tags.get("isrc"), allow_overwrite)
     if artwork and (allow_overwrite or "covr" not in mp4_tags):
         img_data = artwork.get("data")
         if img_data:
@@ -176,6 +192,14 @@ def _apply_generic_tags(file_path, tags, artwork, source_title, allow_overwrite)
         changed |= _set_generic(audio.tags, "mbid", tags.get("recording_id"), allow_overwrite)
     if tags.get("mb_release_id"):
         changed |= _set_generic(audio.tags, "musicbrainz_releaseid", tags.get("mb_release_id"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "retreivr_managed", tags.get("retreivr_managed"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "retreivr_job_id", tags.get("retreivr_job_id"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "retreivr_trace_id", tags.get("retreivr_trace_id"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "retreivr_version", tags.get("retreivr_version"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "retreivr_acquired_at", tags.get("retreivr_acquired_at"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "retreivr_source", tags.get("retreivr_source"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "retreivr_source_id", tags.get("retreivr_source_id"), allow_overwrite)
+    changed |= _set_generic(audio.tags, "isrc", tags.get("isrc"), allow_overwrite)
     if changed:
         audio.save()
 

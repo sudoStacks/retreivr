@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import os
+import re
 import sqlite3
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -17,6 +17,7 @@ from engine.job_queue import (
     utc_now,
 )
 from engine.paths import DOWNLOADS_DIR, resolve_dir
+from media.ffprobe import get_media_tags
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,17 @@ _SUPPORTED_AUDIO_EXTENSIONS = {
     ".alac",
     ".wma",
 }
+_SUPPORTED_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".m4v",
+    ".mkv",
+    ".webm",
+    ".mov",
+    ".avi",
+}
 _RECONCILE_PLAYLIST_ID = "__library_reconcile__"
+_YOUTUBE_ID_RE = re.compile(r"YouTubeID=([A-Za-z0-9_-]{6,})")
+_URL_RE = re.compile(r"URL=(https?://\S+)")
 
 
 @dataclass
@@ -48,6 +59,7 @@ class ReconcileSummary:
     scan_roots: list[str]
     files_seen: int = 0
     audio_files_seen: int = 0
+    video_files_seen: int = 0
     jobs_inserted: int = 0
     history_inserted: int = 0
     isrc_records_inserted: int = 0
@@ -60,7 +72,7 @@ class ReconcileSummary:
         return asdict(self)
 
 
-def reconcile_music_library(*, db_path: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+def reconcile_library(*, db_path: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
     roots = _resolve_scan_roots(config or {})
     summary = ReconcileSummary(scan_roots=[str(path) for path in roots])
 
@@ -78,9 +90,19 @@ def reconcile_music_library(*, db_path: str, config: dict[str, Any] | None = Non
     return summary.to_dict()
 
 
+def reconcile_music_library(*, db_path: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Backward-compatible wrapper for older callers/tests."""
+    return reconcile_library(db_path=db_path, config=config)
+
+
 def _resolve_scan_roots(config: dict[str, Any]) -> list[Path]:
     candidates: list[Path] = []
-    for key in ("music_download_folder", "home_music_download_folder", "single_download_folder"):
+    for key in (
+        "single_download_folder",
+        "music_download_folder",
+        "home_music_download_folder",
+        "home_music_video_download_folder",
+    ):
         value = str(config.get(key) or "").strip()
         if not value:
             continue
@@ -114,12 +136,18 @@ def _scan_root(conn: sqlite3.Connection, root: Path, summary: ReconcileSummary) 
         if not path.is_file():
             continue
         summary.files_seen += 1
-        if path.suffix.lower() not in _SUPPORTED_AUDIO_EXTENSIONS:
+        suffix = path.suffix.lower()
+        if suffix not in _SUPPORTED_AUDIO_EXTENSIONS and suffix not in _SUPPORTED_VIDEO_EXTENSIONS:
             summary.skipped_unsupported += 1
             continue
-        summary.audio_files_seen += 1
         try:
-            metadata = _read_music_identity(path)
+            metadata = None
+            if suffix in _SUPPORTED_AUDIO_EXTENSIONS:
+                summary.audio_files_seen += 1
+                metadata = _read_music_identity(path)
+            elif suffix in _SUPPORTED_VIDEO_EXTENSIONS:
+                summary.video_files_seen += 1
+                metadata = _read_video_identity(path)
             if metadata is None:
                 summary.skipped_missing_identity += 1
                 continue
@@ -175,6 +203,18 @@ def _read_music_identity(path: Path) -> dict[str, Any] | None:
         "----:com.apple.iTunes:ISRC",
         "isrc",
     )
+    source = _first_tag(
+        tags,
+        "TXXX:RETREIVR_SOURCE",
+        "----:com.apple.iTunes:RETREIVR_SOURCE",
+        "retreivr_source",
+    )
+    source_id = _first_tag(
+        tags,
+        "TXXX:RETREIVR_SOURCE_ID",
+        "----:com.apple.iTunes:RETREIVR_SOURCE_ID",
+        "retreivr_source_id",
+    )
 
     if not recording_mbid and not (title and artist):
         return None
@@ -199,19 +239,85 @@ def _read_music_identity(path: Path) -> dict[str, Any] | None:
         "mb_release_id": release_mbid,
         "isrc": isrc,
         "canonical_id": canonical_id,
+        "media_type": "music",
+        "media_intent": "music_track",
+        "source": source or "library_reconcile",
+        "external_id": source_id or recording_mbid or isrc,
+    }
+
+
+def _read_video_identity(path: Path) -> dict[str, Any] | None:
+    tags = get_media_tags(str(path))
+    if not tags:
+        return None
+    normalized = {str(key).lower(): str(value).strip() for key, value in tags.items() if str(value).strip()}
+    title = (
+        normalized.get("title")
+        or normalized.get("title-eng")
+        or path.stem
+    )
+    source = normalized.get("retreivr_source") or "library_reconcile"
+    source_id = normalized.get("retreivr_source_id") or ""
+    input_url = normalized.get("purl") or normalized.get("url") or ""
+    comment = normalized.get("comment") or ""
+    source_channel_id = normalized.get("source_channel_id") or ""
+
+    if not source_id and comment:
+        match = _YOUTUBE_ID_RE.search(comment)
+        if match:
+            source_id = match.group(1)
+    if not input_url and comment:
+        url_match = _URL_RE.search(comment)
+        if url_match:
+            input_url = url_match.group(1)
+
+    if not source_id and input_url and "youtube" in input_url:
+        source = "youtube"
+        source_id = _extract_youtube_id_from_url(input_url) or ""
+
+    if not source_id and not input_url:
+        return None
+
+    canonical_url = input_url or _build_canonical_video_url(source, source_id)
+    return {
+        "title": title or path.stem,
+        "media_type": "video",
+        "media_intent": "episode",
+        "source": source,
+        "external_id": source_id or path.stem,
+        "input_url": input_url or canonical_url,
+        "canonical_url": canonical_url,
+        "channel_id": source_channel_id or None,
     }
 
 
 def _insert_reconciled_job(conn: sqlite3.Connection, path: Path, metadata: dict[str, Any]) -> bool:
     canonical_id = str(metadata.get("canonical_id") or "").strip()
-    if not canonical_id:
-        return False
     cur = conn.cursor()
-    cur.execute(
-        "SELECT 1 FROM download_jobs WHERE canonical_id=? LIMIT 1",
-        (canonical_id,),
-    )
-    if cur.fetchone() is not None:
+    source = str(metadata.get("source") or "library_reconcile").strip()
+    external_id = str(metadata.get("external_id") or "").strip() or None
+    canonical_url = str(metadata.get("canonical_url") or "").strip() or None
+    input_url = str(metadata.get("input_url") or canonical_url or path).strip()
+
+    if canonical_id:
+        cur.execute("SELECT 1 FROM download_jobs WHERE canonical_id=? LIMIT 1", (canonical_id,))
+        if cur.fetchone() is not None:
+            return False
+    elif canonical_url:
+        cur.execute(
+            "SELECT 1 FROM download_jobs WHERE canonical_url=? AND status=? LIMIT 1",
+            (canonical_url, JOB_STATUS_COMPLETED),
+        )
+        if cur.fetchone() is not None:
+            return False
+    elif source and external_id:
+        cur.execute(
+            "SELECT 1 FROM download_jobs WHERE source=? AND external_id=? AND status=? LIMIT 1",
+            (source, external_id, JOB_STATUS_COMPLETED),
+        )
+        if cur.fetchone() is not None:
+            return False
+    else:
         return False
 
     now = utc_now()
@@ -228,14 +334,14 @@ def _insert_reconciled_job(conn: sqlite3.Connection, path: Path, metadata: dict[
         (
             uuid4().hex,
             "reconcile",
-            str(metadata.get("recording_mbid") or path),
-            "music",
-            "music_track",
-            "library_reconcile",
-            str(path),
-            str(path),
-            None,
-            str(metadata.get("recording_mbid") or metadata.get("isrc") or path.name),
+            str(metadata.get("recording_mbid") or external_id or path),
+            str(metadata.get("media_type") or "video"),
+            str(metadata.get("media_intent") or "episode"),
+            source,
+            input_url,
+            input_url,
+            canonical_url,
+            external_id,
             JOB_STATUS_COMPLETED,
             now,
             None,
@@ -252,7 +358,7 @@ def _insert_reconciled_job(conn: sqlite3.Connection, path: Path, metadata: dict[
             uuid4().hex,
             None,
             str(path.parent),
-            canonical_id,
+            canonical_id or None,
             str(path),
         ),
     )
@@ -287,19 +393,19 @@ def _insert_reconciled_history(conn: sqlite3.Connection, path: Path, metadata: d
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            str(metadata.get("recording_mbid") or metadata.get("canonical_id") or path.name),
+            str(metadata.get("recording_mbid") or metadata.get("external_id") or metadata.get("canonical_id") or path.name),
             str(metadata.get("title") or path.stem),
             path.name,
             str(path.parent),
-            "library_reconcile",
+            str(metadata.get("source") or "library_reconcile"),
             "completed",
             now,
             now,
             file_size_bytes,
-            str(path),
-            None,
-            str(metadata.get("recording_mbid") or metadata.get("isrc") or path.name),
-            None,
+            str(metadata.get("input_url") or path),
+            str(metadata.get("canonical_url") or "") or None,
+            str(metadata.get("external_id") or metadata.get("recording_mbid") or metadata.get("isrc") or path.name),
+            metadata.get("channel_id"),
         ),
     )
     return True
@@ -390,6 +496,29 @@ def _normalize_index(value: Any) -> int | None:
     except Exception:
         return None
     return parsed if parsed > 0 else None
+
+
+def _build_canonical_video_url(source: str | None, source_id: str | None) -> str | None:
+    normalized_source = str(source or "").strip().lower()
+    normalized_source_id = str(source_id or "").strip()
+    if not normalized_source_id:
+        return None
+    if normalized_source in {"youtube", "youtube_music"}:
+        return f"https://www.youtube.com/watch?v={normalized_source_id}"
+    return None
+
+
+def _extract_youtube_id_from_url(url: str | None) -> str | None:
+    text = str(url or "").strip()
+    if not text:
+        return None
+    match = re.search(r"[?&]v=([A-Za-z0-9_-]{6,})", text)
+    if match:
+        return match.group(1)
+    match = re.search(r"youtu\.be/([A-Za-z0-9_-]{6,})", text)
+    if match:
+        return match.group(1)
+    return None
 
 
 def _is_relative_to(path: Path, other: Path) -> bool:

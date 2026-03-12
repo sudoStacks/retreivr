@@ -17,6 +17,7 @@ from metadata.naming import build_album_directory, build_track_filename
 from metadata.normalize import normalize_music_metadata
 from metadata.tagging_service import tag_file
 from metadata.types import CanonicalMetadata
+from library.provenance import build_file_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,18 @@ class DownloadWorker:
                         self._set_job_status(job, payload, JOB_STATUS_FAILED)
                         return {"status": JOB_STATUS_FAILED, "file_path": None}
                     try:
-                        tag_file(str(canonical_path), normalized_metadata)
+                        tag_file(
+                            str(canonical_path),
+                            normalized_metadata,
+                            provenance=build_file_provenance(
+                                job=job,
+                                source=(resolved_media or {}).get("source_id") or payload.get("source") or "music",
+                                source_id=(resolved_media or {}).get("video_id")
+                                or (resolved_media or {}).get("external_id")
+                                or payload.get("recording_mbid")
+                                or payload.get("mb_recording_id"),
+                            ),
+                        )
                     except Exception:
                         logger.exception("failed to tag canonical file path=%s", canonical_path)
                         self._set_job_status(job, payload, JOB_STATUS_FAILED)

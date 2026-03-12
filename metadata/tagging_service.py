@@ -31,6 +31,7 @@ def tag_file(
     metadata: CanonicalMetadata,
     *,
     source_title: str | None = None,
+    provenance: dict | None = None,
     allow_overwrite: bool = True,
     dry_run: bool = False,
 ) -> None:
@@ -52,6 +53,10 @@ def tag_file(
             "data": bytes(metadata.artwork),
             "mime": "image/jpeg",
         }
+    if isinstance(provenance, dict):
+        for key, value in provenance.items():
+            if value is not None and value != "":
+                tags[key] = value
     _apply_tags(
         path,
         tags,

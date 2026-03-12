@@ -145,7 +145,7 @@ from scheduler.jobs.spotify_playlist_watch import (
 from metadata.importers.dispatcher import import_playlist as import_playlist_file_bytes
 from engine.import_pipeline import process_imported_tracks
 from engine.import_m3u_builder import write_import_m3u_from_batch
-from library.reconcile import reconcile_music_library
+from library.reconcile import reconcile_library
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 2
@@ -6912,6 +6912,7 @@ def download_full_album(data: dict):
     if not release_group_mbid:
         raise HTTPException(status_code=400, detail="release_group_mbid required")
     force_redownload = bool((data or {}).get("force_redownload"))
+    destination = str((data or {}).get("destination") or (data or {}).get("destination_dir") or "").strip() or None
     requested_media_mode = str((data or {}).get("media_mode") or "").strip().lower()
     if requested_media_mode not in {"music", "music_video"}:
         requested_media_mode = "music"
@@ -7135,6 +7136,7 @@ def download_full_album(data: dict):
                 payload = {
                     "origin": "music_album",
                     "origin_id": album_run_id,
+                    "destination": destination,
                     "media_mode": requested_media_mode,
                     "media_intent": "music_track",
                     "force_redownload": force_redownload,
@@ -8701,7 +8703,7 @@ async def api_put_config(payload: dict = Body(...)):
 @app.post("/api/library/reconcile")
 async def api_reconcile_library():
     config = _read_config_or_404()
-    summary = reconcile_music_library(
+    summary = reconcile_library(
         db_path=app.state.paths.db_path,
         config=config if isinstance(config, dict) else {},
     )
