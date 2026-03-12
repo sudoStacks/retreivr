@@ -522,6 +522,95 @@ def test_album_download_enqueues_release_type_for_ep_context(monkeypatch) -> Non
     assert enqueued[0]["release_secondary_types"] == ["Compilation"]
 
 
+def test_album_download_preserves_selected_destination(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    class _MB:
+        def _call_with_retry(self, func):
+            return func()
+
+        def fetch_release_group_cover_art_url(self, _release_group_id, timeout=8):
+            _ = timeout
+            return "https://img.test/cover.jpg"
+
+        def cover_art_url(self, release_id):
+            return f"https://coverartarchive.org/release/{release_id}/front"
+
+    monkeypatch.setattr("api.main._mb_service", lambda: _MB())
+    monkeypatch.setattr("api.main._read_config_or_404", lambda: {"music_mb_binding_threshold": 0.78})
+
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_group_by_id",
+        lambda _rg, includes=None: {
+            "release-group": {
+                "release-list": [
+                    {"id": "rel-1", "status": "Official", "country": "US"},
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_by_id",
+        lambda _rid, includes=None: {
+            "release": {
+                "id": "rel-1",
+                "title": "Album Name",
+                "date": "2010-01-01",
+                "artist-credit": [{"name": "Artist Name"}],
+                "medium-list": [
+                    {
+                        "position": "1",
+                        "track-list": [
+                            {
+                                "position": "1",
+                                "title": "Track A",
+                                "recording": {"id": "rec-1", "title": "Track A", "length": "210000"},
+                            },
+                            {
+                                "position": "2",
+                                "title": "Track B",
+                                "recording": {"id": "rec-2", "title": "Track B", "length": "211000"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "api.main.resolve_best_mb_pair",
+        lambda _mb, *, track=None, **_kwargs: {
+            "recording_mbid": "rec-1" if track == "Track A" else "rec-2",
+            "mb_release_id": "rel-1",
+            "mb_release_group_id": "rg-1",
+            "artist": "Artist Name",
+            "album": "Album Name",
+            "track_number": 1 if track == "Track A" else 2,
+            "disc_number": 1,
+            "release_date": "2010",
+            "duration_ms": 210000 if track == "Track A" else 211000,
+        },
+    )
+
+    enqueued: list[dict] = []
+    monkeypatch.setattr("api.main._IntentQueueAdapter.enqueue", lambda self, payload: enqueued.append(dict(payload)))
+
+    response = client.post(
+        "/api/music/album/download",
+        json={
+            "release_group_mbid": "rg-1",
+            "destination": "Music/Albums",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(enqueued) == 2
+    assert all(item["destination"] == "Music/Albums" for item in enqueued)
+
+
 def test_music_album_run_summary_endpoint_writes_artifact_and_classifies_failures(monkeypatch, tmp_path) -> None:
     client = _build_client(monkeypatch)
     module = importlib.import_module("api.main")

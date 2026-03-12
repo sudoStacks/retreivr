@@ -492,14 +492,29 @@ def validate_config(config):
 
     final_format = config.get("final_format")
     music_final_format = config.get("music_final_format")
+    home_music_final_format = config.get("home_music_final_format")
+    home_music_video_final_format = config.get("home_music_video_final_format")
+    single_folder = config.get("single_download_folder")
     music_folder = config.get("music_download_folder")
+    home_music_folder = config.get("home_music_download_folder")
+    home_music_video_folder = config.get("home_music_video_download_folder")
+    if single_folder is not None and not isinstance(single_folder, str):
+        errors.append("single_download_folder must be a string")
     if music_folder is not None and not isinstance(music_folder, str):
         errors.append("music_download_folder must be a string")
+    if home_music_folder is not None and not isinstance(home_music_folder, str):
+        errors.append("home_music_download_folder must be a string")
+    if home_music_video_folder is not None and not isinstance(home_music_video_folder, str):
+        errors.append("home_music_video_download_folder must be a string")
 
     if final_format is not None and not isinstance(final_format, str):
         errors.append("final_format must be a string")
     if music_final_format is not None and not isinstance(music_final_format, str):
         errors.append("music_final_format must be a string")
+    if home_music_final_format is not None and not isinstance(home_music_final_format, str):
+        errors.append("home_music_final_format must be a string")
+    if home_music_video_final_format is not None and not isinstance(home_music_video_final_format, str):
+        errors.append("home_music_video_final_format must be a string")
 
     media_type = config.get("media_type")
     if media_type is not None and media_type not in {"music", "audio", "video"}:
