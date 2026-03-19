@@ -41,7 +41,7 @@ def test_duration_tolerance_config_changes_validation_outcome(monkeypatch) -> No
         "download.worker.record_downloaded_track",
         lambda playlist_id, isrc, file_path: recorded.append((playlist_id, isrc, file_path)),
     )
-    monkeypatch.setattr("download.worker.tag_file", lambda _path, _metadata: None)
+    monkeypatch.setattr("download.worker.tag_file", lambda _path, _metadata, **_kwargs: None)
 
     # Deterministic validator model: actual=1.20s, expected=1.00s (delta=0.20s).
     monkeypatch.setattr(

@@ -39,7 +39,7 @@ def test_full_pipeline_validation_failure_does_not_enable_idempotent_skip(tmp_pa
     # Force worker validation to fail before tagging/recording.
     monkeypatch.setattr("download.worker.validate_duration", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("download.worker.get_media_duration", lambda _path: 1.0)
-    monkeypatch.setattr("download.worker.tag_file", lambda _path, _metadata: None)
+    monkeypatch.setattr("download.worker.tag_file", lambda _path, _metadata, **_kwargs: None)
 
     # Ensure queued payload metadata includes expected_ms for validation gating.
     monkeypatch.setattr(

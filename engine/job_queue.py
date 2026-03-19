@@ -7303,8 +7303,25 @@ def atomic_move(src, dst):
     try:
         os.replace(src, dst)
     except OSError:
-        shutil.copy2(src, dst)
-        os.remove(src)
+        dst_dir = os.path.dirname(dst) or "."
+        os.makedirs(dst_dir, exist_ok=True)
+        fd, tmp_dst = tempfile.mkstemp(
+            prefix=".retreivr-move-",
+            suffix=os.path.splitext(dst)[1],
+            dir=dst_dir,
+        )
+        os.close(fd)
+        try:
+            shutil.copy2(src, tmp_dst)
+            os.replace(tmp_dst, dst)
+            os.remove(src)
+        except Exception:
+            try:
+                if os.path.exists(tmp_dst):
+                    os.remove(tmp_dst)
+            except Exception:
+                pass
+            raise
 
 
 def embed_metadata(local_file, meta, video_id, thumbs_dir):

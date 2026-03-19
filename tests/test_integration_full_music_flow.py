@@ -202,7 +202,7 @@ def test_integration_full_music_pipeline(
 
     captured_tags = {}
 
-    def _capture_tag_file(path: str, metadata_obj) -> None:
+    def _capture_tag_file(path: str, metadata_obj, **_kwargs) -> None:
         captured_tags["path"] = path
         captured_tags["title"] = metadata_obj.title
         captured_tags["artist"] = metadata_obj.artist
@@ -231,6 +231,7 @@ def test_integration_full_music_pipeline(
     assert "youtube" not in output_file.name.lower()
     assert "abc123" not in output_file.name.lower()
     assert output_file.name == "01 - My Song.mp3"
+    assert Path(captured_tags["path"]).name == "tmp-yt-source-abc123.mp3"
     assert captured_tags["title"] == "My Song"
     assert captured_tags["artist"] == "The Artist"
     assert captured_tags["album"] == "The Album"

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
@@ -31,6 +33,31 @@ JOB_ALLOWED_STATUSES = {
     JOB_STATUS_CANCELLED,
     JOB_STATUS_VALIDATION_FAILED,
 }
+
+
+def _atomic_move(src: str, dst: str) -> None:
+    try:
+        os.replace(src, dst)
+    except OSError:
+        dst_dir = os.path.dirname(dst) or "."
+        os.makedirs(dst_dir, exist_ok=True)
+        fd, tmp_dst = tempfile.mkstemp(
+            prefix=".retreivr-move-",
+            suffix=os.path.splitext(dst)[1],
+            dir=dst_dir,
+        )
+        os.close(fd)
+        try:
+            shutil.copy2(src, tmp_dst)
+            os.replace(tmp_dst, dst)
+            os.remove(src)
+        except Exception:
+            try:
+                if os.path.exists(tmp_dst):
+                    os.remove(tmp_dst)
+            except Exception:
+                pass
+            raise
 
 
 class _Downloader(Protocol):
@@ -118,14 +145,8 @@ class DownloadWorker:
                     canonical_path = root_path / Path(relative_layout)
                     ensure_parent_dir(canonical_path)
                     try:
-                        shutil.move(str(temp_path), str(canonical_path))
-                    except Exception:
-                        logger.exception("failed to move file to canonical path path=%s", canonical_path)
-                        self._set_job_status(job, payload, JOB_STATUS_FAILED)
-                        return {"status": JOB_STATUS_FAILED, "file_path": None}
-                    try:
                         tag_file(
-                            str(canonical_path),
+                            str(temp_path),
                             normalized_metadata,
                             provenance=build_file_provenance(
                                 job=job,
@@ -137,7 +158,13 @@ class DownloadWorker:
                             ),
                         )
                     except Exception:
-                        logger.exception("failed to tag canonical file path=%s", canonical_path)
+                        logger.exception("failed to tag temp music file path=%s", temp_path)
+                        self._set_job_status(job, payload, JOB_STATUS_FAILED)
+                        return {"status": JOB_STATUS_FAILED, "file_path": None}
+                    try:
+                        _atomic_move(str(temp_path), str(canonical_path))
+                    except Exception:
+                        logger.exception("failed to move tagged file to canonical path path=%s", canonical_path)
                         self._set_job_status(job, payload, JOB_STATUS_FAILED)
                         return {"status": JOB_STATUS_FAILED, "file_path": None}
                     # Record idempotency state only after download and tagging both succeed.

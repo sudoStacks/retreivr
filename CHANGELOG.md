@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.12 — Music Finalization Hardening
+
+### High-Level
+This release tightens the finalization path for music downloads so partially processed files are less likely to appear in the final library. It also hardens final file moves for cross-filesystem setups, where temp and destination paths may live on different mounts.
+
+### Changed
+- Music downloads now complete metadata tagging while still in the temp location before the final library move.
+- Music, video, and music-video finalization paths now use a safer destination-directory temp file strategy when a direct atomic rename is not possible across filesystems.
+- Music review/quarantine items now route into `__NEEDS_REVIEW__` so the folder stays pinned near the top when sorted alphabetically.
+
+### Fixed
+- Reduced the chance of exposing an untagged or partially processed music file at the final destination when tagging or post-processing fails.
+- Cross-filesystem finalization no longer falls back to a visible copy directly into the final destination path before completion.
+
 ## v0.9.11 — Provenance + Reconcile + Defaults Hardening
 
 ### High-Level
