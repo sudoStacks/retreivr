@@ -479,6 +479,7 @@ function setPage(page) {
     }
     setHomeSearchActive(Boolean(state.homeSearchRequestId || state.homeDirectPreview));
     updateHomeViewAdvancedLink();
+    refreshReviewQueue();
   } else {
     stopHomeResultPolling();
     updateHomeViewAdvancedLink();
@@ -7952,6 +7953,25 @@ function updateReviewToolbarState() {
   if (acceptAll) acceptAll.disabled = !hasPending;
 }
 
+function updateReviewPendingIndicators() {
+  const pendingCount = Array.isArray(state.reviewItems) ? state.reviewItems.length : 0;
+  const navBadge = $("#review-nav-badge");
+  if (navBadge) {
+    navBadge.textContent = String(pendingCount);
+    navBadge.classList.toggle("hidden", pendingCount <= 0);
+  }
+  const homeAlert = $("#home-review-alert");
+  const homeAlertText = $("#home-review-alert-text");
+  if (homeAlert && homeAlertText) {
+    if (pendingCount > 0) {
+      homeAlertText.textContent = `${pendingCount} item${pendingCount === 1 ? "" : "s"} waiting for review.`;
+      homeAlert.classList.remove("hidden");
+    } else {
+      homeAlert.classList.add("hidden");
+    }
+  }
+}
+
 function buildReviewMetricLabel(item, key, label, formatter = null) {
   const details = item?.candidate_details || {};
   let value = details[key];
@@ -7978,6 +7998,7 @@ function renderReviewQueue() {
   }
   const pendingCount = Array.isArray(state.reviewItems) ? state.reviewItems.length : 0;
   summaryEl.textContent = `Pending: ${pendingCount}`;
+  updateReviewPendingIndicators();
   const validIds = new Set((state.reviewItems || []).map((item) => String(item.id || "").trim()).filter(Boolean));
   state.reviewSelectedIds = new Set(getSelectedReviewIds().filter((id) => validIds.has(id)));
   updateReviewToolbarState();
@@ -8051,6 +8072,8 @@ async function refreshReviewQueue() {
     state.reviewItems = Array.isArray(data.items) ? data.items : [];
     renderReviewQueue();
   } catch (err) {
+    state.reviewItems = [];
+    updateReviewPendingIndicators();
     if (listEl) {
       listEl.innerHTML = `<div class="notice error">Review queue failed: ${escapeHtml(err.message || "Unknown error")}</div>`;
     }
@@ -8166,6 +8189,8 @@ function setupTimers() {
     if (state.currentPage === "status") {
       withPollingGuard(refreshSearchQueue);
     } else if (state.currentPage === "review") {
+      withPollingGuard(refreshReviewQueue);
+    } else if (state.currentPage === "home") {
       withPollingGuard(refreshReviewQueue);
     }
   }, 3000);
@@ -8776,6 +8801,13 @@ function bindEvents() {
   const reviewRefresh = $("#review-refresh");
   if (reviewRefresh) {
     reviewRefresh.addEventListener("click", refreshReviewQueue);
+  }
+  const homeReviewAlertOpen = $("#home-review-alert-open");
+  if (homeReviewAlertOpen) {
+    homeReviewAlertOpen.addEventListener("click", () => {
+      setPage("review");
+      window.location.hash = "review";
+    });
   }
   const reviewAcceptSelected = $("#review-accept-selected");
   if (reviewAcceptSelected) {

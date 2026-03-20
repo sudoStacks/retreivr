@@ -707,6 +707,26 @@ body.home-page .home-results {
   border-color: var(--accent);
 }
 
+.nav-button-with-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nav-count-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--accent);
+  color: #fff;
+}
+
 @media (min-width: 901px) {
   .top-nav {
     position: absolute;
@@ -727,6 +747,15 @@ body.home-page .home-results {
 body.home-page .home-search-actions {
   justify-content: center;
   gap: 10px;
+}
+
+.review-home-alert {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 body.home-page .home-search-toggles {

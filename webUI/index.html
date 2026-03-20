@@ -24,7 +24,10 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
-      <button class="button ghost small nav-button" data-page="review" type="button">Review</button>
+      <button class="button ghost small nav-button nav-button-with-count" data-page="review" type="button">
+        <span>Review</span>
+        <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
+      </button>
       <button class="button ghost small nav-button" data-page="info" type="button">Info</button>
       <button class="button ghost small nav-button" data-page="status" type="button">Status</button>
       <button class="button ghost small nav-button" data-page="config" data-hash="settings" type="button">Settings</button>
@@ -216,6 +219,10 @@
 
         <div id="home-search-message" class="notice" role="status">
           Press Enter or click Search to discover media
+        </div>
+        <div id="home-review-alert" class="notice review-home-alert hidden" role="status">
+          <span id="home-review-alert-text">Items are waiting for review.</span>
+          <button id="home-review-alert-open" class="button ghost small" type="button">Open Review Queue</button>
         </div>
       </div>
       <div class="home-results hidden" id="home-results">
