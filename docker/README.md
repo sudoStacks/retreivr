@@ -22,7 +22,7 @@ Use relative paths inside `config.json` (e.g. `folder: "YouTube/Channel"`).
 
 Version build arg
 ```bash
-docker build -f docker/Dockerfile --build-arg RETREIVR_VERSION=0.9.12 -t retreivr:latest .
+docker build -f docker/Dockerfile --build-arg RETREIVR_VERSION=0.9.13 -t retreivr:latest .
 ```
 
 Notes

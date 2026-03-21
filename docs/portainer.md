@@ -1,7 +1,7 @@
 # Retreivr — Portainer Deployment (Docker Standalone) — v0.9.1
 
 This guide shows how to deploy Retreivr using Portainer Stacks, using the already-published image.
-Example portainer-friendly docker-compose.yml file is located in /docker folder.
+Use the standard example at `docker/docker-compose.yml.example` for Portainer stacks as well.
 
 ## 1) Create host folders (persistent storage)
 

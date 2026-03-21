@@ -31,11 +31,11 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Used for intentional media consumption... avoid getting sucked into the algorithms
 - Optional Telegram summaries
 
-## 0.9.12 Highlights
-- Provenance tags embedded across music and video download paths
-- Library Reconcile workflow for importing existing media on disk into Retreivr state
-- Stronger destination/default behavior across Video, Music Video, and Music modes
-- Album-download destination handling fixed for Music workflows
+## 0.9.13 Highlights
+- Internal Review Queue for low-confidence music matches, with preview and accept/reject controls
+- Review items now stay out of `/downloads` until explicitly accepted
+- Home-page review alert and Review-nav badge for pending items
+- Recoverable watcher/metadata failures log more cleanly, with hardened review-path and AcoustID handling
 
 ---
 
@@ -124,7 +124,7 @@ Related controls:
 ---
 
 ## Upgrade Notes
-If you are upgrading to `0.9.12`, pull the latest image and restart:
+If you are upgrading to `0.9.13`, pull the latest image and restart:
 ```bash
 docker compose -f docker/docker-compose.yml pull
 docker compose -f docker/docker-compose.yml up -d

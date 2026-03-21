@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.13 — Review Queue + Recoverability Hardening
+
+### High-Level
+This release replaces the old filesystem-only music review hold area with a proper internal review queue and operator workflow. It also hardens recoverable runtime failure handling so transient watcher/metadata conditions are less noisy and less likely to look catastrophic in logs.
+
+### Added
+- Dedicated Review page in the web UI for low-confidence music matches.
+- Internal review queue storage under Retreivr-managed app data instead of the public `/downloads` tree.
+- Inline review preview, detailed quarantine reasons, and batch accept/reject controls.
+- Home-page pending-review alert and Review-nav badge count.
+
+### Changed
+- Accepted review items now move from internal quarantine storage into the canonical music library only after explicit operator approval.
+- Accepted review items now promote the original failed music job into a completed acquired file so future dedupe behaves correctly.
+
+### Fixed
+- Music review/quarantine jobs now execute correctly against the internal review storage root instead of failing path validation against `/downloads`.
+- AcoustID empty-result cases no longer crash the metadata worker.
+- Recoverable watcher supervisor network/DNS failures now log as warnings instead of full crash-style tracebacks.
+- Recoverable metadata-worker conditions now log more quietly instead of producing unnecessary stack traces.
+
 ## v0.9.12 — Music Finalization Hardening
 
 ### High-Level
