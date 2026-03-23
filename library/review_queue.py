@@ -110,6 +110,28 @@ def _safe_int(value: Any) -> int | None:
     return parsed if parsed >= 0 else None
 
 
+def _cleanup_empty_review_dirs(file_path: str | None, quarantine_root: str | None) -> None:
+    candidate = str(file_path or "").strip()
+    root = str(quarantine_root or "").strip()
+    if not candidate or not root:
+        return
+    try:
+        current = os.path.dirname(os.path.abspath(candidate))
+        stop_at = os.path.abspath(root)
+    except Exception:
+        return
+    if not current or not stop_at:
+        return
+    while current.startswith(stop_at):
+        if current == stop_at:
+            break
+        try:
+            os.rmdir(current)
+        except OSError:
+            break
+        current = os.path.dirname(current)
+
+
 def _normalize_status(value: Any) -> str:
     normalized = str(value or REVIEW_STATUS_PENDING).strip().lower()
     return normalized if normalized in _REVIEW_STATUSES else REVIEW_STATUS_PENDING
@@ -442,7 +464,10 @@ def accept_review_queue_items(db_path: str, item_ids: list[str]) -> dict[str, An
                 errors.append(f"{item_id}:not_pending")
                 continue
             try:
+                original_file_path = str(item.get("file_path") or "").strip() or None
+                quarantine_root = str(item.get("quarantine_root") or "").strip() or None
                 final_path, final_destination = _move_review_file_to_library(item)
+                _cleanup_empty_review_dirs(original_file_path, quarantine_root)
                 _record_history_for_accepted_review(db_path, item, final_path)
                 _record_review_isrc(item, final_path)
                 review_job_id = str(item.get("job_id") or "").strip()
@@ -521,6 +546,7 @@ def reject_review_queue_items(db_path: str, item_ids: list[str]) -> dict[str, An
             try:
                 if file_path and os.path.exists(file_path):
                     os.remove(file_path)
+                _cleanup_empty_review_dirs(file_path, item.get("quarantine_root"))
             except Exception as exc:
                 errors.append(f"{item_id}:delete_failed:{exc}")
                 continue

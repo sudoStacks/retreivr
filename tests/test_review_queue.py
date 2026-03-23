@@ -188,6 +188,8 @@ def test_accept_review_queue_item_moves_file_and_promotes_parent_job(tmp_path: P
     assert final_path.exists()
     assert str(final_path).startswith(str(downloads_root))
     assert not file_path.exists()
+    assert not (quarantine_root / "Artist" / "Album (2024)").exists()
+    assert not (quarantine_root / "Artist").exists()
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -244,6 +246,8 @@ def test_reject_review_queue_item_deletes_quarantine_file(tmp_path: Path) -> Non
     result = review_queue.reject_review_queue_items(db_path, ["review:rec-2:cand-2"])
     assert result["rejected"] == 1
     assert not file_path.exists()
+    assert not (quarantine_root / "Artist" / "Album").exists()
+    assert not (quarantine_root / "Artist").exists()
     rejected_item = review_queue.get_review_queue_item(db_path, "review:rec-2:cand-2")
     assert rejected_item is not None
     assert rejected_item["status"] == review_queue.REVIEW_STATUS_REJECTED
