@@ -3,6 +3,7 @@ Docker assets for Retreivr.
 Quick start
 - Build: `docker build -f docker/Dockerfile -t retreivr:latest .`
 - Compose: use `docker/docker-compose.yml.example` as your base.
+- Release asset: each tagged release also publishes `retreivr-docker-starter-<tag>.zip` with compose, env, config example, and runtime README.
 
 Ports
 - Internal container port: 8000

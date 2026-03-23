@@ -1,4 +1,4 @@
-# Retreivr — Portainer Deployment (Docker Standalone) — v0.9.1
+# Retreivr — Portainer Deployment (Docker Standalone)
 
 This guide shows how to deploy Retreivr using Portainer Stacks, using the already-published image.
 Use the standard example at `docker/docker-compose.yml.example` for Portainer stacks as well.
@@ -20,16 +20,16 @@ Portainer:
 - Name: `retreivr`
 - Method: Web editor
 
-Paste one of the compose files below and Deploy.
+Paste the standard compose example below and Deploy.
 
-## Option A: Docker Hub (pinned)
+## Example Stack (Docker Hub)
 
 ```yaml
 version: "3.9"
 
 services:
   retreivr:
-    image: retreivr/retreivr:0.9.1
+    image: sudostacks/retreivr:0.9.14
     container_name: retreivr
     ports:
       - "8090:8000"
@@ -45,27 +45,7 @@ services:
     restart: unless-stopped
 ```
 
-## Option B: GHCR (pinned)
-```yaml
-version: "3.9"
-
-services:
-  retreivr:
-    image: ghcr.io/sudoStacks/retreivr:0.9.1
-    container_name: retreivr
-    ports:
-      - "8090:8000"
-    environment:
-      - RETREIVR_HOST=0.0.0.0
-      - RETREIVR_PORT=8000
-    volumes:
-      - /srv/retreivr/downloads:/downloads
-      - /srv/retreivr/data:/data
-      - /srv/retreivr/config:/config
-      - /srv/retreivr/logs:/logs
-      - /srv/retreivr/tokens:/tokens
-    restart: unless-stopped
-```
+If you prefer GHCR, replace the image with `ghcr.io/sudostacks/retreivr:0.9.14`.
 
 ## 3) Configuration file
 

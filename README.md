@@ -37,6 +37,17 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Scheduled outbox ingestion that can write dataset updates and open/update a GitHub PR automatically
 - Runtime config changes now refresh the publish worker without a restart
 
+## Release Outputs
+- GitHub Container Registry image: `ghcr.io/sudostacks/retreivr:<tag>`
+- Docker Hub image: `sudostacks/retreivr:<tag>`
+- GitHub Release asset: `retreivr-docker-starter-<tag>.zip`
+
+The Docker starter bundle contains:
+- `docker-compose.yml`
+- `.env.example`
+- `config/config.json.example`
+- `README-runtime.md`
+
 ---
 
 ## Quick Start (Local Workstation)

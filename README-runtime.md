@@ -1,8 +1,8 @@
-# Retreivr Runtime Deployment
+# Retreivr Docker Starter Bundle
 
 ## What This Is
 
-This runtime bundle provides the minimum files required to run Retreivr with Docker, without cloning the full repository.
+This starter bundle provides the minimum files required to run Retreivr with Docker Compose, without cloning the full repository.
 
 ## Requirements
 
@@ -11,9 +11,9 @@ This runtime bundle provides the minimum files required to run Retreivr with Doc
 
 ## Setup Instructions
 
-### Step 1 — Download release bundle
+### Step 1 — Download starter bundle
 
-Download `retreivr-runtime-<version>.zip` from the GitHub Release.
+Download `retreivr-docker-starter-<version>.zip` from the GitHub Release assets.
 
 ### Step 2 — Extract files
 
@@ -54,12 +54,12 @@ docker compose up -d
 
 ## Versioning
 
-The runtime bundle version matches the Docker image tag for that release.
+The starter bundle version matches the Docker image tag for that release.
 
 ## Notes
 
 - Full source code and development files are available in the main repository.
-- The runtime bundle is intended for simplified Docker deployment only.
+- The starter bundle is intended for simplified Docker deployment only.
 - Optional custom search adapters can be defined in `config/custom_search_adapters.yaml`.
   - Start from `config/custom_search_adapters.example.yaml`.
   - Point `custom_search_adapters_file` in `config/config.json` to your YAML/JSON file path.
