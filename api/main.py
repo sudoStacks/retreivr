@@ -207,7 +207,7 @@ GITHUB_RELEASES_LATEST_URL = "https://api.github.com/repos/sudoStacks/retreivr/r
 _SEMVER_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$", re.IGNORECASE)
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
-MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024
+MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024
 SUPPORTED_IMPORT_EXTENSIONS = {".m3u", ".m3u8", ".csv", ".xml", ".plist", ".json"}
 IMPORT_JOB_TTL_SECONDS = 6 * 60 * 60
 _LAST_TRANSITION_EVENT: str | None = None
