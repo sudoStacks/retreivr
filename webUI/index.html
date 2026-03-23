@@ -594,6 +594,7 @@
             <a class="settings-nav-link" href="#settings-spotify" data-settings-link="spotify">Spotify</a>
             <a class="settings-nav-link settings-advanced-link" href="#settings-telegram" data-settings-link="telegram" data-settings-level="advanced">Telegram</a>
             <a class="settings-nav-link" href="#settings-tagging" data-settings-link="tagging">Tagging</a>
+            <a class="settings-nav-link" href="#settings-community-cache" data-settings-link="community-cache">Community Cache</a>
             <a class="settings-nav-link settings-advanced-link" href="#settings-runtime" data-settings-link="runtime" data-settings-level="advanced">Runtime</a>
           </nav>
           <label class="field short settings-mobile-jump">
@@ -606,6 +607,7 @@
               <option value="settings-spotify">Spotify</option>
               <option value="settings-telegram" data-settings-level="advanced">Telegram</option>
               <option value="settings-tagging">Tagging</option>
+              <option value="settings-community-cache">Community Cache</option>
               <option value="settings-runtime" data-settings-level="advanced">Runtime</option>
             </select>
           </label>
@@ -780,6 +782,46 @@
                   <div id="schedule-watcher-note" class="notice" style="display: none;">Watcher is active. Scheduler is optional and usually unnecessary.</div>
                   <div class="notice">Scheduled runs will not interrupt or overlap manual runs.</div>
                 </div>
+              </div>
+            </section>
+
+            <section id="settings-community-cache" class="settings-section" data-settings-section="community-cache">
+              <div class="settings-section-heading">Community Cache</div>
+              <div class="group">
+                <div class="group-title">Lookup</div>
+                <div class="grid two">
+                  <label class="field inline short">
+                    <span>Enable community cache lookup</span>
+                    <input id="cfg-community-cache-lookup-enabled" type="checkbox">
+                  </label>
+                </div>
+                <div class="notice">When enabled, Retreivr can seed music-track resolution from the shared community cache before falling back to full transport search.</div>
+              </div>
+              <div class="group">
+                <div class="group-title">Publish</div>
+                <div class="grid two">
+                  <label class="field inline short">
+                    <span>Enable publish proposals</span>
+                    <input id="cfg-community-cache-publish-enabled" type="checkbox">
+                  </label>
+                  <label class="field short">
+                    <span>Publish mode</span>
+                    <select id="cfg-community-cache-publish-mode">
+                      <option value="off">off</option>
+                      <option value="dry_run">dry_run</option>
+                      <option value="write_outbox">write_outbox</option>
+                    </select>
+                  </label>
+                  <label class="field short">
+                    <span>Minimum publish score</span>
+                    <input id="cfg-community-cache-publish-min-score" type="number" min="0" max="1" step="0.01" placeholder="0.78">
+                  </label>
+                  <label class="field full">
+                    <span>Publish outbox directory</span>
+                    <input id="cfg-community-cache-publish-outbox-dir" type="text" placeholder="">
+                  </label>
+                </div>
+                <div class="notice">`write_outbox` is the automatic local dump mode. When enabled, eligible verified matches are written to the outbox as downloads complete. `dry_run` logs what would be published without writing files.</div>
               </div>
             </section>
 

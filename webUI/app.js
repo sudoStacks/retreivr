@@ -13,6 +13,7 @@ const state = {
   currentPage: "home",
   reviewItems: [],
   reviewSelectedIds: new Set(),
+  reviewPreviewItemId: null,
   actionButtons: null,
   runtimeInfo: null,
   watcherStatus: null,
@@ -7109,6 +7110,15 @@ function renderConfig(cfg) {
   $("#cfg-home-music-video-download-folder").value = normalizeDownloadsRelative(
     cfg.home_music_video_download_folder ?? ""
   );
+  $("#cfg-community-cache-lookup-enabled").checked = !!(
+    cfg.community_cache_lookup_enabled ?? cfg.community_cache_enabled
+  );
+  $("#cfg-community-cache-publish-enabled").checked = !!cfg.community_cache_publish_enabled;
+  $("#cfg-community-cache-publish-mode").value = cfg.community_cache_publish_mode ?? "off";
+  $("#cfg-community-cache-publish-min-score").value = Number.isFinite(cfg.community_cache_publish_min_score)
+    ? Number(cfg.community_cache_publish_min_score)
+    : 0.78;
+  $("#cfg-community-cache-publish-outbox-dir").value = cfg.community_cache_publish_outbox_dir ?? "";
   $("#cfg-music-template").value = cfg.music_filename_template ?? "";
   $("#cfg-yt-dlp-cookies").value = cfg.yt_dlp_cookies ?? "";
   const musicMetaDefaults = {
@@ -7718,6 +7728,39 @@ function buildConfigFromForm() {
     delete base.home_music_video_download_folder;
   }
 
+  base.community_cache_lookup_enabled = !!$("#cfg-community-cache-lookup-enabled").checked;
+  base.community_cache_enabled = base.community_cache_lookup_enabled;
+  base.community_cache_publish_enabled = !!$("#cfg-community-cache-publish-enabled").checked;
+
+  const communityCachePublishMode = String(
+    $("#cfg-community-cache-publish-mode").value || "off"
+  ).trim().toLowerCase();
+  const allowedPublishModes = new Set(["off", "dry_run", "write_outbox"]);
+  if (!allowedPublishModes.has(communityCachePublishMode)) {
+    errors.push("Community cache publish mode must be off, dry_run, or write_outbox");
+  } else {
+    base.community_cache_publish_mode = communityCachePublishMode;
+  }
+
+  const publishMinScoreRaw = $("#cfg-community-cache-publish-min-score").value.trim();
+  if (publishMinScoreRaw) {
+    const publishMinScore = Number.parseFloat(publishMinScoreRaw);
+    if (!Number.isFinite(publishMinScore) || publishMinScore < 0 || publishMinScore > 1) {
+      errors.push("Community cache publish minimum score must be between 0 and 1");
+    } else {
+      base.community_cache_publish_min_score = publishMinScore;
+    }
+  } else {
+    delete base.community_cache_publish_min_score;
+  }
+
+  const publishOutboxDir = $("#cfg-community-cache-publish-outbox-dir").value.trim();
+  if (publishOutboxDir) {
+    base.community_cache_publish_outbox_dir = publishOutboxDir;
+  } else {
+    delete base.community_cache_publish_outbox_dir;
+  }
+
   base.schedule = buildSchedulePayloadFromForm();
 
   const telegramToken = $("#cfg-telegram-token").value.trim();
@@ -8016,6 +8059,7 @@ function renderReviewQueue() {
     const failureReason = String(item.failure_reason || "").trim();
     const durationDeltaMs = item?.candidate_details?.duration_delta_ms;
     const selected = state.reviewSelectedIds.has(id);
+    const previewOpen = state.reviewPreviewItemId === id;
     const previewTag = String(item.mime_type || "").startsWith("video/") ? "video" : "audio";
     const metrics = [
       buildReviewMetricLabel(item, "final_score", "Score", (value) => Number(value).toFixed(3)),
@@ -8046,13 +8090,13 @@ function renderReviewQueue() {
         </div>
         <div class="review-card-metrics">${metrics}</div>
         <div class="review-card-actions">
-          <button class="button ghost small" type="button" data-action="review-toggle-preview" data-review-id="${escapeHtml(id)}">Preview</button>
+          <button class="button ghost small" type="button" data-action="review-toggle-preview" data-review-id="${escapeHtml(id)}">${previewOpen ? "Hide Preview" : "Preview"}</button>
           <button class="button ghost small" type="button" data-action="review-accept" data-review-id="${escapeHtml(id)}">Accept</button>
           <button class="button ghost small remove" type="button" data-action="review-reject" data-review-id="${escapeHtml(id)}">Reject</button>
           <button class="button ghost small" type="button" data-action="review-accept-artist" data-review-id="${escapeHtml(id)}">Accept Artist</button>
           <button class="button ghost small" type="button" data-action="review-accept-album" data-review-id="${escapeHtml(id)}">Accept Album</button>
         </div>
-        <div class="review-preview hidden" data-review-preview="${escapeHtml(id)}">
+        <div class="review-preview ${previewOpen ? "" : "hidden"}" data-review-preview="${escapeHtml(id)}">
           <div class="meta">${escapeHtml(String(item.filename || "").trim())}</div>
           <${previewTag} controls preload="metadata" src="/api/review_queue/${encodeURIComponent(id)}/preview"></${previewTag}>
         </div>
@@ -8070,9 +8114,16 @@ async function refreshReviewQueue() {
     }
     const data = await fetchJson("/api/review_queue?status=pending&limit=300");
     state.reviewItems = Array.isArray(data.items) ? data.items : [];
+    if (state.reviewPreviewItemId) {
+      const previewStillExists = state.reviewItems.some((item) => String(item.id || "").trim() === state.reviewPreviewItemId);
+      if (!previewStillExists) {
+        state.reviewPreviewItemId = null;
+      }
+    }
     renderReviewQueue();
   } catch (err) {
     state.reviewItems = [];
+    state.reviewPreviewItemId = null;
     updateReviewPendingIndicators();
     if (listEl) {
       listEl.innerHTML = `<div class="notice error">Review queue failed: ${escapeHtml(err.message || "Unknown error")}</div>`;
@@ -8189,7 +8240,9 @@ function setupTimers() {
     if (state.currentPage === "status") {
       withPollingGuard(refreshSearchQueue);
     } else if (state.currentPage === "review") {
-      withPollingGuard(refreshReviewQueue);
+      if (!state.reviewPreviewItemId) {
+        withPollingGuard(refreshReviewQueue);
+      }
     } else if (state.currentPage === "home") {
       withPollingGuard(refreshReviewQueue);
     }
@@ -8844,12 +8897,8 @@ function bindEvents() {
         const reviewId = String(button.dataset.reviewId || "").trim();
         const item = (state.reviewItems || []).find((entry) => String(entry.id || "").trim() === reviewId);
         if (action === "review-toggle-preview") {
-          const panel = Array.from(reviewList.querySelectorAll("[data-review-preview]"))
-            .find((node) => String(node.dataset.reviewPreview || "").trim() === reviewId);
-          if (panel) {
-            panel.classList.toggle("hidden");
-            button.textContent = panel.classList.contains("hidden") ? "Preview" : "Hide Preview";
-          }
+          state.reviewPreviewItemId = state.reviewPreviewItemId === reviewId ? null : reviewId;
+          renderReviewQueue();
           return;
         }
         if (!item) {
