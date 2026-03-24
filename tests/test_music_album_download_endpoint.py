@@ -50,7 +50,7 @@ def _build_client(monkeypatch) -> TestClient:
     return TestClient(module.app)
 
 
-def test_album_download_returns_partial_success_instead_of_500(monkeypatch) -> None:
+def test_album_download_queues_tracks_when_resolver_enrichment_fails(monkeypatch) -> None:
     client = _build_client(monkeypatch)
     module = importlib.import_module("api.main")
 
@@ -141,13 +141,87 @@ def test_album_download_returns_partial_success_instead_of_500(monkeypatch) -> N
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["tracks_enqueued"] == 1
-    assert payload["failed_tracks_count"] == 1
-    assert len(payload["failed_tracks"]) == 1
-    assert payload["failed_tracks"][0]["track"] == "Track B"
-    assert "forced_track_failure" in payload["failed_tracks"][0]["reason"]
-    assert len(enqueued) == 1
+    assert payload["tracks_considered"] == 2
+    assert payload["tracks_enqueued"] == 2
+    assert payload["failed_tracks_count"] == 0
+    assert len(enqueued) == 2
+    assert {item["recording_mbid"] for item in enqueued} == {"rec-1", "rec-2"}
     assert enqueued[0].get("genre") is None
+
+
+def test_album_download_queues_tracks_when_resolver_returns_none(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    class _MB:
+        def _call_with_retry(self, func):
+            return func()
+
+        def fetch_release_group_cover_art_url(self, _release_group_id, timeout=8):
+            _ = timeout
+            return "https://img.test/cover.jpg"
+
+        def cover_art_url(self, release_id):
+            return f"https://coverartarchive.org/release/{release_id}/front"
+
+    monkeypatch.setattr("api.main._mb_service", lambda: _MB())
+    monkeypatch.setattr("api.main._read_config_or_404", lambda: {"music_mb_binding_threshold": 0.78})
+
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_group_by_id",
+        lambda _rg, includes=None: {
+            "release-group": {
+                "release-list": [
+                    {"id": "rel-1", "status": "Official", "country": "US"},
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(
+        module.musicbrainzngs,
+        "get_release_by_id",
+        lambda _rid, includes=None: {
+            "release": {
+                "id": "rel-1",
+                "title": "Album Name",
+                "date": "2010-01-01",
+                "artist-credit": [{"name": "Artist Name"}],
+                "medium-list": [
+                    {
+                        "position": "1",
+                        "track-list": [
+                            {
+                                "position": "1",
+                                "title": "Track A",
+                                "recording": {"id": "rec-1", "title": "Track A", "length": "210000"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+
+    monkeypatch.setattr("api.main.resolve_best_mb_pair", lambda *_args, **_kwargs: None)
+
+    enqueued: list[dict] = []
+    monkeypatch.setattr("api.main._IntentQueueAdapter.enqueue", lambda self, payload: enqueued.append(dict(payload)))
+
+    response = client.post(
+        "/api/music/album/download",
+        json={"release_group_mbid": "rg-1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tracks_considered"] == 1
+    assert payload["tracks_enqueued"] == 1
+    assert payload["failed_tracks_count"] == 0
+    assert len(enqueued) == 1
+    assert enqueued[0]["recording_mbid"] == "rec-1"
+    assert enqueued[0]["mb_release_id"] == "rel-1"
+    assert enqueued[0]["mb_release_group_id"] == "rg-1"
 
 
 def test_album_download_enforces_album_context_for_featured_tracks(monkeypatch) -> None:

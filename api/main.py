@@ -7308,6 +7308,7 @@ def download_full_album(data: dict):
     queue = _IntentQueueAdapter()
     engine = getattr(app.state, "worker_engine", None)
     store = getattr(engine, "store", None) if engine is not None else None
+    tracks_considered = 0
     tracks_enqueued = 0
     duplicate_tracks_count = 0
     duplicate_tracks = []
@@ -7334,6 +7335,7 @@ def download_full_album(data: dict):
             title = str(track.get("title") or recording.get("title") or "").strip()
             if not recording_mbid or not title:
                 continue
+            tracks_considered += 1
             artist = _credit_name(recording.get("artist-credit")) or _credit_name(track.get("artist-credit")) or _credit_name(release_artist_credit)
             duration_ms = recording.get("length") or track.get("length")
             try:
@@ -7346,32 +7348,33 @@ def download_full_album(data: dict):
                 track_number = None
 
             try:
-                resolved = resolve_best_mb_pair(
-                    mb,
-                    artist=artist or None,
-                    track=title,
-                    album=release_title,
-                    duration_ms=duration_ms_int,
-                    threshold=binding_threshold,
-                    max_duration_delta_ms=album_duration_delta_limit_ms,
-                )
+                resolved = None
+                try:
+                    resolved = resolve_best_mb_pair(
+                        mb,
+                        artist=artist or None,
+                        track=title,
+                        album=release_title,
+                        duration_ms=duration_ms_int,
+                        threshold=binding_threshold,
+                        max_duration_delta_ms=album_duration_delta_limit_ms,
+                    )
+                except Exception as resolve_exc:
+                    logger.info(
+                        "[MUSIC] album track resolver_enrichment_failed recording=%s track=%s reason=%s",
+                        recording_mbid,
+                        title,
+                        str(resolve_exc) or "resolver_failed",
+                    )
+
                 if not resolved:
                     reasons = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
-                    reason_text = ",".join(reasons) if reasons else "mb_pair_not_resolved"
                     logger.info(
-                        "[MUSIC] album track skipped recording=%s track=%s reasons=%s",
+                        "[MUSIC] album track using_release_metadata recording=%s track=%s resolver_reasons=%s",
                         recording_mbid,
                         title,
                         reasons,
                     )
-                    failed_tracks.append(
-                        {
-                            "recording_mbid": recording_mbid,
-                            "track": title,
-                            "reason": reason_text,
-                        }
-                    )
-                    continue
 
                 payload = {
                     "origin": "music_album",
@@ -7381,24 +7384,24 @@ def download_full_album(data: dict):
                     "media_mode": requested_media_mode,
                     "media_intent": "music_track",
                     "force_redownload": force_redownload,
-                    "artist": resolved.get("artist") or artist,
+                    "artist": artist or (resolved.get("artist") if isinstance(resolved, dict) else None),
                     "album": release_title,
-                    "album_artist": album_artist or (resolved.get("album_artist") or resolved.get("artist") or artist),
-                    "track": title,
-                    "recording_mbid": resolved.get("recording_mbid") or recording_mbid,
-                    "mb_recording_id": resolved.get("recording_mbid") or recording_mbid,
-                    "track_number": track_number or resolved.get("track_number"),
-                    "disc_number": disc_number or resolved.get("disc_number"),
+                    "album_artist": album_artist or artist or (resolved.get("album_artist") if isinstance(resolved, dict) else None),
+                    "track": title or (resolved.get("track") if isinstance(resolved, dict) else None),
+                    "recording_mbid": recording_mbid,
+                    "mb_recording_id": recording_mbid,
+                    "track_number": track_number or (resolved.get("track_number") if isinstance(resolved, dict) else None),
+                    "disc_number": disc_number or (resolved.get("disc_number") if isinstance(resolved, dict) else None),
                     "track_total": track_total or None,
                     "disc_total": disc_total,
-                    "release_date": release_date or resolved.get("release_date"),
+                    "release_date": release_date or (resolved.get("release_date") if isinstance(resolved, dict) else None),
                     "mb_release_id": release_mbid,
                     "mb_release_group_id": release_group_mbid,
                     "release_id": release_mbid,
                     "release_group_id": release_group_mbid,
                     "artwork_url": album_artwork_url,
                     "genre": album_genre or (resolved.get("genre") if isinstance(resolved, dict) else None),
-                    "duration_ms": resolved.get("duration_ms") or duration_ms_int,
+                    "duration_ms": duration_ms_int or (resolved.get("duration_ms") if isinstance(resolved, dict) else None),
                     "track_aliases": resolved.get("track_aliases") if isinstance(resolved, dict) else None,
                     "track_disambiguation": resolved.get("track_disambiguation") if isinstance(resolved, dict) else None,
                     "mb_recording_title": resolved.get("mb_recording_title") if isinstance(resolved, dict) else None,
@@ -7476,6 +7479,16 @@ def download_full_album(data: dict):
         },
     }
     summary_path = _write_music_album_run_summary(initial_summary)
+    logger.info(
+        "[MUSIC] album enqueue summary release_group=%s release=%s album_run_id=%s considered=%s queued=%s duplicates=%s failed=%s",
+        release_group_mbid,
+        release_mbid,
+        album_run_id,
+        tracks_considered,
+        tracks_enqueued,
+        duplicate_tracks_count,
+        len(failed_tracks),
+    )
 
     return {
         "status": "enqueued",
@@ -7483,6 +7496,7 @@ def download_full_album(data: dict):
         "run_summary_path": summary_path,
         "release_group_mbid": release_group_mbid,
         "release_mbid": release_mbid,
+        "tracks_considered": tracks_considered,
         "tracks_enqueued": tracks_enqueued,
         "duplicate_tracks_count": duplicate_tracks_count,
         "duplicate_tracks": duplicate_tracks,
