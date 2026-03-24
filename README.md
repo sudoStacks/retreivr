@@ -18,21 +18,8 @@
 
 ---
 
-## Hero Visual Placeholder
-Paste a wide screenshot here later.
-
-Suggested asset:
-- `docs/images/readme/hero-dashboard.png`
-
-Suggested content:
-- Full-width desktop screenshot of the Home or Status page
-- Show a polished, active system with queue activity and clean visual hierarchy
-- Crop tightly so the UI is readable in GitHub without opening the full image
-
-Recommended markdown to add later:
-```md
-![Retreivr dashboard overview](docs/images/readme/hero-dashboard.png)
-```
+## Interface Overview
+![Retreivr dashboard overview](docs/img/img-02.png)
 
 ## What Is Retreivr?
 Retreivr is a self-hosted acquisition engine for building and maintaining a clean local media archive.
@@ -57,44 +44,14 @@ Retreivr is not a streaming server. It is the acquisition layer.
 
 ## Product Tour
 
-### Visual Tour Placeholder 1
-Suggested asset:
-- `docs/images/readme/home-search-flow.png`
+### Search And Queue Flow
+![Home search and queue flow](docs/img/img-04.png)
 
-Suggested content:
-- Home page showing a search or URL submission flow
-- Demonstrate how a user moves from intent to queue quickly
+### Music Mode Resolution
+![Music Mode resolution workflow](docs/img/img-03.png)
 
-Recommended markdown to add later:
-```md
-![Home search and queue flow](docs/images/readme/home-search-flow.png)
-```
-
-### Visual Tour Placeholder 2
-Suggested asset:
-- `docs/images/readme/music-mode-results.png`
-
-Suggested content:
-- Music Mode search results, album resolution, or full-album workflow
-- Best if it shows why Retreivr is strong at clean music acquisition
-
-Recommended markdown to add later:
-```md
-![Music Mode resolution workflow](docs/images/readme/music-mode-results.png)
-```
-
-### Visual Tour Placeholder 3
-Suggested asset:
-- `docs/images/readme/operations-status.png`
-
-Suggested content:
-- Operations Status card with queue health, active jobs, and import visibility
-- Show the system looking operational, not idle and empty
-
-Recommended markdown to add later:
-```md
-![Operations Status and queue visibility](docs/images/readme/operations-status.png)
-```
+### Operations Status
+![Operations Status and queue visibility](docs/img/img-05.png)
 
 ## What It Does
 - Acquire from direct URLs, playlists, search, Spotify sync, and library-import files
@@ -144,20 +101,8 @@ Retreivr follows a simple acquisition model:
 4. Media is downloaded, post-processed, tagged, and finalized.
 5. The UI and API expose status, logs, review states, and recovery actions.
 
-## Architecture Diagram Placeholder
-Suggested asset:
-- `docs/images/readme/architecture-flow.png`
-
-Suggested content:
-- A simple left-to-right flow diagram
-- Inputs: URL / Search / Playlist / Spotify / XML Import
-- Core: Resolver / Queue / Workers / Metadata / Review
-- Outputs: Final Library / Status / Metrics / API
-
-Recommended markdown to add later:
-```md
-![Retreivr architecture flow](docs/images/readme/architecture-flow.png)
-```
+## Architecture Diagram
+![Retreivr architecture flow](docs/img/arch.svg)
 
 ## Quick Start
 
