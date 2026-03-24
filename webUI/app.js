@@ -2020,26 +2020,35 @@ async function refreshStatus() {
   try {
     const data = await fetchJson("/api/status");
     const runningChip = $("#status-running");
-    if (data.running) {
-      runningChip.textContent = "running";
-      runningChip.classList.add("running");
-      runningChip.classList.remove("idle");
-    } else {
-      runningChip.textContent = "idle";
-      runningChip.classList.add("idle");
-      runningChip.classList.remove("running");
-    }
-
-    $("#status-run-id").textContent = `run: ${data.run_id || "-"}`;
-    $("#status-started").textContent = formatTimestamp(data.started_at) || "-";
-    $("#status-finished").textContent = formatTimestamp(data.finished_at) || "-";
     const watcher = data.watcher || {};
     const scheduler = data.scheduler || {};
-    const watcherText = watcher.enabled
-      ? (watcher.paused ? "paused (downtime)" : "enabled")
-      : "disabled";
+    const automation = data.automation_effective || {};
+    const watcherEffective = automation.watcher || {};
+    const schedulerEffective = automation.scheduler || {};
+    const watcherText = !watcherEffective.config_enabled
+      ? "disabled"
+      : (watcher.paused ? "paused" : (watcherEffective.effective_enabled ? "enabled" : "inactive"));
     $("#status-watcher").textContent = watcherText;
-    $("#status-scheduler").textContent = scheduler.enabled ? "enabled" : "disabled";
+    $("#status-scheduler").textContent = !scheduler.enabled
+      ? "disabled"
+      : (schedulerEffective.effective_enabled ? "enabled" : "inactive");
+    const watcherGroup = $("#status-group-watcher");
+    if (watcherGroup) {
+      watcherGroup.classList.toggle("hidden", !watcher.enabled);
+    }
+    const spotifyCfg = (state.config && typeof state.config.spotify === "object")
+      ? state.config.spotify
+      : {};
+    const spotifyGroup = $("#status-group-spotify");
+    const spotifyOperatorsEnabled = !!(
+      spotifyCfg.sync_liked_songs ||
+      spotifyCfg.sync_saved_albums ||
+      spotifyCfg.sync_user_playlists ||
+      (Array.isArray(spotifyCfg.watch_playlists) && spotifyCfg.watch_playlists.length > 0)
+    );
+    if (spotifyGroup) {
+      spotifyGroup.classList.toggle("hidden", !spotifyOperatorsEnabled);
+    }
     state.watcherStatus = watcher;
     const scheduleNote = $("#schedule-watcher-note");
     if (scheduleNote) {
@@ -2063,10 +2072,6 @@ async function refreshStatus() {
     $("#status-error").textContent = errorText || "-";
     $("#status-success").textContent = (status.run_successes || []).length;
     $("#status-failed").textContent = failures.length;
-    $("#status-playlist").textContent = status.current_playlist_id || "-";
-    $("#status-video").textContent = status.current_video_title || status.current_video_id || "-";
-    $("#status-phase").textContent = status.current_phase || "-";
-
     const queue = data.queue || {};
     const queueCounts = queue.counts || {};
     const queuedCount = Number.isFinite(Number(queueCounts.queued)) ? Number(queueCounts.queued) : 0;
@@ -2087,6 +2092,13 @@ async function refreshStatus() {
     const queueSummary = [];
     if (claimedCount > 0) {
       queueSummary.push(`${claimedCount} claimed`);
+    }
+    const staleCounts = queue.stale_counts || {};
+    const staleTotal = ["queued", "claimed", "downloading", "postprocessing"]
+      .map((key) => Number(staleCounts[key] || 0))
+      .reduce((sum, value) => sum + value, 0);
+    if (staleTotal > 0) {
+      queueSummary.push(`${staleTotal} stale`);
     }
     queueSummary.push(`${failedCount} failed backlog`);
     queueSummary.push(`${cancelledCount} cancelled`);
@@ -2120,6 +2132,9 @@ async function refreshStatus() {
     let importEnqueued = Number.isFinite(Number(importCurrent.enqueued))
       ? Number(importCurrent.enqueued)
       : 0;
+    let importDuplicateSkipped = Number.isFinite(Number(importCurrent.duplicate_skipped))
+      ? Number(importCurrent.duplicate_skipped)
+      : 0;
     let importFailed = Number.isFinite(Number(importCurrent.failed))
       ? Number(importCurrent.failed)
       : 0;
@@ -2137,6 +2152,14 @@ async function refreshStatus() {
         `${importEnqueued} enqueued`,
       ]
       : ["Idle"];
+    if (importActive && importDuplicateSkipped > 0) {
+      importSummaryParts.push(`${importDuplicateSkipped} linked`);
+    }
+    const importTopFailures = importCurrent.top_rejection_reasons || {};
+    const topFailureEntry = Object.entries(importTopFailures)[0];
+    if (importActive && topFailureEntry && topFailureEntry[0]) {
+      importSummaryParts.push(`top fail: ${topFailureEntry[0]} (${topFailureEntry[1]})`);
+    }
     if (importActive && importCurrent.message) {
       importSummaryParts.push(importCurrent.message);
     }
@@ -2173,6 +2196,50 @@ async function refreshStatus() {
         importSummaryParts.push(`${postprocessingCount} postprocessing`);
       }
     }
+
+    let operationsState = "idle";
+    if (importActive) {
+      operationsState = "importing";
+    } else if (downloadingCount > 0) {
+      operationsState = "downloading";
+    } else if (postprocessingCount > 0) {
+      operationsState = "postprocessing";
+    } else if (claimedCount > 0) {
+      operationsState = "claimed";
+    } else if (queuedCount > 0) {
+      operationsState = "queued";
+    } else if ((data.watcher_status || {}).state === "polling") {
+      operationsState = "polling";
+    }
+    if ((data.watcher_status || {}).state === "paused_downtime") {
+      operationsState = "downtime";
+    }
+    runningChip.textContent = operationsState;
+    if (operationsState === "idle") {
+      runningChip.classList.add("idle");
+      runningChip.classList.remove("running");
+    } else {
+      runningChip.classList.add("running");
+      runningChip.classList.remove("idle");
+    }
+
+    const currentBatchId = importCurrent.import_batch_id || importCurrent.batch_id || "";
+    const queueHeadJob = activeJobs[0] || null;
+    const liveRunId = currentBatchId || data.run_id || queueHeadJob?.id || "";
+    $("#status-run-id").textContent = `run: ${liveRunId || "-"}`;
+    $("#status-started").textContent = formatTimestamp(
+      importCurrent.started_at || queue.last_job_started_at || data.started_at,
+    ) || "-";
+    $("#status-finished").textContent = formatTimestamp(
+      queue.last_job_completed_at || importCurrent.finished_at || data.finished_at,
+    ) || "-";
+    $("#status-success").textContent = String(
+      Number.isFinite(Number(queueCounts.completed)) ? Number(queueCounts.completed) : ((data.status || {}).run_successes || []).length,
+    );
+    $("#status-failed").textContent = String(
+      Number.isFinite(Number(queueCounts.failed)) ? Number(queueCounts.failed) : ((data.status || {}).run_failures || []).length,
+    );
+
     $("#status-import-state").textContent = importStateText;
     $("#status-import-active-count").textContent = String(importActiveCount);
     $("#status-import-processed").textContent = `${importProcessed} / ${importTotal}`;
@@ -2180,6 +2247,10 @@ async function refreshStatus() {
     $("#status-import-failed").textContent = String(importFailed);
     $("#status-import-progress-bar").style.width = `${importPercent}%`;
     $("#status-import-progress-text").textContent = importSummaryParts.join(" · ");
+    const downloadGroup = $("#status-group-download");
+    if (downloadGroup) {
+      downloadGroup.classList.remove("hidden");
+    }
 
     const watcherStatus = data.watcher_status || {};
     const watcherStateMap = {
@@ -2189,6 +2260,7 @@ async function refreshStatus() {
       batch_ready: "Batch ready",
       running_batch: "Running batch",
       paused_import: "Paused (playlist import active)",
+      paused_downtime: "Paused (downtime)",
       disabled: "Disabled",
     };
     const watcherState = watcherStatus.state || (watcher.enabled ? "idle" : "disabled");
@@ -2256,6 +2328,16 @@ async function refreshStatus() {
       $("#status-playlist-progress-text").textContent = "-";
       $("#status-playlist-progress-bar").style.width = "0%";
     }
+    const transferGroup = $("#status-group-transfer");
+    const hasTransferProgress = (
+      activeQueueCount > 0 ||
+      importActive ||
+      Boolean(status.last_completed) ||
+      (Number.isFinite(status.progress_total) && Number.isFinite(status.progress_current))
+    );
+    if (transferGroup) {
+      transferGroup.classList.toggle("hidden", !hasTransferProgress);
+    }
 
     const videoContainer = $("#status-video-progress");
     const queueHead = downloadingJobs[0] || null;
@@ -2314,40 +2396,42 @@ async function refreshStatus() {
     }
 
     try {
-      const spotifyStatus = await fetchJson("/api/spotify/status");
-      const oauthConnected = !!spotifyStatus.oauth_connected;
-      const oauthEl = $("#spotify-status-oauth");
-      if (oauthEl) {
-        oauthEl.textContent = oauthConnected ? "Connected" : "Not connected";
-      }
-      const likedEl = $("#spotify-status-liked");
-      if (likedEl) {
-        if (spotifyStatus.liked_sync_running) {
-          likedEl.textContent = "Running...";
-          likedEl.classList.add("running");
-        } else {
-          likedEl.classList.remove("running");
-          likedEl.textContent = formatTimestamp(spotifyStatus.last_liked_sync) || "-";
+      if (spotifyOperatorsEnabled) {
+        const spotifyStatus = await fetchJson("/api/spotify/status");
+        const oauthConnected = !!spotifyStatus.oauth_connected;
+        const oauthEl = $("#spotify-status-oauth");
+        if (oauthEl) {
+          oauthEl.textContent = oauthConnected ? "Connected" : "Not connected";
         }
-      }
-      const savedEl = $("#spotify-status-saved");
-      if (savedEl) {
-        if (spotifyStatus.saved_sync_running) {
-          savedEl.textContent = "Running...";
-          savedEl.classList.add("running");
-        } else {
-          savedEl.classList.remove("running");
-          savedEl.textContent = formatTimestamp(spotifyStatus.last_saved_sync) || "-";
+        const likedEl = $("#spotify-status-liked");
+        if (likedEl) {
+          if (spotifyStatus.liked_sync_running) {
+            likedEl.textContent = "Running...";
+            likedEl.classList.add("running");
+          } else {
+            likedEl.classList.remove("running");
+            likedEl.textContent = formatTimestamp(spotifyStatus.last_liked_sync) || "-";
+          }
         }
-      }
-      const playlistsEl = $("#spotify-status-playlists");
-      if (playlistsEl) {
-        if (spotifyStatus.playlists_sync_running) {
-          playlistsEl.textContent = "Running...";
-          playlistsEl.classList.add("running");
-        } else {
-          playlistsEl.classList.remove("running");
-          playlistsEl.textContent = formatTimestamp(spotifyStatus.last_playlists_sync) || "-";
+        const savedEl = $("#spotify-status-saved");
+        if (savedEl) {
+          if (spotifyStatus.saved_sync_running) {
+            savedEl.textContent = "Running...";
+            savedEl.classList.add("running");
+          } else {
+            savedEl.classList.remove("running");
+            savedEl.textContent = formatTimestamp(spotifyStatus.last_saved_sync) || "-";
+          }
+        }
+        const playlistsEl = $("#spotify-status-playlists");
+        if (playlistsEl) {
+          if (spotifyStatus.playlists_sync_running) {
+            playlistsEl.textContent = "Running...";
+            playlistsEl.classList.add("running");
+          } else {
+            playlistsEl.classList.remove("running");
+            playlistsEl.textContent = formatTimestamp(spotifyStatus.last_playlists_sync) || "-";
+          }
         }
       }
     } catch (err) {

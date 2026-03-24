@@ -1463,6 +1463,166 @@ body.home-page .home-candidate-source-tag {
   border-radius: 12px;
 }
 
+#status-panel .operations-status {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+#status-panel .status-overview-card {
+  padding: 18px 20px;
+  background:
+    linear-gradient(135deg, rgba(89, 176, 255, 0.12), rgba(89, 176, 255, 0.02) 48%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0));
+  border-color: rgba(89, 176, 255, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+#status-panel .status-overview-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+#status-panel .status-overview-primary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+}
+
+#status-panel .status-operator-grid,
+#status-panel .status-metric-grid {
+  display: grid;
+  gap: 12px;
+}
+
+#status-panel .status-operator-grid {
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  min-width: min(100%, 320px);
+}
+
+#status-panel .status-metric-grid {
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  margin-top: 16px;
+}
+
+#status-panel .status-sections {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 18px;
+}
+
+#status-panel .status-group {
+  grid-column: span 6;
+  min-width: 0;
+  height: 100%;
+  padding: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0));
+}
+
+#status-panel .status-group-wide {
+  grid-column: 1 / -1;
+}
+
+#status-panel .status-group .row {
+  align-items: stretch;
+}
+
+#status-panel .status-group .stat,
+#status-panel .status-overview-card .stat {
+  min-width: 0;
+  flex: 1 1 140px;
+  padding: 12px 13px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.045);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+#status-panel .status-summary {
+  display: block;
+  line-height: 1.5;
+  font-size: 12.5px;
+}
+
+#status-panel #status-group-health .row {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+#status-panel #status-group-health .label {
+  flex: 0 0 auto;
+  min-width: 96px;
+}
+
+#status-panel #status-group-health #status-error {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#status-panel #status-group-transfer #status-video-progress {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+#status-panel .group-title {
+  margin-bottom: 12px;
+}
+
+#status-panel .progress {
+  height: 12px;
+  background: rgba(15, 23, 36, 0.78);
+}
+
+#status-panel .progress-bar {
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.18);
+}
+
+#status-panel .settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#status-panel #status-cancel {
+  white-space: nowrap;
+}
+
+#status-panel .chip {
+  padding: 7px 14px;
+  font-size: 11px;
+  letter-spacing: 1.2px;
+}
+
+#status-panel .meta#status-run-id {
+  font-size: 12.5px;
+}
+
+#status-panel .status-group .row + .row {
+  margin-top: 2px;
+}
+
+:root[data-theme="light"] #status-panel .status-overview-card {
+  background:
+    linear-gradient(135deg, rgba(43, 111, 247, 0.10), rgba(43, 111, 247, 0.02) 52%),
+    #ffffff;
+  border-color: rgba(43, 111, 247, 0.16);
+}
+
+:root[data-theme="light"] #status-panel .status-group {
+  background: linear-gradient(180deg, rgba(43, 111, 247, 0.02), rgba(15, 23, 42, 0));
+}
+
+:root[data-theme="light"] #status-panel .status-group .stat,
+:root[data-theme="light"] #status-panel .status-overview-card .stat {
+  background: rgba(15, 23, 42, 0.025);
+}
+
 .group-title {
   font-size: 13px;
   font-weight: 700;
@@ -1533,6 +1693,31 @@ body.home-page .home-footer-brand .sudostacks-logo {
 }
 
 @media (max-width: 900px) {
+  #status-panel .panel-header-row {
+    align-items: flex-start;
+  }
+
+  #status-panel .settings-header-actions {
+    width: 100%;
+  }
+
+  #status-panel #status-cancel {
+    width: 100%;
+  }
+
+  #status-panel .status-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #status-panel .status-sections {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #status-panel .status-group,
+  #status-panel .status-group-wide {
+    grid-column: auto;
+  }
+
   body.home-page .home-footer-brand .sudostacks-logo {
     height: 44px;
     max-width: min(280px, 82vw);
@@ -1540,6 +1725,30 @@ body.home-page .home-footer-brand .sudostacks-logo {
 }
 
 @media (max-width: 600px) {
+  #status-panel .status-overview-card,
+  #status-panel .status-group {
+    padding: 14px;
+  }
+
+  #status-panel .status-overview-top {
+    flex-direction: column;
+  }
+
+  #status-panel .status-operator-grid,
+  #status-panel .status-metric-grid,
+  #status-panel .status-sections {
+    grid-template-columns: 1fr;
+  }
+
+  #status-panel .status-overview-primary {
+    align-items: flex-start;
+  }
+
+  #status-panel .status-group .stat,
+  #status-panel .status-overview-card .stat {
+    padding: 11px 12px;
+  }
+
   body.home-page .home-footer-brand {
     margin-top: 6px;
   }

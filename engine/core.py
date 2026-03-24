@@ -811,6 +811,12 @@ def init_db(db_path):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_videos_playlist ON playlist_videos (playlist_id)")
     ensure_download_jobs_table(conn)
+    try:
+        from engine.import_pipeline import ensure_import_batch_tables
+
+        ensure_import_batch_tables(conn)
+    except Exception:
+        logging.exception("Failed to ensure import batch tables")
     conn.commit()
     return conn
 

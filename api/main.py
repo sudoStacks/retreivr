@@ -144,7 +144,11 @@ from scheduler.jobs.spotify_playlist_watch import (
     spotify_user_playlists_watch_job,
 )
 from metadata.importers.dispatcher import import_playlist as import_playlist_file_bytes
-from engine.import_pipeline import process_imported_tracks
+from engine.import_pipeline import (
+    get_import_batch_summary,
+    list_recent_import_batches,
+    process_imported_tracks,
+)
 from engine.import_m3u_builder import write_import_m3u_from_batch
 from library.reconcile import reconcile_library
 from library.review_queue import (
@@ -475,7 +479,14 @@ def _get_playlist_import_snapshot() -> dict:
         "active": _playlist_imports_active(),
         "active_count": _playlist_imports_active_count(),
         "current_job": None,
+        "recent_batches": [],
     }
+    db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+    if db_path:
+        try:
+            snapshot["recent_batches"] = list_recent_import_batches(db_path, limit=5)
+        except Exception:
+            logging.exception("Failed to load recent import batches")
     lock = getattr(app.state, "playlist_import_jobs_lock", None)
     jobs = getattr(app.state, "playlist_import_jobs", None)
     if lock is None or not isinstance(jobs, dict):
@@ -497,18 +508,31 @@ def _get_playlist_import_snapshot() -> dict:
         "job_id": current.get("job_id"),
         "state": current.get("state"),
         "phase": current.get("phase"),
+        "current_phase_detail": current.get("current_phase_detail"),
         "message": current.get("message"),
         "total_tracks": current.get("total_tracks"),
         "processed_tracks": current.get("processed_tracks"),
         "resolved": current.get("resolved"),
         "unresolved": current.get("unresolved"),
         "enqueued": current.get("enqueued"),
+        "duplicate_skipped": current.get("duplicate_skipped"),
         "failed": current.get("failed"),
+        "top_rejection_reasons": current.get("top_rejection_reasons"),
+        "selected_bucket_counts": current.get("selected_bucket_counts"),
+        "import_batch_id": current.get("import_batch_id"),
         "error": current.get("error"),
         "started_at": current.get("started_at"),
         "finished_at": current.get("finished_at"),
         "updated_at": current.get("updated_at"),
     }
+    import_batch_id = str(current.get("import_batch_id") or "").strip()
+    if import_batch_id and db_path:
+        try:
+            batch_summary = get_import_batch_summary(db_path, import_batch_id)
+            if batch_summary:
+                snapshot["current_batch"] = batch_summary
+        except Exception:
+            logging.exception("Failed to load current import batch summary")
     return snapshot
 
 
@@ -525,6 +549,15 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
         },
         "active_count": 0,
         "active_jobs": [],
+        "counts_by_origin": {},
+        "stale_counts": {
+            "queued": 0,
+            "claimed": 0,
+            "downloading": 0,
+            "postprocessing": 0,
+        },
+        "last_job_started_at": None,
+        "last_job_completed_at": None,
         "runtime_metrics": {},
     }
     db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
@@ -545,6 +578,19 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
             key = str(row["status"] or "").strip().lower()
             if key in summary["counts"]:
                 summary["counts"][key] = int(row["count"] or 0)
+
+        cur.execute(
+            """
+            SELECT COALESCE(origin, 'unknown') AS origin, status, COUNT(*) AS count
+            FROM download_jobs
+            GROUP BY COALESCE(origin, 'unknown'), status
+            """
+        )
+        for row in cur.fetchall():
+            origin = str(row["origin"] or "unknown").strip() or "unknown"
+            status = str(row["status"] or "").strip().lower()
+            summary["counts_by_origin"].setdefault(origin, {})
+            summary["counts_by_origin"][origin][status] = int(row["count"] or 0)
 
         summary["active_count"] = int(
             summary["counts"]["queued"]
@@ -595,6 +641,37 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
             }
             for row in cur.fetchall()
         ]
+        cur.execute(
+            """
+            SELECT id, status, queued, claimed, downloading, postprocessing, updated_at, progress_updated_at
+            FROM download_jobs
+            WHERE status IN ('queued', 'claimed', 'downloading', 'postprocessing')
+            """
+        )
+        now_dt = datetime.now(timezone.utc)
+        for row in cur.fetchall():
+            status = str(row["status"] or "").strip().lower()
+            ts = None
+            if status == "queued":
+                ts = _parse_iso(row["queued"] or row["updated_at"])
+                threshold = 30 * 60
+            elif status == "claimed":
+                ts = _parse_iso(row["claimed"] or row["updated_at"])
+                threshold = 20 * 60
+            else:
+                ts = _parse_iso(row["progress_updated_at"] or row[status] or row["updated_at"])
+                threshold = 60 * 60
+            if ts is not None and (now_dt - ts).total_seconds() > threshold:
+                summary["stale_counts"][status] = int(summary["stale_counts"].get(status, 0) or 0) + 1
+
+        cur.execute("SELECT MAX(COALESCE(claimed, downloading, queued)) AS started_at FROM download_jobs")
+        started_row = cur.fetchone()
+        if started_row:
+            summary["last_job_started_at"] = started_row["started_at"]
+        cur.execute("SELECT MAX(completed) AS completed_at FROM download_jobs WHERE status='completed'")
+        completed_row = cur.fetchone()
+        if completed_row:
+            summary["last_job_completed_at"] = completed_row["completed_at"]
     except sqlite3.OperationalError as exc:
         msg = str(exc).lower()
         if "no such table" not in msg and "no such column" not in msg:
@@ -662,12 +739,17 @@ def _run_playlist_import_job(
             _update_playlist_import_job(
                 job_id,
                 phase=snapshot.get("phase") or "resolving",
+                current_phase_detail=snapshot.get("current_phase_detail"),
                 total_tracks=int(snapshot.get("total_tracks") or total_tracks),
                 processed_tracks=int(snapshot.get("processed_tracks") or 0),
                 resolved=int(snapshot.get("resolved_count") or 0),
                 unresolved=int(snapshot.get("unresolved_count") or 0),
                 enqueued=int(snapshot.get("enqueued_count") or 0),
+                duplicate_skipped=int(snapshot.get("duplicate_skipped_count") or 0),
                 failed=int(snapshot.get("failed_count") or 0),
+                top_rejection_reasons=snapshot.get("top_rejection_reasons") or {},
+                selected_bucket_counts=snapshot.get("selected_bucket_counts") or {},
+                batch_id=snapshot.get("batch_id"),
                 message="Resolving tracks and enqueueing jobs...",
             )
 
@@ -695,7 +777,11 @@ def _run_playlist_import_job(
             resolved=int(getattr(result, "resolved_count", 0) or 0),
             unresolved=int(getattr(result, "unresolved_count", 0) or 0),
             enqueued=int(getattr(result, "enqueued_count", 0) or 0),
+            duplicate_skipped=int(getattr(result, "duplicate_skipped_count", 0) or 0),
             failed=int(getattr(result, "failed_count", 0) or 0),
+            current_phase_detail=str(getattr(result, "current_phase_detail", "") or "completed"),
+            top_rejection_reasons=getattr(result, "top_rejection_reasons", {}) or {},
+            selected_bucket_counts=getattr(result, "selected_bucket_counts", {}) or {},
             import_batch_id=import_batch_id,
             error=None,
             finished_at=datetime.now(timezone.utc).isoformat(),
@@ -5247,6 +5333,21 @@ async def _watcher_supervisor():
                 0,
                 int(WATCHER_QUIET_WINDOW_SECONDS - (time.monotonic() - batch_state["last_detection_ts"])),
             )
+        if downtime.get("enabled") and downtime_active:
+            sleep_seconds = 60.0
+            if next_allowed_dt is not None:
+                until_resume = max(0.0, (next_allowed_dt - now).total_seconds())
+                if until_resume > 0:
+                    sleep_seconds = min(60.0, max(1.0, until_resume))
+            _set_watcher_status(
+                "paused_downtime",
+                pending_playlists_count=pending_count,
+                quiet_window_remaining_sec=None,
+                batch_active=batch_state["batch_active"],
+                next_poll_ts=_format_iso(next_allowed_dt) if next_allowed_dt else None,
+            )
+            await asyncio.sleep(sleep_seconds)
+            continue
         if (pending_count and batch_state["last_detection_ts"] is not None
                 and not batch_state["batch_active"]):
             elapsed = time.monotonic() - batch_state["last_detection_ts"]
@@ -5442,23 +5543,6 @@ async def _watcher_supervisor():
             )
         else:
             _set_watcher_status("idle", pending_playlists_count=pending_count, quiet_window_remaining_sec=None, batch_active=batch_state["batch_active"])
-
-        if downtime.get("enabled") and downtime_active:
-            sleep_seconds = 60.0
-            if next_allowed_dt is not None:
-                until_resume = max(0.0, (next_allowed_dt - now).total_seconds())
-                if until_resume > 0:
-                    # Poll at most once per minute but wake exactly at boundary when close.
-                    sleep_seconds = min(60.0, max(1.0, until_resume))
-            _set_watcher_status(
-                "paused_downtime",
-                pending_playlists_count=pending_count,
-                quiet_window_remaining_sec=None,
-                batch_active=batch_state["batch_active"],
-                next_poll_ts=_format_iso(next_allowed_dt) if next_allowed_dt else None,
-            )
-            await asyncio.sleep(sleep_seconds)
-            continue
 
         watch_state = _read_watch_state(app.state.paths.db_path)
         if app.state.was_in_downtime:
@@ -5854,24 +5938,17 @@ def _set_watcher_status(state=None, **fields):
     if state and state != prev_state:
         _log_transition("WATCHER_STATE", from_state=prev_state or "-", to_state=state)
         status["state"] = state
-        if state == "polling":
-            logging.info("Watcher state → polling")
-        elif state == "waiting_quiet_window":
-            remaining = fields.get("quiet_window_remaining_sec")
-            if remaining is None:
-                remaining = WATCHER_QUIET_WINDOW_SECONDS
-            logging.info("Watcher state → waiting_quiet_window (%ss)", remaining)
-        elif state == "batch_ready":
-            logging.info("Watcher state → batch_ready")
-        elif state == "running_batch":
-            count = fields.get("pending_playlists_count")
-            if count is None:
-                count = 0
-            logging.info("Watcher state → running_batch playlists=%s", count)
-        elif state == "disabled":
-            logging.info("Watcher state → disabled")
-        else:
-            logging.info("Watcher state → %s", state)
+        logging.info(
+            {
+                "message": "watcher_state_changed",
+                "from_state": prev_state,
+                "to_state": state,
+                "pending_playlists_count": fields.get("pending_playlists_count"),
+                "batch_active": fields.get("batch_active"),
+                "quiet_window_remaining_sec": fields.get("quiet_window_remaining_sec"),
+                "next_poll_ts": fields.get("next_poll_ts"),
+            }
+        )
     for key, value in fields.items():
         status[key] = value
 
@@ -6559,6 +6636,15 @@ async def get_import_playlist_job(job_id: str):
     if not status_entry:
         raise HTTPException(status_code=404, detail="import_job_not_found")
     status_entry["active"] = bool(status_entry.get("state") in {"queued", "parsing", "resolving"})
+    import_batch_id = str(status_entry.get("import_batch_id") or "").strip()
+    db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+    if import_batch_id and db_path:
+        try:
+            batch_summary = get_import_batch_summary(db_path, import_batch_id)
+            if batch_summary:
+                status_entry["batch_summary"] = batch_summary
+        except Exception:
+            logging.exception("Failed to load import batch summary")
     return {"job_id": normalized, "status": status_entry}
 
 

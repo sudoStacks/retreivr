@@ -271,43 +271,106 @@
       <div id="review-list" class="review-list"></div>
     </section>
     <section class="panel full" id="status-panel" data-page="status">
-      <div class="panel-title">Operations Status (Live)</div>
-      <div class="stack">
-        <div class="row">
-          <span class="chip" id="status-running">idle</span>
-          <span class="meta" id="status-run-id">run: -</span>
+      <div class="panel-header-row">
+        <div class="panel-title">Operations Status (Live)</div>
+        <div class="settings-header-actions">
+          <button id="status-cancel" class="button remove small" type="button">Kill downloads in progress</button>
         </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Started</span>
-            <span id="status-started">-</span>
+      </div>
+      <div class="operations-status">
+        <div class="group status-overview-card">
+          <div class="status-overview-top">
+            <div class="status-overview-primary">
+              <span class="chip" id="status-running">idle</span>
+              <span class="meta" id="status-run-id">run: -</span>
+            </div>
+            <div class="status-operator-grid">
+              <div class="stat">
+                <span class="label">Watcher</span>
+                <span id="status-watcher">-</span>
+              </div>
+              <div class="stat">
+                <span class="label">Scheduler</span>
+                <span id="status-scheduler">-</span>
+              </div>
+            </div>
           </div>
-          <div class="stat">
-            <span class="label">Finished</span>
-            <span id="status-finished">-</span>
+          <div class="status-metric-grid">
+            <div class="stat">
+              <span class="label">Started</span>
+              <span id="status-started">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Finished</span>
+              <span id="status-finished">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Success</span>
+              <span id="status-success">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Failed</span>
+              <span id="status-failed">0</span>
+            </div>
           </div>
         </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Success</span>
-            <span id="status-success">0</span>
+        <div class="status-sections">
+        <div class="group status-group" id="status-group-download">
+          <div class="group-title">Download Status</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">State</span>
+              <span id="status-import-state">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Active flows</span>
+              <span id="status-import-active-count">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Processed</span>
+              <span id="status-import-processed">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Enqueued</span>
+              <span id="status-import-enqueued">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Failed</span>
+              <span id="status-import-failed">0</span>
+            </div>
           </div>
-          <div class="stat">
-            <span class="label">Failed</span>
-            <span id="status-failed">0</span>
+          <div class="progress">
+            <div id="status-import-progress-bar" class="progress-bar"></div>
+          </div>
+          <div class="row">
+            <span class="meta status-summary" id="status-import-progress-text">-</span>
           </div>
         </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Watcher</span>
-            <span id="status-watcher">-</span>
+        <div class="group status-group" id="status-group-queue">
+          <div class="group-title">Queue Health</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">Active jobs</span>
+              <span id="status-queue-active">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Downloading</span>
+              <span id="status-queue-downloading">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Queued</span>
+              <span id="status-queue-queued">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Post-processing</span>
+              <span id="status-queue-postprocessing">0</span>
+            </div>
           </div>
-          <div class="stat">
-            <span class="label">Scheduler</span>
-            <span id="status-scheduler">-</span>
+          <div class="row">
+            <span class="meta status-summary" id="status-queue-summary">-</span>
           </div>
         </div>
-        <div class="group">
+        <div class="group status-group" id="status-group-watcher">
           <div class="group-title">Watcher Status</div>
           <div class="row">
             <div class="stat">
@@ -340,7 +403,7 @@
             </div>
           </div>
         </div>
-        <div class="group">
+        <div class="group status-group" id="status-group-spotify">
           <div class="group-title">Spotify Sync Status</div>
           <div class="row">
             <div class="stat">
@@ -363,94 +426,25 @@
             </div>
           </div>
         </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Active playlist</span>
-            <span id="status-playlist">-</span>
-          </div>
-          <div class="stat">
-            <span class="label">Active video</span>
-            <span id="status-video">-</span>
-          </div>
-        </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Phase</span>
-            <span id="status-phase">-</span>
-          </div>
-        </div>
-        <div class="group">
-          <div class="group-title">Queue Activity</div>
+        <div class="group status-group status-group-wide" id="status-group-transfer">
+          <div class="group-title">Transfer Progress</div>
           <div class="row">
             <div class="stat">
-              <span class="label">Active jobs</span>
-              <span id="status-queue-active">0</span>
+              <span class="label">Last completed</span>
+              <span id="status-last-completed">-</span>
             </div>
             <div class="stat">
-              <span class="label">Downloading</span>
-              <span id="status-queue-downloading">0</span>
-            </div>
-            <div class="stat">
-              <span class="label">Queued</span>
-              <span id="status-queue-queued">0</span>
-            </div>
-            <div class="stat">
-              <span class="label">Post-processing</span>
-              <span id="status-queue-postprocessing">0</span>
-            </div>
-          </div>
-          <div class="row">
-            <span class="meta" id="status-queue-summary">-</span>
-          </div>
-        </div>
-        <div class="group">
-          <div class="group-title">Playlist Import Activity</div>
-          <div class="row">
-            <div class="stat">
-              <span class="label">State</span>
-              <span id="status-import-state">-</span>
-            </div>
-            <div class="stat">
-              <span class="label">Active import jobs</span>
-              <span id="status-import-active-count">0</span>
-            </div>
-            <div class="stat">
-              <span class="label">Processed</span>
-              <span id="status-import-processed">-</span>
-            </div>
-            <div class="stat">
-              <span class="label">Enqueued</span>
-              <span id="status-import-enqueued">0</span>
-            </div>
-            <div class="stat">
-              <span class="label">Failed</span>
-              <span id="status-import-failed">0</span>
+              <span class="label">Current queue progress</span>
+              <span id="status-playlist-progress-text">-</span>
             </div>
           </div>
           <div class="progress">
-            <div id="status-import-progress-bar" class="progress-bar"></div>
+            <div id="status-playlist-progress-bar" class="progress-bar"></div>
           </div>
-          <div class="row">
-            <span class="meta" id="status-import-progress-text">-</span>
-          </div>
-        </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Last completed</span>
-            <span id="status-last-completed">-</span>
-          </div>
-          <div class="stat">
-            <span class="label">Playlist progress</span>
-            <span id="status-playlist-progress-text">-</span>
-          </div>
-        </div>
-        <div class="progress">
-          <div id="status-playlist-progress-bar" class="progress-bar"></div>
-        </div>
-        <div id="status-video-progress" class="stack hidden">
+          <div id="status-video-progress" class="stack hidden">
           <div class="row">
             <div class="stat">
-              <span class="label">Video progress</span>
+              <span class="label">Current transfer</span>
               <span id="status-video-progress-text">-</span>
             </div>
             <span id="status-video-progress-meta" class="meta">-</span>
@@ -459,11 +453,15 @@
             <div id="status-video-progress-bar" class="progress-bar"></div>
           </div>
         </div>
-        <div class="row">
+        </div>
+        <div class="group status-group" id="status-group-health">
+          <div class="group-title">Operations Health</div>
+          <div class="row">
           <span class="label">Last error</span>
           <span id="status-error" class="meta">-</span>
         </div>
-        <div class="group">
+        </div>
+        <div class="group status-group status-group-wide">
           <div class="group-title">Music failures</div>
           <div class="row">
             <div class="stat">
@@ -476,8 +474,6 @@
           <div id="music-failures-message" class="notice" role="status"></div>
           <div id="music-failures-list" class="stack"></div>
         </div>
-        <div class="row">
-          <button id="status-cancel" class="button remove small" type="button">Kill downloads in progress</button>
         </div>
       </div>
     </section>

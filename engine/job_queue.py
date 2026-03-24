@@ -271,6 +271,9 @@ _COMMUNITY_PUBLISH_RECENT_MAX_ENTRIES = 4096
 _COMMUNITY_PUBLISH_RECENT_WINDOW_SECONDS = 24 * 3600
 _MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS = 6 * 3600
 _MUSIC_CANDIDATE_FAILURE_MIN_COUNT = 1
+_IMPORT_DUPLICATE_STALE_QUEUED_SECONDS = 30 * 60
+_IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS = 20 * 60
+_IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS = 60 * 60
 
 
 @dataclass(frozen=True)
@@ -307,6 +310,16 @@ class DownloadJob:
 
 def utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _parse_iso_datetime(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _log_event(level, message, **fields):
@@ -961,6 +974,137 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def _classify_duplicate_row(
+        self,
+        row,
+        *,
+        now_dt=None,
+        queued_stale_seconds=_IMPORT_DUPLICATE_STALE_QUEUED_SECONDS,
+        claimed_stale_seconds=_IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS,
+        downloading_stale_seconds=_IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS,
+    ):
+        if not row:
+            return None
+        if isinstance(row, sqlite3.Row):
+            row = dict(row)
+        now_dt = now_dt or datetime.now(timezone.utc)
+        status = str(row.get("status") or "").strip().lower()
+        timestamp_field = None
+        stale_threshold = None
+        classification = "duplicate_existing"
+        stale = False
+        if status == JOB_STATUS_COMPLETED:
+            classification = "completed_valid" if self._row_has_valid_output(row) else "completed_invalid"
+        elif status in {JOB_STATUS_FAILED, JOB_STATUS_CANCELLED, JOB_STATUS_SKIPPED_DUPLICATE}:
+            classification = "terminal_retryable"
+        elif status == JOB_STATUS_QUEUED:
+            timestamp_field = row.get("queued") or row.get("updated_at") or row.get("created_at")
+            stale_threshold = max(60, int(queued_stale_seconds or _IMPORT_DUPLICATE_STALE_QUEUED_SECONDS))
+            classification = "active_existing"
+        elif status == JOB_STATUS_CLAIMED:
+            timestamp_field = row.get("claimed") or row.get("updated_at") or row.get("created_at")
+            stale_threshold = max(60, int(claimed_stale_seconds or _IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS))
+            classification = "active_existing"
+        elif status == JOB_STATUS_DOWNLOADING:
+            timestamp_field = row.get("progress_updated_at") or row.get("downloading") or row.get("updated_at") or row.get("created_at")
+            stale_threshold = max(60, int(downloading_stale_seconds or _IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS))
+            classification = "active_existing"
+        elif status == JOB_STATUS_POSTPROCESSING:
+            timestamp_field = row.get("postprocessing") or row.get("updated_at") or row.get("created_at")
+            stale_threshold = max(60, int(downloading_stale_seconds or _IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS))
+            classification = "active_existing"
+        if timestamp_field and stale_threshold:
+            ts = _parse_iso_datetime(timestamp_field)
+            if ts is not None and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts is not None and (now_dt - ts).total_seconds() > stale_threshold:
+                stale = True
+                classification = f"stale_{status}"
+        return {
+            "job_id": row.get("id"),
+            "status": status,
+            "classification": classification,
+            "stale": stale,
+            "trace_id": row.get("trace_id"),
+            "canonical_id": row.get("canonical_id"),
+            "file_path": row.get("file_path"),
+        }
+
+    def classify_duplicate_job(
+        self,
+        *,
+        canonical_id=None,
+        url=None,
+        destination=None,
+        now_iso=None,
+        queued_stale_seconds=_IMPORT_DUPLICATE_STALE_QUEUED_SECONDS,
+        claimed_stale_seconds=_IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS,
+        downloading_stale_seconds=_IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS,
+    ):
+        if not canonical_id and not url:
+            return None
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            clauses = []
+            params = []
+            dest_clause = "resolved_destination=?" if destination is not None else "resolved_destination IS NULL"
+            if canonical_id:
+                candidate_ids = _candidate_canonical_ids(canonical_id)
+                placeholders = ", ".join("?" for _ in candidate_ids)
+                clauses.append(f"(canonical_id IN ({placeholders}) AND {dest_clause})")
+                params.extend(candidate_ids)
+                if destination is not None:
+                    params.append(destination)
+            if url:
+                clauses.append(f"(url=? AND {dest_clause})")
+                params.append(url)
+                if destination is not None:
+                    params.append(destination)
+            if not clauses:
+                return None
+            status_placeholders = ", ".join("?" for _ in (
+                JOB_STATUS_COMPLETED,
+                JOB_STATUS_QUEUED,
+                JOB_STATUS_CLAIMED,
+                JOB_STATUS_DOWNLOADING,
+                JOB_STATUS_POSTPROCESSING,
+                JOB_STATUS_FAILED,
+                JOB_STATUS_CANCELLED,
+                JOB_STATUS_SKIPPED_DUPLICATE,
+            ))
+            cur.execute(
+                f"""
+                SELECT * FROM download_jobs
+                WHERE ({' OR '.join(clauses)})
+                  AND status IN ({status_placeholders})
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (
+                    *params,
+                    JOB_STATUS_COMPLETED,
+                    JOB_STATUS_QUEUED,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                    JOB_STATUS_FAILED,
+                    JOB_STATUS_CANCELLED,
+                    JOB_STATUS_SKIPPED_DUPLICATE,
+                ),
+            )
+            row = cur.fetchone()
+            now_dt = _parse_iso_datetime(now_iso) if now_iso else datetime.now(timezone.utc)
+            return self._classify_duplicate_row(
+                row,
+                now_dt=now_dt,
+                queued_stale_seconds=queued_stale_seconds,
+                claimed_stale_seconds=claimed_stale_seconds,
+                downloading_stale_seconds=downloading_stale_seconds,
+            )
+        finally:
+            conn.close()
+
     def _is_requeueable_duplicate(self, job):
         if not job:
             return False
@@ -1130,12 +1274,77 @@ class DownloadJobStore:
                     destination=destination,
                 )
             if duplicate_job:
+                duplicate_state = self.classify_duplicate_job(
+                    canonical_id=canonical_id,
+                    url=url,
+                    destination=destination,
+                )
                 if duplicate_job.status in {
                     JOB_STATUS_QUEUED,
                     JOB_STATUS_CLAIMED,
                     JOB_STATUS_DOWNLOADING,
                     JOB_STATUS_POSTPROCESSING,
                 }:
+                    duplicate_classification = str((duplicate_state or {}).get("classification") or "").strip()
+                    if duplicate_classification.startswith("stale_"):
+                        _log_event(
+                            logging.INFO,
+                            "queue_stale_job_detected",
+                            job_id=duplicate_job.id,
+                            trace_id=duplicate_job.trace_id,
+                            canonical_id=canonical_id,
+                            status=duplicate_job.status,
+                            classification=duplicate_classification,
+                        )
+                    else:
+                        if log_duplicate_event:
+                            _log_event(
+                                logging.INFO,
+                                "job_skipped_duplicate",
+                                job_id=duplicate_job.id,
+                                trace_id=duplicate_job.trace_id,
+                                origin=origin,
+                                origin_id=origin_id,
+                                source=source,
+                                url=url,
+                                destination=destination,
+                                canonical_id=canonical_id,
+                                status=duplicate_job.status,
+                            )
+                        return duplicate_job.id, False, "duplicate"
+                if duplicate_state and str(duplicate_state.get("classification") or "").startswith("stale_"):
+                    requeued = self._requeue_existing_job(
+                        job_id=duplicate_job.id,
+                        origin=origin,
+                        origin_id=origin_id,
+                        media_type=media_type,
+                        media_intent=media_intent,
+                        source=source,
+                        url=url,
+                        input_url=input_url,
+                        canonical_url=canonical_url,
+                        external_id=external_id,
+                        max_attempts=max_attempts,
+                        output_template_json=safe_json_dumps(output_template) if output_template else None,
+                        destination=destination,
+                        canonical_id=canonical_id,
+                    )
+                    if requeued:
+                        _log_event(
+                            logging.INFO,
+                            "queue_recovered_job",
+                            job_id=duplicate_job.id,
+                            trace_id=duplicate_job.trace_id,
+                            origin=origin,
+                            origin_id=origin_id,
+                            source=source,
+                            url=url,
+                            destination=destination,
+                            canonical_id=canonical_id,
+                            previous_status=duplicate_job.status,
+                            classification=duplicate_state.get("classification"),
+                        )
+                        return duplicate_job.id, True, "requeued"
                     if log_duplicate_event:
                         _log_event(
                             logging.INFO,
