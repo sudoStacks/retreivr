@@ -8746,6 +8746,38 @@ async def clear_failed_download_jobs():
     return safe_json({"deleted": deleted_count, "before": before_count, "remaining": max(0, before_count - deleted_count)})
 
 
+@app.post("/api/download_jobs/cancel_active")
+async def cancel_active_download_jobs():
+    store = DownloadJobStore(app.state.paths.db_path)
+    cancelled = int(
+        store.cancel_jobs_by_statuses(
+            ["claimed", "downloading", "postprocessing"],
+            reason="cancel_active_requested",
+        )
+        or 0
+    )
+    return safe_json({"cancelled": cancelled})
+
+
+@app.post("/api/download_jobs/recover_stale")
+async def recover_stale_download_jobs():
+    store = DownloadJobStore(app.state.paths.db_path)
+    result = store.recover_stale_jobs(reason="manual_stale_recovery")
+    return safe_json(result if isinstance(result, dict) else {"recovered": 0, "job_ids": []})
+
+
+@app.post("/api/download_jobs/clear_queue")
+async def clear_pending_download_jobs():
+    store = DownloadJobStore(app.state.paths.db_path)
+    deleted = int(
+        store.clear_jobs_by_statuses(
+            ["queued", "claimed", "downloading", "postprocessing"],
+        )
+        or 0
+    )
+    return safe_json({"deleted": deleted})
+
+
 class ReviewQueueActionPayload(BaseModel):
     item_ids: list[str]
 

@@ -273,8 +273,11 @@
     <section class="panel full" id="status-panel" data-page="status">
       <div class="panel-header-row">
         <div class="panel-title">Operations Status (Live)</div>
-        <div class="settings-header-actions">
-          <button id="status-cancel" class="button remove small" type="button">Kill downloads in progress</button>
+        <div class="settings-header-actions status-action-row">
+          <button id="status-cancel-active" class="button ghost small" type="button">Cancel Active</button>
+          <button id="status-recover-stale" class="button ghost small" type="button">Recover Stale Jobs</button>
+          <button id="status-clear-failed" class="button ghost small" type="button">Clear Failed</button>
+          <button id="status-clear-queue" class="button remove small" type="button">Clear Queue</button>
         </div>
       </div>
       <div class="operations-status">

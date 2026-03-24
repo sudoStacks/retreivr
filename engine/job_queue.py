@@ -1815,6 +1815,141 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def cancel_jobs_by_statuses(self, statuses, *, reason=None):
+        normalized = [
+            str(status or "").strip().lower()
+            for status in (statuses or [])
+            if str(status or "").strip()
+        ]
+        if not normalized:
+            return 0
+        now = utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            placeholders = ", ".join("?" for _ in normalized)
+            cur.execute(
+                f"""
+                UPDATE download_jobs
+                SET status=?, canceled=?, updated_at=?, last_error=?
+                WHERE status IN ({placeholders})
+                """,
+                (
+                    JOB_STATUS_CANCELLED,
+                    now,
+                    now,
+                    reason,
+                    *normalized,
+                ),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
+    def clear_jobs_by_statuses(self, statuses):
+        normalized = [
+            str(status or "").strip().lower()
+            for status in (statuses or [])
+            if str(status or "").strip()
+        ]
+        if not normalized:
+            return 0
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            placeholders = ", ".join("?" for _ in normalized)
+            cur.execute(
+                f"DELETE FROM download_jobs WHERE status IN ({placeholders})",
+                tuple(normalized),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
+    def recover_stale_jobs(
+        self,
+        *,
+        queued_stale_seconds=_IMPORT_DUPLICATE_STALE_QUEUED_SECONDS,
+        claimed_stale_seconds=_IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS,
+        downloading_stale_seconds=_IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS,
+        include_queued=False,
+        reason="Recovered stale job",
+    ):
+        statuses = [JOB_STATUS_CLAIMED, JOB_STATUS_DOWNLOADING, JOB_STATUS_POSTPROCESSING]
+        if include_queued:
+            statuses.append(JOB_STATUS_QUEUED)
+        conn = self._connect()
+        recovered = 0
+        recovered_ids: list[str] = []
+        try:
+            cur = conn.cursor()
+            placeholders = ", ".join("?" for _ in statuses)
+            cur.execute(
+                f"SELECT * FROM download_jobs WHERE status IN ({placeholders}) ORDER BY created_at ASC",
+                tuple(statuses),
+            )
+            rows = cur.fetchall()
+            now_dt = datetime.now(timezone.utc)
+            stale_rows = []
+            for row in rows:
+                classified = self._classify_duplicate_row(
+                    row,
+                    now_dt=now_dt,
+                    queued_stale_seconds=queued_stale_seconds,
+                    claimed_stale_seconds=claimed_stale_seconds,
+                    downloading_stale_seconds=downloading_stale_seconds,
+                )
+                if classified and str(classified.get("classification") or "").startswith("stale_"):
+                    stale_rows.append((dict(row), classified))
+            if not stale_rows:
+                return {"recovered": 0, "job_ids": []}
+            now_iso = utc_now()
+            cur.execute("BEGIN IMMEDIATE")
+            for row, classified in stale_rows:
+                cur.execute(
+                    """
+                    UPDATE download_jobs
+                    SET status=?,
+                        queued=?,
+                        claimed=NULL,
+                        downloading=NULL,
+                        postprocessing=NULL,
+                        updated_at=?,
+                        last_error=?,
+                        progress_downloaded_bytes=NULL,
+                        progress_total_bytes=NULL,
+                        progress_percent=NULL,
+                        progress_speed_bps=NULL,
+                        progress_eta_seconds=NULL,
+                        progress_updated_at=NULL
+                    WHERE id=?
+                    """,
+                    (
+                        JOB_STATUS_QUEUED,
+                        now_iso,
+                        now_iso,
+                        f"{reason} ({classified.get('classification')})",
+                        row.get("id"),
+                    ),
+                )
+                if cur.rowcount:
+                    recovered += 1
+                    recovered_ids.append(str(row.get("id") or ""))
+                    _log_event(
+                        logging.INFO,
+                        "queue_recovered_job",
+                        job_id=row.get("id"),
+                        trace_id=row.get("trace_id"),
+                        previous_status=row.get("status"),
+                        classification=classified.get("classification"),
+                    )
+            conn.commit()
+            return {"recovered": recovered, "job_ids": recovered_ids}
+        finally:
+            conn.close()
+
     def record_failure(self, job, *, error_message, retryable, retry_delay_seconds):
         attempts = job.attempts + 1
         now = utc_now()

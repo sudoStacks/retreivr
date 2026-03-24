@@ -1587,9 +1587,10 @@ body.home-page .home-candidate-source-tag {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
-#status-panel #status-cancel {
+#status-panel .status-action-row .button {
   white-space: nowrap;
 }
 

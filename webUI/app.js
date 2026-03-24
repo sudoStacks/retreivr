@@ -2386,9 +2386,21 @@ async function refreshStatus() {
       $("#status-video-progress-meta").textContent = "-";
     }
 
-    const cancelBtn = $("#status-cancel");
-    if (cancelBtn) {
-      cancelBtn.disabled = !(Boolean(data.running) || activeQueueCount > 0);
+    const cancelActiveBtn = $("#status-cancel-active");
+    if (cancelActiveBtn) {
+      cancelActiveBtn.disabled = !(claimedCount > 0 || downloadingCount > 0 || postprocessingCount > 0);
+    }
+    const recoverStaleBtn = $("#status-recover-stale");
+    if (recoverStaleBtn) {
+      recoverStaleBtn.disabled = !(staleTotal > 0);
+    }
+    const clearFailedBtn = $("#status-clear-failed");
+    if (clearFailedBtn) {
+      clearFailedBtn.disabled = !(failedCount > 0 || cancelledCount > 0);
+    }
+    const clearQueueBtn = $("#status-clear-queue");
+    if (clearQueueBtn) {
+      clearQueueBtn.disabled = !(activeQueueCount > 0);
     }
     if (!state.playlistImportInProgress) {
       const activeImport = !!importState.active;
@@ -6960,6 +6972,33 @@ async function clearFailedQueueJobs() {
   }
 }
 
+async function runStatusQueueAction({ buttonId, endpoint, confirmText, progressText, successText, errorPrefix, refreshQueueTable = true }) {
+  const button = $(buttonId);
+  if (!button) {
+    return;
+  }
+  const confirmed = !confirmText || window.confirm(confirmText);
+  if (!confirmed) {
+    return;
+  }
+  const previousDisabled = button.disabled;
+  try {
+    button.disabled = true;
+    setNotice($("#home-search-message"), progressText, false);
+    const data = await fetchJson(endpoint, { method: "POST" });
+    const rendered = typeof successText === "function" ? successText(data || {}) : successText;
+    setNotice($("#home-search-message"), rendered, false);
+    await refreshStatus();
+    if (refreshQueueTable) {
+      await refreshSearchQueue();
+    }
+  } catch (err) {
+    setNotice($("#home-search-message"), `${errorPrefix}: ${err.message}`, true);
+  } finally {
+    button.disabled = previousDisabled;
+  }
+}
+
 async function cleanupTemp() {
   const ok = window.confirm("Clear temporary files? This does not affect completed downloads.");
   if (!ok) {
@@ -9104,18 +9143,57 @@ function bindEvents() {
   $("#add-account").addEventListener("click", () => addAccountRow("", {}));
   $("#add-playlist").addEventListener("click", () => addPlaylistRow({}));
 
-  $("#status-cancel").addEventListener("click", async () => {
-    const ok = confirm("Are you sure you want to kill downloads in progress?");
-    if (!ok) {
-      return;
-    }
-    try {
-      await fetchJson("/api/cancel", { method: "POST" });
-      setNotice($("#home-search-message"), "Cancel requested", false);
-      await refreshStatus();
-    } catch (err) {
-      setNotice($("#home-search-message"), `Cancel failed: ${err.message}`, true);
-    }
+  $("#status-cancel-active").addEventListener("click", async () => {
+    await runStatusQueueAction({
+      buttonId: "#status-cancel-active",
+      endpoint: "/api/download_jobs/cancel_active",
+      confirmText: "Cancel all active jobs? Queued items will remain in place.",
+      progressText: "Cancelling active jobs...",
+      successText: (data) => {
+        const cancelled = Number.isFinite(Number(data?.cancelled)) ? Number(data.cancelled) : 0;
+        return `Cancelled ${cancelled} active job${cancelled === 1 ? "" : "s"}.`;
+      },
+      errorPrefix: "Failed to cancel active jobs",
+    });
+  });
+  $("#status-recover-stale").addEventListener("click", async () => {
+    await runStatusQueueAction({
+      buttonId: "#status-recover-stale",
+      endpoint: "/api/download_jobs/recover_stale",
+      confirmText: "Recover stale jobs and place them back into the queue?",
+      progressText: "Recovering stale jobs...",
+      successText: (data) => {
+        const recovered = Number.isFinite(Number(data?.recovered)) ? Number(data.recovered) : 0;
+        return `Recovered ${recovered} stale job${recovered === 1 ? "" : "s"}.`;
+      },
+      errorPrefix: "Failed to recover stale jobs",
+    });
+  });
+  $("#status-clear-failed").addEventListener("click", async () => {
+    await runStatusQueueAction({
+      buttonId: "#status-clear-failed",
+      endpoint: "/api/download_jobs/clear_failed",
+      confirmText: "Clear all failed and cancelled jobs from the queue table?",
+      progressText: "Clearing failed jobs...",
+      successText: (data) => {
+        const deleted = Number.isFinite(Number(data?.deleted)) ? Number(data.deleted) : 0;
+        return `Cleared ${deleted} failed/cancelled job${deleted === 1 ? "" : "s"}.`;
+      },
+      errorPrefix: "Failed to clear failed jobs",
+    });
+  });
+  $("#status-clear-queue").addEventListener("click", async () => {
+    await runStatusQueueAction({
+      buttonId: "#status-clear-queue",
+      endpoint: "/api/download_jobs/clear_queue",
+      confirmText: "Clear the pending queue? This removes queued and active jobs but keeps completed history.",
+      progressText: "Clearing pending queue...",
+      successText: (data) => {
+        const deleted = Number.isFinite(Number(data?.deleted)) ? Number(data.deleted) : 0;
+        return `Cleared ${deleted} queued/active job${deleted === 1 ? "" : "s"}.`;
+      },
+      errorPrefix: "Failed to clear queue",
+    });
   });
   $("#toggle-theme").addEventListener("click", () => {
     const next = resolveTheme() === "light" ? "dark" : "light";
