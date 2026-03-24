@@ -2791,11 +2791,15 @@ async def shutdown():
 
 
 def _browse_root_map():
-    return {
+    roots = {
         "downloads": os.path.realpath(DOWNLOADS_DIR),
         "config": os.path.realpath(CONFIG_DIR),
         "tokens": os.path.realpath(TOKENS_DIR),
     }
+    library_exports_dir = "/library-exports"
+    if os.path.isdir(library_exports_dir):
+        roots["library_exports"] = os.path.realpath(library_exports_dir)
+    return roots
 
 
 def _path_allowed(path, roots):
@@ -9192,7 +9196,7 @@ async def api_cleanup():
 
 @app.get("/api/browse")
 async def api_browse(
-    root: str = Query(..., description="downloads, config, or tokens"),
+    root: str = Query(..., description="Browse root key"),
     path: str = Query("", description="Relative path within the root"),
     mode: str = Query("dir", description="dir or file"),
     ext: str = Query("", description="Optional file extension filter, e.g. .json"),
@@ -9201,7 +9205,8 @@ async def api_browse(
     root = (root or "").strip().lower()
     roots = app.state.browse_roots
     if root not in roots:
-        raise HTTPException(status_code=400, detail="root must be downloads, config, or tokens")
+        allowed_roots = ", ".join(sorted(roots.keys()))
+        raise HTTPException(status_code=400, detail=f"root must be one of: {allowed_roots}")
 
     mode = mode.lower()
     if mode not in {"dir", "file"}:

@@ -93,8 +93,10 @@ const previewState = {
 };
 const BROWSE_DEFAULTS = {
   configDir: "",
+  libraryExportsRoot: "",
   mediaRoot: "",
   tokensDir: "",
+  roots: {},
 };
 const MUSIC_EXPORT_TYPES = ["copy", "transcode"];
 const VERSION_LATEST_URL = "/api/version/latest";
@@ -539,6 +541,7 @@ function addMusicExportRow(entry = {}) {
     ? String(entry.type || "").trim().toLowerCase()
     : "copy";
   row.querySelector(".music-export-path").value = entry.path ?? "";
+  row.querySelector(".music-export-path").dataset.browserAbsolute = "1";
   row.querySelector(".music-export-codec").value = entry.codec ?? "aac";
   row.querySelector(".music-export-bitrate").value = entry.bitrate ?? "256k";
 
@@ -547,7 +550,8 @@ function addMusicExportRow(entry = {}) {
   row.querySelector(".music-export-remove").addEventListener("click", () => row.remove());
   row.querySelector(".music-export-browse").addEventListener("click", () => {
     const input = row.querySelector(".music-export-path");
-    openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input?.value || ""));
+    const rootKey = preferredMusicLibraryBrowseRoot(input?.value || "");
+    openBrowser(input, rootKey, "dir", "", resolveBrowseStart(rootKey, input?.value || ""));
   });
   syncMusicExportRow(row);
 }
@@ -1531,6 +1535,90 @@ function normalizeDownloadsRelative(value) {
   return raw;
 }
 
+function getBrowseRootBase(rootKey) {
+  if (rootKey === "downloads") {
+    return BROWSE_DEFAULTS.mediaRoot || "";
+  }
+  if (rootKey === "config") {
+    return BROWSE_DEFAULTS.configDir || "";
+  }
+  if (rootKey === "tokens") {
+    return BROWSE_DEFAULTS.tokensDir || "";
+  }
+  if (rootKey === "library_exports") {
+    return BROWSE_DEFAULTS.libraryExportsRoot || "";
+  }
+  const roots = BROWSE_DEFAULTS.roots || {};
+  return typeof roots[rootKey] === "string" ? roots[rootKey] : "";
+}
+
+function getBrowseRootLabel(rootKey) {
+  if (rootKey === "downloads") return "Downloads";
+  if (rootKey === "library_exports") return "Library Exports";
+  if (rootKey === "config") return "Config";
+  if (rootKey === "tokens") return "Tokens";
+  return String(rootKey || "").replaceAll("_", " ");
+}
+
+function availableBrowserRootsForMode(mode = "dir") {
+  const ordered = ["downloads", "library_exports", "config", "tokens"];
+  const roots = BROWSE_DEFAULTS.roots || {};
+  const result = [];
+  ordered.forEach((rootKey) => {
+    if (!roots[rootKey]) {
+      return;
+    }
+    if (mode === "dir" && rootKey === "tokens") {
+      return;
+    }
+    result.push(rootKey);
+  });
+  Object.keys(roots).sort().forEach((rootKey) => {
+    if (ordered.includes(rootKey)) {
+      return;
+    }
+    if (mode === "dir" && rootKey === "tokens") {
+      return;
+    }
+    result.push(rootKey);
+  });
+  return result;
+}
+
+function preferredMusicLibraryBrowseRoot(value = "") {
+  const raw = String(value || "").trim();
+  const libraryExportsBase = getBrowseRootBase("library_exports");
+  if (libraryExportsBase) {
+    const normalizedBase = libraryExportsBase.endsWith("/") ? libraryExportsBase : `${libraryExportsBase}/`;
+    if (!raw || raw === libraryExportsBase || raw.startsWith(normalizedBase)) {
+      return "library_exports";
+    }
+  }
+  return "downloads";
+}
+
+function updateBrowserRootSelect() {
+  const rootSelect = $("#browser-root");
+  if (!rootSelect) {
+    return;
+  }
+  const roots = availableBrowserRootsForMode(browserState.mode);
+  rootSelect.innerHTML = "";
+  roots.forEach((rootKey) => {
+    const option = document.createElement("option");
+    option.value = rootKey;
+    option.textContent = getBrowseRootLabel(rootKey);
+    rootSelect.appendChild(option);
+  });
+  if (roots.includes(browserState.root)) {
+    rootSelect.value = browserState.root;
+  } else if (roots.length > 0) {
+    browserState.root = roots[0];
+    rootSelect.value = browserState.root;
+  }
+  rootSelect.disabled = roots.length <= 1;
+}
+
 function resolveBrowseStart(rootKey, value) {
   const raw = (value || "").trim();
   if (!raw) return "";
@@ -1539,14 +1627,7 @@ function resolveBrowseStart(rootKey, value) {
     return raw.slice(2);
   }
 
-  let base = "";
-  if (rootKey === "downloads") {
-    base = BROWSE_DEFAULTS.mediaRoot || "";
-  } else if (rootKey === "config") {
-    base = BROWSE_DEFAULTS.configDir || "";
-  } else if (rootKey === "tokens") {
-    base = BROWSE_DEFAULTS.tokensDir || "";
-  }
+  const base = getBrowseRootBase(rootKey);
 
   if (!base) {
     return raw.startsWith("/") ? "" : raw;
@@ -1694,8 +1775,10 @@ async function loadPaths() {
   try {
     const data = await fetchJson("/api/paths");
     BROWSE_DEFAULTS.configDir = data.config_dir || "";
+    BROWSE_DEFAULTS.libraryExportsRoot = data.browse_roots?.library_exports || "";
     BROWSE_DEFAULTS.mediaRoot = data.downloads_dir || "";
     BROWSE_DEFAULTS.tokensDir = data.tokens_dir || "";
+    BROWSE_DEFAULTS.roots = (data && typeof data.browse_roots === "object" && data.browse_roots) ? data.browse_roots : {};
   } catch (err) {
     setConfigNotice(`Path load error: ${err.message}`, true);
   }
@@ -1710,6 +1793,7 @@ function openBrowser(target, root, mode = "dir", ext = "", startPath = "") {
   browserState.currentAbs = "";
   browserState.selected = "";
   browserState.target = target;
+  updateBrowserRootSelect();
   updatePollingState();
   $("#browser-modal").classList.remove("hidden");
   $("#browser-select").textContent = mode === "dir" ? "Use this folder" : "Use selected file";
@@ -1831,10 +1915,11 @@ function applyBrowserSelection() {
     if (!browserState.currentAbs) {
       return;
     }
+    const useAbsolutePath = browserState.target.dataset.browserAbsolute === "1";
     const rel = browserState.path ? browserState.path : ".";
     const targetId = browserState.target.id;
-    browserState.target.value = rel;
-    console.info("Directory selected", { root: browserState.root, path: rel });
+    browserState.target.value = useAbsolutePath ? browserState.currentAbs : rel;
+    console.info("Directory selected", { root: browserState.root, path: useAbsolutePath ? browserState.currentAbs : rel });
     closeBrowser();
     if (targetId === "home-destination") {
       updateHomeDestinationResolved();
@@ -3669,6 +3754,9 @@ function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
   if (!messageEl) {
     return;
   }
+  const tracksConsidered = Number.isFinite(Number(result?.tracks_considered))
+    ? Number(result.tracks_considered)
+    : 0;
   const tracksEnqueued = Number.isFinite(Number(result?.tracks_enqueued))
     ? Number(result.tracks_enqueued)
     : 0;
@@ -3678,8 +3766,13 @@ function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
   const failedTracksCount = Number.isFinite(Number(result?.failed_tracks_count))
     ? Number(result.failed_tracks_count)
     : 0;
+  const duplicateTracks = Array.isArray(result?.duplicate_tracks) ? result.duplicate_tracks : [];
   const failedTracks = Array.isArray(result?.failed_tracks) ? result.failed_tracks : [];
-  const summaryParts = [`Album queued: ${tracksEnqueued} tracks`];
+  const summaryParts = [
+    tracksConsidered > 0
+      ? `Album queue result: ${tracksEnqueued}/${tracksConsidered} tracks queued`
+      : `Album queue result: ${tracksEnqueued} tracks queued`,
+  ];
   if (duplicateTracksCount > 0) {
     summaryParts.push(`Already queued/downloaded: ${duplicateTracksCount}`);
   }
@@ -3687,7 +3780,8 @@ function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
     summaryParts.push(`Failed: ${failedTracksCount}`);
   }
   const summary = summaryParts.join(" · ");
-  setNotice(messageEl, summary, false);
+  const isZeroResult = tracksEnqueued <= 0;
+  setNotice(messageEl, summary, isZeroResult && (duplicateTracksCount > 0 || failedTracksCount > 0));
 
   let detailsEl = document.getElementById("home-album-failed-details");
   if (!detailsEl) {
@@ -3696,16 +3790,30 @@ function renderAlbumQueueSummary(result, { albumTitle = "Album" } = {}) {
     detailsEl.className = "meta";
     messageEl.insertAdjacentElement("afterend", detailsEl);
   }
+  const detailItems = [];
+  if (duplicateTracksCount > 0 && duplicateTracks.length > 0) {
+    detailItems.push(
+      ...duplicateTracks.slice(0, 10).map((entry) => {
+        const track = String(entry?.track || "Unknown track");
+        const reason = String(entry?.reason || "duplicate");
+        return `<li><strong>${track}</strong>: already queued/downloaded (${reason})</li>`;
+      })
+    );
+  }
   if (failedTracksCount > 0 && failedTracks.length > 0) {
-    const items = failedTracks
+    detailItems.push(
+      ...failedTracks
       .slice(0, 10)
       .map((entry) => {
         const track = String(entry?.track || "Unknown track");
         const reason = String(entry?.reason || "unknown");
         return `<li><strong>${track}</strong>: ${reason}</li>`;
       })
-      .join("");
-    detailsEl.innerHTML = `<summary>${albumTitle}: ${failedTracksCount} skipped</summary><ul>${items}</ul>`;
+    );
+  }
+  if (detailItems.length > 0) {
+    const skippedTotal = duplicateTracksCount + failedTracksCount;
+    detailsEl.innerHTML = `<summary>${albumTitle}: ${skippedTotal} not queued</summary><ul>${detailItems.join("")}</ul>`;
     detailsEl.open = false;
     detailsEl.classList.remove("hidden");
   } else {
@@ -4055,7 +4163,8 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
         const releaseGroupMbidValue = String(button.dataset.releaseGroupMbid || "").trim();
         if (!releaseGroupMbidValue) return;
         button.disabled = true;
-        button.textContent = "Queued...";
+        button.textContent = "Queueing...";
+        setNotice($("#home-search-message"), `Queueing ${albumItem?.title || "album"}...`, false);
         try {
           const result = await enqueueAlbum(releaseGroupMbidValue);
           const count = Number.isFinite(Number(result?.tracks_enqueued))
@@ -4633,6 +4742,8 @@ function renderHomeAlbumCandidates(candidates, query = "") {
     }
     const originalLabel = button.textContent;
     button.disabled = true;
+    button.textContent = "Queueing...";
+    setNotice($("#home-search-message"), `Queueing ${button.dataset.albumTitle || "album"}...`, false);
     try {
       const payload = {
         release_group_mbid: releaseGroupId,
@@ -9085,7 +9196,8 @@ function bindEvents() {
   if (browseMusicLibraryPath) {
     browseMusicLibraryPath.addEventListener("click", () => {
       const input = $("#cfg-music-library-path");
-      openBrowser(input, "downloads", "dir", "", resolveBrowseStart("downloads", input?.value || ""));
+      const rootKey = preferredMusicLibraryBrowseRoot(input?.value || "");
+      openBrowser(input, rootKey, "dir", "", resolveBrowseStart(rootKey, input?.value || ""));
     });
   }
   const addMusicExportButton = $("#add-music-export");
@@ -9140,6 +9252,14 @@ function bindEvents() {
   });
 
   $("#browser-close").addEventListener("click", closeBrowser);
+  $("#browser-root").addEventListener("change", (event) => {
+    const nextRoot = String(event.target?.value || "").trim();
+    if (!nextRoot || nextRoot === browserState.root) {
+      return;
+    }
+    browserState.root = nextRoot;
+    refreshBrowser("");
+  });
   $("#browser-up").addEventListener("click", (event) => {
     const next = event.currentTarget.dataset.path;
     if (next !== undefined) {

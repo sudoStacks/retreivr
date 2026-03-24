@@ -680,7 +680,7 @@
                   <label class="field full">
                     <span>Canonical Library Path</span>
                     <div class="row path-picker">
-                      <input id="cfg-music-library-path" type="text" placeholder="/Media/Music/Music Library">
+                      <input id="cfg-music-library-path" type="text" placeholder="/Media/Music/Music Library" data-browser-absolute="1">
                       <button id="browse-music-library-path" class="button ghost small" type="button">Browse</button>
                     </div>
                   </label>
@@ -1280,6 +1280,12 @@
       <div class="row space-between">
         <div id="browser-title" class="panel-title">Server Browser</div>
         <button id="browser-close" class="button ghost small">Close</button>
+      </div>
+      <div class="row" style="justify-content: flex-start; align-items: center; gap: 8px;">
+        <label class="field inline short" style="margin: 0;">
+          <span>Root</span>
+          <select id="browser-root"></select>
+        </label>
       </div>
       <div class="row space-between">
         <div class="meta" id="browser-path">/</div>
