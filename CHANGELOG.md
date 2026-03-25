@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.16 — Resolution Network Foundations + Jellyfin Plugin Bootstrap
+
+### High-Level
+This release expands Retreivr from a deterministic acquisition engine into the early foundation of a shared resolution network. It adds a first-class Resolution API, local-first community cache workflows, publish/backfill controls, and the initial Jellyfin plugin integration path built around the new API and community dataset model.
+
+### Added
+- Versioned Resolution API with public-facing infrastructure endpoints for single resolve, bulk resolve, submit, verify, stats, health, snapshot, and diff sync.
+- Local-first community cache lookup flow backed by a persistent on-node dataset mirror with remote fallback and deterministic best-source selection.
+- Manual Community Cache controls in Settings for `Run Publish Now`, `Backfill Library`, publish/sync status, and richer runtime visibility.
+- Historical community-cache backfill workflow and CLI for scanning the canonical music library, repairing missing MusicBrainz tagging when possible, and emitting publish proposals for previously acquired files.
+- Normalized resolution availability model across the new API and runtime flows: `verified`, `pending`, `not_found`, and `local_only`.
+- Auto-verify and unresolved-MBID queue plumbing so successful acquisitions strengthen local resolution state and unresolved lookups are captured for later network fill.
+- Local cache sync API/operator workflow for pulling remote resolution data into the local node as a first-class operational action.
+- Section 3 architecture baseline checklist in project management docs to keep future work aligned with the long-term network vision.
+- Separate Jellyfin plugin repository bootstrap aligned to the Resolution API contract, including release automation, manifest-based installation, backend status, and a first minimal in-plugin music search/acquisition UI.
+
+### Changed
+- Community cache publishing now prefers stable publisher identity for branch naming and tighter trusted-branch policy alignment.
+- Cache lookup and resolution flows were reworked around the shared dataset contract instead of treating the community cache as a thin optional side path.
+- Retreivr documentation and runtime guidance now frame the project more clearly as acquisition infrastructure plus an emerging shared resolution layer.
+- Plugin-side docs now direct operators to the Retreivr Docker starter bundle as the primary fast-start backend path.
+
+### Fixed
+- Music library export targets now integrate cleanly with post-finalization library workflows without mutating canonical files.
+- Music Mode full-album queueing was hardened for duplicate reporting, empty-release variants, and truthful queue visibility.
+- Jellyfin plugin release packaging/manifest flow now produces installable release assets with valid checksums, icon metadata, and stable repository-manifest behavior.
+- Jellyfin plugin settings persistence was hardened so saved backend URLs and toggles survive round-trips correctly.
+
 ## v0.9.15 — Library Import Overhaul + Queue Recovery + Live Status
 
 ### High-Level

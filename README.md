@@ -36,11 +36,11 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 0.9.15 Highlights
-- Import-aware library resolution for Apple Music XML and other fuzzy library-import paths
-- Queue recovery controls for cancelling active work, recovering stale jobs, clearing failed items, and clearing the queue
-- Expanded live status visibility for active jobs, stale blockers, import progress, and recent batch outcomes
-- Lower-noise watcher and import logging with more truthful operational summaries
+## 0.9.16 Highlights
+- Resolution API foundations for single resolve, bulk resolve, submit, verify, stats, health, and snapshot/diff sync
+- Local-first community cache lookup, publish controls, and historical backfill for previously acquired music libraries
+- Music export targets for post-finalization library integration workflows such as Apple Music auto-import
+- First Jellyfin plugin bootstrap path built around the Resolution API and Retreivr Core backend
 
 ## Product Tour
 
@@ -213,7 +213,7 @@ Related controls:
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `0.9.15`, pull the latest image and restart:
+If you are upgrading to `0.9.16`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
