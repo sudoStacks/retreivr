@@ -1089,6 +1089,13 @@ body.home-page .home-source-panel .home-source-pill.selected {
   gap: 10px;
 }
 
+.home-candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 320px));
+  justify-content: start;
+  gap: 14px;
+}
+
 .home-candidate-row {
   display: flex;
   flex-wrap: wrap;
@@ -1100,6 +1107,16 @@ body.home-page .home-source-panel .home-source-pill.selected {
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.02);
   width: 100%;
+}
+
+.home-candidate-grid .home-candidate-row {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 12px;
+  min-height: 100%;
+  padding: 14px;
 }
 
 .home-candidate-posted {
@@ -1124,6 +1141,12 @@ body.home-page .home-source-panel .home-source-pill.selected {
   background: #000;
 }
 
+.home-candidate-grid .home-candidate-artwork {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+
 /* Ensure artwork thumbnails always display */
 .home-candidate-artwork img {
   width: 100%;
@@ -1146,6 +1169,10 @@ body.home-page .home-source-panel .home-source-pill.selected {
   font-weight: 600;
   flex: 1;
   min-width: 0;
+}
+
+.home-candidate-grid .home-candidate-info {
+  width: 100%;
 }
 
 body.home-page .home-candidate-title {
@@ -1334,6 +1361,41 @@ body.home-page .home-candidate-source-tag {
   gap: 8px;
   justify-content: center;
   flex-shrink: 0;
+}
+
+.home-candidate-grid .home-candidate-action {
+  width: 100%;
+  align-items: stretch;
+  margin-top: auto;
+}
+
+.home-candidate-grid .home-candidate-action .button {
+  width: 100%;
+  justify-content: center;
+}
+
+.home-candidate-grid .home-candidate-posted {
+  text-align: left;
+  margin-top: 0;
+}
+
+@media (max-width: 900px) {
+  .home-candidate-grid {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .home-candidate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+  }
+}
+
+@media (max-width: 520px) {
+  .home-candidate-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 900px) {

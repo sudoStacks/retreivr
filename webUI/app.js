@@ -5501,7 +5501,7 @@ function renderHomeResultItem(item) {
   // Remove destination line for Home page result cards (visual polish)
   // No destination line
   const candidateList = document.createElement("div");
-  candidateList.className = "home-candidate-list";
+  candidateList.className = "home-candidate-list home-candidate-grid";
   candidateList.dataset.itemId = item.id || "";
   const placeholder = document.createElement("div");
   placeholder.className = "home-results-empty";
