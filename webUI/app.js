@@ -182,6 +182,7 @@ const DIRECT_URL_PLAYLIST_ERROR =
   "Playlist URLs are not supported in Direct URL mode. Please add this playlist via Scheduler or Playlist settings.";
 const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
   "Playlist URL detected. Use Search & Download to enqueue all videos in the playlist.";
+const HOME_HOVER_PREVIEW_DELAY_MS = 3000;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -959,6 +960,14 @@ function buildYouTubeHomePreviewEmbedUrl(url) {
   return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0&modestbranding=1`;
 }
 
+function buildYouTubeHomeHoverEmbedUrl(url) {
+  const videoId = extractYouTubeVideoIdFromUrl(url);
+  if (!videoId) {
+    return null;
+  }
+  return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&mute=1&controls=0&rel=0&modestbranding=1&playsinline=1`;
+}
+
 function buildRumbleHomePreviewEmbedUrl(url, candidate) {
   const parseRawMeta = () => {
     const raw = candidate?.raw_meta_json;
@@ -1044,6 +1053,66 @@ function buildHomePreviewDescriptor(candidate) {
     title: String(candidate.title || "").trim() || "Preview",
     embedUrl,
   };
+}
+
+function buildHomeHoverPreviewDescriptor(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  const source = normalizePreviewSourceKey(candidate.source);
+  const url = String(candidate.url || "").trim();
+  if (!source || !url || !isValidHttpUrl(url)) {
+    return null;
+  }
+  let embedUrl = null;
+  if (source === "youtube" || source === "youtube_music") {
+    embedUrl = buildYouTubeHomeHoverEmbedUrl(url);
+  } else if (source === "rumble") {
+    embedUrl = buildRumbleHomePreviewEmbedUrl(url, candidate);
+  }
+  if (!embedUrl || !isValidHttpUrl(embedUrl)) {
+    return null;
+  }
+  return {
+    source,
+    title: String(candidate.title || "").trim() || "Preview",
+    embedUrl,
+  };
+}
+
+function stopHomeArtworkHoverPreview(row) {
+  if (!row) return;
+  const artwork = row.querySelector(".home-candidate-artwork");
+  if (!artwork) return;
+  if (row._hoverPreviewTimer) {
+    clearTimeout(row._hoverPreviewTimer);
+    row._hoverPreviewTimer = null;
+  }
+  row.classList.remove("hover-preview-active");
+  const frame = artwork.querySelector(".home-candidate-hover-preview");
+  if (frame) {
+    frame.remove();
+  }
+}
+
+function startHomeArtworkHoverPreview(row, descriptor) {
+  if (!row || !descriptor?.embedUrl) return;
+  const artwork = row.querySelector(".home-candidate-artwork");
+  if (!artwork) return;
+  stopHomeArtworkHoverPreview(row);
+  row._hoverPreviewTimer = setTimeout(() => {
+    row._hoverPreviewTimer = null;
+    const frame = document.createElement("iframe");
+    frame.className = "home-candidate-hover-preview";
+    frame.src = descriptor.embedUrl;
+    frame.title = descriptor.title || "Preview";
+    frame.setAttribute("allow", "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share");
+    frame.setAttribute("allowfullscreen", "true");
+    frame.setAttribute("loading", "eager");
+    frame.tabIndex = -1;
+    artwork.appendChild(frame);
+    row.classList.add("hover-preview-active");
+  }, HOME_HOVER_PREVIEW_DELAY_MS);
 }
 
 function buildHomePreviewDescriptorFromRow(row) {
@@ -5807,6 +5876,24 @@ function renderHomeCandidateRow(candidate, item) {
       action.appendChild(previewButton);
       titleEl.dataset.previewEnabled = "true";
       artwork.dataset.previewEnabled = "true";
+    }
+
+    const hoverPreviewDescriptor = item.media_type !== "music"
+      ? buildHomeHoverPreviewDescriptor(candidate)
+      : null;
+    if (hoverPreviewDescriptor) {
+      row.addEventListener("mouseenter", () => {
+        startHomeArtworkHoverPreview(row, hoverPreviewDescriptor);
+      });
+      row.addEventListener("mouseleave", () => {
+        stopHomeArtworkHoverPreview(row);
+      });
+      row.addEventListener("focusin", () => {
+        startHomeArtworkHoverPreview(row, hoverPreviewDescriptor);
+      });
+      row.addEventListener("focusout", () => {
+        stopHomeArtworkHoverPreview(row);
+      });
     }
 
     const openLink = document.createElement("a");
