@@ -91,3 +91,27 @@ class WatcherBehaviorTests(unittest.IsolatedAsyncioTestCase):
         finally:
             api_main.get_playlist_videos = original
 
+    async def test_watcher_next_poll_skew_limit_allows_max_backoff_interval(self):
+        policy = {
+            "min_interval_minutes": 5,
+            "max_interval_minutes": 360,
+            "idle_backoff_factor": 2,
+            "active_reset_minutes": 5,
+            "downtime": {"enabled": False, "start": "23:00", "end": "09:00", "timezone": "UTC"},
+        }
+        watch = {"current_interval_min": 360}
+        skew_limit = api_main._watcher_next_poll_skew_limit_seconds(policy, watch)
+        # 6 hours (max backoff) should not be considered skew by itself.
+        self.assertGreaterEqual(skew_limit, 21600)
+
+    async def test_watcher_next_poll_skew_limit_defaults_without_watch_state(self):
+        policy = {
+            "min_interval_minutes": 5,
+            "max_interval_minutes": 360,
+            "idle_backoff_factor": 2,
+            "active_reset_minutes": 5,
+            "downtime": {"enabled": False, "start": "23:00", "end": "09:00", "timezone": "UTC"},
+        }
+        skew_limit = api_main._watcher_next_poll_skew_limit_seconds(policy, {})
+        # Guardrail remains active for truly implausible timestamps.
+        self.assertGreaterEqual(skew_limit, 900)

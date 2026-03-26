@@ -20,6 +20,12 @@ class AppleXMLImporter(BaseImporter):
             artist = _clean(track_data.get("Artist"))
             title = _clean(track_data.get("Name"))
             album = _clean(track_data.get("Album"))
+            album_artist = _clean(track_data.get("Album Artist"))
+            track_number = _safe_int(track_data.get("Track Number"))
+            disc_number = _safe_int(track_data.get("Disc Number"))
+            release_date = _clean(track_data.get("Year")) or _clean(track_data.get("Date Added"))
+            genre = _clean(track_data.get("Genre"))
+            total_time = _safe_int(track_data.get("Total Time"))
             raw_line = " | ".join(part for part in (artist, title, album) if part) or ""
             intents.append(
                 TrackIntent(
@@ -28,6 +34,12 @@ class AppleXMLImporter(BaseImporter):
                     album=album,
                     raw_line=raw_line,
                     source_format=self.SOURCE_FORMAT,
+                    album_artist=album_artist,
+                    track_number=track_number,
+                    disc_number=disc_number,
+                    release_date=release_date,
+                    genre=genre,
+                    duration_ms=total_time,
                 )
             )
         return intents
@@ -90,3 +102,13 @@ def _clean(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _safe_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None

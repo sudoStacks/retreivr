@@ -18,8 +18,14 @@ class _MockDownloader:
 def test_worker_moves_to_canonical_path_and_returns_it(tmp_path, monkeypatch) -> None:
     root = tmp_path / "Music"
     temp_file = tmp_path / "download-temp.mp3"
+    tagged = {}
 
-    monkeypatch.setattr("download.worker.tag_file", lambda _path, _metadata: None)
+    def _capture_tag_file(path, _metadata, **_kwargs):
+        tagged["path"] = path
+        tagged["exists_during_tag"] = Path(path).exists()
+        tagged["final_exists_during_tag"] = (root / "Artist" / "Album (2020)" / "Disc 2" / "03 - Song.mp3").exists()
+
+    monkeypatch.setattr("download.worker.tag_file", _capture_tag_file)
 
     worker = DownloadWorker(_MockDownloader(temp_file))
     job = SimpleNamespace(
@@ -43,5 +49,8 @@ def test_worker_moves_to_canonical_path_and_returns_it(tmp_path, monkeypatch) ->
 
     expected = root / "Artist" / "Album (2020)" / "Disc 2" / "03 - Song.mp3"
     assert result == {"status": JOB_STATUS_COMPLETED, "file_path": str(expected)}
+    assert tagged["path"] == str(temp_file)
+    assert tagged["exists_during_tag"] is True
+    assert tagged["final_exists_during_tag"] is False
     assert expected.exists() is True
     assert temp_file.exists() is False

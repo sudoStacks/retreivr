@@ -11,6 +11,7 @@ permissions:
 
 env:
   IMAGE_REPO: retreivr
+  DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/retreivr
 
 jobs:
   release:
@@ -47,36 +48,47 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags
-        id: image_tags
-        shell: bash
-        run: |
-          set -euo pipefail
-          IMAGE_NAME="${{ steps.image_name.outputs.value }}"
-          TAGS="${IMAGE_NAME}:${GITHUB_REF_NAME}"
-          if [[ "${{ steps.release_mode.outputs.is_prerelease }}" == "false" ]]; then
-            TAGS="${TAGS}"$'\n'"${IMAGE_NAME}:latest"
-          fi
-          {
-            echo "tags<<EOF"
-            echo "${TAGS}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ steps.image_name.outputs.value }}
+            ${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ steps.release_mode.outputs.is_prerelease == 'false' }}
+
+      - name: Build and push Docker images
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.image_tags.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            RETREIVR_VERSION=${{ github.ref_name }}
 
-      - name: Generate runtime bundle
+      - name: Generate Docker starter bundle
         shell: bash
         run: |
           set -euo pipefail
 
-          BUNDLE_DIR="runtime-bundle"
+          BUNDLE_DIR="docker-starter"
           rm -rf "${BUNDLE_DIR}"
           mkdir -p "${BUNDLE_DIR}/config"
 
@@ -96,25 +108,27 @@ jobs:
           fi
 
           if [[ -f "config/config.json.example" ]]; then
-            cp "config/config.json.example" "${BUNDLE_DIR}/config/config.json"
+            cp "config/config.json.example" "${BUNDLE_DIR}/config/config.json.example"
           elif [[ -f "config/config_sample.json" ]]; then
-            cp "config/config_sample.json" "${BUNDLE_DIR}/config/config.json"
+            cp "config/config_sample.json" "${BUNDLE_DIR}/config/config.json.example"
           else
             echo "No config example file found." >&2
             exit 1
           fi
 
+          if [[ -f "config/custom_search_adapters.example.yaml" ]]; then
+            cp "config/custom_search_adapters.example.yaml" "${BUNDLE_DIR}/config/custom_search_adapters.example.yaml"
+          fi
+
           cp "README-runtime.md" "${BUNDLE_DIR}/README-runtime.md"
 
-      - name: Create runtime zip
+      - name: Create Docker starter zip
         shell: bash
         run: |
           set -euo pipefail
-          ZIP_NAME="retreivr-runtime-${{ github.ref_name }}.zip"
+          ZIP_NAME="retreivr-docker-starter-${{ github.ref_name }}.zip"
           rm -f "${ZIP_NAME}"
-          (cd runtime-bundle && zip -rq "../${ZIP_NAME}" .)
-          echo "Created zip file: ${ZIP_NAME}"
-          ls -lah "${ZIP_NAME}"
+          (cd docker-starter && zip -rq "../${ZIP_NAME}" .)
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
@@ -123,4 +137,4 @@ jobs:
           prerelease: ${{ steps.release_mode.outputs.is_prerelease }}
           generate_release_notes: true
           files: |
-            retreivr-runtime-${{ github.ref_name }}.zip
+            retreivr-docker-starter-${{ github.ref_name }}.zip

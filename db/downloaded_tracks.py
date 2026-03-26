@@ -40,6 +40,29 @@ def has_downloaded_isrc(playlist_id: str, isrc: str) -> bool:
         conn.close()
 
 
+def has_downloaded_isrc_anywhere(isrc: str) -> bool:
+    """Return True when an ISRC is already recorded in any playlist scope."""
+    track_isrc = (isrc or "").strip()
+    if not track_isrc:
+        return False
+
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT 1
+            FROM downloaded_music_tracks
+            WHERE isrc=?
+            LIMIT 1
+            """,
+            (track_isrc,),
+        )
+        return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
 def record_downloaded_track(playlist_id: str, isrc: str, file_path: str) -> None:
     """Insert a downloaded track record for playlist/idempotency tracking."""
     pid = (playlist_id or "").strip()

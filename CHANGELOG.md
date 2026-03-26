@@ -2,6 +2,279 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.18 — Community Cache Publish Branch Reset + Sync Docs
+
+### High-Level
+This release closes the last major community-cache publish loop around stale rejected PR branches. Retreivr now resets orphaned publish branches back to clean `main` before republishing, keeps the public dataset contract strict around canonical `youtube` source naming, and improves operator-facing documentation for local cache sync behavior.
+
+### Added
+- Regression coverage for resetting stale publish branches when no open PR exists for the active publish branch.
+- Operator-facing documentation for `resolution_api` local cache sync fields, intended usage, and UI actions.
+
+### Changed
+- Community-cache publishing now treats a closed or rejected publish PR as a clean-reset boundary instead of continuing to reuse the stale branch contents indefinitely.
+- Release-facing docs, highlights, Docker examples, and starter defaults now point to `v0.9.18`.
+
+### Fixed
+- Rejected or closed publish branches no longer keep replaying old invalid dataset files into later publish attempts.
+- Local cache sync settings are now documented clearly enough to distinguish single-node installs from upstream-mirror sync setups.
+
+## v0.9.17 — Community Cache Contract Hardening + Export Tag Ordering
+
+### High-Level
+This release is a hardening pass on the new resolution-network and library-integration foundations from `v0.9.16`. It tightens community-cache publishing against the public dataset contract, makes export copies inherit finalized music tags deterministically, and prepares the runtime/docs/examples for a cleaner release and deployment cycle.
+
+### Added
+- Regression coverage for community-cache publish source normalization so `youtube_music` inputs are emitted as cache-safe `youtube` transport records.
+- Regression coverage for synchronous final music metadata application before post-finalization export copies are written.
+
+### Changed
+- Community-cache publish merge logic now normalizes legacy queued proposals and existing branch records so stale `youtube_music` source values are rewritten into the canonical dataset contract during publish.
+- Community-cache backfill now treats unresolved release-enrichment edge cases as structured skips instead of noisy hard failures.
+- Release-facing docs, highlights, Docker examples, and starter defaults now point to `v0.9.17`.
+
+### Fixed
+- Post-finalization `copy` exports no longer race ahead of music metadata tagging; export targets now inherit the finalized tagged canonical file state.
+- Live publish proposals and merged cache records now conform to the cache repo’s `youtube`-only source policy even when the originating runtime source was `youtube_music`.
+- Community-cache default repo/docs wiring remains aligned to the canonical `retreivr-community-cache` repository naming.
+
+## v0.9.16 — Resolution Network Foundations + Jellyfin Plugin Bootstrap
+
+### High-Level
+This release expands Retreivr from a deterministic acquisition engine into the early foundation of a shared resolution network. It adds a first-class Resolution API, local-first community cache workflows, publish/backfill controls, and the initial Jellyfin plugin integration path built around the new API and community dataset model.
+
+### Added
+- Versioned Resolution API with public-facing infrastructure endpoints for single resolve, bulk resolve, submit, verify, stats, health, snapshot, and diff sync.
+- Local-first community cache lookup flow backed by a persistent on-node dataset mirror with remote fallback and deterministic best-source selection.
+- Manual Community Cache controls in Settings for `Run Publish Now`, `Backfill Library`, publish/sync status, and richer runtime visibility.
+- Historical community-cache backfill workflow and CLI for scanning the canonical music library, repairing missing MusicBrainz tagging when possible, and emitting publish proposals for previously acquired files.
+- Normalized resolution availability model across the new API and runtime flows: `verified`, `pending`, `not_found`, and `local_only`.
+- Auto-verify and unresolved-MBID queue plumbing so successful acquisitions strengthen local resolution state and unresolved lookups are captured for later network fill.
+- Local cache sync API/operator workflow for pulling remote resolution data into the local node as a first-class operational action.
+- Section 3 architecture baseline checklist in project management docs to keep future work aligned with the long-term network vision.
+- Separate Jellyfin plugin repository bootstrap aligned to the Resolution API contract, including release automation, manifest-based installation, backend status, and a first minimal in-plugin music search/acquisition UI.
+
+### Changed
+- Community cache publishing now prefers stable publisher identity for branch naming and tighter trusted-branch policy alignment.
+- Cache lookup and resolution flows were reworked around the shared dataset contract instead of treating the community cache as a thin optional side path.
+- Retreivr documentation and runtime guidance now frame the project more clearly as acquisition infrastructure plus an emerging shared resolution layer.
+- Plugin-side docs now direct operators to the Retreivr Docker starter bundle as the primary fast-start backend path.
+
+### Fixed
+- Music library export targets now integrate cleanly with post-finalization library workflows without mutating canonical files.
+- Music Mode full-album queueing was hardened for duplicate reporting, empty-release variants, and truthful queue visibility.
+- Jellyfin plugin release packaging/manifest flow now produces installable release assets with valid checksums, icon metadata, and stable repository-manifest behavior.
+- Jellyfin plugin settings persistence was hardened so saved backend URLs and toggles survive round-trips correctly.
+
+## v0.9.15 — Library Import Overhaul + Queue Recovery + Live Status
+
+### High-Level
+This release turns library import into a first-class operational workflow. Retreivr now resolves fuzzy Apple Music XML imports with a dedicated import-aware profile, exposes truthful batch and queue status in the UI/API, and adds recovery controls for stale or blocked jobs so large imports are easier to trust and operate.
+
+### Added
+- Import-aware MusicBrainz resolution profile for library imports, including `album_artist` support, batch-context scoring, softer duration handling, and controlled fallback behavior for non-ideal release candidates.
+- Persisted import-batch and import-item records with per-track outcomes, rejection reasons, scoring details, duplicate linkage, and selected release bucket metadata.
+- New queue recovery actions in the Status page: `Cancel Active`, `Recover Stale Jobs`, `Clear Failed`, and `Clear Queue`.
+- Expanded live status payload and UI sections for active jobs, queue health, stale-job counts, import progress, and recent import-batch summaries.
+- Music library integration settings and post-finalization export targets for canonical music files, including flat-folder copy targets and optional AAC transcode targets for watched-library workflows such as Apple Music auto-import or portable-device sync.
+
+### Changed
+- Library import processing now records batch-level progress and compact completion summaries instead of relying on noisy per-track logs.
+- Duplicate handling for import-resolved canonical jobs now classifies active, completed, failed, and stale rows instead of silently skipping everything as a generic duplicate.
+- Operations Status layout in the web UI was reorganized into clearer responsive sections that better use available width and hide disabled operator subsections.
+- Watcher status logging now emits on meaningful state transitions instead of repeating redundant idle/downtime chatter.
+
+### Fixed
+- Watcher downtime no longer appears to pause import execution or queue processing in logs; watcher pause semantics are now clearer and status-driven.
+- Stale `claimed` or otherwise blocked queue rows can now be recovered so they stop wedging large import runs indefinitely.
+- Status page counters and labels now better distinguish queue activity, active work, import progress, and subsystem state.
+- Music Mode full-album download buttons now report truthful queue results instead of marking albums as queued when every expanded track was skipped as a duplicate or when queue persistence was unavailable.
+
+## v0.9.14 — Community Cache Publisher Automation
+
+### High-Level
+This release turns community-cache contribution into a built-in workflow. Retreivr can now take verified local resolution matches, stage them through the existing outbox, and automatically publish PR-ready dataset updates to the community cache repository on a schedule.
+
+### Added
+- Internal community-cache publisher worker that ingests verified outbox proposals, batches them by recording MBID, updates community dataset files, and opens or updates a GitHub pull request automatically.
+- Community Cache settings section in the web UI for lookup, proposal emission, repo/branch targeting, PR behavior, polling interval, batch size, and token env-var configuration.
+- New config defaults for automated community-cache publishing, including repo, branch, polling, token env, and batch-size controls.
+
+### Changed
+- Community-cache contribution is now a complete in-app flow: successful verified matches can emit to the outbox and be picked up by the internal publisher worker without a manual export step.
+- Runtime config updates now refresh community-cache publisher scheduling without requiring a restart.
+
+## v0.9.13 — Review Queue + Recoverability Hardening
+
+### High-Level
+This release replaces the old filesystem-only music review hold area with a proper internal review queue and operator workflow. It also hardens recoverable runtime failure handling so transient watcher/metadata conditions are less noisy and less likely to look catastrophic in logs.
+
+### Added
+- Dedicated Review page in the web UI for low-confidence music matches.
+- Internal review queue storage under Retreivr-managed app data instead of the public `/downloads` tree.
+- Inline review preview, detailed quarantine reasons, and batch accept/reject controls.
+- Home-page pending-review alert and Review-nav badge count.
+
+### Changed
+- Accepted review items now move from internal quarantine storage into the canonical music library only after explicit operator approval.
+- Accepted review items now promote the original failed music job into a completed acquired file so future dedupe behaves correctly.
+
+### Fixed
+- Music review/quarantine jobs now execute correctly against the internal review storage root instead of failing path validation against `/downloads`.
+- AcoustID empty-result cases no longer crash the metadata worker.
+- Recoverable watcher supervisor network/DNS failures now log as warnings instead of full crash-style tracebacks.
+- Recoverable metadata-worker conditions now log more quietly instead of producing unnecessary stack traces.
+
+## v0.9.12 — Music Finalization Hardening
+
+### High-Level
+This release tightens the finalization path for music downloads so partially processed files are less likely to appear in the final library. It also hardens final file moves for cross-filesystem setups, where temp and destination paths may live on different mounts.
+
+### Changed
+- Music downloads now complete metadata tagging while still in the temp location before the final library move.
+- Music, video, and music-video finalization paths now use a safer destination-directory temp file strategy when a direct atomic rename is not possible across filesystems.
+- Music review/quarantine items now route into `__NEEDS_REVIEW__` so the folder stays pinned near the top when sorted alphabetically.
+
+### Fixed
+- Reduced the chance of exposing an untagged or partially processed music file at the final destination when tagging or post-processing fails.
+- Cross-filesystem finalization no longer falls back to a visible copy directly into the final destination path before completion.
+- Home playlist file imports in Music and Music Video modes now honor the active destination and mode-specific format defaults instead of falling back to generic download locations.
+- Music Mode full-album downloads now preserve the selected audio format (for example `m4a`) across per-track enqueue expansion.
+- Music Mode direct-URL downloads now read the correct mode-specific format selector instead of the generic video format control.
+
+## v0.9.11 — Provenance + Reconcile + Defaults Hardening
+
+### High-Level
+This release is a practical hardening step toward `v1.0.0`. It strengthens file traceability, expands library reconciliation beyond music-only workflows, and tightens destination/default behavior so operators can move existing libraries into Retreivr with less duplicate risk and less ambiguity.
+
+### Added
+- Retreivr provenance tags embedded into music downloads and video/music-video downloads.
+- Library reconcile workflow in Settings for backfilling known media on disk into Retreivr database state.
+- Operator guide for `v1.0` expectations and download-default behavior.
+- Mode-specific Home default format controls for Video, Music Video, and Music workflows.
+
+### Changed
+- Library reconcile now scans audio and video files, not only music files.
+- Home destination and format defaults were tightened so Video, Music Video, and Music modes resolve more predictably.
+- Dedicated music-search defaults now align better with the newer Home music destination model.
+- Version resolution for provenance/runtime metadata now prefers explicit runtime version, then installed package metadata, then project version from source checkout.
+
+### Fixed
+- Full-album music downloads now honor the selected Music destination instead of falling back to the single-download folder.
+- Reconciled music can now participate in stronger duplicate prevention through global ISRC awareness and canonical-ID fallback matching.
+- Settings download-default layout was cleaned up so destinations and format selectors are clearer and mode-specific.
+
+## v0.9.10 — Watcher/Telegram Hardening + Config Upgrade Safety
+
+### High-Level
+This release is a focused hardening pass after `v0.9.9`: watcher reliability was tightened, watcher Telegram batching was made less noisy and more accurate, and config upgrade/default behavior was made safer for existing user installations.
+
+### Changed
+- Music download flow now de-emphasizes/skips pre-download metadata probe in music paths to reduce avoidable retries and improve determinism.
+- Added music candidate cooldown controls to avoid repeatedly selecting recently failing candidates.
+- Config loading now backfills missing keys recursively from defaults and persists them on load without overwriting existing user-provided values.
+- Default-template backfill no longer injects sample/demo entities (for example `example_account`, sample playlists) into real user configs.
+
+### Fixed
+- Watcher startup now resets persisted poll state for configured playlists, forcing immediate polling after container/app restart before adaptive backoff resumes.
+- Watcher polling no longer hard-skips when OAuth client is unavailable; it now attempts yt-dlp fallback for playlist fetch.
+- Subscribe-mode watcher detection no longer misses new videos when seen entries appear first; newly detected subscribe IDs are marked seen at detection time.
+- Watcher batch orchestration now prefers full poll coverage across watched playlists (with bounded max wait), reducing one-item/one-message spam behavior.
+- Watcher Telegram dispatch now includes cooldown-aware batching and improved attempted-count accounting.
+- Watcher summary dispatch now waits for terminal job states (bounded) before send, improving post-download summary timing and attempted-item resolution.
+- Watcher skew/startup idle behavior hardened to prevent long “stuck waiting” windows from stale persisted `next_poll_at` values.
+- OAuth refresh logging wording clarified (`Refreshing credentials - Attempt X/Y` and explicit success line).
+- OAuth helper modal sizing in the web UI now respects viewport height and keeps controls reachable on smaller browser windows.
+
+## v0.9.9 — Settings IA Overhaul + UX Consistency + Runtime Notification Fixes
+
+### High-Level
+This release focuses on configuration clarity, safer control flow, and runtime reliability. The former long Config page was redesigned into a structured Settings experience, Home mode controls were unified, and key operational regressions in scheduler persistence and Telegram reporting were fixed.
+
+### Added
+- Redesigned Settings information architecture (sectioned navigation, focused section view, advanced-mode gating, and mobile selector fallback).
+- Mode-specific Home destination defaults for Video/Music/Music Video were formalized in settings.
+
+### Changed
+- Home control behavior was unified across Video/MV/Music flows (shared delivery semantics, consistent destination handling, and expanded format surfacing including `m4a` where applicable).
+- YouTube playlist/account configuration flow was streamlined (normalized playlist ID handling, constrained account selection, and clearer add/delete actions).
+- Settings layout responsiveness was hardened across desktop/tablet/mobile to reduce section-switch and resize inconsistencies.
+
+### Fixed
+- Scheduler enabled-state save/apply flow now respects user toggles after `Save Schedule` / `Save Config`.
+- Telegram scheduler/watcher summaries now resolve and display human-readable video titles (instead of only YouTube IDs) in attempted-item lists.
+- Settings section navigation/selection no longer triggers unintended scroll/hash jumps during category changes.
+
+## v0.9.8 — Fast Discovery + Video Preview + Adapter Extensibility
+
+### High-Level
+This release focuses on homepage discovery responsiveness and operator usability. Search now renders incrementally as sources resolve, lightweight video discovery is prioritized, and supported sources can be previewed inline before enqueue. Deterministic acquisition and download behavior remain unchanged.
+
+### Added
+- Homepage video preview flow with `Preview` action on result cards for supported adapters.
+- Preview trigger parity on title/thumbnail clicks (same behavior as the `Preview` button).
+- Structured custom adapter framework with user-facing `config/custom_search_adapters.example.yaml` template.
+- New video discovery adapters integrated for `rumble` and `archive_org`.
+- Discovery timing instrumentation and source-level adapter progress logging.
+- New API endpoint `GET /api/version/latest` to resolve latest version from GHCR tags (with release fallback).
+
+### Changed
+- Search discovery pipeline refactored for lightweight-first behavior:
+  - canonical metadata resolution removed from initial generic/video discovery path
+  - strict per-source timeout budget for discovery
+  - bounded discovery result set per source
+  - fallback/retry behavior for timed-out sources without blocking first visible results
+- YouTube lightweight discovery migrated to Innertube search (`youtubei/v1/search`) for fast candidate return.
+- Homepage results rendering now updates progressively as adapters resolve (no all-at-once batch wait).
+- Candidate row rendering is now non-blocking: rows render first, job-state enrichment follows asynchronously.
+- Home polling loop hardened to prevent overlapping async polls and reduce UI update latency.
+- Search DB connections tuned for concurrent read/write responsiveness (`WAL`, `busy_timeout`) during progressive candidate writes.
+- Source selection UX refined:
+  - dynamic source list from backend
+  - video-mode source filtering to remove non-video adapters from the selection list
+- Info page version check now tracks GHCR-published versions (container-first) instead of browser-side GitHub release lookup.
+
+### Removed
+- Legacy local YouTube search cache pipeline and schema artifacts (`search_query_cache` and related indexes).
+- `x` and `bitchute` default source adapter exposure from active source selection paths.
+
+### Fixed
+- Multi-source visibility issue where one adapter’s results could hide or starve others in combined searches.
+- Homepage candidate refresh race conditions that caused delayed or dropped incremental rows.
+- Rumble/archive preview wiring and embed behavior reliability on homepage preview modal.
+- Search-card metadata regressions (including posted-date rendering on result cards).
+
+### Upgrade Notes
+- No required config migration for existing installs.
+- To add site-search adapters, copy `config/custom_search_adapters.example.yaml` to `config/custom_search_adapters.yaml` and ensure `custom_search_adapters_file` is set in `config/config.json`.
+
+## v0.9.7 — Community Cache + Local Search Cache + Watcher/Telegram Hardening
+
+### High-Level
+This release improves cache-first search/resolution performance, stabilizes watcher/Telegram reporting, and refines music/music-video UX without changing deterministic scoring thresholds.
+Added Music Video Mode with similar UX as Music Mode, but attempts to download official music videos from official channels as priority while still embedding musicbrainz metadata.
+
+### Added
+- Community transport cache lookup + publish outbox (local JSONL proposals, opt-in).
+- Local SQLite search cache for homepage search with cache-first replay + background refresh.
+- Deterministic community reverse-index rebuild from local dataset snapshots.
+- Music/MV metadata-first UX upgrades: MB IDs on cards, artwork, album/track navigation improvements.
+
+### Changed
+- Homepage search now surfaces cached candidates immediately and continues normal adapter resolution in parallel.
+- Candidate dedupe now merges provenance/metadata deterministically and removes cache/adapter duplicate rows.
+- Community lookup remains hint-only and is injected before normal ladder execution; fallback behavior is unchanged if cache is missing/unavailable.
+- Config defaults/schema expanded for community lookup/publish and local search-cache controls with backward-compatible defaulting.
+- Generic/video scoring now includes a small logarithmic `view_count` tie-break bonus when metadata already contains view counts (no extra fetch calls).
+- Navigation cleanup: page naming/hash alias behavior aligned around `Advanced`.
+
+### Fixed
+- Search/control-flow safety fixes so cache failures/timeouts do not block request resolution.
+- Restricted-content filtering improved for adapter normalization and cache replay.
+- Telegram scheduler/watcher summaries hardened: cleaner headers, title-first item labels, duplicate dispatch reduction.
+- Watcher stability improvements: batch-level messaging behavior, restart resilience, and non-blocking polling paths.
+- Music UI regressions fixed across `View Tracks`, card actions, artwork loading/layout, and mode-specific interaction behavior.
+
 ## v0.9.6 — Runtime Distribution + Music Match Robustness
 
 ### High-Level

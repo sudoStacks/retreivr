@@ -45,7 +45,13 @@ def test_apple_xml_sample() -> None:
       <dict>
         <key>Name</key><string>Dreams</string>
         <key>Artist</key><string>Fleetwood Mac</string>
+        <key>Album Artist</key><string>Fleetwood Mac</string>
         <key>Album</key><string>Rumours</string>
+        <key>Track Number</key><integer>2</integer>
+        <key>Disc Number</key><integer>1</integer>
+        <key>Year</key><integer>1977</integer>
+        <key>Genre</key><string>Rock</string>
+        <key>Total Time</key><integer>257000</integer>
       </dict>
     </dict>
   </dict>
@@ -60,6 +66,12 @@ def test_apple_xml_sample() -> None:
     assert item.artist == "Fleetwood Mac"
     assert item.title == "Dreams"
     assert item.album == "Rumours"
+    assert item.album_artist == "Fleetwood Mac"
+    assert item.track_number == 2
+    assert item.disc_number == 1
+    assert item.release_date == "1977"
+    assert item.genre == "Rock"
+    assert item.duration_ms == 257000
 
 
 def test_soundizz_json_sample() -> None:

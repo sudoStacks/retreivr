@@ -3,6 +3,7 @@ import queue as queue_lib
 import threading
 
 from .worker import MetadataWorker
+from .worker import _process_item
 
 DEFAULT_METADATA_CONFIG = {
     "enabled": True,
@@ -58,4 +59,20 @@ def enqueue_metadata(file_path, meta, config):
             _WORKER.start()
             logging.info("Music metadata worker started")
     _QUEUE.put(item)
+    return True
+
+
+def process_metadata_now(file_path, meta, config):
+    if not file_path:
+        return False
+    normalized = normalize_metadata_config(config)
+    if not normalized.get("enabled"):
+        return False
+    _process_item(
+        {
+            "file_path": file_path,
+            "meta": meta or {},
+            "config": normalized,
+        }
+    )
     return True

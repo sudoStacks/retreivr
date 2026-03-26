@@ -1,0 +1,38 @@
+version: 1
+adapters:
+  # Example 1: YouTube site-search fallback adapter.
+  # Note: built-in YouTube adapter is already better/faster; this is only a template.
+  - source: youtube_site_fallback
+    type: site_search
+    enabled: false
+    domains:
+      - youtube.com
+      - youtu.be
+    source_modifier: 0.70
+    query_suffix: official video
+
+  # Example 2: PeerTube instances.
+  - source: peertube
+    type: site_search
+    enabled: true
+    domains:
+      - peertube.social
+      - tilvids.com
+    source_modifier: 0.84
+    query_suffix: video
+
+  # Example 3: Odysee.
+  - source: odysee
+    type: site_search
+    enabled: true
+    domain: odysee.com
+    source_modifier: 0.82
+    query_suffix: video
+
+  # Example 4: Dailymotion.
+  - source: dailymotion
+    type: site_search
+    enabled: true
+    domain: dailymotion.com
+    source_modifier: 0.80
+    query_suffix: video

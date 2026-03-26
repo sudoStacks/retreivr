@@ -16,6 +16,8 @@ CORRECTNESS_WEIGHT = 0.8
 COMPLETENESS_WEIGHT = 0.2
 CORRECTNESS_FLOOR = 62.0
 MAX_DURATION_DELTA_MS = 12000
+IMPORT_CORRECTNESS_FLOOR = 57.0
+IMPORT_MAX_DURATION_DELTA_MS = 30000
 PREVIEW_REJECT_MS = 45000
 BUCKET_MULTIPLIERS: dict[str, float] = {
     "album": 1.00,
@@ -423,11 +425,24 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
     if mode_value not in {"auto", "artist", "album", "track"}:
         mode_value = "auto"
 
-    limit_value = min(max(1, int(limit or 20)), 15)
+    requested_limit = max(1, int(limit or 100))
+    artist_limit = 10
+    catalog_limit = min(requested_limit, 100)
     offset_value = max(0, int(offset or 0))
 
+    forced_track_mode = mode_value == "track"
+
     resolved_mode = mode_value
-    if artist_value and album_value and track_value:
+    if forced_track_mode and artist_value and album_value and not track_value:
+        resolved_mode = "track"
+        route_case = "artist_album_forced_track"
+    elif forced_track_mode and album_value and not artist_value and not track_value:
+        resolved_mode = "track"
+        route_case = "album_forced_track"
+    elif forced_track_mode and artist_value and not album_value and not track_value:
+        resolved_mode = "track"
+        route_case = "artist_forced_track"
+    elif artist_value and album_value and track_value:
         resolved_mode = "track"
         route_case = "artist_album_track"
     elif artist_value and track_value:
@@ -448,13 +463,14 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
     else:
         route_case = "empty"
 
+    response_limit = artist_limit if resolved_mode == "artist" else catalog_limit
     response = {
         "artists": [],
         "albums": [],
         "tracks": [],
         "mode_used": resolved_mode,
         "offset": offset_value,
-        "limit": limit_value,
+        "limit": response_limit,
     }
     if route_case == "empty":
         return response
@@ -499,12 +515,12 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         payload = _mb_call(
             lambda: musicbrainzngs.search_artists(
                 query=artist_query,
-                limit=limit_value,
+                limit=artist_limit,
                 offset=offset_value,
             )
         )
         artist_list = payload.get("artist-list", []) if isinstance(payload, dict) else []
-        for artist_item in artist_list[:limit_value]:
+        for artist_item in artist_list[:artist_limit]:
             if not isinstance(artist_item, dict):
                 continue
             response["artists"].append(
@@ -534,12 +550,12 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         payload = _mb_call(
             lambda: musicbrainzngs.search_release_groups(
                 query=release_group_query,
-                limit=limit_value,
+                limit=catalog_limit,
                 offset=offset_value,
             )
         )
         group_list = payload.get("release-group-list", []) if isinstance(payload, dict) else []
-        for group in group_list[:limit_value]:
+        for group in group_list[:catalog_limit]:
             if not isinstance(group, dict):
                 continue
             if not _is_allowed_album_release_group_type(group.get("primary-type")):
@@ -562,11 +578,20 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
                 f"recording:{_field(track_value)} AND "
                 f"release:{_field(album_value)}"
             )
+        elif route_case == "artist_album_forced_track":
+            recording_query = (
+                f"artist:{_field(artist_value)} AND "
+                f"release:{_field(album_value)}"
+            )
         elif route_case == "artist_track":
             recording_query = (
                 f"artist:{_field(artist_value)} AND "
                 f"recording:{_field(track_value)}"
             )
+        elif route_case == "album_forced_track":
+            recording_query = f"release:{_field(album_value)}"
+        elif route_case == "artist_forced_track":
+            recording_query = f"artist:{_field(artist_value)}"
         else:
             recording_query = f"recording:{_field(track_value)}"
         logger.info(
@@ -576,12 +601,12 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         payload = _mb_call(
             lambda: musicbrainzngs.search_recordings(
                 query=recording_query,
-                limit=limit_value,
+                limit=catalog_limit,
                 offset=offset_value,
             )
         )
         recording_list = payload.get("recording-list", []) if isinstance(payload, dict) else []
-        for recording in recording_list[:limit_value]:
+        for recording in recording_list[:catalog_limit]:
             if not isinstance(recording, dict):
                 continue
             recording_mbid = str(recording.get("id") or "").strip()
@@ -632,6 +657,7 @@ def resolve_best_mb_pair(
     artist: str | None,
     track: str,
     album: str | None = None,
+    album_artist: str | None = None,
     duration_ms: int | None = None,
     country_preference: str = "US",
     allow_non_album_fallback: bool = False,
@@ -639,8 +665,11 @@ def resolve_best_mb_pair(
     min_recording_score: float = 0.0,
     threshold: float = 0.78,
     max_duration_delta_ms: int | None = None,
+    resolution_profile: str | None = None,
+    context_hint: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     resolve_best_mb_pair.last_failure_reasons = []
+    resolve_best_mb_pair.last_resolution_diagnostics = {}
     failure_reasons: set[str] = set()
     bucket_counts: dict[str, int] = {"album": 0, "compilation": 0, "single": 0, "excluded": 0}
     rejected_counts_by_reason: dict[str, int] = {}
@@ -663,15 +692,26 @@ def resolve_best_mb_pair(
         return parsed
 
     expected_artist = str(artist or "").strip()
+    expected_album_artist = str(album_artist or "").strip()
     expected_track_raw = str(track or "").strip()
     expected_track_lookup = _normalize_title_for_mb_lookup(expected_track_raw)
     expected_track_for_score = _strip_neutral_title_phrases(expected_track_raw) or expected_track_raw
     expected_track = expected_track_raw
     expected_album = str(album or "").strip() or None
+    import_profile = str(resolution_profile or "").strip().lower() in {
+        "library_import",
+        "apple_xml",
+        "library_xml",
+    }
+    context = context_hint if isinstance(context_hint, dict) else {}
+    preferred_release_id = str(context.get("preferred_release_id") or "").strip()
     prefer_country = str(country_preference or "").strip().upper() or None
     binding_threshold = _normalize_threshold(threshold, default=0.78)
     binding_threshold_score = binding_threshold * 100.0
-    duration_delta_limit_ms = _safe_int(max_duration_delta_ms) or MAX_DURATION_DELTA_MS
+    duration_delta_limit_ms = _safe_int(max_duration_delta_ms) or (
+        IMPORT_MAX_DURATION_DELTA_MS if import_profile else MAX_DURATION_DELTA_MS
+    )
+    correctness_floor = IMPORT_CORRECTNESS_FLOOR if import_profile else CORRECTNESS_FLOOR
     log_duration_reject_detail = bool(expected_album) or (max_duration_delta_ms is not None)
 
     if debug:
@@ -684,8 +724,9 @@ def resolve_best_mb_pair(
             }
         )
 
+    search_artist = expected_album_artist or expected_artist
     recordings_payload = mb_service.search_recordings(
-        expected_artist or None,
+        search_artist or None,
         expected_track_lookup or expected_track_raw,
         album=expected_album,
         limit=5,
@@ -696,9 +737,29 @@ def resolve_best_mb_pair(
         if isinstance(raw, list):
             recording_list = [entry for entry in raw if isinstance(entry, dict)]
     ranked_recordings = sorted(recording_list, key=lambda rec: (-_score_value(rec), str(rec.get("id") or "")))
+    if not ranked_recordings and expected_artist and expected_album_artist and expected_artist != expected_album_artist:
+        recordings_payload = mb_service.search_recordings(
+            expected_artist or None,
+            expected_track_lookup or expected_track_raw,
+            album=expected_album,
+            limit=5,
+        )
+        if isinstance(recordings_payload, dict):
+            raw = recordings_payload.get("recording-list")
+            if isinstance(raw, list):
+                ranked_recordings = sorted(
+                    [entry for entry in raw if isinstance(entry, dict)],
+                    key=lambda rec: (-_score_value(rec), str(rec.get("id") or "")),
+                )
     if not ranked_recordings:
         _add_failure("no_recording_candidates")
         resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons)
+        resolve_best_mb_pair.last_resolution_diagnostics = {
+            "reasons": sorted(failure_reasons),
+            "rejected_counts_by_reason": rejected_counts_by_reason,
+            "bucket_counts": bucket_counts,
+            "resolution_profile": resolution_profile,
+        }
         logger.info(
             {
                 "message": "mb_pair_selection_failed",
@@ -854,16 +915,6 @@ def resolve_best_mb_pair(
             variant_triggers = _extract_variant_triggers(recording_title)
             if variant_triggers and not variant_allowed:
                 _add_failure("disallowed_variant")
-                logger.info(
-                    {
-                        "message": "mb_pair_rejected",
-                        "recording_mbid": recording_mbid,
-                        "release_mbid": release_id,
-                        "reason": "disallowed_variant",
-                        "variant_triggers": variant_triggers,
-                        "normalized_title_for_scoring": recording_title_for_score,
-                    }
-                )
                 if debug:
                     logger.debug(
                         {
@@ -896,13 +947,19 @@ def resolve_best_mb_pair(
             candidate_artist = recording_artist or release_artist
             if expected_artist:
                 artist_similarity = _token_similarity(expected_artist, candidate_artist)
-                if not candidate_artist:
-                    artist_similarity = max(0.6, recording_score)
             else:
                 artist_similarity = 1.0
+            if expected_album_artist:
+                album_artist_similarity = _token_similarity(expected_album_artist, candidate_artist)
+            else:
+                album_artist_similarity = artist_similarity if expected_artist else 1.0
+            if not candidate_artist:
+                artist_similarity = max(0.6, recording_score)
+                album_artist_similarity = max(album_artist_similarity, artist_similarity)
             title_similarity = _token_similarity(expected_track_for_score, recording_title_for_score or expected_track_for_score)
             album_similarity = _token_similarity(expected_album, release_title) if expected_album else 0.0
-            if expected_album and bucket == "compilation" and album_similarity < 0.40:
+            compilation_album_floor = 0.25 if import_profile else 0.40
+            if expected_album and bucket == "compilation" and album_similarity < compilation_album_floor:
                 _add_failure("compilation_album_mismatch")
                 if debug:
                     logger.debug(
@@ -915,6 +972,10 @@ def resolve_best_mb_pair(
                         }
                     )
                 continue
+            text_match_strong = (
+                max(artist_similarity, album_artist_similarity) >= 0.86
+                and title_similarity >= 0.88
+            )
             if duration_ms is not None and recording_duration_ms is not None:
                 duration_similarity = max(
                     0.0,
@@ -924,7 +985,7 @@ def resolve_best_mb_pair(
                 duration_similarity = 0.5
 
             correctness = (
-                artist_similarity * 40.0
+                max(artist_similarity, album_artist_similarity) * 40.0
                 + title_similarity * 30.0
                 + duration_similarity * 20.0
                 + album_similarity * 10.0
@@ -949,34 +1010,48 @@ def resolve_best_mb_pair(
                 completeness += 8.0
 
             country_bonus = 6.0 if (prefer_country and country == prefer_country) else 0.0
-            total = correctness * CORRECTNESS_WEIGHT + completeness * COMPLETENESS_WEIGHT + country_bonus
+            release_quality = 1.0 if bucket == "album" else (0.9 if bucket == "compilation" else 0.8)
+            batch_context_boost = 0.0
+            if preferred_release_id and preferred_release_id in {release_id, str(release_group_id or "")}:
+                batch_context_boost = 4.0
+            total = correctness * CORRECTNESS_WEIGHT + completeness * COMPLETENESS_WEIGHT + country_bonus + batch_context_boost
 
             if duration_delta_ms is not None and duration_delta_ms > duration_delta_limit_ms:
-                _add_failure("duration_delta_gt_limit")
-                if log_duration_reject_detail:
-                    logger.info(
-                        {
-                            "message": "duration_reject_detail",
-                            "recording_mbid": recording_mbid,
-                            "mb_duration_ms": duration_ms,
-                            "candidate_duration_ms": recording_duration_ms,
-                            "delta_ms": duration_delta_ms,
-                            "limit_ms": duration_delta_limit_ms,
-                        }
-                    )
-                if debug:
-                    logger.debug(
-                        {
-                            "message": "mb_pair_rejected",
-                            "recording_mbid": recording_mbid,
-                            "release_mbid": release_id,
-                            "reason": "duration_delta_gt_limit",
-                            "duration_delta_ms": duration_delta_ms,
-                            "duration_delta_limit_ms": duration_delta_limit_ms,
-                            "normalized_title_for_scoring": recording_title_for_score,
-                        }
-                    )
-                continue
+                soft_duration_limit = duration_delta_limit_ms * (2 if import_profile else 1)
+                if not (import_profile and text_match_strong and duration_delta_ms <= soft_duration_limit):
+                    _add_failure("duration_delta_gt_limit")
+                    if log_duration_reject_detail and debug:
+                        logger.debug(
+                            {
+                                "message": "duration_reject_detail",
+                                "recording_mbid": recording_mbid,
+                                "mb_duration_ms": duration_ms,
+                                "candidate_duration_ms": recording_duration_ms,
+                                "delta_ms": duration_delta_ms,
+                                "limit_ms": duration_delta_limit_ms,
+                            }
+                        )
+                    if debug:
+                        logger.debug(
+                            {
+                                "message": "mb_pair_rejected",
+                                "recording_mbid": recording_mbid,
+                                "release_mbid": release_id,
+                                "reason": "duration_delta_gt_limit",
+                                "duration_delta_ms": duration_delta_ms,
+                                "duration_delta_limit_ms": duration_delta_limit_ms,
+                                "normalized_title_for_scoring": recording_title_for_score,
+                            }
+                        )
+                    continue
+                duration_similarity = max(0.10, 1.0 - (float(duration_delta_ms or 0) / float(soft_duration_limit)))
+                correctness = (
+                    max(artist_similarity, album_artist_similarity) * 40.0
+                    + title_similarity * 30.0
+                    + duration_similarity * 20.0
+                    + album_similarity * 10.0
+                )
+                total = correctness * CORRECTNESS_WEIGHT + completeness * COMPLETENESS_WEIGHT + country_bonus + batch_context_boost
 
             candidate = {
                 "recording_mbid": recording_mbid,
@@ -999,6 +1074,18 @@ def resolve_best_mb_pair(
                 "track_disambiguation": recording_disambiguation or track_disambiguation,
                 "track_aliases": title_aliases,
                 "mb_youtube_urls": mb_youtube_urls,
+                "matched_artist": candidate_artist or None,
+                "release_quality": release_quality,
+                "batch_context_boost": batch_context_boost,
+                "scoring_breakdown": {
+                    "artist_similarity": round(float(artist_similarity), 4),
+                    "album_artist_similarity": round(float(album_artist_similarity), 4),
+                    "title_similarity": round(float(title_similarity), 4),
+                    "album_similarity": round(float(album_similarity), 4),
+                    "duration_similarity": round(float(duration_similarity), 4),
+                    "release_quality": round(float(release_quality), 4),
+                    "batch_context_boost": round(float(batch_context_boost), 4),
+                },
             }
             if debug:
                 logger.debug(
@@ -1029,6 +1116,12 @@ def resolve_best_mb_pair(
                 rejected_counts_by_reason.get("no_valid_release_for_recording", 0)
             ) + 1
         resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons or {"no_valid_release_for_recording"})
+        resolve_best_mb_pair.last_resolution_diagnostics = {
+            "reasons": sorted(failure_reasons or {"no_valid_release_for_recording"}),
+            "rejected_counts_by_reason": rejected_counts_by_reason,
+            "bucket_counts": bucket_counts,
+            "resolution_profile": resolution_profile,
+        }
         logger.info(
             {
                 "message": "mb_pair_selection_failed",
@@ -1039,10 +1132,16 @@ def resolve_best_mb_pair(
         )
         return None
 
-    eligible = [c for c in all_candidates if float(c.get("correctness") or 0.0) >= CORRECTNESS_FLOOR]
+    eligible = [c for c in all_candidates if float(c.get("correctness") or 0.0) >= correctness_floor]
     if not eligible:
         _add_failure("correctness_below_floor")
         resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons)
+        resolve_best_mb_pair.last_resolution_diagnostics = {
+            "reasons": sorted(failure_reasons),
+            "rejected_counts_by_reason": rejected_counts_by_reason,
+            "bucket_counts": bucket_counts,
+            "resolution_profile": resolution_profile,
+        }
         logger.info(
             {
                 "message": "mb_pair_selection_failed",
@@ -1068,11 +1167,17 @@ def resolve_best_mb_pair(
         final_pool = album_compilation_candidates
     else:
         _add_failure("no_album_or_compilation_candidate")
-        final_pool = eligible
+        final_pool = eligible if (allow_non_album_fallback or import_profile) else []
 
     if not final_pool:
         _add_failure("single_fallback_failed")
         resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons)
+        resolve_best_mb_pair.last_resolution_diagnostics = {
+            "reasons": sorted(failure_reasons),
+            "rejected_counts_by_reason": rejected_counts_by_reason,
+            "bucket_counts": bucket_counts,
+            "resolution_profile": resolution_profile,
+        }
         logger.info(
             {
                 "message": "mb_pair_selection_failed",
@@ -1087,6 +1192,12 @@ def resolve_best_mb_pair(
     if not threshold_pool:
         _add_failure("mb_binding_below_threshold")
         resolve_best_mb_pair.last_failure_reasons = sorted(failure_reasons)
+        resolve_best_mb_pair.last_resolution_diagnostics = {
+            "reasons": sorted(failure_reasons),
+            "rejected_counts_by_reason": rejected_counts_by_reason,
+            "bucket_counts": bucket_counts,
+            "resolution_profile": resolution_profile,
+        }
         logger.info(
             {
                 "message": "mb_pair_selection_failed",
@@ -1123,9 +1234,19 @@ def resolve_best_mb_pair(
             "bucket": selected.get("bucket"),
             "bucket_multiplier": selected.get("bucket_multiplier"),
             "mb_youtube_urls": selected.get("mb_youtube_urls") or [],
+            "resolution_profile": resolution_profile,
+            "scoring_breakdown": selected.get("scoring_breakdown") or {},
         }
     )
     resolve_best_mb_pair.last_failure_reasons = []
+    resolve_best_mb_pair.last_resolution_diagnostics = {
+        "selected_bucket": selected.get("bucket"),
+        "scoring_breakdown": selected.get("scoring_breakdown") or {},
+        "recording_mbid": selected.get("recording_mbid"),
+        "release_mbid": selected.get("mb_release_id"),
+        "matched_artist": selected.get("matched_artist"),
+        "resolution_profile": resolution_profile,
+    }
     return {
         "recording_mbid": selected.get("recording_mbid"),
         "mb_release_id": selected.get("mb_release_id"),
@@ -1139,4 +1260,7 @@ def resolve_best_mb_pair(
         "track_disambiguation": selected.get("track_disambiguation"),
         "track_aliases": selected.get("track_aliases"),
         "mb_youtube_urls": selected.get("mb_youtube_urls") or [],
+        "matched_artist": selected.get("matched_artist"),
+        "selected_bucket": selected.get("bucket"),
+        "scoring_breakdown": selected.get("scoring_breakdown") or {},
     }

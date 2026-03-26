@@ -1,3 +1,5 @@
+import json
+import math
 import re
 import unicodedata
 
@@ -405,6 +407,41 @@ def _canonical_bonus(expected, candidate):
     return clamp01(sum(signals) / len(signals))
 
 
+def _coerce_nonnegative_int(value):
+    try:
+        parsed = int(value)
+    except Exception:
+        return None
+    if parsed < 0:
+        return None
+    return parsed
+
+
+def _candidate_view_count(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    direct = _coerce_nonnegative_int(candidate.get("view_count"))
+    if direct is not None:
+        return direct
+    raw_meta = candidate.get("raw_meta_json")
+    if isinstance(raw_meta, str):
+        try:
+            raw_meta = json.loads(raw_meta)
+        except Exception:
+            raw_meta = None
+    if isinstance(raw_meta, dict):
+        return _coerce_nonnegative_int(raw_meta.get("view_count"))
+    return None
+
+
+def _view_count_signal(candidate):
+    views = _candidate_view_count(candidate)
+    if views is None or views <= 0:
+        return 0.0
+    # Log scale keeps large channels from overpowering intent matching.
+    return max(0.0, min(1.0, math.log10(float(views) + 1.0) / 8.0))
+
+
 def score_candidate(expected, candidate, *, source_modifier=1.0):
     if str(expected.get("media_intent") or "").strip().lower() == "music_track":
         source_value = str(candidate.get("source") or "").strip().lower()
@@ -530,6 +567,8 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             else:
                 rejection_reason = "floor_check_failed"
 
+        view_count_signal = _view_count_signal(candidate)
+        view_count_bonus_pts = 1.5 * view_count_signal
         raw_score_100 = (
             track_pts
             + artist_pts
@@ -537,6 +576,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
             + duration_pts
             + source_authority_pts
             + owned_channel_bonus_pts
+            + view_count_bonus_pts
             - noise_penalty
             - duration_penalty
         )
@@ -568,6 +608,7 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
                 "owned_channel_bonus_pts": owned_channel_bonus_pts,
                 "noise_penalty": noise_penalty,
                 "duration_penalty": duration_penalty,
+                "view_count_bonus_pts": view_count_bonus_pts,
                 "source_multiplier": multiplier,
                 "raw_score_100": raw_score_100,
                 "final_score_100": final_score_100,
@@ -595,12 +636,14 @@ def score_candidate(expected, candidate, *, source_modifier=1.0):
     duration = duration_score(expected.get("duration_hint_sec"), candidate.get("duration_sec"))
 
     bonus_score = _canonical_bonus(expected, candidate)
+    view_count_bonus = 0.02 * _view_count_signal(candidate)
     weighted_sum = (
         _WEIGHTS["artist"] * artist_score
         + _WEIGHTS["track"] * track_score
         + _WEIGHTS["album"] * album_score
         + _WEIGHTS["duration"] * duration
         + _WEIGHTS["bonus"] * bonus_score
+        + view_count_bonus
     )
 
     penalties = penalty_multiplier(expected_track, candidate_track, artist_score)

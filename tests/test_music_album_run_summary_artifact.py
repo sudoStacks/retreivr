@@ -84,6 +84,11 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
                             "mb_release_group_id": "rg-1",
                         },
                         "runtime_search_meta": {
+                            "community_seeded_candidates": 1,
+                            "community_seeded_selected": True,
+                            "community_seeded_rejections": {},
+                            "community_publish_attempted": True,
+                            "community_publish_status": "written",
                             "decision_edge": {
                                 "accepted_selection": {
                                     "selected_candidate_id": "ok-cand",
@@ -125,6 +130,14 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
                             "mb_release_group_id": "rg-1",
                         },
                         "runtime_search_meta": {
+                            "community_seeded_candidates": 1,
+                            "community_seeded_selected": False,
+                            "community_seeded_rejections": {
+                                "community_seeded_failed_duration": 1,
+                                "community_seeded_failed_variant": 2,
+                            },
+                            "community_publish_attempted": True,
+                            "community_publish_status": "dry_run",
                             "ep_refinement_attempted": True,
                             "ep_refinement_candidates_considered": 3,
                             "decision_edge": {
@@ -196,6 +209,18 @@ def test_write_music_album_run_summary_emits_expected_schema(tmp_path) -> None:
     assert payload["tracks_total"] == 2
     assert payload["tracks_resolved"] == 1
     assert "completion_percent" in payload
+    assert payload["community_seeded_total"] == 2
+    assert payload["community_seeded_selected_total"] == 1
+    assert payload["community_seeded_rejection_mix"]["community_seeded_failed_duration"] == 1
+    assert payload["community_seeded_rejection_mix"]["community_seeded_failed_variant"] == 2
+    assert payload["community_publish_attempted_total"] == 2
+    assert payload["community_publish_written_total"] == 1
+    assert payload["community_publish_dry_run_total"] == 1
+    assert payload["community_publish_deduped_total"] == 0
+    assert payload["community_publish_skipped_total"] == 0
+    assert payload["community_publish_error_total"] == 0
+    assert payload["community_publish_status_mix"]["written"] == 1
+    assert payload["community_publish_status_mix"]["dry_run"] == 1
     assert "wrong_variant_flags" in payload
     assert "rejection_mix" in payload
     assert "unresolved_classification" in payload

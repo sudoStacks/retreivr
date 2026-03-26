@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
 from config.settings import ENABLE_DURATION_VALIDATION, SPOTIFY_DURATION_TOLERANCE_SECONDS
 from db.downloaded_tracks import record_downloaded_track
+from engine.music_export import run_music_exports
 from media.ffprobe import get_media_duration
 from media.music_contract import coerce_canonical_music_metadata, parse_first_positive_int
 from media.path_builder import build_music_relative_layout, ensure_parent_dir, resolve_music_root_path
@@ -17,6 +20,7 @@ from metadata.naming import build_album_directory, build_track_filename
 from metadata.normalize import normalize_music_metadata
 from metadata.tagging_service import tag_file
 from metadata.types import CanonicalMetadata
+from library.provenance import build_file_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +34,31 @@ JOB_ALLOWED_STATUSES = {
     JOB_STATUS_CANCELLED,
     JOB_STATUS_VALIDATION_FAILED,
 }
+
+
+def _atomic_move(src: str, dst: str) -> None:
+    try:
+        os.replace(src, dst)
+    except OSError:
+        dst_dir = os.path.dirname(dst) or "."
+        os.makedirs(dst_dir, exist_ok=True)
+        fd, tmp_dst = tempfile.mkstemp(
+            prefix=".retreivr-move-",
+            suffix=os.path.splitext(dst)[1],
+            dir=dst_dir,
+        )
+        os.close(fd)
+        try:
+            shutil.copy2(src, tmp_dst)
+            os.replace(tmp_dst, dst)
+            os.remove(src)
+        except Exception:
+            try:
+                if os.path.exists(tmp_dst):
+                    os.remove(tmp_dst)
+            except Exception:
+                pass
+            raise
 
 
 class _Downloader(Protocol):
@@ -117,17 +146,39 @@ class DownloadWorker:
                     canonical_path = root_path / Path(relative_layout)
                     ensure_parent_dir(canonical_path)
                     try:
-                        shutil.move(str(temp_path), str(canonical_path))
+                        tag_file(
+                            str(temp_path),
+                            normalized_metadata,
+                            provenance=build_file_provenance(
+                                job=job,
+                                source=(resolved_media or {}).get("source_id") or payload.get("source") or "music",
+                                source_id=(resolved_media or {}).get("video_id")
+                                or (resolved_media or {}).get("external_id")
+                                or payload.get("recording_mbid")
+                                or payload.get("mb_recording_id"),
+                            ),
+                        )
                     except Exception:
-                        logger.exception("failed to move file to canonical path path=%s", canonical_path)
+                        logger.exception("failed to tag temp music file path=%s", temp_path)
                         self._set_job_status(job, payload, JOB_STATUS_FAILED)
                         return {"status": JOB_STATUS_FAILED, "file_path": None}
                     try:
-                        tag_file(str(canonical_path), normalized_metadata)
+                        _atomic_move(str(temp_path), str(canonical_path))
                     except Exception:
-                        logger.exception("failed to tag canonical file path=%s", canonical_path)
+                        logger.exception("failed to move tagged file to canonical path path=%s", canonical_path)
                         self._set_job_status(job, payload, JOB_STATUS_FAILED)
                         return {"status": JOB_STATUS_FAILED, "file_path": None}
+                    try:
+                        export_results = run_music_exports(
+                            str(canonical_path),
+                            self._metadata_to_export_dict(normalized_metadata),
+                            payload.get("config") if isinstance(payload.get("config"), dict) else {},
+                        )
+                    except Exception:
+                        logger.exception("music export stage failed path=%s", canonical_path)
+                        export_results = {}
+                    if export_results:
+                        payload["export_results"] = export_results
                     # Record idempotency state only after download and tagging both succeed.
                     playlist_id = payload.get("playlist_id")
                     isrc = getattr(metadata, "isrc", None)
@@ -168,6 +219,22 @@ class DownloadWorker:
     def _resolve_music_root(payload: dict[str, Any]) -> Path:
         """Resolve music root path from existing payload/config fields."""
         return resolve_music_root_path(payload)
+
+    @staticmethod
+    def _metadata_to_export_dict(metadata: CanonicalMetadata) -> dict[str, Any]:
+        return {
+            "title": metadata.title,
+            "track": metadata.title,
+            "artist": metadata.artist,
+            "album": metadata.album,
+            "album_artist": metadata.album_artist,
+            "track_number": metadata.track_num,
+            "track_num": metadata.track_num,
+            "disc_number": metadata.disc_num,
+            "disc_num": metadata.disc_num,
+            "date": metadata.date,
+            "genre": metadata.genre,
+        }
 
 
 def safe_int(value: Any) -> Optional[int]:

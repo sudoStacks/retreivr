@@ -14,7 +14,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from db.downloaded_tracks import has_downloaded_isrc
+from db.downloaded_tracks import has_downloaded_isrc, has_downloaded_isrc_anywhere
 from metadata.merge import merge_metadata
 from playlist.rebuild import rebuild_playlist_from_tracks
 from spotify.client import SpotifyPlaylistClient, get_playlist_items
@@ -470,7 +470,10 @@ async def enqueue_spotify_track(queue, spotify_track: dict, search_service, play
     missing/empty ISRC are always treated as normal enqueue candidates.
     """
     track_isrc = str((spotify_track or {}).get("isrc") or "").strip()
-    if track_isrc and has_downloaded_isrc(playlist_id, track_isrc):
+    if track_isrc and (
+        has_downloaded_isrc(playlist_id, track_isrc)
+        or has_downloaded_isrc_anywhere(track_isrc)
+    ):
         logging.info("skip duplicate isrc=%s playlist=%s", track_isrc, playlist_id)
         return {
             "created": False,

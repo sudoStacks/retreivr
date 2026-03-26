@@ -29,3 +29,21 @@ class WatchPolicyTests(unittest.TestCase):
         self.assertTrue(in_window)
         self.assertEqual(next_allowed, datetime(2026, 1, 2, 9, 0, tzinfo=timezone.utc))
 
+    def test_downtime_same_day_start_inclusive_end_exclusive(self):
+        start = "08:00"
+        end = "10:00"
+        at_start = datetime(2026, 1, 1, 8, 0, tzinfo=timezone.utc)
+        before_end = datetime(2026, 1, 1, 9, 59, tzinfo=timezone.utc)
+        at_end = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+
+        in_window, next_allowed = api_main.in_downtime(at_start, start, end)
+        self.assertTrue(in_window)
+        self.assertEqual(next_allowed, datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc))
+
+        in_window, next_allowed = api_main.in_downtime(before_end, start, end)
+        self.assertTrue(in_window)
+        self.assertEqual(next_allowed, datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc))
+
+        in_window, next_allowed = api_main.in_downtime(at_end, start, end)
+        self.assertFalse(in_window)
+        self.assertIsNone(next_allowed)

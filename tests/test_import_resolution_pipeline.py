@@ -138,10 +138,21 @@ class FakeMusicBrainzService:
 class FakeQueueStore:
     def __init__(self):
         self.enqueued = []
+        self.existing_by_canonical_id = {}
+        self.duplicate_classifications = {}
 
     def enqueue_job(self, **kwargs):
         self.enqueued.append(kwargs)
+        if kwargs.get("force_requeue"):
+            return f"job-{len(self.enqueued)}", True, "requeued"
         return f"job-{len(self.enqueued)}", True, None
+
+    def get_job_by_canonical_id(self, canonical_id):
+        return self.existing_by_canonical_id.get(canonical_id)
+
+    def classify_duplicate_job(self, *, canonical_id=None, url=None, destination=None):
+        _ = (url, destination)
+        return self.duplicate_classifications.get(canonical_id)
 
 
 def _spy_job_payload_builder(*, config, **kwargs):
@@ -208,6 +219,7 @@ def test_import_pipeline_resolves_musicbrainz_and_enqueues_music_track() -> None
     assert result.resolved_count == 1
     assert result.unresolved_count == 0
     assert result.enqueued_count == 1
+    assert result.duplicate_skipped_count == 0
     assert result.failed_count == 0
     assert result.resolved_mbids == ["mbid-1"]
     assert result.import_batch_id
@@ -264,6 +276,7 @@ def test_import_pipeline_unresolved_when_no_acceptable_musicbrainz_match() -> No
     assert result.resolved_count == 0
     assert result.unresolved_count == 1
     assert result.enqueued_count == 0
+    assert result.duplicate_skipped_count == 0
     assert result.failed_count == 0
     assert result.resolved_mbids == []
     assert len(queue_store.enqueued) == 0
@@ -483,3 +496,126 @@ def test_import_pipeline_progress_callback_reports_completed_work_units() -> Non
     assert snapshots[-1]["unresolved_count"] == result.unresolved_count
     assert snapshots[-1]["enqueued_count"] == result.enqueued_count
     assert snapshots[-1]["failed_count"] == result.failed_count
+
+
+def test_import_pipeline_skips_enqueue_when_canonical_job_already_exists() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-skip-1",
+                        "title": "Dreams",
+                        "ext:score": "95",
+                        "artist-credit": [{"name": "Fleetwood Mac"}],
+                        "release-list": [{"id": "release-skip-1"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    canonical_id = build_music_track_canonical_id(
+        "Fleetwood Mac",
+        "Album",
+        1,
+        "Dreams",
+        recording_mbid="mbid-skip-1",
+        mb_release_id="release-skip-1",
+        disc_number=1,
+    )
+    queue_store.existing_by_canonical_id[canonical_id] = type(
+        "ExistingJob",
+        (),
+        {
+            "status": "completed",
+            "file_path": "/downloads/Music/Fleetwood Mac/Album (2011)/01 - Dreams.m4a",
+        },
+    )()
+    intents = [
+        TrackIntent(
+            artist="Fleetwood Mac",
+            title="Dreams",
+            album="Rumours",
+            raw_line="",
+            source_format="apple_xml",
+        )
+    ]
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+        },
+    )
+
+    assert result.total_tracks == 1
+    assert result.resolved_count == 1
+    assert result.enqueued_count == 0
+    assert result.duplicate_skipped_count == 1
+    assert result.failed_count == 0
+    assert len(queue_store.enqueued) == 0
+
+
+def test_import_pipeline_requeues_stale_duplicate_job() -> None:
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-stale-1",
+                        "title": "Dreams",
+                        "ext:score": "95",
+                        "artist-credit": [{"name": "Fleetwood Mac"}],
+                        "release-list": [{"id": "release-stale-1"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    canonical_id = build_music_track_canonical_id(
+        "Fleetwood Mac",
+        "Album",
+        1,
+        "Dreams",
+        recording_mbid="mbid-stale-1",
+        mb_release_id="release-stale-1",
+        disc_number=1,
+    )
+    queue_store.duplicate_classifications[canonical_id] = {
+        "job_id": "existing-job-1",
+        "status": "queued",
+        "classification": "stale_queued",
+        "stale": True,
+    }
+    intents = [
+        TrackIntent(
+            artist="Fleetwood Mac",
+            title="Dreams",
+            album="Rumours",
+            raw_line="",
+            source_format="apple_xml",
+        )
+    ]
+
+    result = process_imported_tracks(
+        intents,
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+        },
+    )
+
+    assert result.total_tracks == 1
+    assert result.resolved_count == 1
+    assert result.enqueued_count == 1
+    assert result.duplicate_skipped_count == 0
+    assert result.failed_count == 0
+    assert len(queue_store.enqueued) == 1
+    assert queue_store.enqueued[0]["force_requeue"] is True

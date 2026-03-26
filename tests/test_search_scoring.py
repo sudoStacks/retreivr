@@ -258,6 +258,41 @@ class SearchScoringTests(unittest.TestCase):
         scored = score_candidate(expected, candidate, source_modifier=1.0)
         self.assertGreaterEqual(float(scored.get("score_artist") or 0.0), 0.99)
 
+    def test_view_count_bonus_prefers_higher_views_for_generic_scores(self):
+        expected = {"artist": "Artist", "track": "Song"}
+        low_views = {
+            "title": "Artist - Song",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "duration_sec": 200,
+            "view_count": 250,
+        }
+        high_views = dict(low_views)
+        high_views["view_count"] = 2_500_000
+        low_scored = score_candidate(expected, low_views, source_modifier=1.0)
+        high_scored = score_candidate(expected, high_views, source_modifier=1.0)
+        self.assertGreater(float(high_scored.get("final_score") or 0.0), float(low_scored.get("final_score") or 0.0))
+
+    def test_view_count_bonus_reads_raw_meta_json_when_field_missing(self):
+        expected = {"artist": "Artist", "track": "Song"}
+        low_views = {
+            "title": "Artist - Song",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "duration_sec": 200,
+            "raw_meta_json": '{"view_count": 100}',
+        }
+        high_views = {
+            "title": "Artist - Song",
+            "artist_detected": "Artist",
+            "track_detected": "Song",
+            "duration_sec": 200,
+            "raw_meta_json": '{"view_count": 9000000}',
+        }
+        low_scored = score_candidate(expected, low_views, source_modifier=1.0)
+        high_scored = score_candidate(expected, high_views, source_modifier=1.0)
+        self.assertGreater(float(high_scored.get("final_score") or 0.0), float(low_scored.get("final_score") or 0.0))
+
     def test_music_track_youtube_missing_album_does_not_trigger_album_gate_rejection(self):
         expected = {
             "artist": "Artist",

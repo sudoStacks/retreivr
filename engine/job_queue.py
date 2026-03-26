@@ -27,6 +27,9 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
+from engine.community_publish_worker import append_publish_proposal_to_outbox, normalize_community_publish_source
+from engine.music_export import run_music_exports
+from engine.resolution_api import upsert_local_acquired_mapping
 from engine.music_title_normalization import has_live_intent, relaxed_search_title
 from engine.paths import EnginePaths, TOKENS_DIR, resolve_dir
 from engine.search_scoring import rank_candidates, score_candidate
@@ -34,7 +37,13 @@ from media.music_contract import format_zero_padded_track_number, parse_first_po
 from media.path_builder import build_music_relative_layout
 from metadata.naming import sanitize_component
 from metadata.queue import enqueue_metadata
+try:
+    from metadata.queue import process_metadata_now
+except Exception:  # pragma: no cover - optional in tests with stubbed metadata.queue
+    process_metadata_now = None
 from metadata.services.musicbrainz_service import get_musicbrainz_service
+from library.provenance import build_file_provenance, get_retreivr_version
+from library.review_queue import record_completed_review_item
 
 try:
     from engine.musicbrainz_binding import _normalize_title_for_mb_lookup, resolve_best_mb_pair
@@ -251,7 +260,6 @@ _MUSIC_SOURCE_PRIORITY_WEIGHTS = {
 }
 _VIDEO_CONTAINERS = {"mkv", "mp4", "webm"}
 _MUSIC_AUDIO_FORMAT_WARNED = False
-_MUSIC_REVIEW_FOLDER_NAME = "Needs Review"
 _MUSIC_DEFAULT_CONCURRENT_FRAGMENT_DOWNLOADS = 2
 _MUSIC_RESOLUTION_CACHE_MAX_ENTRIES = 256
 _MUSIC_DEFAULT_PRERESOLVE_LOOKAHEAD = 3
@@ -264,6 +272,15 @@ _SOURCE_MAX_CONCURRENCY = 4
 _GLOBAL_MAX_CONCURRENT_JOBS = 32
 _MUSIC_PRERESOLVE_POOL_DEFAULT_WORKERS = 3
 _MUSIC_PRERESOLVE_POOL_MAX_WORKERS = 6
+_COMMUNITY_PUBLISH_SCHEMA_VERSION = 1
+_COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
+_COMMUNITY_PUBLISH_RECENT_MAX_ENTRIES = 4096
+_COMMUNITY_PUBLISH_RECENT_WINDOW_SECONDS = 24 * 3600
+_MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS = 6 * 3600
+_MUSIC_CANDIDATE_FAILURE_MIN_COUNT = 1
+_IMPORT_DUPLICATE_STALE_QUEUED_SECONDS = 30 * 60
+_IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS = 20 * 60
+_IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS = 60 * 60
 
 
 @dataclass(frozen=True)
@@ -302,12 +319,53 @@ def utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _parse_iso_datetime(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
 def _log_event(level, message, **fields):
     payload = {"message": message, **fields}
     try:
         logging.log(level, safe_json_dumps(payload, sort_keys=True))
     except Exception as exc:
         logging.log(level, f"log_event_serialization_failed: {exc} message={message}")
+
+
+def _normalize_community_publish_mode(config) -> str:
+    if not isinstance(config, dict):
+        return "off"
+    raw = str(config.get("community_cache_publish_mode") or "off").strip().lower()
+    return raw if raw in _COMMUNITY_PUBLISH_MODES else "off"
+
+
+def _validate_community_publish_proposal(proposal):
+    payload = proposal if isinstance(proposal, dict) else {}
+    if int(payload.get("schema_version") or 0) != int(_COMMUNITY_PUBLISH_SCHEMA_VERSION):
+        return False, "invalid_schema_version"
+    for key in ("proposal_id", "proposal_type", "emitted_at", "recording_mbid", "video_id", "source", "candidate_url"):
+        if not str(payload.get(key) or "").strip():
+            return False, f"missing_{key}"
+    selected_score = payload.get("selected_score")
+    try:
+        score = float(selected_score)
+    except Exception:
+        return False, "invalid_selected_score"
+    if score < 0.0 or score > 1.0:
+        return False, "invalid_selected_score_range"
+    duration_ms = payload.get("duration_ms")
+    if duration_ms is not None:
+        try:
+            if int(duration_ms) <= 0:
+                return False, "invalid_duration_ms"
+        except Exception:
+            return False, "invalid_duration_ms"
+    return True, None
 
 
 def ensure_download_jobs_table(conn):
@@ -478,6 +536,35 @@ def ensure_download_history_table(conn):
     )
     conn.commit()
 
+
+def ensure_music_candidate_failures_table(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS music_candidate_failures (
+            recording_mbid TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            unavailable_class TEXT NOT NULL,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            first_failed_at TEXT NOT NULL,
+            last_failed_at TEXT NOT NULL,
+            cooldown_until TEXT NOT NULL,
+            last_error TEXT,
+            PRIMARY KEY (recording_mbid, candidate_id, unavailable_class)
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_music_candidate_failures_active "
+        "ON music_candidate_failures (recording_mbid, cooldown_until)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_music_candidate_failures_candidate "
+        "ON music_candidate_failures (candidate_id, recording_mbid)"
+    )
+    conn.commit()
+
+
 def is_music_media_type(value):
     if value is None:
         return False
@@ -489,6 +576,21 @@ def is_music_track_intent(value):
     if value is None:
         return False
     return str(value).strip().lower() in {"music_track", "music_track_review"}
+
+
+def _resolve_job_output_dir(output_dir, paths, *, media_intent=None):
+    raw = str(output_dir or "").strip()
+    if not raw:
+        return paths.single_downloads_dir
+    normalized_intent = str(media_intent or "").strip().lower()
+    if normalized_intent == "music_track_review":
+        review_root = str(getattr(paths, "review_queue_files_dir", "") or "").strip()
+        if review_root:
+            try:
+                return resolve_dir(raw, review_root)
+            except ValueError:
+                pass
+    return resolve_dir(raw, paths.single_downloads_dir)
 
 def _normalize_audio_format(value: str | None) -> str | None:
     if not value:
@@ -524,6 +626,17 @@ def _extract_music_binding_ids(job: DownloadJob) -> tuple[str | None, str | None
         or ""
     ).strip() or None
     return recording_mbid, release_mbid
+
+
+def _candidate_canonical_ids(canonical_id: str | None) -> list[str]:
+    cid = str(canonical_id or "").strip()
+    if not cid:
+        return []
+    candidates = [cid]
+    parts = cid.split(":")
+    if len(parts) == 5 and parts[0] == "music_track" and parts[2] != "unknown-release":
+        candidates.append(f"{parts[0]}:{parts[1]}:unknown-release:{parts[3]}:{parts[4]}")
+    return candidates
 
 class DownloadJobStore:
     def __init__(self, db_path):
@@ -600,6 +713,11 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def _get_job_status_with_cursor(self, cur, job_id):
+        cur.execute("SELECT status FROM download_jobs WHERE id=?", (job_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
     def merge_output_template_fields(self, job_id, updates):
         if not isinstance(updates, dict) or not updates:
             return
@@ -625,6 +743,115 @@ class DownloadJobStore:
             cur.execute(
                 "UPDATE download_jobs SET output_template=?, updated_at=? WHERE id=?",
                 (safe_json_dumps(existing), utc_now(), job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_blocked_music_candidate_ids(
+        self,
+        *,
+        recording_mbid,
+        now_iso=None,
+        min_failure_count=_MUSIC_CANDIDATE_FAILURE_MIN_COUNT,
+        limit=64,
+    ):
+        rec = str(recording_mbid or "").strip().lower()
+        if not rec:
+            return set()
+        now_iso = str(now_iso or utc_now())
+        try:
+            min_count = max(1, int(min_failure_count))
+        except Exception:
+            min_count = _MUSIC_CANDIDATE_FAILURE_MIN_COUNT
+        try:
+            max_rows = max(1, int(limit))
+        except Exception:
+            max_rows = 64
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT DISTINCT candidate_id
+                FROM music_candidate_failures
+                WHERE recording_mbid=?
+                  AND failure_count>=?
+                  AND cooldown_until>?
+                ORDER BY cooldown_until DESC
+                LIMIT ?
+                """,
+                (rec, min_count, now_iso, max_rows),
+            )
+            return {
+                str(row[0] or "").strip()
+                for row in cur.fetchall()
+                if str(row[0] or "").strip()
+            }
+        finally:
+            conn.close()
+
+    def note_music_candidate_unavailable(
+        self,
+        *,
+        recording_mbid,
+        candidate_id,
+        unavailable_class,
+        cooldown_seconds=_MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS,
+        error_message=None,
+    ):
+        rec = str(recording_mbid or "").strip().lower()
+        cand = str(candidate_id or "").strip()
+        unavailable = str(unavailable_class or "").strip().lower()
+        if not rec or not cand or not unavailable:
+            return
+        try:
+            cooldown = max(60, int(cooldown_seconds))
+        except Exception:
+            cooldown = _MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        now_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        now_iso = now_dt.isoformat()
+        cooldown_until = (now_dt + timedelta(seconds=cooldown)).isoformat()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                """
+                INSERT INTO music_candidate_failures (
+                    recording_mbid,
+                    candidate_id,
+                    unavailable_class,
+                    failure_count,
+                    first_failed_at,
+                    last_failed_at,
+                    cooldown_until,
+                    last_error
+                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+                ON CONFLICT(recording_mbid, candidate_id, unavailable_class)
+                DO UPDATE SET
+                    failure_count = music_candidate_failures.failure_count + 1,
+                    last_failed_at = excluded.last_failed_at,
+                    cooldown_until = excluded.cooldown_until,
+                    last_error = excluded.last_error
+                """,
+                (rec, cand, unavailable, now_iso, now_iso, cooldown_until, str(error_message or "")[:1024]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def clear_music_candidate_failures(self, *, recording_mbid, candidate_id):
+        rec = str(recording_mbid or "").strip().lower()
+        cand = str(candidate_id or "").strip()
+        if not rec or not cand:
+            return
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM music_candidate_failures WHERE recording_mbid=? AND candidate_id=?",
+                (rec, cand),
             )
             conn.commit()
         finally:
@@ -689,8 +916,10 @@ class DownloadJobStore:
             params = []
             dest_clause = "resolved_destination=?" if destination is not None else "resolved_destination IS NULL"
             if canonical_id:
-                clauses.append(f"(canonical_id=? AND {dest_clause})")
-                params.append(canonical_id)
+                candidate_ids = _candidate_canonical_ids(canonical_id)
+                canonical_placeholders = ", ".join("?" for _ in candidate_ids)
+                clauses.append(f"(canonical_id IN ({canonical_placeholders}) AND {dest_clause})")
+                params.extend(candidate_ids)
                 if destination is not None:
                     params.append(destination)
             if url:
@@ -727,25 +956,159 @@ class DownloadJobStore:
             conn.close()
 
     def get_job_by_canonical_id(self, canonical_id):
-        cid = str(canonical_id or "").strip()
-        if not cid:
+        candidate_ids = _candidate_canonical_ids(canonical_id)
+        if not candidate_ids:
             return None
         conn = self._connect()
         try:
             cur = conn.cursor()
+            placeholders = ", ".join("?" for _ in candidate_ids)
             cur.execute(
                 """
                 SELECT * FROM download_jobs
-                WHERE canonical_id=?
+                WHERE canonical_id IN ("""
+                + placeholders
+                + """)
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                (cid,),
+                tuple(candidate_ids),
             )
             row = cur.fetchone()
             if not row:
                 return None
             return self._row_to_job(row)
+        finally:
+            conn.close()
+
+    def _classify_duplicate_row(
+        self,
+        row,
+        *,
+        now_dt=None,
+        queued_stale_seconds=_IMPORT_DUPLICATE_STALE_QUEUED_SECONDS,
+        claimed_stale_seconds=_IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS,
+        downloading_stale_seconds=_IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS,
+    ):
+        if not row:
+            return None
+        if isinstance(row, sqlite3.Row):
+            row = dict(row)
+        now_dt = now_dt or datetime.now(timezone.utc)
+        status = str(row.get("status") or "").strip().lower()
+        timestamp_field = None
+        stale_threshold = None
+        classification = "duplicate_existing"
+        stale = False
+        if status == JOB_STATUS_COMPLETED:
+            classification = "completed_valid" if self._row_has_valid_output(row) else "completed_invalid"
+        elif status in {JOB_STATUS_FAILED, JOB_STATUS_CANCELLED, JOB_STATUS_SKIPPED_DUPLICATE}:
+            classification = "terminal_retryable"
+        elif status == JOB_STATUS_QUEUED:
+            timestamp_field = row.get("queued") or row.get("updated_at") or row.get("created_at")
+            stale_threshold = max(60, int(queued_stale_seconds or _IMPORT_DUPLICATE_STALE_QUEUED_SECONDS))
+            classification = "active_existing"
+        elif status == JOB_STATUS_CLAIMED:
+            timestamp_field = row.get("claimed") or row.get("updated_at") or row.get("created_at")
+            stale_threshold = max(60, int(claimed_stale_seconds or _IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS))
+            classification = "active_existing"
+        elif status == JOB_STATUS_DOWNLOADING:
+            timestamp_field = row.get("progress_updated_at") or row.get("downloading") or row.get("updated_at") or row.get("created_at")
+            stale_threshold = max(60, int(downloading_stale_seconds or _IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS))
+            classification = "active_existing"
+        elif status == JOB_STATUS_POSTPROCESSING:
+            timestamp_field = row.get("postprocessing") or row.get("updated_at") or row.get("created_at")
+            stale_threshold = max(60, int(downloading_stale_seconds or _IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS))
+            classification = "active_existing"
+        if timestamp_field and stale_threshold:
+            ts = _parse_iso_datetime(timestamp_field)
+            if ts is not None and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts is not None and (now_dt - ts).total_seconds() > stale_threshold:
+                stale = True
+                classification = f"stale_{status}"
+        return {
+            "job_id": row.get("id"),
+            "status": status,
+            "classification": classification,
+            "stale": stale,
+            "trace_id": row.get("trace_id"),
+            "canonical_id": row.get("canonical_id"),
+            "file_path": row.get("file_path"),
+        }
+
+    def classify_duplicate_job(
+        self,
+        *,
+        canonical_id=None,
+        url=None,
+        destination=None,
+        now_iso=None,
+        queued_stale_seconds=_IMPORT_DUPLICATE_STALE_QUEUED_SECONDS,
+        claimed_stale_seconds=_IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS,
+        downloading_stale_seconds=_IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS,
+    ):
+        if not canonical_id and not url:
+            return None
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            clauses = []
+            params = []
+            dest_clause = "resolved_destination=?" if destination is not None else "resolved_destination IS NULL"
+            if canonical_id:
+                candidate_ids = _candidate_canonical_ids(canonical_id)
+                placeholders = ", ".join("?" for _ in candidate_ids)
+                clauses.append(f"(canonical_id IN ({placeholders}) AND {dest_clause})")
+                params.extend(candidate_ids)
+                if destination is not None:
+                    params.append(destination)
+            if url:
+                clauses.append(f"(url=? AND {dest_clause})")
+                params.append(url)
+                if destination is not None:
+                    params.append(destination)
+            if not clauses:
+                return None
+            status_placeholders = ", ".join("?" for _ in (
+                JOB_STATUS_COMPLETED,
+                JOB_STATUS_QUEUED,
+                JOB_STATUS_CLAIMED,
+                JOB_STATUS_DOWNLOADING,
+                JOB_STATUS_POSTPROCESSING,
+                JOB_STATUS_FAILED,
+                JOB_STATUS_CANCELLED,
+                JOB_STATUS_SKIPPED_DUPLICATE,
+            ))
+            cur.execute(
+                f"""
+                SELECT * FROM download_jobs
+                WHERE ({' OR '.join(clauses)})
+                  AND status IN ({status_placeholders})
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (
+                    *params,
+                    JOB_STATUS_COMPLETED,
+                    JOB_STATUS_QUEUED,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                    JOB_STATUS_FAILED,
+                    JOB_STATUS_CANCELLED,
+                    JOB_STATUS_SKIPPED_DUPLICATE,
+                ),
+            )
+            row = cur.fetchone()
+            now_dt = _parse_iso_datetime(now_iso) if now_iso else datetime.now(timezone.utc)
+            return self._classify_duplicate_row(
+                row,
+                now_dt=now_dt,
+                queued_stale_seconds=queued_stale_seconds,
+                claimed_stale_seconds=claimed_stale_seconds,
+                downloading_stale_seconds=downloading_stale_seconds,
+            )
         finally:
             conn.close()
 
@@ -918,12 +1281,77 @@ class DownloadJobStore:
                     destination=destination,
                 )
             if duplicate_job:
+                duplicate_state = self.classify_duplicate_job(
+                    canonical_id=canonical_id,
+                    url=url,
+                    destination=destination,
+                )
                 if duplicate_job.status in {
                     JOB_STATUS_QUEUED,
                     JOB_STATUS_CLAIMED,
                     JOB_STATUS_DOWNLOADING,
                     JOB_STATUS_POSTPROCESSING,
                 }:
+                    duplicate_classification = str((duplicate_state or {}).get("classification") or "").strip()
+                    if duplicate_classification.startswith("stale_"):
+                        _log_event(
+                            logging.INFO,
+                            "queue_stale_job_detected",
+                            job_id=duplicate_job.id,
+                            trace_id=duplicate_job.trace_id,
+                            canonical_id=canonical_id,
+                            status=duplicate_job.status,
+                            classification=duplicate_classification,
+                        )
+                    else:
+                        if log_duplicate_event:
+                            _log_event(
+                                logging.INFO,
+                                "job_skipped_duplicate",
+                                job_id=duplicate_job.id,
+                                trace_id=duplicate_job.trace_id,
+                                origin=origin,
+                                origin_id=origin_id,
+                                source=source,
+                                url=url,
+                                destination=destination,
+                                canonical_id=canonical_id,
+                                status=duplicate_job.status,
+                            )
+                        return duplicate_job.id, False, "duplicate"
+                if duplicate_state and str(duplicate_state.get("classification") or "").startswith("stale_"):
+                    requeued = self._requeue_existing_job(
+                        job_id=duplicate_job.id,
+                        origin=origin,
+                        origin_id=origin_id,
+                        media_type=media_type,
+                        media_intent=media_intent,
+                        source=source,
+                        url=url,
+                        input_url=input_url,
+                        canonical_url=canonical_url,
+                        external_id=external_id,
+                        max_attempts=max_attempts,
+                        output_template_json=safe_json_dumps(output_template) if output_template else None,
+                        destination=destination,
+                        canonical_id=canonical_id,
+                    )
+                    if requeued:
+                        _log_event(
+                            logging.INFO,
+                            "queue_recovered_job",
+                            job_id=duplicate_job.id,
+                            trace_id=duplicate_job.trace_id,
+                            origin=origin,
+                            origin_id=origin_id,
+                            source=source,
+                            url=url,
+                            destination=destination,
+                            canonical_id=canonical_id,
+                            previous_status=duplicate_job.status,
+                            classification=duplicate_state.get("classification"),
+                        )
+                        return duplicate_job.id, True, "requeued"
                     if log_duplicate_event:
                         _log_event(
                             logging.INFO,
@@ -1264,20 +1692,36 @@ class DownloadJobStore:
                     """
                     UPDATE download_jobs
                     SET status=?, completed=?, updated_at=?, file_path=?
-                    WHERE id=? AND status!=?
+                    WHERE id=? AND status IN (?, ?)
                     """,
-                    (JOB_STATUS_COMPLETED, now, now, file_path, job_id, JOB_STATUS_FAILED),
+                    (
+                        JOB_STATUS_COMPLETED,
+                        now,
+                        now,
+                        file_path,
+                        job_id,
+                        JOB_STATUS_DOWNLOADING,
+                        JOB_STATUS_POSTPROCESSING,
+                    ),
                 )
             else:
                 cur.execute(
                     """
                     UPDATE download_jobs
                     SET status=?, completed=?, updated_at=?
-                    WHERE id=? AND status!=?
+                    WHERE id=? AND status IN (?, ?)
                     """,
-                    (JOB_STATUS_COMPLETED, now, now, job_id, JOB_STATUS_FAILED),
+                    (
+                        JOB_STATUS_COMPLETED,
+                        now,
+                        now,
+                        job_id,
+                        JOB_STATUS_DOWNLOADING,
+                        JOB_STATUS_POSTPROCESSING,
+                    ),
                 )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1332,11 +1776,22 @@ class DownloadJobStore:
                 """
                 UPDATE download_jobs
                 SET status=?, canceled=?, updated_at=?, last_error=?
-                WHERE id=?
+                WHERE id=? AND status IN (?, ?, ?, ?)
                 """,
-                (JOB_STATUS_CANCELLED, now, now, reason, job_id),
+                (
+                    JOB_STATUS_CANCELLED,
+                    now,
+                    now,
+                    reason,
+                    job_id,
+                    JOB_STATUS_QUEUED,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                ),
             )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1367,6 +1822,141 @@ class DownloadJobStore:
         finally:
             conn.close()
 
+    def cancel_jobs_by_statuses(self, statuses, *, reason=None):
+        normalized = [
+            str(status or "").strip().lower()
+            for status in (statuses or [])
+            if str(status or "").strip()
+        ]
+        if not normalized:
+            return 0
+        now = utc_now()
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            placeholders = ", ".join("?" for _ in normalized)
+            cur.execute(
+                f"""
+                UPDATE download_jobs
+                SET status=?, canceled=?, updated_at=?, last_error=?
+                WHERE status IN ({placeholders})
+                """,
+                (
+                    JOB_STATUS_CANCELLED,
+                    now,
+                    now,
+                    reason,
+                    *normalized,
+                ),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
+    def clear_jobs_by_statuses(self, statuses):
+        normalized = [
+            str(status or "").strip().lower()
+            for status in (statuses or [])
+            if str(status or "").strip()
+        ]
+        if not normalized:
+            return 0
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            placeholders = ", ".join("?" for _ in normalized)
+            cur.execute(
+                f"DELETE FROM download_jobs WHERE status IN ({placeholders})",
+                tuple(normalized),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
+    def recover_stale_jobs(
+        self,
+        *,
+        queued_stale_seconds=_IMPORT_DUPLICATE_STALE_QUEUED_SECONDS,
+        claimed_stale_seconds=_IMPORT_DUPLICATE_STALE_CLAIMED_SECONDS,
+        downloading_stale_seconds=_IMPORT_DUPLICATE_STALE_DOWNLOADING_SECONDS,
+        include_queued=False,
+        reason="Recovered stale job",
+    ):
+        statuses = [JOB_STATUS_CLAIMED, JOB_STATUS_DOWNLOADING, JOB_STATUS_POSTPROCESSING]
+        if include_queued:
+            statuses.append(JOB_STATUS_QUEUED)
+        conn = self._connect()
+        recovered = 0
+        recovered_ids: list[str] = []
+        try:
+            cur = conn.cursor()
+            placeholders = ", ".join("?" for _ in statuses)
+            cur.execute(
+                f"SELECT * FROM download_jobs WHERE status IN ({placeholders}) ORDER BY created_at ASC",
+                tuple(statuses),
+            )
+            rows = cur.fetchall()
+            now_dt = datetime.now(timezone.utc)
+            stale_rows = []
+            for row in rows:
+                classified = self._classify_duplicate_row(
+                    row,
+                    now_dt=now_dt,
+                    queued_stale_seconds=queued_stale_seconds,
+                    claimed_stale_seconds=claimed_stale_seconds,
+                    downloading_stale_seconds=downloading_stale_seconds,
+                )
+                if classified and str(classified.get("classification") or "").startswith("stale_"):
+                    stale_rows.append((dict(row), classified))
+            if not stale_rows:
+                return {"recovered": 0, "job_ids": []}
+            now_iso = utc_now()
+            cur.execute("BEGIN IMMEDIATE")
+            for row, classified in stale_rows:
+                cur.execute(
+                    """
+                    UPDATE download_jobs
+                    SET status=?,
+                        queued=?,
+                        claimed=NULL,
+                        downloading=NULL,
+                        postprocessing=NULL,
+                        updated_at=?,
+                        last_error=?,
+                        progress_downloaded_bytes=NULL,
+                        progress_total_bytes=NULL,
+                        progress_percent=NULL,
+                        progress_speed_bps=NULL,
+                        progress_eta_seconds=NULL,
+                        progress_updated_at=NULL
+                    WHERE id=?
+                    """,
+                    (
+                        JOB_STATUS_QUEUED,
+                        now_iso,
+                        now_iso,
+                        f"{reason} ({classified.get('classification')})",
+                        row.get("id"),
+                    ),
+                )
+                if cur.rowcount:
+                    recovered += 1
+                    recovered_ids.append(str(row.get("id") or ""))
+                    _log_event(
+                        logging.INFO,
+                        "queue_recovered_job",
+                        job_id=row.get("id"),
+                        trace_id=row.get("trace_id"),
+                        previous_status=row.get("status"),
+                        classification=classified.get("classification"),
+                    )
+            conn.commit()
+            return {"recovered": recovered, "job_ids": recovered_ids}
+        finally:
+            conn.close()
+
     def record_failure(self, job, *, error_message, retryable, retry_delay_seconds):
         attempts = job.attempts + 1
         now = utc_now()
@@ -1386,10 +1976,24 @@ class DownloadJobStore:
                         progress_speed_bps=NULL,
                         progress_eta_seconds=NULL,
                         progress_updated_at=NULL
-                    WHERE id=?
+                    WHERE id=? AND status IN (?, ?, ?)
                     """,
-                    (JOB_STATUS_QUEUED, queued_at, now, attempts, error_message, job.id),
+                    (
+                        JOB_STATUS_QUEUED,
+                        queued_at,
+                        now,
+                        attempts,
+                        error_message,
+                        job.id,
+                        JOB_STATUS_CLAIMED,
+                        JOB_STATUS_DOWNLOADING,
+                        JOB_STATUS_POSTPROCESSING,
+                    ),
                 )
+                if cur.rowcount != 1:
+                    conn.commit()
+                    current = self._get_job_status_with_cursor(cur, job.id)
+                    return current or JOB_STATUS_FAILED
                 conn.commit()
                 return JOB_STATUS_QUEUED
 
@@ -1397,10 +2001,24 @@ class DownloadJobStore:
                 """
                 UPDATE download_jobs
                 SET status=?, failed=?, updated_at=?, attempts=?, last_error=?
-                WHERE id=?
+                WHERE id=? AND status IN (?, ?, ?)
                 """,
-                (JOB_STATUS_FAILED, now, now, attempts, error_message, job.id),
+                (
+                    JOB_STATUS_FAILED,
+                    now,
+                    now,
+                    attempts,
+                    error_message,
+                    job.id,
+                    JOB_STATUS_CLAIMED,
+                    JOB_STATUS_DOWNLOADING,
+                    JOB_STATUS_POSTPROCESSING,
+                ),
             )
+            if cur.rowcount != 1:
+                conn.commit()
+                current = self._get_job_status_with_cursor(cur, job.id)
+                return current or JOB_STATUS_FAILED
             conn.commit()
             return JOB_STATUS_FAILED
         finally:
@@ -1421,11 +2039,12 @@ class DownloadJobStore:
                     progress_speed_bps=NULL,
                     progress_eta_seconds=NULL,
                     progress_updated_at=NULL
-                WHERE id=?
+                WHERE id=? AND status=?
                 """,
-                (JOB_STATUS_DOWNLOADING, now, now, job_id),
+                (JOB_STATUS_DOWNLOADING, now, now, job_id, JOB_STATUS_CLAIMED),
             )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1482,11 +2101,12 @@ class DownloadJobStore:
                 """
                 UPDATE download_jobs
                 SET status=?, postprocessing=?, updated_at=?
-                WHERE id=? AND status!=?
+                WHERE id=? AND status=?
                 """,
-                (JOB_STATUS_POSTPROCESSING, now, now, job_id, JOB_STATUS_FAILED),
+                (JOB_STATUS_POSTPROCESSING, now, now, job_id, JOB_STATUS_DOWNLOADING),
             )
             conn.commit()
+            return cur.rowcount == 1
         finally:
             conn.close()
 
@@ -1523,6 +2143,7 @@ class DownloadWorkerEngine:
         try:
             ensure_download_jobs_table(conn)
             ensure_downloads_table(conn)
+            ensure_music_candidate_failures_table(conn)
         finally:
             conn.close()
         self._locks = {}
@@ -1550,6 +2171,8 @@ class DownloadWorkerEngine:
             max_workers=self._preresolve_pool_workers(),
             thread_name_prefix="music-preresolve",
         )
+        self._community_publish_recent_lock = threading.Lock()
+        self._community_publish_recent = OrderedDict()
 
     def _extract_resolved_candidate(self, resolved):
         if not resolved:
@@ -1559,6 +2182,392 @@ class DownloadWorkerEngine:
         url = getattr(resolved, "url", None)
         source = getattr(resolved, "source", None)
         return url, source
+
+    def _music_candidate_cooldown_enabled(self) -> bool:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        value = cfg.get("music_candidate_cooldown_enabled")
+        if value is None:
+            return True
+        return bool(value)
+
+    def _music_candidate_cooldown_seconds(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        raw = cfg.get("music_candidate_cooldown_seconds")
+        try:
+            value = int(raw) if raw is not None else _MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        except Exception:
+            value = _MUSIC_CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        return max(60, min(value, 7 * 24 * 3600))
+
+    def _music_candidate_cooldown_min_failures(self) -> int:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        raw = cfg.get("music_candidate_cooldown_min_failures")
+        try:
+            value = int(raw) if raw is not None else _MUSIC_CANDIDATE_FAILURE_MIN_COUNT
+        except Exception:
+            value = _MUSIC_CANDIDATE_FAILURE_MIN_COUNT
+        return max(1, min(value, 10))
+
+    def _blocked_music_candidate_ids(self, recording_mbid: str | None) -> set[str]:
+        if not self._music_candidate_cooldown_enabled():
+            return set()
+        rec = str(recording_mbid or "").strip().lower()
+        if not rec:
+            return set()
+        try:
+            return self.store.get_blocked_music_candidate_ids(
+                recording_mbid=rec,
+                min_failure_count=self._music_candidate_cooldown_min_failures(),
+            )
+        except Exception:
+            logger.exception("[MUSIC] failed querying blocked candidate ids recording_mbid=%s", rec)
+            return set()
+
+    def _note_music_candidate_unavailable(self, job, *, unavailable_class: str | None, error_message: str | None = None) -> None:
+        if not self._music_candidate_cooldown_enabled():
+            return
+        if str(getattr(job, "media_intent", "") or "").strip().lower() != "music_track":
+            return
+        if not unavailable_class:
+            return
+        recording_mbid, _ = _extract_music_binding_ids(job)
+        candidate_id = getattr(job, "external_id", None) or extract_video_id(getattr(job, "url", None))
+        if not recording_mbid or not candidate_id:
+            return
+        try:
+            self.store.note_music_candidate_unavailable(
+                recording_mbid=recording_mbid,
+                candidate_id=candidate_id,
+                unavailable_class=unavailable_class,
+                cooldown_seconds=self._music_candidate_cooldown_seconds(),
+                error_message=error_message,
+            )
+            _log_event(
+                logging.WARNING,
+                "music_candidate_cooldown_recorded",
+                job_id=getattr(job, "id", None),
+                recording_mbid=recording_mbid,
+                candidate_id=candidate_id,
+                unavailable_class=unavailable_class,
+            )
+        except Exception:
+            logger.exception(
+                "[MUSIC] failed to record candidate cooldown recording_mbid=%s candidate_id=%s",
+                recording_mbid,
+                candidate_id,
+            )
+
+    def _clear_music_candidate_cooldown(self, job) -> None:
+        if not self._music_candidate_cooldown_enabled():
+            return
+        if str(getattr(job, "media_intent", "") or "").strip().lower() != "music_track":
+            return
+        recording_mbid, _ = _extract_music_binding_ids(job)
+        candidate_id = getattr(job, "external_id", None) or extract_video_id(getattr(job, "url", None))
+        if not recording_mbid or not candidate_id:
+            return
+        try:
+            self.store.clear_music_candidate_failures(recording_mbid=recording_mbid, candidate_id=candidate_id)
+        except Exception:
+            logger.exception(
+                "[MUSIC] failed clearing candidate cooldown recording_mbid=%s candidate_id=%s",
+                recording_mbid,
+                candidate_id,
+            )
+
+    def _community_publish_min_score(self):
+        raw = self.config.get("community_cache_publish_min_score", _MUSIC_TRACK_THRESHOLD)
+        try:
+            value = float(raw)
+        except Exception:
+            value = float(_MUSIC_TRACK_THRESHOLD)
+        if value < 0.0:
+            return 0.0
+        if value > 1.0:
+            return 1.0
+        return value
+
+    def _community_publish_outbox_dir(self):
+        configured = str(self.config.get("community_cache_publish_outbox_dir") or "").strip()
+        base_dir = os.path.join(os.path.dirname(self.db_path), "run_summaries")
+        if not configured:
+            return os.path.join(base_dir, "community_publish_outbox")
+        if os.path.isabs(configured):
+            return configured
+        try:
+            return resolve_dir(configured, base_dir)
+        except Exception:
+            return os.path.join(base_dir, "community_publish_outbox")
+
+    def _community_publish_dedupe_key(self, *, recording_mbid, video_id):
+        rec = str(recording_mbid or "").strip().lower()
+        vid = str(video_id or "").strip().lower()
+        if not rec or not vid:
+            return None
+        return f"{rec}|{vid}"
+
+    def _community_publish_is_duplicate_recent(self, *, recording_mbid, video_id):
+        key = self._community_publish_dedupe_key(recording_mbid=recording_mbid, video_id=video_id)
+        if not key:
+            return False
+        now = time.time()
+        with self._community_publish_recent_lock:
+            stale = [
+                item_key
+                for item_key, ts in self._community_publish_recent.items()
+                if (now - float(ts or 0.0)) > float(_COMMUNITY_PUBLISH_RECENT_WINDOW_SECONDS)
+            ]
+            for item_key in stale:
+                self._community_publish_recent.pop(item_key, None)
+            seen_ts = self._community_publish_recent.get(key)
+            if seen_ts is not None and (now - float(seen_ts)) <= float(_COMMUNITY_PUBLISH_RECENT_WINDOW_SECONDS):
+                self._community_publish_recent.move_to_end(key)
+                return True
+            self._community_publish_recent[key] = now
+            self._community_publish_recent.move_to_end(key)
+            while len(self._community_publish_recent) > int(_COMMUNITY_PUBLISH_RECENT_MAX_ENTRIES):
+                self._community_publish_recent.popitem(last=False)
+            return False
+
+    def _emit_community_publish_proposal(self, job, *, final_path=None, meta=None):
+        mode = _normalize_community_publish_mode(self.config)
+        enabled = bool(self.config.get("community_cache_publish_enabled", False))
+        status = "disabled"
+        reason = "publish_disabled"
+        emitted = False
+        deduped = False
+        recording_mbid = None
+        video_id = None
+        proposal = None
+        selected_score = None
+        attempt = enabled and mode in {"dry_run", "write_outbox"}
+        payload = job.output_template if isinstance(job.output_template, dict) else {}
+        canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+        runtime_meta = payload.get("runtime_search_meta") if isinstance(payload.get("runtime_search_meta"), dict) else {}
+        if attempt:
+            failure_reason = str(runtime_meta.get("failure_reason") or "").strip()
+            if failure_reason:
+                status = "skipped_ineligible"
+                reason = "resolver_failure_reason_present"
+            else:
+                recording_mbid = str(
+                    payload.get("recording_mbid")
+                    or payload.get("mb_recording_id")
+                    or canonical.get("recording_mbid")
+                    or canonical.get("mb_recording_id")
+                    or ""
+                ).strip() or None
+                candidate_url = str(
+                    runtime_meta.get("selected_candidate_url")
+                    or getattr(job, "url", None)
+                    or ""
+                ).strip()
+                video_id = extract_video_id(candidate_url) or str(payload.get("community_video_id") or "").strip() or None
+                try:
+                    selected_score = float(runtime_meta.get("selected_score"))
+                except Exception:
+                    selected_score = None
+                if not recording_mbid:
+                    status = "skipped_ineligible"
+                    reason = "missing_recording_mbid"
+                elif not video_id:
+                    status = "skipped_ineligible"
+                    reason = "missing_video_id"
+                elif selected_score is None:
+                    status = "skipped_ineligible"
+                    reason = "missing_selected_score"
+                elif float(selected_score) < float(self._community_publish_min_score()):
+                    status = "skipped_ineligible"
+                    reason = "selected_score_below_min"
+                elif self._community_publish_is_duplicate_recent(recording_mbid=recording_mbid, video_id=video_id):
+                    status = "deduped"
+                    reason = "duplicate_recent"
+                    deduped = True
+                else:
+                    duration_ms = canonical.get("duration_ms") or payload.get("duration_ms")
+                    if duration_ms is None and isinstance(meta, dict) and meta.get("duration_sec") is not None:
+                        try:
+                            duration_ms = int(meta.get("duration_sec")) * 1000
+                        except Exception:
+                            duration_ms = None
+                    candidate_id = str(runtime_meta.get("selected_candidate_id") or "").strip() or None
+                    source = str(
+                        runtime_meta.get("selected_candidate_source")
+                        or getattr(job, "source", None)
+                        or ""
+                    ).strip() or None
+                    proposal = {
+                        "schema_version": _COMMUNITY_PUBLISH_SCHEMA_VERSION,
+                        "proposal_type": "community_cache_publish_proposal",
+                        "proposal_id": uuid4().hex,
+                        "emitted_at": utc_now(),
+                        "recording_mbid": recording_mbid,
+                        "release_mbid": str(
+                            payload.get("mb_release_id")
+                            or canonical.get("mb_release_id")
+                            or ""
+                        ).strip() or None,
+                        "release_group_mbid": str(
+                            payload.get("mb_release_group_id")
+                            or canonical.get("mb_release_group_id")
+                            or ""
+                        ).strip() or None,
+                        "video_id": video_id,
+                        "source": normalize_community_publish_source(source or resolve_source(candidate_url)),
+                        "candidate_url": candidate_url,
+                        "candidate_id": candidate_id,
+                        "duration_ms": int(duration_ms) if duration_ms is not None else None,
+                        "selected_score": float(selected_score),
+                        "duration_delta_ms": runtime_meta.get("selected_duration_delta_ms"),
+                        "final_path": str(final_path or "").strip() or None,
+                        "retreivr_version": get_retreivr_version(),
+                    }
+                    valid, validation_reason = _validate_community_publish_proposal(proposal)
+                    if not valid:
+                        status = "validation_failed"
+                        reason = str(validation_reason or "invalid_proposal")
+                    elif mode == "dry_run":
+                        status = "dry_run"
+                        reason = "proposal_valid_dry_run"
+                        emitted = True
+                        _log_event(
+                            logging.INFO,
+                            "community_publish_proposal_dry_run",
+                            job_id=getattr(job, "id", None),
+                            recording_mbid=recording_mbid,
+                            video_id=video_id,
+                            selected_score=selected_score,
+                        )
+                    elif mode == "write_outbox":
+                        try:
+                            outbox_result = append_publish_proposal_to_outbox(
+                                config=self.config,
+                                db_path=self.db_path,
+                                proposal=proposal,
+                            )
+                            status = str(outbox_result.get("status") or "error")
+                            reason = str(outbox_result.get("reason") or "outbox_append_failed")
+                            outbox_path = str(outbox_result.get("outbox_path") or "")
+                            emitted = status == "written"
+                            _log_event(
+                                logging.INFO,
+                                "community_publish_proposal_written",
+                                job_id=getattr(job, "id", None),
+                                recording_mbid=recording_mbid,
+                                video_id=video_id,
+                                outbox_path=outbox_path,
+                            )
+                        except Exception as exc:
+                            status = "error"
+                            reason = f"write_failed:{exc}"
+                            _log_event(
+                                logging.WARNING,
+                                "community_publish_proposal_write_failed",
+                                job_id=getattr(job, "id", None),
+                                recording_mbid=recording_mbid,
+                                video_id=video_id,
+                                error=str(exc),
+                            )
+        update_payload = {
+            "community_publish_mode": mode,
+            "community_publish_attempted": bool(attempt),
+            "community_publish_status": status,
+            "community_publish_reason": reason,
+            "community_publish_emitted": bool(emitted),
+            "community_publish_deduped": bool(deduped),
+            "community_publish_recording_mbid": recording_mbid,
+            "community_publish_video_id": video_id,
+        }
+        if selected_score is not None:
+            update_payload["community_publish_selected_score"] = float(selected_score)
+        try:
+            self.store.merge_output_template_fields(
+                job.id,
+                {"runtime_search_meta": update_payload},
+            )
+        except Exception:
+            logger.exception("[MUSIC] failed to persist community publish metadata job_id=%s", getattr(job, "id", None))
+
+        if attempt and status.startswith("skipped"):
+            _log_event(
+                logging.INFO,
+                "community_publish_proposal_skipped",
+                job_id=getattr(job, "id", None),
+                reason=reason,
+                recording_mbid=recording_mbid,
+                video_id=video_id,
+            )
+        return {
+            "status": status,
+            "reason": reason,
+            "emitted": emitted,
+            "deduped": deduped,
+            "proposal": proposal,
+        }
+
+    def _auto_verify_resolution_mapping(self, job, *, final_path=None, meta=None):
+        payload = job.output_template if isinstance(job.output_template, dict) else {}
+        canonical = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
+        runtime_meta = payload.get("runtime_search_meta") if isinstance(payload.get("runtime_search_meta"), dict) else {}
+        recording_mbid = str(
+            payload.get("recording_mbid")
+            or payload.get("mb_recording_id")
+            or canonical.get("recording_mbid")
+            or canonical.get("mb_recording_id")
+            or ""
+        ).strip()
+        source_url = str(runtime_meta.get("selected_candidate_url") or getattr(job, "url", None) or "").strip()
+        source = str(
+            runtime_meta.get("selected_candidate_source")
+            or getattr(job, "source", None)
+            or resolve_source(source_url)
+            or ""
+        ).strip().lower()
+        if not recording_mbid or not source_url or not source:
+            return {"status": "skipped", "reason": "missing_mapping_fields"}
+        duration_seconds = None
+        if isinstance(meta, dict) and meta.get("duration_sec") is not None:
+            try:
+                duration_seconds = int(meta.get("duration_sec"))
+            except Exception:
+                duration_seconds = None
+        bitrate_kbps = None
+        if isinstance(meta, dict) and meta.get("abr") is not None:
+            try:
+                bitrate_kbps = int(float(meta.get("abr")))
+            except Exception:
+                bitrate_kbps = None
+        source_id = str(runtime_meta.get("selected_candidate_id") or extract_video_id(source_url) or "").strip() or None
+        resolution_cfg = self.config.get("resolution_api") if isinstance(self.config.get("resolution_api"), dict) else {}
+        node_id = str(resolution_cfg.get("local_node_id") or "local_node").strip() or "local_node"
+        result = upsert_local_acquired_mapping(
+            self.db_path,
+            mbid=recording_mbid,
+            source_url=source_url,
+            source=source,
+            node_id=node_id,
+            duration_seconds=duration_seconds,
+            media_format=str(getattr(job, "final_format", None) or payload.get("final_format") or "").strip() or None,
+            bitrate_kbps=bitrate_kbps,
+            file_hash=None,
+            resolution_method=f"retreivr_{get_retreivr_version()}",
+            source_id=source_id,
+            raw_payload={
+                "selected_score": runtime_meta.get("selected_score"),
+                "selected_candidate_id": runtime_meta.get("selected_candidate_id"),
+                "selected_candidate_source": runtime_meta.get("selected_candidate_source"),
+                "selected_duration_delta_ms": runtime_meta.get("selected_duration_delta_ms"),
+                "final_path": str(final_path or "").strip() or None,
+            },
+        )
+        try:
+            self.store.merge_output_template_fields(
+                job.id,
+                {"runtime_search_meta": {"resolution_auto_verify_status": str(result.get("action") or result.get("status") or "updated")}},
+            )
+        except Exception:
+            logger.exception("[MUSIC] failed to persist resolution auto-verify metadata job_id=%s", getattr(job, "id", None))
+        return result
 
     def _music_tokens(self, value):
         return _WORD_TOKEN_RE.findall(str(value or "").lower())
@@ -1905,6 +2914,15 @@ class DownloadWorkerEngine:
 
         search_query = self._build_music_track_query(artist, track, album, is_live=allow_live)
         logger.debug(f"[MUSIC] built search_query={search_query} for music_track")
+        blocked_candidate_ids = self._blocked_music_candidate_ids(recording_mbid)
+        if blocked_candidate_ids:
+            _log_event(
+                logging.INFO,
+                "music_candidate_cooldown_active",
+                job_id=job.id,
+                recording_mbid=recording_mbid,
+                blocked_candidates=len(blocked_candidate_ids),
+            )
         resolved = self._extract_runtime_pre_resolved(
             payload,
             recording_mbid=recording_mbid,
@@ -1917,6 +2935,31 @@ class DownloadWorkerEngine:
                 release_mbid=release_mbid,
             )
         used_cached_resolved = bool(resolved) and not used_pre_resolved
+        if used_pre_resolved or used_cached_resolved:
+            _log_event(
+                logging.INFO,
+                "music_track_search_bypassed",
+                job_id=job.id,
+                recording_mbid=recording_mbid,
+                used_pre_resolved=used_pre_resolved,
+                used_cached_resolved=used_cached_resolved,
+            )
+            candidate_from_resolved = None
+            if isinstance(resolved, dict):
+                candidate_from_resolved = str(resolved.get("candidate_id") or "").strip()
+                if not candidate_from_resolved:
+                    candidate_from_resolved = str(extract_video_id(resolved.get("url")) or "").strip()
+            if candidate_from_resolved and candidate_from_resolved in blocked_candidate_ids:
+                _log_event(
+                    logging.WARNING,
+                    "music_track_preresolved_candidate_blocked",
+                    job_id=job.id,
+                    recording_mbid=recording_mbid,
+                    candidate_id=candidate_from_resolved,
+                )
+                resolved = None
+                used_pre_resolved = False
+                used_cached_resolved = False
         retry_start_rung = 0
         track_total_value = None
         for candidate_total in (
@@ -1967,6 +3010,8 @@ class DownloadWorkerEngine:
                     mb_youtube_urls=mb_youtube_urls,
                     recording_mbid=recording_mbid,
                     is_ep_release=is_ep_release,
+                    prefer_music_video=str(getattr(job, "media_type", "") or "").strip().lower() == "video",
+                    excluded_candidate_ids=blocked_candidate_ids,
                 )
             except Exception as exc:
                 self._metric_record_resolve_latency((time.perf_counter() - search_started) * 1000.0)
@@ -2003,6 +3048,9 @@ class DownloadWorkerEngine:
             injected_selected = bool(search_meta.get("mb_injected_selected"))
             injected_candidates = int(search_meta.get("mb_injected_candidates") or 0)
             album_success_count = int(search_meta.get("mb_injected_album_success_count") or 0)
+            community_rejections = search_meta.get("community_seeded_rejections")
+            community_selected = bool(search_meta.get("community_seeded_selected"))
+            community_candidates = int(search_meta.get("community_seeded_candidates") or 0)
             if persist_failures:
                 try:
                     self.store.merge_output_template_fields(
@@ -2014,6 +3062,9 @@ class DownloadWorkerEngine:
                                 "mb_injected_selected": injected_selected,
                                 "mb_injected_rejections": injected_rejections or {},
                                 "mb_injected_album_success_count": album_success_count,
+                                "community_seeded_candidates": community_candidates,
+                                "community_seeded_selected": community_selected,
+                                "community_seeded_rejections": community_rejections or {},
                                 "ep_refinement_attempted": bool(search_meta.get("ep_refinement_attempted")),
                                 "ep_refinement_candidates_considered": int(search_meta.get("ep_refinement_candidates_considered") or 0),
                                 "decision_edge": search_meta.get("decision_edge") if isinstance(search_meta.get("decision_edge"), dict) else {},
@@ -2033,6 +3084,17 @@ class DownloadWorkerEngine:
                         injected_selected=injected_selected,
                         injected_rejections=injected_rejections or {},
                         album_run_success_count=album_success_count,
+                    )
+                if community_candidates > 0 or community_selected or community_rejections:
+                    _log_event(
+                        logging.INFO,
+                        "music_track_community_seeded_outcome",
+                        job_id=job.id,
+                        recording_mbid=recording_mbid,
+                        release_mbid=release_mbid,
+                        community_candidates=community_candidates,
+                        community_selected=community_selected,
+                        community_rejections=community_rejections or {},
                     )
         if not _is_http_url(resolved_url):
             failure_reason = str((search_meta or {}).get("failure_reason") or "").strip()
@@ -2132,6 +3194,26 @@ class DownloadWorkerEngine:
         candidate_id = None
         if isinstance(resolved, dict):
             candidate_id = resolved.get("candidate_id")
+        runtime_selected_updates = {
+            "selected_candidate_id": candidate_id,
+            "selected_candidate_url": resolved_url,
+            "selected_candidate_source": source,
+            "selected_score": float(selected_score) if selected_score is not None else None,
+            "selected_duration_delta_ms": duration_delta_ms,
+        }
+        runtime_meta = payload.get("runtime_search_meta")
+        if not isinstance(runtime_meta, dict):
+            runtime_meta = {}
+            payload["runtime_search_meta"] = runtime_meta
+        runtime_meta.update(runtime_selected_updates)
+        if persist_failures:
+            try:
+                self.store.merge_output_template_fields(
+                    job.id,
+                    {"runtime_search_meta": runtime_selected_updates},
+                )
+            except Exception:
+                logger.exception("[MUSIC] failed to persist runtime selected metadata job_id=%s", job.id)
         logger.info(
             '[MUSIC] acquisition recording_mbid=%s release_mbid=%s search_query="%s" source=%s candidate_id=%s duration_delta_ms=%s final_path=%s',
             recording_mbid,
@@ -2162,6 +3244,7 @@ class DownloadWorkerEngine:
             input_url=resolved_url,
             canonical_url=canonical_url,
             external_id=external_id,
+            output_template=payload,
         )
 
     def _review_quarantine_enabled_for_job(self, job, payload):
@@ -2280,13 +3363,21 @@ class DownloadWorkerEngine:
         review_key = candidate_id or hashlib.sha1(candidate_url.encode("utf-8")).hexdigest()[:12]
         review_canonical_id = f"review:{recording_mbid or job.id}:{review_key}"
 
-        base_music_root = resolve_dir(
+        public_music_root = resolve_dir(
             payload.get("output_dir")
             or getattr(job, "resolved_destination", None)
             or self.config.get("music_download_folder"),
             self.paths.single_downloads_dir,
         )
-        needs_review_root = os.path.join(base_music_root, _MUSIC_REVIEW_FOLDER_NAME)
+        review_files_root = str(
+            getattr(self.paths, "review_queue_files_dir", "")
+            or os.path.join(
+                getattr(self.paths, "temp_downloads_dir", None) or self.paths.single_downloads_dir,
+                "review_queue",
+                "files",
+            )
+        ).strip()
+        quarantine_root = os.path.join(review_files_root, sanitize_component(review_canonical_id))
         review_artist = str(canonical.get("artist") or payload.get("artist") or "").strip() or "Unknown Artist"
         review_track = str(canonical.get("track") or payload.get("track") or "").strip() or "Unknown Track"
         review_album = str(canonical.get("album") or payload.get("album") or "").strip() or "Unknown Album"
@@ -2340,8 +3431,8 @@ class DownloadWorkerEngine:
             source=review_source,
             url=candidate_url,
             input_url=candidate_url,
-            destination=needs_review_root,
-            base_dir=self.paths.single_downloads_dir,
+            destination=quarantine_root,
+            base_dir=review_files_root,
             final_format_override=final_format_override,
             resolved_metadata=review_metadata,
             output_template_overrides={
@@ -2349,6 +3440,8 @@ class DownloadWorkerEngine:
                 "source": "music_review",
                 "import_batch": payload.get("import_batch"),
                 "import_batch_id": payload.get("import_batch_id"),
+                "review_parent_job_id": str(getattr(job, "id", "") or "").strip() or None,
+                "review_target_destination": public_music_root,
                 "review_candidate_id": review_candidate.get("candidate_id"),
                 "review_candidate_url": candidate_url,
                 "review_failure_reason": failure_reason,
@@ -2356,6 +3449,22 @@ class DownloadWorkerEngine:
                 "review_nearest_pass_margin": review_candidate.get("nearest_pass_margin")
                 if isinstance(review_candidate.get("nearest_pass_margin"), dict)
                 else {},
+                "review_candidate_details": {
+                    "candidate_id": review_candidate.get("candidate_id"),
+                    "url": candidate_url,
+                    "source": review_candidate.get("source"),
+                    "final_score": review_candidate.get("final_score"),
+                    "title_similarity": review_candidate.get("title_similarity"),
+                    "artist_similarity": review_candidate.get("artist_similarity"),
+                    "album_similarity": review_candidate.get("album_similarity"),
+                    "duration_delta_ms": review_candidate.get("duration_delta_ms"),
+                    "duration_ms": review_candidate.get("duration_ms"),
+                    "rejection_reason": review_candidate.get("rejection_reason"),
+                    "top_failed_gate": review_candidate.get("top_failed_gate"),
+                    "nearest_pass_margin": review_candidate.get("nearest_pass_margin")
+                    if isinstance(review_candidate.get("nearest_pass_margin"), dict)
+                    else {},
+                },
             },
             canonical_id=review_canonical_id,
             canonical_url=canonical_url,
@@ -3006,7 +4115,17 @@ class DownloadWorkerEngine:
                 )
                 self._write_album_run_summary_artifact(job)
                 return
-            self.store.mark_downloading(job.id)
+            if not self.store.mark_downloading(job.id):
+                current_status = self.store.get_job_status(job.id)
+                _log_event(
+                    logging.INFO,
+                    "job_start_skipped_non_claimed",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    status=current_status,
+                )
+                return
             _log_event(
                 logging.INFO,
                 "job_started",
@@ -3063,14 +4182,48 @@ class DownloadWorkerEngine:
                     media_intent=job.media_intent,
                 )
                 return
-            self.store.mark_postprocessing(job.id)
-            record_download_history(
-                self.db_path,
-                job,
-                final_path,
-                meta=meta,
-            )
-            self.store.mark_completed(job.id, file_path=final_path)
+            if not self.store.mark_postprocessing(job.id):
+                current_status = self.store.get_job_status(job.id)
+                _log_event(
+                    logging.INFO,
+                    "job_postprocessing_skipped_invalid_state",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    status=current_status,
+                )
+                return
+            is_review_job = str(getattr(job, "media_intent", "") or "").strip().lower() == "music_track_review"
+            if is_review_job:
+                record_completed_review_item(self.db_path, job, final_path, meta=meta)
+            else:
+                record_download_history(
+                    self.db_path,
+                    job,
+                    final_path,
+                    meta=meta,
+                )
+            if not self.store.mark_completed(job.id, file_path=final_path):
+                current_status = self.store.get_job_status(job.id)
+                _log_event(
+                    logging.INFO,
+                    "job_complete_skipped_invalid_state",
+                    job_id=job.id,
+                    trace_id=job.trace_id,
+                    source=job.source,
+                    status=current_status,
+                )
+                return
+            self._clear_music_candidate_cooldown(job)
+            if str(getattr(job, "media_intent", "") or "").strip().lower() == "music_track":
+                try:
+                    self._auto_verify_resolution_mapping(job, final_path=final_path, meta=meta)
+                except Exception:
+                    logger.exception("[MUSIC] resolution auto-verify failed job_id=%s", getattr(job, "id", None))
+                try:
+                    self._emit_community_publish_proposal(job, final_path=final_path, meta=meta)
+                except Exception:
+                    logger.exception("[MUSIC] community publish proposal emit failed job_id=%s", getattr(job, "id", None))
             self._write_album_run_summary_artifact(job, final_path=final_path)
             _log_event(
                 logging.INFO,
@@ -3135,6 +4288,11 @@ class DownloadWorkerEngine:
             retryable = is_retryable_error(exc)
             error_text_lower = error_message.lower()
             unavailable_class = _classify_ytdlp_unavailability(error_message)
+            self._note_music_candidate_unavailable(
+                job,
+                unavailable_class=unavailable_class,
+                error_message=error_message,
+            )
             if "yt_dlp_source_unavailable:" in error_text_lower or unavailable_class:
                 failure_domain = "source_unavailable"
             elif "metadata_probe" in error_text_lower or "yt_dlp_metadata_probe_failed" in error_text_lower:
@@ -3176,7 +4334,6 @@ class DownloadWorkerEngine:
                 candidate_id=candidate_id,
                 unavailable_class=unavailable_class,
             )
-
 
 class YouTubeAdapter:
     _missing_final_format_warned = False
@@ -3251,7 +4408,7 @@ class YouTubeAdapter:
         filename_template = output_template.get("filename_template")
         audio_template = output_template.get("audio_filename_template")
 
-        resolved_dir = resolve_dir(output_dir, paths.single_downloads_dir)
+        resolved_dir = _resolve_job_output_dir(output_dir, paths, media_intent=media_intent)
         temp_dir = os.path.join(paths.temp_downloads_dir, job.id)
         os.makedirs(temp_dir, exist_ok=True)
 
@@ -3326,7 +4483,7 @@ class YouTubeAdapter:
                 meta["mb_release_group_id"] = release_group_mbid
             effective_media_intent = media_intent or getattr(job, "media_intent", None)
             normalized_intent = str(effective_media_intent or "").strip().lower()
-            if is_music_media_type(effective_media_type) and is_music_track_intent(normalized_intent):
+            if is_music_track_intent(normalized_intent):
                 pre_fields = _release_fields_from_template(output_template, canonical)
                 if not _release_fields_complete(pre_fields):
                     _log_event(
@@ -3378,6 +4535,23 @@ class YouTubeAdapter:
                 )
                 meta["mb_release_id"] = refreshed_canonical.get("mb_release_id")
                 meta["mb_release_group_id"] = refreshed_canonical.get("mb_release_group_id")
+                if (
+                    str(effective_media_type or "").strip().lower() == "video"
+                    and not audio_mode
+                    and normalized_intent == "music_track"
+                ):
+                    _log_event(
+                        logging.INFO,
+                        "music_video_mb_metadata_bound",
+                        job_id=getattr(job, "id", None),
+                        recording_mbid=meta.get("recording_mbid") or meta.get("mb_recording_id"),
+                        mb_release_id=meta.get("mb_release_id"),
+                        mb_release_group_id=meta.get("mb_release_group_id"),
+                        artist=str(meta.get("artist") or "").strip() or None,
+                        album=str(meta.get("album") or "").strip() or None,
+                        track=str(meta.get("track") or meta.get("title") or "").strip() or None,
+                        release_date=str(meta.get("release_date") or "").strip() or None,
+                    )
             video_id = meta.get("video_id") or job.id
             template = audio_template if audio_mode else filename_template
             enforce_music_contract = bool(
@@ -3389,10 +4563,36 @@ class YouTubeAdapter:
                     or _release_fields_complete(_release_fields_from_template(output_template, canonical))
                 )
             )
+            if (
+                str(effective_media_type or "").strip().lower() == "video"
+                and not audio_mode
+                and normalized_intent == "music_track"
+            ):
+                _log_event(
+                    logging.INFO,
+                    "music_video_metadata_embed_payload",
+                    job_id=getattr(job, "id", None),
+                    title=str(meta.get("title") or "").strip() or None,
+                    artist=str(meta.get("artist") or "").strip() or None,
+                    album=str(meta.get("album") or "").strip() or None,
+                    track=str(meta.get("track") or "").strip() or None,
+                    track_number=meta.get("track_number"),
+                    disc_number=meta.get("disc_number"),
+                    has_release_date=bool(str(meta.get("release_date") or "").strip()),
+                    has_description=bool(str(meta.get("description") or "").strip()),
+                )
 
             if stop_event and stop_event.is_set():
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
+
+            if isinstance(meta, dict):
+                provenance = build_file_provenance(
+                    job=job,
+                    source=getattr(job, "source", None),
+                    source_id=meta.get("video_id") or getattr(job, "external_id", None) or video_id,
+                )
+                meta.update(provenance)
 
             final_path, meta = finalize_download_artifact(
                 local_file=local_file,
@@ -3408,13 +4608,26 @@ class YouTubeAdapter:
                 enqueue_audio_metadata=bool(music_mode),
             )
             runtime_media_profile = meta.get("runtime_media_profile") if isinstance(meta.get("runtime_media_profile"), dict) else None
+            adapter_store = getattr(self, "store", None)
             if runtime_media_profile:
-                adapter_store = getattr(self, "store", None)
                 if adapter_store and hasattr(adapter_store, "merge_output_template_fields"):
                     adapter_store.merge_output_template_fields(
                         job.id,
                         {"runtime_media_profile": runtime_media_profile},
                     )
+            export_results = {}
+            if audio_mode and final_path and isinstance(config, dict):
+                try:
+                    export_results = run_music_exports(final_path, meta if isinstance(meta, dict) else {}, config)
+                except Exception:
+                    logger.exception("[MUSIC] export stage failed job_id=%s path=%s", getattr(job, "id", None), final_path)
+                    export_results = {}
+                if export_results and adapter_store and hasattr(adapter_store, "merge_output_template_fields"):
+                    adapter_store.merge_output_template_fields(
+                        job.id,
+                        {"export_results": export_results},
+                    )
+                    meta["export_results"] = export_results
             logger.info(f"[MUSIC] finalized file: {final_path}")
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -3913,6 +5126,22 @@ def _classify_ytdlp_unavailability(message: str | None) -> str | None:
     return None
 
 def resolve_media_type(config, *, playlist_entry=None, url=None):
+    media_mode = None
+    if isinstance(playlist_entry, dict):
+        media_mode = playlist_entry.get("media_mode")
+        if media_mode is None and playlist_entry.get("music_video") is True:
+            media_mode = "music_video"
+    if media_mode is None and isinstance(config, dict):
+        media_mode = config.get("media_mode")
+        if media_mode is None and config.get("music_video") is True:
+            media_mode = "music_video"
+    if media_mode:
+        normalized_media_mode = str(media_mode).strip().lower()
+        if normalized_media_mode == "music":
+            return "music"
+        if normalized_media_mode in {"music_video", "video"}:
+            return "video"
+
     media_type = None
     if isinstance(playlist_entry, dict):
         media_type = playlist_entry.get("media_type") or playlist_entry.get("media")
@@ -5150,6 +6379,9 @@ def download_with_ytdlp(
         opts["cookiefile"] = resolved_cookiefile
 
     normalized_intent = str(media_intent or "").strip().lower()
+    is_music_track_download = bool(
+        audio_mode and is_music_media_type(media_type) and is_music_track_intent(normalized_intent)
+    )
     if audio_mode and is_music_media_type(media_type) and is_music_track_intent(normalized_intent):
         if "format" not in opts:
             _log_event(
@@ -5255,97 +6487,110 @@ def download_with_ytdlp(
 
     from subprocess import CalledProcessError
     info = None
-    # Always get metadata via API (for output file info, etc.)
-    try:
-        probe_opts = copy.deepcopy(opts)
-        probe_opts.pop("format", None)
-        probe_opts.pop("postprocessors", None)
-        probe_opts.pop("merge_output_format", None)
-        probe_opts.pop("recodevideo", None)
-        probe_opts.pop("final_format", None)
-        probe_opts.pop("writethumbnail", None)
-        probe_opts.pop("embedthumbnail", None)
-        probe_opts["skip_download"] = True
-        logger.info(
-            {
-                "message": "metadata_probe_invocation",
-                "job_id": job_id,
-                "url": url,
-                "format_present": "format" in probe_opts,
-                "postprocessors_present": "postprocessors" in probe_opts,
-            }
-        )
-        with YoutubeDL(probe_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as exc:
-        probe_error = str(exc)
-        lower_probe_error = probe_error.lower()
-        format_unavailable_probe = "requested format is not available" in lower_probe_error
-        unavailable_class = _classify_ytdlp_unavailability(probe_error)
+    skip_probe_for_music = bool((config or {}).get("music_skip_metadata_probe", True))
+    should_skip_probe = bool(is_music_track_download and skip_probe_for_music)
+    if should_skip_probe:
         _log_event(
-            logging.WARNING if format_unavailable_probe else logging.ERROR,
-            "ytdlp_metadata_probe_failed",
+            logging.INFO,
+            "metadata_probe_skipped_for_music",
             job_id=job_id,
             url=url,
-            error=probe_error,
-            failure_domain=(
-                "metadata_probe_unavailable"
-                if unavailable_class
-                else ("metadata_probe_format" if format_unavailable_probe else "metadata_probe")
-            ),
-            error_message=probe_error,
-            candidate_id=extract_video_id(url),
-            unavailable_class=unavailable_class,
+            media_type=media_type,
+            media_intent=media_intent,
         )
-        should_escalate_probe_js = any(
-            marker in lower_probe_error
-            for marker in (
-                "signature solving failed",
-                "n challenge solving failed",
+        info = {"id": extract_video_id(url), "webpage_url": url}
+    else:
+        # Always get metadata via API (for output file info, etc.)
+        try:
+            probe_opts = copy.deepcopy(opts)
+            probe_opts.pop("format", None)
+            probe_opts.pop("postprocessors", None)
+            probe_opts.pop("merge_output_format", None)
+            probe_opts.pop("recodevideo", None)
+            probe_opts.pop("final_format", None)
+            probe_opts.pop("writethumbnail", None)
+            probe_opts.pop("embedthumbnail", None)
+            probe_opts["skip_download"] = True
+            logger.info(
+                {
+                    "message": "metadata_probe_invocation",
+                    "job_id": job_id,
+                    "url": url,
+                    "format_present": "format" in probe_opts,
+                    "postprocessors_present": "postprocessors" in probe_opts,
+                }
             )
-        )
-        if should_escalate_probe_js:
-            js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
-            if js_runtime_map:
-                retry_probe_opts = copy.deepcopy(probe_opts)
-                retry_probe_opts["js_runtimes"] = js_runtime_map
-                retry_probe_opts["remote_components"] = "ejs:github"
+            with YoutubeDL(probe_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            probe_error = str(exc)
+            lower_probe_error = probe_error.lower()
+            format_unavailable_probe = "requested format is not available" in lower_probe_error
+            unavailable_class = _classify_ytdlp_unavailability(probe_error)
+            _log_event(
+                logging.WARNING if format_unavailable_probe else logging.ERROR,
+                "ytdlp_metadata_probe_failed",
+                job_id=job_id,
+                url=url,
+                error=probe_error,
+                failure_domain=(
+                    "metadata_probe_unavailable"
+                    if unavailable_class
+                    else ("metadata_probe_format" if format_unavailable_probe else "metadata_probe")
+                ),
+                error_message=probe_error,
+                candidate_id=extract_video_id(url),
+                unavailable_class=unavailable_class,
+            )
+            should_escalate_probe_js = any(
+                marker in lower_probe_error
+                for marker in (
+                    "signature solving failed",
+                    "n challenge solving failed",
+                )
+            )
+            if should_escalate_probe_js:
+                js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+                if js_runtime_map:
+                    retry_probe_opts = copy.deepcopy(probe_opts)
+                    retry_probe_opts["js_runtimes"] = js_runtime_map
+                    retry_probe_opts["remote_components"] = "ejs:github"
+                    _log_event(
+                        logging.WARNING,
+                        "ytdlp_metadata_probe_js_retry",
+                        job_id=job_id,
+                        url=url,
+                        media_type=media_type,
+                        media_intent=media_intent,
+                        error=probe_error,
+                    )
+                    try:
+                        with YoutubeDL(retry_probe_opts) as ydl:
+                            info = ydl.extract_info(url, download=False)
+                    except Exception as retry_exc:
+                        _log_event(
+                            logging.WARNING,
+                            "ytdlp_metadata_probe_js_retry_failed",
+                            job_id=job_id,
+                            url=url,
+                            media_type=media_type,
+                            media_intent=media_intent,
+                            error=str(retry_exc),
+                        )
+                        info = None
+
+            if info is None:
                 _log_event(
                     logging.WARNING,
-                    "ytdlp_metadata_probe_js_retry",
+                    "ytdlp_metadata_probe_nonfatal_proceeding",
                     job_id=job_id,
                     url=url,
                     media_type=media_type,
                     media_intent=media_intent,
                     error=probe_error,
+                    unavailable_class=unavailable_class,
                 )
-                try:
-                    with YoutubeDL(retry_probe_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                except Exception as retry_exc:
-                    _log_event(
-                        logging.WARNING,
-                        "ytdlp_metadata_probe_js_retry_failed",
-                        job_id=job_id,
-                        url=url,
-                        media_type=media_type,
-                        media_intent=media_intent,
-                        error=str(retry_exc),
-                    )
-                    info = None
-
-        if info is None:
-            _log_event(
-                logging.WARNING,
-                "ytdlp_metadata_probe_nonfatal_proceeding",
-                job_id=job_id,
-                url=url,
-                media_type=media_type,
-                media_intent=media_intent,
-                error=probe_error,
-                unavailable_class=unavailable_class,
-            )
-            info = {"id": extract_video_id(url), "webpage_url": url}
+                info = {"id": extract_video_id(url), "webpage_url": url}
 
     def _is_empty_download_error(e: Exception) -> bool:
         msg = str(e) or ""
@@ -5375,8 +6620,14 @@ def download_with_ytdlp(
     keep_cookies_first_attempt = bool(audio_mode and configured_cookiefile)
     if not keep_cookies_first_attempt:
         configured_cookiefile = opts_for_run.pop("cookiefile", None)
-    opts_for_run.pop("js_runtimes", None)
-    opts_for_run.pop("remote_components", None)
+    js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
+    keep_js_first_attempt = bool(is_music_track_download and js_runtime_map)
+    if keep_js_first_attempt:
+        opts_for_run["js_runtimes"] = js_runtime_map
+        opts_for_run["remote_components"] = "ejs:github"
+    else:
+        opts_for_run.pop("js_runtimes", None)
+        opts_for_run.pop("remote_components", None)
     # Always request sidecar metadata from successful download attempts.
     opts_for_run["writeinfojson"] = True
     opts_for_run["newline"] = True
@@ -5432,16 +6683,21 @@ def download_with_ytdlp(
         )
 
         retry_attempts = []
-        if audio_mode and "requested format is not available" in lower_error:
+        if audio_mode and "requested format is not available" in lower_error and not is_music_track_download:
             retry_attempts.append("audio_best")
-        if should_escalate_js:
+        first_attempt_had_js = bool(opts_for_run.get("js_runtimes"))
+        first_attempt_had_cookies = bool(opts_for_run.get("cookiefile"))
+        if should_escalate_js and not first_attempt_had_js:
             retry_attempts.append("js")
-        if should_try_cookies and configured_cookiefile:
+        if should_try_cookies and configured_cookiefile and not first_attempt_had_cookies:
             retry_attempts.append("cookies")
-        if should_escalate_js and should_try_cookies and configured_cookiefile:
+        if (
+            should_escalate_js
+            and should_try_cookies
+            and configured_cookiefile
+            and not (first_attempt_had_js and first_attempt_had_cookies)
+        ):
             retry_attempts.append("js+cookies")
-
-        js_runtime_map = _build_js_runtime_dict(_extract_config_js_runtime_values(config))
         for attempt in retry_attempts:
             retry_opts = dict(opts_for_run)
             if attempt == "audio_best":
@@ -6020,6 +7276,12 @@ def _hydrate_meta_from_output_template(meta, output_template):
     if not isinstance(output_template, dict):
         return meta
 
+    canonical = (
+        output_template.get("canonical_metadata")
+        if isinstance(output_template.get("canonical_metadata"), dict)
+        else {}
+    )
+
     template_title = str(output_template.get("title") or output_template.get("track") or "").strip()
     template_channel = str(
         output_template.get("channel")
@@ -6038,6 +7300,73 @@ def _hydrate_meta_from_output_template(meta, output_template):
         meta["channel"] = template_channel
         if not str(meta.get("artist") or "").strip():
             meta["artist"] = template_channel
+
+    # For music-video jobs, preserve canonical MB metadata so video container tags
+    # can carry artist/album/track/release fields as expected.
+    artist_value = str(
+        canonical.get("artist")
+        or canonical.get("album_artist")
+        or output_template.get("artist")
+        or output_template.get("album_artist")
+        or ""
+    ).strip()
+    if artist_value and not str(meta.get("artist") or "").strip():
+        meta["artist"] = artist_value
+    if artist_value and not str(meta.get("album_artist") or "").strip():
+        meta["album_artist"] = artist_value
+
+    track_value = str(
+        canonical.get("track")
+        or canonical.get("title")
+        or output_template.get("track")
+        or ""
+    ).strip()
+    if track_value and not str(meta.get("track") or "").strip():
+        meta["track"] = track_value
+    if track_value and not str(meta.get("title") or "").strip():
+        meta["title"] = track_value
+
+    album_value = str(canonical.get("album") or output_template.get("album") or "").strip()
+    if album_value and not str(meta.get("album") or "").strip():
+        meta["album"] = album_value
+
+    release_date = str(
+        canonical.get("release_date")
+        or canonical.get("date")
+        or output_template.get("release_date")
+        or ""
+    ).strip()
+    if release_date and not str(meta.get("release_date") or "").strip():
+        meta["release_date"] = release_date
+
+    for key in ("track_number", "track_total", "disc_number", "disc_total", "genre"):
+        if meta.get(key) in (None, "", 0):
+            value = canonical.get(key)
+            if value in (None, "", 0):
+                value = output_template.get(key)
+            if value not in (None, "", 0):
+                meta[key] = value
+
+    recording_id = str(
+        canonical.get("recording_mbid")
+        or canonical.get("mb_recording_id")
+        or output_template.get("recording_mbid")
+        or output_template.get("mb_recording_id")
+        or ""
+    ).strip()
+    if recording_id and not str(meta.get("recording_mbid") or meta.get("mb_recording_id") or "").strip():
+        meta["recording_mbid"] = recording_id
+        meta["mb_recording_id"] = recording_id
+
+    release_id = str(
+        canonical.get("mb_release_id")
+        or canonical.get("release_id")
+        or output_template.get("mb_release_id")
+        or output_template.get("release_id")
+        or ""
+    ).strip()
+    if release_id and not str(meta.get("mb_release_id") or "").strip():
+        meta["mb_release_id"] = release_id
 
     return meta
 
@@ -6427,7 +7756,7 @@ def finalize_download_artifact(
 
     if audio_mode and enqueue_audio_metadata and isinstance(config, dict):
         try:
-            enqueue_media_metadata(final_path, meta, config)
+            apply_media_metadata_now(final_path, meta, config)
         except Exception:
             pass
 
@@ -6450,8 +7779,25 @@ def atomic_move(src, dst):
     try:
         os.replace(src, dst)
     except OSError:
-        shutil.copy2(src, dst)
-        os.remove(src)
+        dst_dir = os.path.dirname(dst) or "."
+        os.makedirs(dst_dir, exist_ok=True)
+        fd, tmp_dst = tempfile.mkstemp(
+            prefix=".retreivr-move-",
+            suffix=os.path.splitext(dst)[1],
+            dir=dst_dir,
+        )
+        os.close(fd)
+        try:
+            shutil.copy2(src, tmp_dst)
+            os.replace(tmp_dst, dst)
+            os.remove(src)
+        except Exception:
+            try:
+                if os.path.exists(tmp_dst):
+                    os.remove(tmp_dst)
+            except Exception:
+                pass
+            raise
 
 
 def embed_metadata(local_file, meta, video_id, thumbs_dir):
@@ -6477,6 +7823,8 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
     track = meta.get("track")
     track_number = meta.get("track_number")
     disc = meta.get("disc")
+    if disc is None:
+        disc = meta.get("disc_number")
     release_date = meta.get("release_date")
     upload_date = meta.get("upload_date") or ""
     description = meta.get("description") or ""
@@ -6561,32 +7909,54 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
     def _add_common_metadata(cmd_list: list[str]):
         if title:
             cmd_list.extend(["-metadata", f"title={title}"])
+            cmd_list.extend(["-metadata", f"TITLE={title}"])
         if artist:
             cmd_list.extend(["-metadata", f"artist={artist}"])
+            cmd_list.extend(["-metadata", f"ARTIST={artist}"])
         if album:
             cmd_list.extend(["-metadata", f"album={album}"])
+            cmd_list.extend(["-metadata", f"ALBUM={album}"])
         if album_artist:
             cmd_list.extend(["-metadata", f"album_artist={album_artist}"])
+            cmd_list.extend(["-metadata", f"ALBUMARTIST={album_artist}"])
         if track:
             # Track name
             cmd_list.extend(["-metadata", f"track={track}"])
+            cmd_list.extend(["-metadata", f"TRACK={track}"])
         if track_number is not None:
             # Prefer common track number tag in a safe form
             try:
                 tn = int(track_number)
                 cmd_list.extend(["-metadata", f"track_number={tn}"])
+                cmd_list.extend(["-metadata", f"TRACKNUMBER={tn}"])
             except Exception:
                 pass
         if disc is not None:
             try:
                 dn = int(disc)
                 cmd_list.extend(["-metadata", f"disc={dn}"])
+                cmd_list.extend(["-metadata", f"DISCNUMBER={dn}"])
             except Exception:
                 pass
         if date_tag:
             cmd_list.extend(["-metadata", f"date={date_tag}"])
+            cmd_list.extend(["-metadata", f"DATE={date_tag}"])
         if description:
             cmd_list.extend(["-metadata", f"description={description}"])
+        if meta.get("retreivr_managed"):
+            cmd_list.extend(["-metadata", f"retreivr_managed={meta.get('retreivr_managed')}"])
+        if meta.get("retreivr_job_id"):
+            cmd_list.extend(["-metadata", f"retreivr_job_id={meta.get('retreivr_job_id')}"])
+        if meta.get("retreivr_trace_id"):
+            cmd_list.extend(["-metadata", f"retreivr_trace_id={meta.get('retreivr_trace_id')}"])
+        if meta.get("retreivr_version"):
+            cmd_list.extend(["-metadata", f"retreivr_version={meta.get('retreivr_version')}"])
+        if meta.get("retreivr_acquired_at"):
+            cmd_list.extend(["-metadata", f"retreivr_acquired_at={meta.get('retreivr_acquired_at')}"])
+        if meta.get("retreivr_source"):
+            cmd_list.extend(["-metadata", f"retreivr_source={meta.get('retreivr_source')}"])
+        if meta.get("retreivr_source_id"):
+            cmd_list.extend(["-metadata", f"retreivr_source_id={meta.get('retreivr_source_id')}"])
         if channel_id:
             cmd_list.extend(["-metadata", f"source_channel_id={channel_id}"])
         if keywords:
@@ -6674,6 +8044,17 @@ def enqueue_media_metadata(file_path, meta, config):
         enqueue_metadata(file_path, meta, config)
     except Exception:
         logging.exception("Metadata enqueue failed for %s", file_path)
+
+
+def apply_media_metadata_now(file_path, meta, config):
+    try:
+        if callable(process_metadata_now):
+            return bool(process_metadata_now(file_path, meta, config))
+        enqueue_metadata(file_path, meta, config)
+        return True
+    except Exception:
+        logging.exception("Synchronous metadata apply failed for %s", file_path)
+        return False
 
 
 def _album_output_dir_from_track_path(file_path):
@@ -6801,6 +8182,43 @@ def _normalize_decision_edge(value):
     }
 
 
+def _normalize_export_results(value):
+    if not isinstance(value, dict):
+        return {}
+    normalized = {}
+    for export_name, export_result in value.items():
+        name = str(export_name or "").strip()
+        if not name or not isinstance(export_result, dict):
+            continue
+        normalized[name] = dict(export_result)
+    return normalized
+
+
+def _aggregate_export_results(rows):
+    aggregate = {}
+    for row in rows:
+        output_template = {}
+        raw_template = row["output_template"]
+        if isinstance(raw_template, str) and raw_template.strip():
+            try:
+                loaded = json.loads(raw_template)
+                if isinstance(loaded, dict):
+                    output_template = loaded
+            except Exception:
+                output_template = {}
+        export_results = _normalize_export_results(output_template.get("export_results"))
+        for export_name, result in export_results.items():
+            target = aggregate.setdefault(export_name, {"copied": 0, "transcoded": 0, "failed": 0})
+            status = str(result.get("status") or "").strip().lower()
+            if status == "copied":
+                target["copied"] += 1
+            elif status == "transcoded":
+                target["transcoded"] += 1
+            else:
+                target["failed"] += 1
+    return dict(sorted(aggregate.items(), key=lambda item: item[0]))
+
+
 def build_music_album_run_summary(db_path, album_run_id):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -6826,6 +8244,16 @@ def build_music_album_run_summary(db_path, album_run_id):
     source_unavailable = 0
     why_missing_counts = Counter()
     why_missing_tracks = []
+    community_seeded_total = 0
+    community_seeded_selected_total = 0
+    community_seeded_rejection_mix = Counter()
+    community_publish_status_mix = Counter()
+    community_publish_attempted_total = 0
+    community_publish_written_total = 0
+    community_publish_dry_run_total = 0
+    community_publish_deduped_total = 0
+    community_publish_skipped_total = 0
+    community_publish_error_total = 0
     per_track = []
     candidate_album_dirs = Counter()
 
@@ -6843,6 +8271,34 @@ def build_music_album_run_summary(db_path, album_run_id):
         canonical = output_template.get("canonical_metadata") if isinstance(output_template.get("canonical_metadata"), dict) else {}
         track_id = str(canonical.get("recording_mbid") or output_template.get("recording_mbid") or row["id"]).strip()
         runtime_search_meta = output_template.get("runtime_search_meta") if isinstance(output_template.get("runtime_search_meta"), dict) else {}
+        community_seeded_total += int(runtime_search_meta.get("community_seeded_candidates") or 0)
+        if bool(runtime_search_meta.get("community_seeded_selected")):
+            community_seeded_selected_total += 1
+        runtime_community_rejections = runtime_search_meta.get("community_seeded_rejections")
+        if isinstance(runtime_community_rejections, dict):
+            for key, value in runtime_community_rejections.items():
+                reason = str(key or "").strip()
+                if not reason:
+                    continue
+                try:
+                    community_seeded_rejection_mix[reason] += int(value or 0)
+                except Exception:
+                    continue
+        publish_attempted = bool(runtime_search_meta.get("community_publish_attempted"))
+        if publish_attempted:
+            community_publish_attempted_total += 1
+        publish_status = str(runtime_search_meta.get("community_publish_status") or "").strip() or "disabled"
+        community_publish_status_mix[publish_status] += 1
+        if publish_status == "written":
+            community_publish_written_total += 1
+        elif publish_status == "dry_run":
+            community_publish_dry_run_total += 1
+        elif publish_status == "deduped":
+            community_publish_deduped_total += 1
+        elif publish_status.startswith("skipped") or publish_status == "validation_failed":
+            community_publish_skipped_total += 1
+        elif publish_status == "error":
+            community_publish_error_total += 1
         ep_refinement_attempted = bool(runtime_search_meta.get("ep_refinement_attempted"))
         ep_refinement_candidates_considered = int(runtime_search_meta.get("ep_refinement_candidates_considered") or 0)
         runtime_media_profile = output_template.get("runtime_media_profile") if isinstance(output_template.get("runtime_media_profile"), dict) else {}
@@ -6899,9 +8355,10 @@ def build_music_album_run_summary(db_path, album_run_id):
     selected_album_dir = None
     if candidate_album_dirs:
         selected_album_dir = sorted(candidate_album_dirs.items(), key=lambda item: (-int(item[1]), item[0]))[0][0]
+    export_summary = _aggregate_export_results(rows)
 
     summary = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_type": "music_album",
         "album_run_id": str(album_run_id or ""),
         "telegram_sent": False,
@@ -6909,6 +8366,21 @@ def build_music_album_run_summary(db_path, album_run_id):
         "tracks_total": tracks_total,
         "tracks_resolved": tracks_resolved,
         "completion_percent": completion_percent,
+        "community_seeded_total": int(community_seeded_total),
+        "community_seeded_selected_total": int(community_seeded_selected_total),
+        "community_seeded_rejection_mix": dict(
+            sorted(community_seeded_rejection_mix.items(), key=lambda item: (-int(item[1]), item[0]))
+        ),
+        "community_publish_attempted_total": int(community_publish_attempted_total),
+        "community_publish_written_total": int(community_publish_written_total),
+        "community_publish_dry_run_total": int(community_publish_dry_run_total),
+        "community_publish_deduped_total": int(community_publish_deduped_total),
+        "community_publish_skipped_total": int(community_publish_skipped_total),
+        "community_publish_error_total": int(community_publish_error_total),
+        "community_publish_status_mix": dict(
+            sorted(community_publish_status_mix.items(), key=lambda item: (-int(item[1]), item[0]))
+        ),
+        "exports": export_summary,
         "wrong_variant_flags": wrong_variant_count,
         "rejection_mix": dict(sorted(rejection_mix.items(), key=lambda item: (-int(item[1]), item[0]))),
         "unresolved_classification": {

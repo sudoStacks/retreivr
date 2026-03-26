@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.6-ui-queue-2">
-  <script defer src="app.js?v=0.9.6-ui-queue-14"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.8-ui-1">
+  <script defer src="app.js?v=0.9.8-ui-1"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -24,16 +24,22 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
-      <button class="button ghost small nav-button" data-page="advanced" type="button">Info</button>
+      <button class="button ghost small nav-button nav-button-with-count" data-page="review" type="button">
+        <span>Review</span>
+        <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
+      </button>
+      <button class="button ghost small nav-button" data-page="info" type="button">Info</button>
       <button class="button ghost small nav-button" data-page="status" type="button">Status</button>
-      <button class="button ghost small nav-button" data-page="config" type="button">Config</button>
+      <button class="button ghost small nav-button" data-page="config" data-hash="settings" type="button">Settings</button>
       <div id="nav-actions" class="nav-actions"></div>
     </nav>
     <div class="top-actions" id="top-actions">
-      <button id="toggle-theme" class="button ghost small">Light mode</button>
-    </div>
-    <div class="header-sponsor">
-      <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
+      <button id="toggle-theme" class="button ghost small" type="button" aria-label="Switch to light mode" title="Switch to light mode">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="4.5" fill="currentColor"></circle>
+          <path d="M12 2.5v2.5M12 19v2.5M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2.5 12H5M19 12h2.5M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"></path>
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -41,11 +47,19 @@
     <section class="panel full page-full" id="home-panel" data-page="home">
       <div class="home-search-shell">
         <div class="music-mode-toggle-row">
-          <label class="music-mode-switch" for="music-mode-toggle">
-            <input id="music-mode-toggle" type="checkbox">
-            <span class="music-mode-slider" aria-hidden="true"></span>
-            <span class="music-mode-label">Music Mode</span>
-          </label>
+          <div class="home-media-mode-group" role="group" aria-label="Search mode">
+            <span class="home-media-mode-label">Mode</span>
+            <div id="home-media-mode-toggle" class="home-media-mode-toggle" role="radiogroup" aria-label="Media mode">
+              <button type="button" class="home-media-mode-pill active" data-mode="video" role="radio" aria-checked="true">Video</button>
+              <button type="button" class="home-media-mode-pill" data-mode="music_video" role="radio" aria-checked="false">Music Video</button>
+              <button type="button" class="home-media-mode-pill" data-mode="music" role="radio" aria-checked="false">Music</button>
+            </div>
+            <select id="home-media-mode" class="hidden" aria-hidden="true" tabindex="-1">
+              <option value="video">Video Mode</option>
+              <option value="music_video">Music Video Mode</option>
+              <option value="music">Music Mode</option>
+            </select>
+          </div>
         </div>
         <div id="standard-search-container">
           <input
@@ -65,13 +79,15 @@
                 aria-expanded="false"
                 aria-controls="home-source-panel"
               >
-                Sources: All
+                Sources: YouTube
               </button>
               <div id="home-source-panel" class="home-source-panel" role="menu">
                 <label class="home-source-pill"><input type="checkbox" data-source="youtube" checked> <span>YouTube</span></label>
-                <label class="home-source-pill"><input type="checkbox" data-source="youtube_music" checked> <span>YouTube Music</span></label>
-                <label class="home-source-pill"><input type="checkbox" data-source="soundcloud" checked> <span>SoundCloud</span></label>
-                <label class="home-source-pill"><input type="checkbox" data-source="bandcamp" checked> <span>Bandcamp</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="youtube_music"> <span>YouTube Music</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="rumble"> <span>Rumble</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="archive_org"> <span>Archive.org</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="soundcloud"> <span>SoundCloud</span></label>
+                <label class="home-source-pill"><input type="checkbox" data-source="bandcamp"> <span>Bandcamp</span></label>
               </div>
             </div>
 
@@ -88,33 +104,38 @@
 
           <div id="home-advanced-panel" class="home-advanced-panel hidden">
             <div class="home-advanced-row">
+              <div id="home-delivery-video-slot">
+                <label id="home-delivery-field" class="home-advanced-field">
+                  <span>Delivery</span>
+                  <div id="home-delivery-toggle" class="home-delivery-toggle" role="group" aria-label="Delivery mode">
+                    <button type="button" class="home-media-mode-pill active" data-mode="server">Server</button>
+                    <button type="button" class="home-media-mode-pill" data-mode="client">Client</button>
+                  </div>
+                  <input id="home-delivery-mode" type="hidden" value="server">
+                </label>
+              </div>
+
               <label class="home-advanced-field">
                 <span>Format</span>
                 <select id="home-format">
                   <option value="">Default</option>
                   <option value="mp3">mp3</option>
+                  <option value="m4a">m4a</option>
                   <option value="mp4">mp4</option>
                   <option value="mkv">mkv</option>
                   <option value="webm">webm</option>
                 </select>
               </label>
 
-              <label class="home-advanced-field">
-                <span>Delivery</span>
-                <div id="home-delivery-toggle" class="home-delivery-toggle" role="group" aria-label="Delivery mode">
-                  <button type="button" class="button ghost small active" data-mode="server">Server</button>
-                  <button type="button" class="button ghost small" data-mode="client">Client</button>
-                </div>
-                <input id="home-delivery-mode" type="hidden" value="server">
-              </label>
-
-              <label class="home-advanced-field" id="home-destination-field">
-                <span>Destination</span>
-                <div class="home-destination-row">
-                  <input id="home-destination" type="text" placeholder="downloads">
-                  <button id="home-destination-browse" class="button ghost small" type="button">Browse</button>
-                </div>
-              </label>
+              <div id="home-destination-video-slot">
+                <label class="home-advanced-field" id="home-destination-field">
+                  <span>Destination</span>
+                  <div class="home-destination-row path-picker destination-picker">
+                    <input id="home-destination" type="text" placeholder="downloads">
+                    <button id="home-destination-browse" class="button ghost small" type="button">Browse</button>
+                  </div>
+                </label>
+              </div>
             </div>
           </div>
 
@@ -143,45 +164,65 @@
             </label>
           </div>
           <div class="music-search-options">
-            <label class="field">
+            <div class="music-search-options-row">
+            <label class="field music-search-mode-field">
               <span>Mode</span>
-              <select id="music-mode-select">
+              <div id="music-mode-toggle" class="home-media-mode-toggle music-mode-toggle" role="radiogroup" aria-label="Music metadata mode">
+                <button type="button" class="home-media-mode-pill active" data-mode="auto" role="radio" aria-checked="true">Auto</button>
+                <button type="button" class="home-media-mode-pill" data-mode="album" role="radio" aria-checked="false">Album</button>
+                <button type="button" class="home-media-mode-pill" data-mode="track" role="radio" aria-checked="false">Track</button>
+              </div>
+              <select id="music-mode-select" class="hidden" aria-hidden="true" tabindex="-1">
                 <option value="auto">Auto</option>
                 <option value="artist">Artist</option>
                 <option value="album">Album</option>
                 <option value="track">Track</option>
               </select>
             </label>
-            <label class="field">
-              <span>Max candidates (1-15)</span>
-              <input id="search-max-candidates" type="number" min="1" max="15" value="10">
-            </label>
-            <label class="checkbox-inline music-search-force-redownload">
-              <input id="music-force-redownload" type="checkbox">
-              <span>Force re-download</span>
-            </label>
+              <div id="home-delivery-music-slot"></div>
+              <label id="music-video-format-field" class="field tiny music-search-video-format hidden">
+                <span>Format</span>
+                <select id="music-video-final-format">
+                  <option value="mp4" selected>mp4</option>
+                  <option value="mkv">mkv</option>
+                  <option value="webm">webm</option>
+                </select>
+              </label>
+              <div id="home-destination-music-slot"></div>
+              <label class="field music-search-redownload-field" for="music-force-redownload">
+                <span>Redownload</span>
+                <input id="music-force-redownload" type="checkbox" class="hidden" aria-hidden="true" tabindex="-1">
+                <div id="music-force-toggle" class="home-media-mode-toggle music-force-pill-toggle" role="group" aria-label="Force re-download">
+                  <button type="button" class="home-media-mode-pill active" data-force="off" aria-pressed="true">Off</button>
+                  <button type="button" class="home-media-mode-pill" data-force="on" aria-pressed="false">On</button>
+                </div>
+              </label>
+            </div>
           </div>
           <div class="music-search-actions-row">
             <button id="search-create-only" class="button primary">Search</button>
             <div id="search-create-message" class="notice" role="status"></div>
           </div>
+          <button id="import-playlist-toggle" class="button ghost small" type="button">Import Playlist</button>
+          <div id="import-playlist-panel" class="hidden">
+            <div class="home-advanced-row">
+              <label class="home-advanced-field">
+                <span>Import playlist file</span>
+                <input id="home-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
+              </label>
+              <button id="home-import-button" class="button ghost small" type="button">Import Playlist</button>
+            </div>
+            <div id="home-import-summary" class="meta"></div>
+          </div>
         </div>
         <div id="music-results-container"></div>
 
-        <button id="import-playlist-toggle" class="button ghost small" type="button">Import Playlist</button>
-        <div id="import-playlist-panel" class="hidden">
-          <div class="home-advanced-row">
-            <label class="home-advanced-field">
-              <span>Import playlist file</span>
-              <input id="home-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
-            </label>
-            <button id="home-import-button" class="button ghost small" type="button">Import Playlist</button>
-          </div>
-          <div id="home-import-summary" class="meta"></div>
-        </div>
-
         <div id="home-search-message" class="notice" role="status">
           Press Enter or click Search to discover media
+        </div>
+        <div id="home-review-alert" class="notice review-home-alert hidden" role="status">
+          <span id="home-review-alert-text">Items are waiting for review.</span>
+          <button id="home-review-alert-open" class="button ghost small" type="button">Open Review Queue</button>
         </div>
       </div>
       <div class="home-results hidden" id="home-results">
@@ -202,46 +243,137 @@
           <span class="x-logo" aria-hidden="true">X</span>
           <span>Follow us on X</span>
         </a>
+        <span class="home-footer-brand">
+          <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
+        </span>
       </footer>
     </section>
+    <section class="panel full" id="review-panel" data-page="review">
+      <div class="panel-header-row">
+        <div class="panel-title">Review Queue</div>
+        <div class="settings-header-actions">
+          <button id="review-refresh" class="button ghost small" type="button">Refresh</button>
+        </div>
+      </div>
+      <div class="notice">
+        Low-confidence music matches stay in internal Retreivr quarantine storage until you preview and accept or reject them.
+      </div>
+      <div class="review-toolbar">
+        <div id="review-summary" class="meta">Pending: 0</div>
+        <div class="review-toolbar-actions">
+          <button id="review-accept-selected" class="button ghost small" type="button" disabled>Accept Selected</button>
+          <button id="review-reject-selected" class="button ghost small remove" type="button" disabled>Reject Selected</button>
+          <button id="review-accept-all" class="button ghost small" type="button">Accept All Pending</button>
+          <button id="review-clear-selection" class="button ghost small" type="button" disabled>Clear Selection</button>
+        </div>
+      </div>
+      <div id="review-message" class="notice" role="status"></div>
+      <div id="review-list" class="review-list"></div>
+    </section>
     <section class="panel full" id="status-panel" data-page="status">
-      <div class="panel-title">Operations Status (Live)</div>
-      <div class="stack">
-        <div class="row">
-          <span class="chip" id="status-running">idle</span>
-          <span class="meta" id="status-run-id">run: -</span>
+      <div class="panel-header-row">
+        <div class="panel-title">Operations Status (Live)</div>
+        <div class="settings-header-actions status-action-row">
+          <button id="status-cancel-active" class="button ghost small" type="button">Cancel Active</button>
+          <button id="status-recover-stale" class="button ghost small" type="button">Recover Stale Jobs</button>
+          <button id="status-clear-failed" class="button ghost small" type="button">Clear Failed</button>
+          <button id="status-clear-queue" class="button remove small" type="button">Clear Queue</button>
         </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Started</span>
-            <span id="status-started">-</span>
+      </div>
+      <div class="operations-status">
+        <div class="group status-overview-card">
+          <div class="status-overview-top">
+            <div class="status-overview-primary">
+              <span class="chip" id="status-running">idle</span>
+              <span class="meta" id="status-run-id">run: -</span>
+            </div>
+            <div class="status-operator-grid">
+              <div class="stat">
+                <span class="label">Watcher</span>
+                <span id="status-watcher">-</span>
+              </div>
+              <div class="stat">
+                <span class="label">Scheduler</span>
+                <span id="status-scheduler">-</span>
+              </div>
+            </div>
           </div>
-          <div class="stat">
-            <span class="label">Finished</span>
-            <span id="status-finished">-</span>
+          <div class="status-metric-grid">
+            <div class="stat">
+              <span class="label">Started</span>
+              <span id="status-started">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Finished</span>
+              <span id="status-finished">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Success</span>
+              <span id="status-success">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Failed</span>
+              <span id="status-failed">0</span>
+            </div>
           </div>
         </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Success</span>
-            <span id="status-success">0</span>
+        <div class="status-sections">
+        <div class="group status-group" id="status-group-download">
+          <div class="group-title">Download Status</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">State</span>
+              <span id="status-import-state">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Active flows</span>
+              <span id="status-import-active-count">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Processed</span>
+              <span id="status-import-processed">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Enqueued</span>
+              <span id="status-import-enqueued">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Failed</span>
+              <span id="status-import-failed">0</span>
+            </div>
           </div>
-          <div class="stat">
-            <span class="label">Failed</span>
-            <span id="status-failed">0</span>
+          <div class="progress">
+            <div id="status-import-progress-bar" class="progress-bar"></div>
+          </div>
+          <div class="row">
+            <span class="meta status-summary" id="status-import-progress-text">-</span>
           </div>
         </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Watcher</span>
-            <span id="status-watcher">-</span>
+        <div class="group status-group" id="status-group-queue">
+          <div class="group-title">Queue Health</div>
+          <div class="row">
+            <div class="stat">
+              <span class="label">Active jobs</span>
+              <span id="status-queue-active">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Downloading</span>
+              <span id="status-queue-downloading">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Queued</span>
+              <span id="status-queue-queued">0</span>
+            </div>
+            <div class="stat">
+              <span class="label">Post-processing</span>
+              <span id="status-queue-postprocessing">0</span>
+            </div>
           </div>
-          <div class="stat">
-            <span class="label">Scheduler</span>
-            <span id="status-scheduler">-</span>
+          <div class="row">
+            <span class="meta status-summary" id="status-queue-summary">-</span>
           </div>
         </div>
-        <div class="group">
+        <div class="group status-group" id="status-group-watcher">
           <div class="group-title">Watcher Status</div>
           <div class="row">
             <div class="stat">
@@ -274,7 +406,7 @@
             </div>
           </div>
         </div>
-        <div class="group">
+        <div class="group status-group" id="status-group-spotify">
           <div class="group-title">Spotify Sync Status</div>
           <div class="row">
             <div class="stat">
@@ -297,94 +429,25 @@
             </div>
           </div>
         </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Active playlist</span>
-            <span id="status-playlist">-</span>
-          </div>
-          <div class="stat">
-            <span class="label">Active video</span>
-            <span id="status-video">-</span>
-          </div>
-        </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Phase</span>
-            <span id="status-phase">-</span>
-          </div>
-        </div>
-        <div class="group">
-          <div class="group-title">Queue Activity</div>
+        <div class="group status-group status-group-wide" id="status-group-transfer">
+          <div class="group-title">Transfer Progress</div>
           <div class="row">
             <div class="stat">
-              <span class="label">Active jobs</span>
-              <span id="status-queue-active">0</span>
+              <span class="label">Last completed</span>
+              <span id="status-last-completed">-</span>
             </div>
             <div class="stat">
-              <span class="label">Downloading</span>
-              <span id="status-queue-downloading">0</span>
-            </div>
-            <div class="stat">
-              <span class="label">Queued</span>
-              <span id="status-queue-queued">0</span>
-            </div>
-            <div class="stat">
-              <span class="label">Post-processing</span>
-              <span id="status-queue-postprocessing">0</span>
-            </div>
-          </div>
-          <div class="row">
-            <span class="meta" id="status-queue-summary">-</span>
-          </div>
-        </div>
-        <div class="group">
-          <div class="group-title">Playlist Import Activity</div>
-          <div class="row">
-            <div class="stat">
-              <span class="label">State</span>
-              <span id="status-import-state">-</span>
-            </div>
-            <div class="stat">
-              <span class="label">Active import jobs</span>
-              <span id="status-import-active-count">0</span>
-            </div>
-            <div class="stat">
-              <span class="label">Processed</span>
-              <span id="status-import-processed">-</span>
-            </div>
-            <div class="stat">
-              <span class="label">Enqueued</span>
-              <span id="status-import-enqueued">0</span>
-            </div>
-            <div class="stat">
-              <span class="label">Failed</span>
-              <span id="status-import-failed">0</span>
+              <span class="label">Current queue progress</span>
+              <span id="status-playlist-progress-text">-</span>
             </div>
           </div>
           <div class="progress">
-            <div id="status-import-progress-bar" class="progress-bar"></div>
+            <div id="status-playlist-progress-bar" class="progress-bar"></div>
           </div>
-          <div class="row">
-            <span class="meta" id="status-import-progress-text">-</span>
-          </div>
-        </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Last completed</span>
-            <span id="status-last-completed">-</span>
-          </div>
-          <div class="stat">
-            <span class="label">Playlist progress</span>
-            <span id="status-playlist-progress-text">-</span>
-          </div>
-        </div>
-        <div class="progress">
-          <div id="status-playlist-progress-bar" class="progress-bar"></div>
-        </div>
-        <div id="status-video-progress" class="stack hidden">
+          <div id="status-video-progress" class="stack hidden">
           <div class="row">
             <div class="stat">
-              <span class="label">Video progress</span>
+              <span class="label">Current transfer</span>
               <span id="status-video-progress-text">-</span>
             </div>
             <span id="status-video-progress-meta" class="meta">-</span>
@@ -393,11 +456,15 @@
             <div id="status-video-progress-bar" class="progress-bar"></div>
           </div>
         </div>
-        <div class="row">
+        </div>
+        <div class="group status-group" id="status-group-health">
+          <div class="group-title">Operations Health</div>
+          <div class="row">
           <span class="label">Last error</span>
           <span id="status-error" class="meta">-</span>
         </div>
-        <div class="group">
+        </div>
+        <div class="group status-group status-group-wide">
           <div class="group-title">Music failures</div>
           <div class="row">
             <div class="stat">
@@ -410,8 +477,6 @@
           <div id="music-failures-message" class="notice" role="status"></div>
           <div id="music-failures-list" class="stack"></div>
         </div>
-        <div class="row">
-          <button id="status-cancel" class="button remove small" type="button">Kill downloads in progress</button>
         </div>
       </div>
     </section>
@@ -449,366 +514,618 @@
       </div>
     </section>
 
-    <section class="panel" id="metrics-panel" data-page="advanced">
+    <section class="panel full" id="metrics-panel" data-page="info">
       <div class="panel-title">Metrics</div>
-      <div class="panel-body">
-        <div class="row">
-          <div class="stat">
-            <span class="label">Downloads files</span>
-            <span id="metrics-downloads-count">-</span>
-          </div>
-          <div class="stat">
-            <span class="label">Downloads size</span>
-            <span id="metrics-downloads-size">-</span>
-          </div>
-          <div class="stat">
-            <span class="label">Disk free</span>
-            <span id="metrics-disk-free">-</span>
-          </div>
-          <div class="stat">
-            <span class="label">Disk total</span>
-            <span id="metrics-disk-total">-</span>
-          </div>
-        </div>
-        <div class="row">
-          <span id="metrics-message" class="notice"></span>
-        </div>
-      </div>
-      <div class="panel-footer">
-        <div class="row version-block">
-          <div class="stat">
-            <span class="label">Version</span>
-            <div class="meta">
-              <div id="status-version-app">App -</div>
-              <div id="status-version-ytdlp">yt-dlp -</div>
-              <div id="status-version-python">Py -</div>
+      <div class="metrics-main">
+        <div class="panel-body">
+          <div class="row">
+            <div class="stat">
+              <span class="label">Downloads files</span>
+              <span id="metrics-downloads-count">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Downloads size</span>
+              <span id="metrics-downloads-size">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Disk free</span>
+              <span id="metrics-disk-free">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Disk total</span>
+              <span id="metrics-disk-total">-</span>
             </div>
           </div>
-          <div class="stat">
-            <span class="label">Update</span>
-            <span id="status-update" class="meta">-</span>
+          <div class="row">
+            <span id="metrics-message" class="notice"></span>
+          </div>
+        </div>
+        <div class="panel-footer">
+          <div class="row version-block">
+            <div class="stat">
+              <span class="label">Version</span>
+              <div class="meta">
+                <div id="status-version-app">App -</div>
+                <div id="status-version-ytdlp">yt-dlp -</div>
+                <div id="status-version-python">Py -</div>
+              </div>
+            </div>
+            <div class="stat">
+              <span class="label">Update</span>
+              <span id="status-update" class="meta">-</span>
+            </div>
           </div>
         </div>
       </div>
+      <footer class="home-footer-links info-footer-links" aria-label="Project links">
+        <a href="https://github.com/sudoStacks/retreivr" target="_blank" rel="noopener">Retreivr Repository</a>
+        <a href="https://github.com/sudoStacks/" target="_blank" rel="noopener">SudoStacks GitHub</a>
+        <a href="https://x.com/sudoStacks" target="_blank" rel="noopener">
+          <span class="x-logo" aria-hidden="true">X</span>
+          <span>Follow us on X</span>
+        </a>
+        <span class="home-footer-brand">
+          <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
+        </span>
+      </footer>
     </section>
 
     <section class="panel full" id="config-panel" data-page="config">
       <div class="panel-header-row">
-        <div class="panel-title">Config Editor</div>
-        <a class="button ghost small" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
+        <div class="panel-title">Settings</div>
+        <div class="settings-header-actions">
+          <button id="ytdlp-update" class="button ghost small" type="button">Update yt-dlp</button>
+          <a class="button ghost small" href="/docs" target="_blank" rel="noopener">OpenAPI</a>
+        </div>
       </div>
-      <div class="stack">
-        <div class="group">
-          <div class="group-title">Config File</div>
-          <div class="row">
-            <label class="field long">
-              <span>Config path (server)</span>
-              <input id="config-path" type="text" placeholder="config/config.json">
-            </label>
-            <button id="browse-config-path" class="button ghost">Browse</button>
-            <button id="load-config-path" class="button">Load</button>
-          </div>
-          <div class="notice">Path changes apply globally on the server.</div>
-        </div>
-
-        <div class="group">
-          <div class="group-title">General</div>
-          <div class="grid two">
-            <label class="field short">
-              <span>Upload date format</span>
-              <input id="cfg-upload-date-format" type="text" placeholder="MM-YYYY">
-            </label>
-            <label class="field full">
-              <span>Filename template</span>
-              <input id="cfg-filename-template" type="text" placeholder="%(title)s - %(uploader)s - %(upload_date)s.%(ext)s">
-            </label>
-            <label class="field short">
-              <span>Final format</span>
-              <select id="cfg-final-format">
-                <option value="">(not set)</option>
-                <option value="mkv">mkv (default)</option>
-                <option value="mp4">mp4</option>
-                <option value="webm">webm</option>
-                <option value="mp3">mp3</option>
-              </select>
-            </label>
-            <div class="notice">Final format currently applies to video output; music uses <code>music_final_format</code> from config.json.</div>
-            <label class="field medium">
-              <span>JS runtime</span>
-              <input id="cfg-js-runtime" type="text" placeholder="node:/usr/bin/node">
-            </label>
-            <label class="field medium">
-              <span>Single download folder</span>
-              <div class="row">
-                <input id="cfg-single-download-folder" type="text" placeholder="downloads">
-                <button id="browse-single-download" class="button ghost small">Browse</button>
+      <div id="ytdlp-update-message" class="notice settings-header-notice" role="status"></div>
+      <div class="settings-layout">
+        <aside class="settings-sidebar" aria-label="Settings categories">
+          <label class="field inline short settings-advanced-control">
+            <span>Advanced mode</span>
+            <input id="settings-advanced-mode" type="checkbox">
+          </label>
+          <nav id="settings-nav" class="settings-nav" aria-label="Settings sections">
+            <a class="settings-nav-link" href="#settings-all" data-settings-link="all">All Settings</a>
+            <a class="settings-nav-link active" href="#settings-core" data-settings-link="core">General</a>
+            <a class="settings-nav-link" href="#settings-automation" data-settings-link="automation">Automation</a>
+            <a class="settings-nav-link" href="#settings-youtube" data-settings-link="youtube">YouTube</a>
+            <a class="settings-nav-link" href="#settings-spotify" data-settings-link="spotify">Spotify</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-telegram" data-settings-link="telegram" data-settings-level="advanced">Telegram</a>
+            <a class="settings-nav-link" href="#settings-tagging" data-settings-link="tagging">Tagging</a>
+            <a class="settings-nav-link" href="#settings-community-cache" data-settings-link="community-cache">Community Cache</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-runtime" data-settings-link="runtime" data-settings-level="advanced">Runtime</a>
+          </nav>
+          <label class="field short settings-mobile-jump">
+            <span>Section</span>
+            <select id="settings-section-select">
+              <option value="settings-all">All Settings</option>
+              <option value="settings-core">General</option>
+              <option value="settings-automation">Automation</option>
+              <option value="settings-youtube">YouTube</option>
+              <option value="settings-spotify">Spotify</option>
+              <option value="settings-telegram" data-settings-level="advanced">Telegram</option>
+              <option value="settings-tagging">Tagging</option>
+              <option value="settings-community-cache">Community Cache</option>
+              <option value="settings-runtime" data-settings-level="advanced">Runtime</option>
+            </select>
+          </label>
+        </aside>
+        <div class="settings-main">
+          <div class="stack settings-stack">
+            <section id="settings-core" class="settings-section" data-settings-section="core">
+              <div class="settings-section-heading">General</div>
+              <div class="group">
+                <div class="group-title">Download Defaults</div>
+                <div class="stack">
+                  <label class="field full">
+                    <div class="download-defaults-header-row">
+                      <span class="download-defaults-destination-label">Single download folder</span>
+                      <span class="download-defaults-format-label">Format</span>
+                    </div>
+                    <div class="row path-picker destination-picker">
+                      <input id="cfg-single-download-folder" type="text" placeholder="downloads">
+                      <button id="browse-single-download" class="button ghost small">Browse</button>
+                      <select id="cfg-final-format" class="download-defaults-format-select">
+                        <option value="">Default format</option>
+                        <option value="mkv">mkv</option>
+                        <option value="mp4">mp4</option>
+                        <option value="webm">webm</option>
+                      </select>
+                    </div>
+                  </label>
+                  <label class="field full">
+                    <span>Music Video download folder (Home default)</span>
+                    <div class="row path-picker destination-picker">
+                      <input id="cfg-home-music-video-download-folder" type="text" placeholder="Videos/Music Videos">
+                      <button id="browse-home-music-video-download" class="button ghost small">Browse</button>
+                      <select id="cfg-home-music-video-final-format">
+                        <option value="">Default format</option>
+                        <option value="mp4">mp4</option>
+                        <option value="mkv">mkv</option>
+                        <option value="webm">webm</option>
+                      </select>
+                    </div>
+                  </label>
+                  <label class="field full">
+                    <span>Music download folder (Home default)</span>
+                    <div class="row path-picker destination-picker">
+                      <input id="cfg-home-music-download-folder" type="text" placeholder="Music">
+                      <button id="browse-home-music-download" class="button ghost small">Browse</button>
+                      <select id="cfg-home-music-final-format">
+                        <option value="">Default format</option>
+                        <option value="mp3">mp3</option>
+                        <option value="m4a">m4a</option>
+                      </select>
+                    </div>
+                  </label>
+                  <div class="notice">These format selectors define the default Home-page format selection for Video/Single, Music Video, and Music modes.</div>
+                </div>
               </div>
-            </label>
-          </div>
-        </div>
-
-        <div class="group">
-          <div class="group-title">Watcher</div>
-          <div class="grid two">
-            <label class="field inline short">
-              <span>Enabled</span>
-              <input id="cfg-watcher-enabled" type="checkbox">
-            </label>
-            <label class="field short">
-              <span>Min interval (minutes)</span>
-              <input id="cfg-watcher-min-interval" type="number" min="1" step="1">
-            </label>
-            <label class="field short">
-              <span>Max interval (minutes)</span>
-              <input id="cfg-watcher-max-interval" type="number" min="1" step="1">
-            </label>
-            <label class="field short">
-              <span>Idle backoff factor</span>
-              <input id="cfg-watcher-idle-backoff" type="number" min="1" step="1">
-            </label>
-            <label class="field short">
-              <span>Active reset (minutes)</span>
-              <input id="cfg-watcher-active-reset" type="number" min="1" step="1">
-            </label>
-            <label class="field inline short">
-              <span>Downtime enabled</span>
-              <input id="cfg-watcher-downtime-enabled" type="checkbox">
-            </label>
-            <label class="field short">
-              <span>Downtime start (HH:MM)</span>
-              <input id="cfg-watcher-downtime-start" type="text" placeholder="23:00">
-            </label>
-            <label class="field short">
-              <span>Downtime end (HH:MM)</span>
-              <input id="cfg-watcher-downtime-end" type="text" placeholder="09:00">
-            </label>
-            <label class="field medium">
-              <span>Downtime timezone</span>
-              <input id="cfg-watcher-downtime-timezone" type="text" placeholder="local">
-            </label>
-          </div>
-        <div class="notice">Automatically monitors playlists and downloads new videos as they appear.</div>
-      </div>
-
-      <div class="group">
-        <div class="group-title">Scheduler</div>
-        <div class="row">
-          <label class="field inline">
-            <span>Enabled</span>
-            <input id="schedule-enabled" type="checkbox">
-          </label>
-          <label class="field inline short">
-            <span>Interval (hours)</span>
-            <input id="schedule-interval" type="number" min="1" step="1" value="6">
-          </label>
-          <label class="field inline">
-            <span>Run on startup</span>
-            <input id="schedule-startup" type="checkbox">
-          </label>
-        </div>
-        <div class="row">
-          <button id="schedule-save" class="button">Save Schedule</button>
-          <button id="schedule-run-now" class="button ghost">Run now</button>
-        </div>
-        <div class="row">
-          <div id="schedule-message" class="notice" role="status"></div>
-        </div>
-        <div class="row">
-          <div class="stat">
-            <span class="label">Last run</span>
-            <span id="schedule-last-run">-</span>
-          </div>
-          <div class="stat">
-            <span class="label">Next run</span>
-            <span id="schedule-next-run">-</span>
-          </div>
-        </div>
-        <div class="notice">Runs full playlist jobs on a fixed interval. Not required when watcher is enabled.</div>
-        <div id="schedule-watcher-note" class="notice" style="display: none;">Watcher is active. Scheduler is optional and usually unnecessary.</div>
-        <div class="notice">Scheduled runs will not interrupt or overlap manual runs.</div>
-      </div>
-
-        <div class="group">
-          <div class="group-title">Telegram</div>
-          <div class="grid two">
-            <label class="field long">
-              <span>Bot token</span>
-              <div class="row">
-                <input id="cfg-telegram-token" type="password">
-                <button id="toggle-telegram-token" class="button ghost small" type="button">Show</button>
+              <div class="group">
+                <div class="group-title">Library Reconcile (Beta)</div>
+                <div class="grid two">
+                  <div class="notice">
+                    Scan existing music, video, and music-video files under the configured downloads folders and backfill database entries for known Retreivr-managed media.
+                  </div>
+                  <div class="row">
+                    <button id="library-reconcile-button" class="button ghost" type="button">Reconcile Library</button>
+                  </div>
+                </div>
+                <div id="library-reconcile-message" class="notice" role="status"></div>
               </div>
-            </label>
-            <label class="field short">
-              <span>Chat ID</span>
-              <input id="cfg-telegram-chat" type="text">
-            </label>
-          </div>
-        </div>
-
-        <div class="group">
-          <div class="group-title">Music</div>
-          <div class="grid two">
-            <label class="field full">
-              <span>Music filename template</span>
-              <input id="cfg-music-template" type="text" placeholder="%(artist)s/%(album)s/%(track_number)s - %(track)s.%(ext)s">
-            </label>
-            <label class="field long">
-              <span>yt-dlp cookies (optional)</span>
-              <div class="row">
-                <input id="cfg-yt-dlp-cookies" type="text" placeholder="tokens/cookies.txt">
-                <button id="browse-yt-dlp-cookies" class="button ghost small" type="button">Browse</button>
+              <div class="group">
+                <div class="group-title">Music Library Integration</div>
+                <div class="stack">
+                  <label class="field full">
+                    <span>Canonical Library Path</span>
+                    <div class="row path-picker">
+                      <input id="cfg-music-library-path" type="text" placeholder="/Media/Music/Music Library" data-browser-absolute="1">
+                      <button id="browse-music-library-path" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <div id="music-exports-list" class="stack"></div>
+                  <div class="row">
+                    <button id="add-music-export" class="button ghost small" type="button">Add Export Target</button>
+                  </div>
+                  <div class="notice">Exports run after the canonical file is finalized. Copy exports keep the canonical filename only; transcode exports emit flat `.m4a` files without touching the canonical library.</div>
+                </div>
               </div>
-            </label>
+              <div class="group" data-settings-level="advanced">
+                <div class="group-title">Filename Templates</div>
+                <div class="grid two runtime-extras-grid">
+                  <label class="field full">
+                    <span>Filename template</span>
+                    <input id="cfg-filename-template" type="text" placeholder="%(title)s - %(uploader)s - %(upload_date)s.%(ext)s">
+                  </label>
+                  <label class="field full" data-settings-level="advanced">
+                    <span>Music filename template</span>
+                    <input id="cfg-music-template" type="text" placeholder="%(artist)s/%(album)s/%(track_number)s - %(track)s.%(ext)s">
+                  </label>
+                  <label class="field short" data-settings-level="advanced">
+                    <span>Upload date format</span>
+                    <input id="cfg-upload-date-format" type="text" placeholder="MM-YYYY">
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <section id="settings-automation" class="settings-section" data-settings-section="automation">
+              <div class="settings-section-heading">Automation</div>
+              <div class="group" id="watcher-group">
+                <div class="group-title">Watcher</div>
+                <div class="grid two">
+                  <label class="field inline short">
+                    <span>Enabled</span>
+                    <input id="cfg-watcher-enabled" type="checkbox">
+                  </label>
+                </div>
+                <div id="watcher-details" class="config-collapsible">
+                  <div class="grid two">
+                    <label class="field short">
+                      <span>Min interval (minutes)</span>
+                      <input id="cfg-watcher-min-interval" type="number" min="1" step="1">
+                    </label>
+                    <label class="field short">
+                      <span>Max interval (minutes)</span>
+                      <input id="cfg-watcher-max-interval" type="number" min="1" step="1">
+                    </label>
+                    <label class="field short">
+                      <span>Idle backoff factor</span>
+                      <input id="cfg-watcher-idle-backoff" type="number" min="1" step="1">
+                    </label>
+                    <label class="field short">
+                      <span>Active reset (minutes)</span>
+                      <input id="cfg-watcher-active-reset" type="number" min="1" step="1">
+                    </label>
+                    <label class="field inline short">
+                      <span>Downtime enabled</span>
+                      <input id="cfg-watcher-downtime-enabled" type="checkbox">
+                    </label>
+                    <label class="field short">
+                      <span>Downtime start (HH:MM)</span>
+                      <input id="cfg-watcher-downtime-start" type="text" placeholder="23:00">
+                    </label>
+                    <label class="field short">
+                      <span>Downtime end (HH:MM)</span>
+                      <input id="cfg-watcher-downtime-end" type="text" placeholder="09:00">
+                    </label>
+                    <label class="field medium">
+                      <span>Downtime timezone</span>
+                      <input id="cfg-watcher-downtime-timezone" type="text" placeholder="local">
+                    </label>
+                  </div>
+                  <div class="notice">Automatically monitors playlists and downloads new videos as they appear.</div>
+                </div>
+              </div>
+              <div class="group" id="scheduler-group">
+                <div class="group-title">Scheduler</div>
+                <div class="scheduler-controls">
+                  <label class="field inline">
+                    <span>Enabled</span>
+                    <input id="schedule-enabled" type="checkbox">
+                  </label>
+                </div>
+                <div id="scheduler-details" class="config-collapsible">
+                  <div class="scheduler-controls">
+                    <label class="field short">
+                      <span>Interval (hours)</span>
+                      <input id="schedule-interval" type="number" min="1" step="1" value="6">
+                    </label>
+                    <label class="field inline">
+                      <span>Run on startup</span>
+                      <input id="schedule-startup" type="checkbox">
+                    </label>
+                  </div>
+                  <div class="scheduler-actions">
+                    <button id="schedule-save" class="button">Save Schedule</button>
+                    <button id="schedule-run-now" class="button ghost">Run now</button>
+                  </div>
+                  <div class="scheduler-message-row">
+                    <div id="schedule-message" class="notice" role="status"></div>
+                  </div>
+                  <div class="scheduler-status-row">
+                    <div class="stat">
+                      <span class="label">Last run</span>
+                      <span id="schedule-last-run">-</span>
+                    </div>
+                    <div class="stat">
+                      <span class="label">Next run</span>
+                      <span id="schedule-next-run">-</span>
+                    </div>
+                  </div>
+                  <div class="notice">Runs full playlist jobs on a fixed interval. Not required when watcher is enabled.</div>
+                  <div id="schedule-watcher-note" class="notice" style="display: none;">Watcher is active. Scheduler is optional and usually unnecessary.</div>
+                  <div class="notice">Scheduled runs will not interrupt or overlap manual runs.</div>
+                </div>
+              </div>
+            </section>
+
+            <section id="settings-community-cache" class="settings-section" data-settings-section="community-cache">
+              <div class="settings-section-heading">Community Cache</div>
+              <div class="group">
+                <div class="group-title">Lookup</div>
+                <div class="grid two">
+                  <label class="field inline short">
+                    <span>Enable community cache lookup</span>
+                    <input id="cfg-community-cache-lookup-enabled" type="checkbox">
+                  </label>
+                </div>
+                <div class="notice">When enabled, Retreivr can seed music-track resolution from the shared community cache before falling back to full transport search.</div>
+              </div>
+              <div class="group">
+                <div class="group-title">Publish</div>
+                <div class="grid two">
+                  <label class="field inline short">
+                    <span>Enable publish proposals</span>
+                    <input id="cfg-community-cache-publish-enabled" type="checkbox">
+                  </label>
+                  <label class="field short">
+                    <span>Publish mode</span>
+                    <select id="cfg-community-cache-publish-mode">
+                      <option value="off">off</option>
+                      <option value="dry_run">dry_run</option>
+                      <option value="write_outbox">write_outbox</option>
+                    </select>
+                  </label>
+                  <label class="field short">
+                    <span>Minimum publish score</span>
+                    <input id="cfg-community-cache-publish-min-score" type="number" min="0" max="1" step="0.01" placeholder="0.78">
+                  </label>
+                  <label class="field full">
+                    <span>Publish outbox directory</span>
+                    <input id="cfg-community-cache-publish-outbox-dir" type="text" placeholder="Use system default (suggested)" disabled>
+                  </label>
+                  <label class="field full">
+                    <span>Community cache repo</span>
+                    <input id="cfg-community-cache-publish-repo" type="text" placeholder="sudostacks/retreivr-community-cache">
+                  </label>
+                  <label class="field short">
+                    <span>Target branch</span>
+                    <input id="cfg-community-cache-publish-target-branch" type="text" placeholder="main">
+                  </label>
+                  <label class="field medium">
+                    <span>Publish branch</span>
+                    <input id="cfg-community-cache-publish-branch" type="text" placeholder="Auto-managed" disabled>
+                  </label>
+                  <label class="field inline short">
+                    <span>Open / update pull request</span>
+                    <input id="cfg-community-cache-publish-open-pr" type="checkbox">
+                  </label>
+                  <label class="field short">
+                    <span>Poll interval (minutes)</span>
+                    <input id="cfg-community-cache-publish-poll-minutes" type="number" min="1" step="1" placeholder="15">
+                  </label>
+                  <label class="field short">
+                    <span>Batch size</span>
+                    <input id="cfg-community-cache-publish-batch-size" type="number" min="1" step="1" placeholder="25">
+                  </label>
+                  <label class="field medium">
+                    <span>GitHub token env var</span>
+                    <input id="cfg-community-cache-publish-token-env" type="text" placeholder="RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN">
+                  </label>
+                  <label class="field medium">
+                    <span>Publisher identity</span>
+                    <input id="cfg-community-cache-publish-publisher" type="text" placeholder="GitHub username (recommended)">
+                  </label>
+                </div>
+                <div class="notice">`write_outbox` is the automatic local dump mode. When enabled, eligible verified matches are written to the outbox as downloads complete. The publisher worker reads that outbox on a schedule, writes dataset updates to an auto-managed `retreivr-community-publish/<instance>` branch, and can open or update a pull request automatically. GitHub auth is read from the configured environment variable, not from the UI.</div>
+                <div class="row">
+                  <button id="community-publish-run-now" class="button ghost small" type="button">Run Publish Now</button>
+                  <button id="community-publish-backfill" class="button ghost small" type="button">Backfill Library</button>
+                  <button id="community-publish-refresh-status" class="button ghost small" type="button">Refresh Status</button>
+                </div>
+                <div id="community-publish-message" class="notice" role="status"></div>
+                <div class="group">
+                  <div class="group-title">Publish Status</div>
+                  <div id="community-publish-status" class="meta">Status unavailable</div>
+                </div>
+                <div class="group">
+                  <div class="group-title">Local Cache Sync</div>
+                  <div class="grid two">
+                    <label class="field full">
+                      <span>Resolution API Upstream URL</span>
+                      <input id="cfg-resolution-api-upstream-base-url" type="text" placeholder="https://resolution.example.com">
+                    </label>
+                    <label class="field inline short">
+                      <span>Enable local cache sync</span>
+                      <input id="cfg-resolution-api-sync-enabled" type="checkbox">
+                    </label>
+                    <label class="field short">
+                      <span>Sync interval (minutes)</span>
+                      <input id="cfg-resolution-api-sync-poll-minutes" type="number" min="1" step="1" placeholder="1440">
+                    </label>
+                    <label class="field short">
+                      <span>Sync batch size</span>
+                      <input id="cfg-resolution-api-sync-batch-size" type="number" min="1" step="1" placeholder="500">
+                    </label>
+                    <label class="field medium">
+                      <span>Local node identity</span>
+                      <input id="cfg-resolution-api-local-node-id" type="text" placeholder="local_node">
+                    </label>
+                  </div>
+                  <div class="row">
+                    <button id="community-cache-sync-run-now" class="button ghost small" type="button">Run Cache Sync Now</button>
+                    <button id="community-cache-sync-refresh-status" class="button ghost small" type="button">Refresh Sync Status</button>
+                  </div>
+                  <div id="community-cache-sync-message" class="notice" role="status"></div>
+                  <div id="community-cache-sync-status" class="meta">Status unavailable</div>
+                </div>
+              </div>
+            </section>
+
+            <section id="settings-youtube" class="settings-section" data-settings-section="youtube">
+              <div class="settings-section-heading">YouTube</div>
+              <div class="group">
+                <div class="group-title">YouTube Accounts</div>
+                <div id="accounts-list" class="stack"></div>
+                <button id="add-account" class="button">+ Add Account</button>
+              </div>
+              <div class="group">
+                <div class="group-title">YouTube Playlists</div>
+                <div id="playlists-list" class="stack"></div>
+                <button id="add-playlist" class="button">+ Add Playlist</button>
+              </div>
+            </section>
+
+            <section id="settings-spotify" class="settings-section" data-settings-section="spotify">
+              <div class="settings-section-heading">Spotify</div>
+              <div class="group" id="spotify-group">
+                <div class="group-title">Spotify Integration</div>
+                <div class="grid two">
+                  <label class="field inline short">
+                    <span>Enabled</span>
+                    <input id="spotify-enabled" type="checkbox">
+                  </label>
+                </div>
+                <div id="spotify-details" class="config-collapsible">
+                  <div class="group-subtitle">(Spotify requires Spotify Premium subscription for API connectors)</div>
+                  <div class="grid two">
+                    <label class="field full" for="spotify-client-id">
+                      <span>Client ID</span>
+                      <input id="spotify-client-id" type="text">
+                    </label>
+                    <label class="field full" for="spotify-client-secret">
+                      <span>Client Secret</span>
+                      <input id="spotify-client-secret" type="text">
+                    </label>
+                    <label class="field full" for="spotify-redirect-uri">
+                      <span>Redirect URI</span>
+                      <input id="spotify-redirect-uri" type="text" readonly>
+                    </label>
+                  </div>
+                  <div class="row">
+                    <span class="label">Connection Status</span>
+                    <span id="spotify-connection-status">Not connected</span>
+                  </div>
+                  <div class="row">
+                    <button id="spotify-connect-btn" class="button" type="button">Connect Spotify</button>
+                    <button id="spotify-disconnect-btn" class="button ghost" type="button" style="display: none;">Disconnect</button>
+                  </div>
+                  <div class="grid two">
+                    <label class="field inline short">
+                      <span>Sync Liked Songs</span>
+                      <input id="spotify-sync-liked" type="checkbox">
+                    </label>
+                    <label class="field short">
+                      <span>Liked Songs interval (minutes)</span>
+                      <input id="spotify-liked-interval" type="number" min="1" step="1">
+                    </label>
+                    <label class="field inline short">
+                      <span>Sync Saved Albums</span>
+                      <input id="spotify-sync-saved" type="checkbox">
+                    </label>
+                    <label class="field short">
+                      <span>Saved Albums interval (minutes)</span>
+                      <input id="spotify-saved-interval" type="number" min="1" step="1">
+                    </label>
+                    <label class="field inline short">
+                      <span>Sync My Playlists</span>
+                      <input id="spotify-sync-playlists" type="checkbox">
+                    </label>
+                    <label class="field short">
+                      <span>Playlists interval (minutes)</span>
+                      <input id="spotify-playlists-interval" type="number" min="1" step="1">
+                    </label>
+                  </div>
+                  <label class="field full" for="config-spotify-playlists">
+                    <span>Spotify Playlists (one per line)</span>
+                    <textarea id="config-spotify-playlists" rows="4"></textarea>
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <section id="settings-tagging" class="settings-section" data-settings-section="tagging">
+              <div class="settings-section-heading">Tagging</div>
+              <div class="group" id="music-meta-group">
+                <div class="group-title">Post-download tagging &amp; enrichment</div>
+                <div class="stack music-meta-layout">
+                  <div class="row">
+                    <label class="field inline short">
+                      <span title="Turns post-download metadata enrichment on or off for music-mode items.">Enabled</span>
+                      <input id="cfg-music-meta-enabled" type="checkbox">
+                    </label>
+                  </div>
+                  <div id="music-meta-details" class="config-collapsible stack">
+                    <div class="row">
+                      <label class="field inline short">
+                        <span title="Embed album art into output audio tags when available.">Embed artwork</span>
+                        <input id="cfg-music-meta-artwork" type="checkbox">
+                      </label>
+                      <label class="field inline short">
+                        <span title="Write tag changes without modifying files (debug/verification mode).">Dry-run tagging</span>
+                        <input id="cfg-music-meta-dry-run" type="checkbox">
+                      </label>
+                      <label class="field inline short">
+                        <span title="Allow enrichment to replace existing tags in already-tagged files.">Overwrite existing tags</span>
+                        <input id="cfg-music-meta-overwrite" type="checkbox">
+                      </label>
+                    </div>
+                    <div class="row">
+                      <label class="field tiny" data-settings-level="advanced">
+                        <span title="Minimum MusicBrainz/source match score used by music-mode resolver.">Match threshold (%)</span>
+                        <input id="cfg-music-meta-threshold" type="number" min="0" max="100" step="1">
+                      </label>
+                      <label class="field tiny" data-settings-level="advanced">
+                        <span title="Minimum enrichment confidence required before writing metadata tags.">Enrichment threshold (%)</span>
+                        <input id="cfg-music-enrich-threshold" type="number" min="0" max="100" step="1">
+                      </label>
+                      <label class="field short" data-settings-level="advanced">
+                        <span title="Throttle metadata calls to reduce API pressure and rate-limit risk.">Rate limit (seconds)</span>
+                        <input id="cfg-music-meta-rate" type="number" min="0" step="0.1">
+                      </label>
+                      <label class="field short" data-settings-level="advanced">
+                        <span title="Maximum embedded artwork dimension (pixels). Larger values increase output size.">Max artwork size (px)</span>
+                        <input id="cfg-music-meta-artwork-size" type="number" min="200" step="50">
+                      </label>
+                    </div>
+                    <div class="row">
+                      <label class="field inline short">
+                        <span title="Use AcoustID fingerprint lookups when available to improve tag confidence.">Use AcoustID</span>
+                        <input id="cfg-music-meta-acoustid" type="checkbox">
+                      </label>
+                      <label class="field long">
+                        <span title="Optional AcoustID API key used when AcoustID lookups are enabled.">AcoustID API key</span>
+                        <input id="cfg-music-meta-acoustid-key" type="password" placeholder="optional">
+                      </label>
+                    </div>
+                    <div class="notice">Applies only to music mode runs. Enrichment happens after downloads, in the background.</div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section id="settings-telegram" class="settings-section" data-settings-section="telegram" data-settings-level="advanced">
+              <div class="settings-section-heading">Telegram</div>
+              <div class="group">
+                <div class="group-title">Telegram</div>
+                <div class="grid two">
+                  <label class="field long">
+                    <span>Bot token</span>
+                    <div class="row">
+                      <input id="cfg-telegram-token" type="password">
+                      <button id="toggle-telegram-token" class="button ghost small" type="button">Show</button>
+                    </div>
+                  </label>
+                  <label class="field short">
+                    <span>Chat ID</span>
+                    <input id="cfg-telegram-chat" type="text">
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <section id="settings-runtime" class="settings-section" data-settings-section="runtime" data-settings-level="advanced">
+              <div class="settings-section-heading">Runtime</div>
+              <div class="group">
+                <div class="group-title">Config File</div>
+                <div class="row">
+                  <label class="field long">
+                    <span>Config path (server)</span>
+                    <div class="row path-picker">
+                      <input id="config-path" type="text" placeholder="config/config.json">
+                      <button id="browse-config-path" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <button id="load-config-path" class="button">Load</button>
+                </div>
+                <div class="grid two">
+                  <label class="field medium" data-settings-level="advanced">
+                    <span>JS runtime</span>
+                    <input id="cfg-js-runtime" type="text" placeholder="node:/usr/bin/node">
+                  </label>
+                  <label class="field long">
+                    <span>yt-dlp cookies (optional)</span>
+                    <div class="row path-picker">
+                      <input id="cfg-yt-dlp-cookies" type="text" placeholder="tokens/cookies.txt">
+                      <button id="browse-yt-dlp-cookies" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                </div>
+                <div class="notice">Path changes apply globally on the server.</div>
+                <div class="notice">Cookies are optional but strongly recommended for YouTube Music metadata.</div>
+              </div>
+              <div class="group" data-settings-level="advanced">
+                <div class="group-title">yt-dlp Options (JSON)</div>
+                <label class="field full">
+                  <span>Options</span>
+                  <textarea id="cfg-yt-dlp-opts" rows="6" placeholder='{"format_sort": ["res", "codec"]}'></textarea>
+                </label>
+              </div>
+            </section>
+
+            <div class="row settings-actions-row">
+              <button id="save-config" class="button">Save Config</button>
+              <button id="reset-config" class="button ghost">Reset</button>
+              <div id="config-message" class="notice" role="status"></div>
+            </div>
           </div>
-          <div class="notice">Cookies are optional but strongly recommended for YouTube Music metadata.</div>
-        </div>
-
-        <div class="group">
-          <div class="group-title">Music metadata enrichment</div>
-          <div class="grid two">
-            <label class="field short">
-              <span>Music mode match threshold (%)</span>
-              <input id="cfg-music-meta-threshold" type="number" min="0" max="100" step="1">
-            </label>
-            <label class="field inline short">
-              <span>Enabled</span>
-              <input id="cfg-music-meta-enabled" type="checkbox">
-            </label>
-            <label class="field short">
-              <span>Enrichment confidence threshold (%)</span>
-              <input id="cfg-music-enrich-threshold" type="number" min="0" max="100" step="1">
-            </label>
-            <label class="field inline short">
-              <span>Use AcoustID</span>
-              <input id="cfg-music-meta-acoustid" type="checkbox">
-            </label>
-            <label class="field long">
-              <span>AcoustID API key</span>
-              <input id="cfg-music-meta-acoustid-key" type="password" placeholder="optional">
-            </label>
-            <label class="field inline short">
-              <span>Embed artwork</span>
-              <input id="cfg-music-meta-artwork" type="checkbox">
-            </label>
-            <label class="field inline short">
-              <span>Overwrite existing tags</span>
-              <input id="cfg-music-meta-overwrite" type="checkbox">
-            </label>
-            <label class="field short">
-              <span>Max artwork size (px)</span>
-              <input id="cfg-music-meta-artwork-size" type="number" min="200" step="50">
-            </label>
-            <label class="field short">
-              <span>Rate limit (seconds)</span>
-              <input id="cfg-music-meta-rate" type="number" min="0" step="0.1">
-            </label>
-            <label class="field inline short">
-              <span>Dry-run tagging</span>
-              <input id="cfg-music-meta-dry-run" type="checkbox">
-            </label>
-          </div>
-          <div class="notice">Applies only to music mode runs. Enrichment happens after downloads, in the background.</div>
-        </div>
-
-        <div class="group">
-          <div class="group-title">Accounts</div>
-          <div id="accounts-list" class="stack"></div>
-          <button id="add-account" class="button ghost">Add account</button>
-        </div>
-
-        <div class="group">
-          <div class="group-title">Playlists</div>
-          <div id="playlists-list" class="stack"></div>
-          <button id="add-playlist" class="button ghost">Add playlist</button>
-        </div>
-
-        <div class="group">
-          <div class="group-title">Spotify Playlists</div>
-          <div id="spotify-playlists-list" class="stack"></div>
-        </div>
-
-        <div class="group">
-          <div class="group-title">Spotify Integration</div>
-          <div class="group-subtitle">(Spotify requires Spotify Premium subscription for API connectors)</div>
-          <div class="grid two">
-            <label class="field full" for="spotify-client-id">
-              <span>Client ID</span>
-              <input id="spotify-client-id" type="text">
-            </label>
-            <label class="field full" for="spotify-client-secret">
-              <span>Client Secret</span>
-              <input id="spotify-client-secret" type="text">
-            </label>
-            <label class="field full" for="spotify-redirect-uri">
-              <span>Redirect URI</span>
-              <input id="spotify-redirect-uri" type="text" readonly>
-            </label>
-          </div>
-          <div class="row">
-            <span class="label">Connection Status</span>
-            <span id="spotify-connection-status">Not connected</span>
-          </div>
-          <div class="row">
-            <button id="spotify-connect-btn" class="button" type="button">Connect Spotify</button>
-            <button id="spotify-disconnect-btn" class="button ghost" type="button" style="display: none;">Disconnect</button>
-          </div>
-          <div class="grid two">
-            <label class="field inline short">
-              <span>Sync Liked Songs</span>
-              <input id="spotify-sync-liked" type="checkbox">
-            </label>
-            <label class="field short">
-              <span>Liked Songs interval (minutes)</span>
-              <input id="spotify-liked-interval" type="number" min="1" step="1">
-            </label>
-            <label class="field inline short">
-              <span>Sync Saved Albums</span>
-              <input id="spotify-sync-saved" type="checkbox">
-            </label>
-            <label class="field short">
-              <span>Saved Albums interval (minutes)</span>
-              <input id="spotify-saved-interval" type="number" min="1" step="1">
-            </label>
-            <label class="field inline short">
-              <span>Sync My Playlists</span>
-              <input id="spotify-sync-playlists" type="checkbox">
-            </label>
-            <label class="field short">
-              <span>Playlists interval (minutes)</span>
-              <input id="spotify-playlists-interval" type="number" min="1" step="1">
-            </label>
-          </div>
-          <label class="field full" for="config-spotify-playlists">
-            <span>Spotify Playlists (one per line)</span>
-            <textarea id="config-spotify-playlists" rows="4"></textarea>
-          </label>
-        </div>
-
-        <div class="group">
-          <div class="group-title">yt-dlp Options (JSON)</div>
-          <label class="field full">
-            <span>Options</span>
-            <textarea id="cfg-yt-dlp-opts" rows="6" placeholder='{"format_sort": ["res", "codec"]}'></textarea>
-          </label>
-        </div>
-
-        <div class="group">
-          <div class="group-title">Maintenance</div>
-          <div class="row">
-            <button id="ytdlp-update" class="button ghost">Update yt-dlp</button>
-            <div id="ytdlp-update-message" class="notice" role="status"></div>
-          </div>
-        </div>
-
-        <div class="row">
-          <button id="save-config" class="button">Save Config</button>
-          <button id="reset-config" class="button ghost">Reset</button>
-          <div id="config-message" class="notice" role="status"></div>
         </div>
       </div>
     </section>
 
-    <section class="panel" id="search-items-panel" data-page="advanced">
+    <section class="panel" id="search-items-panel" data-page="info">
       <div class="panel-title">Search Results (Discovery)</div>
       <div class="notice">Selected request: <span id="search-selected-request">-</span></div>
       <div class="group">
@@ -853,7 +1170,7 @@
     </section>
 
 
-    <section class="panel" id="search-requests-panel" data-page="advanced">
+    <section class="panel" id="search-requests-panel" data-page="info">
       <div class="panel-title">Search History (Requests)</div>
       <div class="row">
         <button id="search-requests-refresh" class="button ghost">Refresh</button>
@@ -864,8 +1181,7 @@
         <table class="table">
           <thead>
             <tr>
-              <th>Request ID</th>
-              <th>Artist / Album / Track</th>
+              <th>Search text</th>
               <th>Intent</th>
               <th>Status</th>
               <th>Created</th>
@@ -1010,6 +1326,12 @@
         <div id="browser-title" class="panel-title">Server Browser</div>
         <button id="browser-close" class="button ghost small">Close</button>
       </div>
+      <div class="row" style="justify-content: flex-start; align-items: center; gap: 8px;">
+        <label class="field inline short" style="margin: 0;">
+          <span>Root</span>
+          <select id="browser-root"></select>
+        </label>
+      </div>
       <div class="row space-between">
         <div class="meta" id="browser-path">/</div>
         <button id="browser-up" class="button ghost small">Up</button>
@@ -1092,6 +1414,27 @@
       <div id="import-progress-error" class="notice" role="status"></div>
       <div class="meta">
         Please avoid starting other downloads or heavy actions until the import completes.
+      </div>
+    </div>
+  </div>
+
+  <div id="home-preview-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="home-preview-title">
+    <div class="modal-card home-preview-card">
+      <div class="row space-between">
+        <div id="home-preview-title" class="panel-title">Preview</div>
+        <button id="home-preview-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div id="home-preview-source" class="meta home-preview-meta"></div>
+      <div class="home-preview-frame-wrap">
+        <iframe
+          id="home-preview-frame"
+          title="Video preview"
+          src="about:blank"
+          loading="lazy"
+          allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+          allowfullscreen
+          referrerpolicy="strict-origin-when-cross-origin"
+        ></iframe>
       </div>
     </div>
   </div>

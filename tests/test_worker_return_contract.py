@@ -15,7 +15,7 @@ def test_process_job_returns_validation_failed_without_file_path(monkeypatch) ->
 
     monkeypatch.setattr("download.worker.validate_duration", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("download.worker.get_media_duration", lambda _path: 1.0)
-    monkeypatch.setattr("download.worker.tag_file", lambda _path, _metadata: None)
+    monkeypatch.setattr("download.worker.tag_file", lambda _path, _metadata, **_kwargs: None)
     monkeypatch.setattr(
         "download.worker.record_downloaded_track",
         lambda playlist_id, isrc, file_path: recorded.append((playlist_id, isrc, file_path)),

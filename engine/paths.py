@@ -42,13 +42,15 @@ DB_PATH = Path(os.environ.get("RETREIVR_DB_PATH", DATA_DIR / "database" / "db.sq
 
 @dataclass(frozen=True)
 class EnginePaths:
-    log_dir: str
-    db_path: str
-    temp_downloads_dir: str
-    single_downloads_dir: str
-    lock_file: str
-    ytdlp_temp_dir: str
-    thumbs_dir: str
+    log_dir: str = ""
+    db_path: str = ""
+    temp_downloads_dir: str = ""
+    single_downloads_dir: str = ""
+    review_queue_dir: str = ""
+    review_queue_files_dir: str = ""
+    lock_file: str = ""
+    ytdlp_temp_dir: str = ""
+    thumbs_dir: str = ""
 
 
 def ensure_dir(path):
@@ -90,6 +92,8 @@ def resolve_dir(path, base_dir):
 def build_engine_paths():
     db_path = DB_PATH
     temp_downloads_dir = DATA_DIR / "temp_downloads"
+    review_queue_dir = DATA_DIR / "review_queue"
+    review_queue_files_dir = review_queue_dir / "files"
     lock_file = DATA_DIR / "tmp" / "retreivr.lock"
     ytdlp_temp_dir = DATA_DIR / "tmp" / "yt-dlp"
     thumbs_dir = ytdlp_temp_dir / "thumbs"
@@ -98,6 +102,8 @@ def build_engine_paths():
     for d in (
         db_path.parent,
         temp_downloads_dir,
+        review_queue_dir,
+        review_queue_files_dir,
         lock_file.parent,
         ytdlp_temp_dir,
         thumbs_dir,
@@ -113,6 +119,8 @@ def build_engine_paths():
         db_path=str(db_path),
         temp_downloads_dir=str(temp_downloads_dir),
         single_downloads_dir=str(DOWNLOADS_DIR),
+        review_queue_dir=str(review_queue_dir),
+        review_queue_files_dir=str(review_queue_files_dir),
         lock_file=str(lock_file),
         ytdlp_temp_dir=str(ytdlp_temp_dir),
         thumbs_dir=str(thumbs_dir),

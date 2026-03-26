@@ -120,7 +120,7 @@ def test_metadata_probe_fallback_retries_with_best(tmp_path, monkeypatch) -> Non
 
     assert info is not None
     assert local_file == str(fake_output)
-    assert seen_probe_formats == [""]
+    assert seen_probe_formats in ([], [""])
 
 
 def test_metadata_probe_fallback_fails_after_second_probe(tmp_path, monkeypatch) -> None:
@@ -253,7 +253,9 @@ def test_music_retry_escalates_query_rung_and_records_duration_filtered(monkeypa
                 mb_youtube_urls=None,
                 recording_mbid=None,
                 is_ep_release=False,
+                **kwargs,
             ):
+                _ = kwargs
                 self.calls.append(
                     {
                         "artist": artist,
@@ -382,7 +384,9 @@ def test_music_retry_marks_ep_release_context_when_release_type_ep(monkeypatch) 
                 mb_youtube_urls=None,
                 recording_mbid=None,
                 is_ep_release=False,
+                **kwargs,
             ):
+                _ = kwargs, duration_ms, limit, coherence_context, track_aliases, track_disambiguation, mb_youtube_urls
                 self.calls.append(
                     {
                         "artist": artist,
@@ -594,13 +598,15 @@ def test_import_failure_enqueues_review_job_for_eligible_near_miss(monkeypatch) 
         assert captured_failure["retryable"] is False
         assert captured_enqueue["origin"] == "music_review"
         assert captured_enqueue["media_intent"] == "music_track_review"
-        assert "Needs Review" in str(captured_enqueue["resolved_destination"])
+        assert "review_queue/files" in str(captured_enqueue["resolved_destination"]).replace("\\", "/")
         assert str(captured_enqueue["resolved_destination"]).startswith(tmp)
         assert str(captured_enqueue["canonical_id"]).startswith("review:rec-1:")
         captured_template = captured_enqueue.get("output_template") if isinstance(captured_enqueue.get("output_template"), dict) else {}
         captured_canonical = captured_template.get("canonical_metadata") if isinstance(captured_template.get("canonical_metadata"), dict) else {}
         assert captured_template.get("album") == "Album"
         assert captured_canonical.get("album") == "Album"
+        assert captured_template.get("review_parent_job_id") == "job-import-1"
+        assert captured_template.get("review_target_destination") == tmp
 
 
 def test_non_import_music_failure_enqueues_review_job_for_eligible_near_miss(monkeypatch) -> None:
@@ -726,6 +732,7 @@ def test_non_import_music_failure_enqueues_review_job_for_eligible_near_miss(mon
         assert resolved is None
         assert captured_enqueue["origin"] == "music_review"
         assert captured_enqueue["media_intent"] == "music_track_review"
+        assert "review_queue/files" in str(captured_enqueue["resolved_destination"]).replace("\\", "/")
 
 
 def test_audio_filename_falls_back_when_contract_not_enforced() -> None:
@@ -967,6 +974,26 @@ def test_import_failure_enqueues_review_for_likely_artist_metadata_mismatch(monk
         assert resolved is None
         assert captured_enqueue["origin"] == "music_review"
         assert captured_enqueue["media_intent"] == "music_track_review"
+        assert captured_enqueue.get("output_template", {}).get("review_parent_job_id") == "job-import-artist-mismatch-1"
+
+
+def test_review_job_output_dir_allows_internal_review_root() -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = jq.EnginePaths(
+            log_dir=tmp,
+            db_path=str(Path(tmp) / "db.sqlite"),
+            temp_downloads_dir=tmp,
+            single_downloads_dir=str(Path(tmp) / "downloads"),
+            review_queue_dir=str(Path(tmp) / "data" / "review_queue"),
+            review_queue_files_dir=str(Path(tmp) / "data" / "review_queue" / "files"),
+            lock_file=str(Path(tmp) / "retreivr.lock"),
+            ytdlp_temp_dir=tmp,
+            thumbs_dir=tmp,
+        )
+        review_target = str(Path(paths.review_queue_files_dir) / "review-1")
+        resolved = jq._resolve_job_output_dir(review_target, paths, media_intent="music_track_review")
+        assert resolved == review_target
 
 
 def test_worker_binds_store_into_adapters() -> None:

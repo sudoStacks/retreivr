@@ -9,8 +9,40 @@ Key endpoints
 - GET /api/schedule
 - GET /api/metrics
 - POST /api/run
+- POST /api/intake
 - GET /api/history
 - GET /api/logs
+
+External intake
+`POST /api/intake` accepts a normalized acquisition package from external tools
+such as Jellyfin plugins, browser extensions, or local scripts.
+
+Full schema and examples: `docs/intake_api.md`
+
+Example payload:
+{
+  "source_url": "https://media.example.test/file.mp3",
+  "media_class": "audiobook",
+  "metadata": {
+    "title": "Chapter 1",
+    "author": "Example Author",
+    "series": "Example Series"
+  },
+  "delivery": {
+    "destination": "Books/Audiobooks",
+    "final_format": "mp3"
+  },
+  "provenance": {
+    "origin": "jellyfin_plugin",
+    "origin_id": "item-123"
+  }
+}
+
+Current media class handling:
+- `music`, `audio`, `track`, `song` -> queued as music
+- `audiobook`, `podcast` -> queued as music with audiobook/podcast intent
+- `video`, `music_video`, `movie`, `episode` -> queued as video
+- `book`, `pdf`, `ebook`, `document` -> queued as generic download with book intent
 
 Status JSON (stable)
 Example response:

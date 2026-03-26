@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-ARG RETREIVR_VERSION=0.9.6
+ARG RETREIVR_VERSION=0.9.18
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -11,6 +11,7 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg \
+        libchromaprint-tools \
         tzdata \
         nodejs \
     && rm -rf /var/lib/apt/lists/*

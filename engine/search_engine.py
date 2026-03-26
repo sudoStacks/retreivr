@@ -1,37 +1,113 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 MAX_PARALLEL_ADAPTERS = 4
 
 # Helper to run one adapter safely
-def _run_adapter_search(adapter, item, max_candidates, canonical_payload):
+def _run_adapter_search(
+    adapter,
+    item,
+    max_candidates,
+    canonical_payload,
+    *,
+    lightweight=False,
+    timeout_budget_sec=None,
+):
     """
     Execute a single adapter search safely.
     - Adapter exceptions are contained
     - Invalid URLs are dropped here
     - Never raises
     """
-    try:
+    def _invoke_adapter():
+        adapter_source = str(getattr(adapter, "source", "")).strip().lower()
+        if lightweight and adapter_source in {"youtube", "youtube_music"}:
+            if item["item_type"] == "album":
+                fast_query = f"{item.get('artist') or ''} {item.get('album') or ''}".strip()
+            else:
+                query_parts = [item.get("artist"), item.get("track")]
+                if item.get("album"):
+                    query_parts.append(item.get("album"))
+                fast_query = " ".join(
+                    str(part or "").strip()
+                    for part in query_parts
+                    if str(part or "").strip()
+                )
+            fast_rows = youtube_fast_search(fast_query, limit=max_candidates)
+            if fast_rows:
+                return [
+                    {
+                        "source": adapter_source or "youtube",
+                        "video_id": row.get("video_id"),
+                        "url": row.get("url"),
+                        "title": row.get("title"),
+                        "uploader": row.get("channel"),
+                        "channel": row.get("channel"),
+                        "thumbnail_url": row.get("thumbnail_url"),
+                        "artist_detected": row.get("channel"),
+                        "album_detected": None,
+                        "track_detected": row.get("title"),
+                        "posted_label": row.get("posted_label"),
+                        "duration_sec": None,
+                        "artwork_url": None,
+                        "raw_meta_json": safe_json_dumps(
+                            {
+                                "posted_label": row.get("posted_label"),
+                            }
+                        ),
+                        "official": False,
+                        "isrc": None,
+                        "track_count": None,
+                        "view_count": None,
+                    }
+                    for row in fast_rows
+                    if isinstance(row, dict) and _is_http_url(row.get("url"))
+                ]
+        kwargs = {}
+        if lightweight:
+            kwargs["lightweight"] = True
+        if timeout_budget_sec is not None:
+            kwargs["timeout_budget_sec"] = timeout_budget_sec
         if item["item_type"] == "album":
-            candidates = adapter.search_album(
+            try:
+                return adapter.search_album(
+                    item["artist"],
+                    item.get("album"),
+                    max_candidates,
+                    **kwargs,
+                )
+            except TypeError:
+                return adapter.search_album(
+                    item["artist"],
+                    item.get("album"),
+                    max_candidates,
+                )
+        try:
+            return adapter.search_track(
                 item["artist"],
+                item.get("track"),
                 item.get("album"),
                 max_candidates,
+                **kwargs,
             )
-        else:
-            candidates = adapter.search_track(
+        except TypeError:
+            return adapter.search_track(
                 item["artist"],
                 item.get("track"),
                 item.get("album"),
                 max_candidates,
             )
+
+    try:
+        candidates = _invoke_adapter()
     except Exception as exc:
         logging.exception(
             "adapter_search_exception",
             extra={
-                "adapter": getattr(adapter, "name", repr(adapter)),
+                "adapter": getattr(adapter, "source", repr(adapter)),
                 "artist": item.get("artist"),
                 "album": item.get("album"),
                 "track": item.get("track"),
                 "error": str(exc),
+                "lightweight": bool(lightweight),
             },
         )
         return []
@@ -72,9 +148,10 @@ from engine.job_queue import (
     canonicalize_url,
     extract_video_id,
 )
+from engine import community_cache
 from engine.json_utils import safe_json_dumps
 from engine.paths import DATA_DIR
-from engine.search_adapters import default_adapters
+from engine.search_adapters import default_adapters, youtube_fast_search
 from engine.search_scoring import (
     classify_music_title_variants,
     rank_candidates,
@@ -103,7 +180,14 @@ ITEM_STATUSES = {
     "failed",
 }
 
-DEFAULT_SOURCE_PRIORITY = ["bandcamp", "youtube_music", "soundcloud"]
+DEFAULT_SOURCE_PRIORITY = [
+    "youtube",
+    "youtube_music",
+    "rumble",
+    "archive_org",
+    "soundcloud",
+    "bandcamp",
+]
 MUSIC_TRACK_SOURCE_PRIORITY = ("youtube_music", "youtube", "soundcloud", "bandcamp")
 MUSIC_TRACK_SOURCE_PRIORITY_WITH_MB = ("mb_relationship",) + MUSIC_TRACK_SOURCE_PRIORITY
 MUSIC_TRACK_PENALIZE_TOKENS = ("live", "cover", "karaoke", "remix", "reaction", "ft.", "feat.", "instrumental")
@@ -118,6 +202,8 @@ _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY = 0.92
 _ALBUM_COHERENCE_MAX_BOOST = 0.03
 _ALBUM_COHERENCE_TIE_WINDOW = 0.03
 _MB_INJECTED_MAX_URLS = 3
+_COMMUNITY_CACHE_MAX_URLS = 1
+_PROBE_FAILURE_CACHE_KEY = "__probe_failure_reason__"
 
 
 @dataclass(frozen=True)
@@ -144,6 +230,7 @@ class MusicTrackSelectionResult:
     failure_reason: str
     coherence_boost_applied: int
     mb_injected_rejections: dict[str, int]
+    community_seeded_rejections: dict[str, int]
     rejected_candidates: list[dict]
     accepted_selection: dict | None
     final_rejection: dict | None
@@ -165,6 +252,22 @@ def _is_http_url(value: str | None) -> bool:
 # Helper: Coerce to HTTP(S) URL or None
 def _coerce_http_url(value: str | None) -> str | None:
     return value if _is_http_url(value) else None
+
+
+def _candidate_transport_identity(candidate: dict | None) -> str | None:
+    if not isinstance(candidate, dict):
+        return None
+    raw_url = str(candidate.get("url") or "").strip()
+    source = str(candidate.get("source") or "").strip().lower()
+    if source in {"youtube", "youtube_music"}:
+        video_id = extract_video_id(raw_url) or extract_video_id(candidate.get("video_id"))
+        if video_id:
+            return f"youtube_video:{str(video_id).lower()}"
+    if raw_url:
+        if source:
+            return f"source_url:{source}:{raw_url.lower()}"
+        return f"url:{raw_url.lower()}"
+    return None
 
 # Helper: Detect if a value is a URL
 def _is_url(value: str | None) -> bool:
@@ -430,6 +533,25 @@ def ensure_search_tables(conn):
     if "canonical_json" not in existing:
         cur.execute("ALTER TABLE search_candidates ADD COLUMN canonical_json TEXT")
 
+    # Local search result cache has been removed from discovery/acquisition flows.
+    # Drop legacy table/indexes on startup to keep schema clean.
+    cur.execute("DROP INDEX IF EXISTS idx_search_query_cache_key")
+    cur.execute("DROP INDEX IF EXISTS idx_search_query_cache_video_id")
+    cur.execute("DROP INDEX IF EXISTS idx_search_query_cache_cached_at")
+    cur.execute("DROP TABLE IF EXISTS search_query_cache")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS community_video_index (
+            video_id TEXT PRIMARY KEY,
+            recording_mbid TEXT,
+            confidence REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_community_video_index_recording ON community_video_index (recording_mbid)")
+
     conn.commit()
 
 
@@ -438,8 +560,14 @@ class SearchJobStore:
         self.db_path = db_path
 
     def _connect(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=5.0)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+        except Exception:
+            pass
         return conn
 
     def ensure_schema(self):
@@ -536,6 +664,21 @@ class SearchJobStore:
                     (item["id"],),
                 )
                 item["candidate_count"] = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT * FROM search_candidates WHERE item_id=? ORDER BY rank",
+                    (item["id"],),
+                )
+                candidate_rows = []
+                for cand_row in cur.fetchall():
+                    candidate_entry = dict(cand_row)
+                    canonical_raw = candidate_entry.get("canonical_json")
+                    if canonical_raw:
+                        try:
+                            candidate_entry["canonical_metadata"] = json.loads(canonical_raw)
+                        except json.JSONDecodeError:
+                            candidate_entry["canonical_metadata"] = None
+                    candidate_rows.append(candidate_entry)
+                item["candidates"] = candidate_rows
             return {"request": request, "items": items}
         finally:
             conn.close()
@@ -747,6 +890,18 @@ class SearchJobStore:
         finally:
             conn.close()
 
+    def list_search_cache(self, *, cache_key, max_age_seconds=None, limit=50):
+        return []
+
+    def replace_search_cache(self, *, cache_key, query_text, media_type, candidates):
+        return
+
+    def enforce_search_cache_max_entries(self, *, max_entries):
+        return
+
+    def prune_search_cache_for_url(self, *, url, failure_reason=None, delete=False):
+        return 0
+
     def reset_candidates_for_item(self, item_id):
         conn = self._connect()
         try:
@@ -866,8 +1021,8 @@ class SearchResolutionService:
     def __init__(self, *, search_db_path, queue_db_path, adapters=None, config=None, paths=None, canonical_resolver=None):
         self.search_db_path = search_db_path
         self.queue_db_path = queue_db_path
-        self.adapters = adapters or default_adapters()
         self.config = config or {}
+        self.adapters = adapters or default_adapters(config=self.config)
         self.debug_music_scoring = self._as_bool(self.config.get("debug_music_scoring"))
         self.music_source_match_threshold = _normalize_threshold(
             self.config.get("music_source_match_threshold", MUSIC_TRACK_THRESHOLD),
@@ -884,6 +1039,22 @@ class SearchResolutionService:
         self._album_coherence_lock = threading.Lock()
         self._mb_injected_probe_cache = {}
         self._mb_injected_probe_lock = threading.Lock()
+        self.community_cache_lookup_enabled = self._as_bool(
+            self.config.get(
+                "community_cache_lookup_enabled",
+                self.config.get("community_cache_enabled", True),
+            )
+        )
+        self.lightweight_discovery_enabled = self._as_bool(
+            self.config.get("lightweight_discovery_enabled", True)
+        )
+        self.discovery_source_timeout_sec = self._parse_discovery_source_timeout(
+            self.config.get("discovery_source_timeout_sec", 2.0)
+        )
+        self.discovery_max_candidates_per_source = self._parse_discovery_max_candidates(
+            self.config.get("discovery_max_candidates_per_source", 10)
+        )
+        self._maybe_rebuild_community_reverse_index()
 
     def _as_bool(self, value):
         if isinstance(value, bool):
@@ -893,6 +1064,58 @@ class SearchResolutionService:
         if isinstance(value, (int, float)):
             return bool(value)
         return False
+
+    def _parse_cache_ttl_days(self, value):
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = 0
+        return max(0, parsed)
+
+    def _parse_discovery_source_timeout(self, value):
+        try:
+            parsed = float(value)
+        except Exception:
+            parsed = 2.0
+        return max(0.5, min(10.0, parsed))
+
+    def _parse_discovery_max_candidates(self, value):
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = 10
+        return max(1, min(50, parsed))
+
+    def _community_dataset_root(self):
+        configured = str(self.config.get("community_cache_dataset_dir") or "").strip()
+        if configured:
+            return configured
+        return str(DATA_DIR / "community_cache_dataset")
+
+    def _maybe_rebuild_community_reverse_index(self):
+        if not bool(self.community_cache_lookup_enabled):
+            return
+        dataset_root = self._community_dataset_root()
+        try:
+            stats = community_cache.rebuild_reverse_index_from_dataset(
+                db_path=self.search_db_path,
+                dataset_root=dataset_root,
+            )
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "community_reverse_index_rebuild_failed",
+                dataset_root=dataset_root,
+                error=str(exc),
+            )
+            return
+        _log_event(
+            logging.INFO,
+            "community_reverse_index_rebuilt",
+            dataset_root=dataset_root,
+            files_scanned=int(stats.get("files_scanned") or 0),
+            video_ids_indexed=int(stats.get("video_ids_indexed") or 0),
+        )
 
     def ensure_schema(self):
         """
@@ -992,7 +1215,15 @@ class SearchResolutionService:
             with self._mb_injected_probe_lock:
                 cached = self._mb_injected_probe_cache.get(cache_key, "__missing__")
             if cached != "__missing__":
-                return dict(cached) if isinstance(cached, dict) else None
+                if isinstance(cached, dict):
+                    cached_failure = str(cached.get(_PROBE_FAILURE_CACHE_KEY) or "").strip()
+                    if cached_failure:
+                        return None, cached_failure
+                    return dict(cached), None
+                if isinstance(cached, str) and cached.strip():
+                    return None, str(cached).strip()
+                # Backward compatibility for previously cached bare `None`.
+                return None, "mb_injected_failed_unavailable"
         opts = {
             "quiet": True,
             "no_warnings": True,
@@ -1015,13 +1246,18 @@ class SearchResolutionService:
             )
             if cache_key:
                 with self._mb_injected_probe_lock:
-                    self._mb_injected_probe_cache[cache_key] = None
+                    self._mb_injected_probe_cache[cache_key] = {
+                        _PROBE_FAILURE_CACHE_KEY: failure_kind
+                    }
             return None, failure_kind
         if not isinstance(info, dict):
+            failure_kind = "mb_injected_failed_unavailable"
             if cache_key:
                 with self._mb_injected_probe_lock:
-                    self._mb_injected_probe_cache[cache_key] = None
-            return None, "mb_injected_failed_unavailable"
+                    self._mb_injected_probe_cache[cache_key] = {
+                        _PROBE_FAILURE_CACHE_KEY: failure_kind
+                    }
+            return None, failure_kind
         resolved_url = str(info.get("webpage_url") or info.get("original_url") or url).strip() or url
         video_id = extract_video_id(resolved_url) or extract_video_id(url)
         canonical_url = canonicalize_url("youtube", resolved_url, video_id) or resolved_url
@@ -1108,6 +1344,124 @@ class SearchResolutionService:
         if value in {"low_artist_similarity"}:
             return "mb_injected_failed_artist"
         return f"mb_injected_failed_{value}"
+
+    def _classify_community_seeded_rejection(self, reason):
+        value = str(reason or "").strip().lower()
+        if not value:
+            return "community_seeded_failed_unknown"
+        if value in {"duration_out_of_bounds", "duration_over_hard_cap", "preview_duration", "community_duration_mismatch"}:
+            return "community_seeded_failed_duration"
+        if value in {"disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
+            return "community_seeded_failed_variant"
+        if value in {"low_title_similarity"}:
+            return "community_seeded_failed_title"
+        if value in {"low_artist_similarity"}:
+            return "community_seeded_failed_artist"
+        if value in {"community_cache_unavailable", "community_cache_miss", "community_no_candidate"}:
+            return "community_seeded_failed_unavailable"
+        return f"community_seeded_failed_{value}"
+
+    def _resolve_community_cache_candidates(
+        self,
+        *,
+        recording_mbid=None,
+        artist=None,
+        track=None,
+        album=None,
+        expected_duration_ms=None,
+    ):
+        if not bool(self.community_cache_lookup_enabled):
+            return [], {}
+        normalized_mbid = str(recording_mbid or "").strip()
+        if not normalized_mbid:
+            return [], {"community_seeded_failed_no_recording_mbid": 1}
+
+        try:
+            record = community_cache.cached_lookup(
+                normalized_mbid,
+                dataset_root=self._community_dataset_root(),
+                allow_remote=True,
+            )
+        except Exception as exc:
+            _log_event(
+                logging.WARNING,
+                "community_cache_error",
+                recording_mbid=normalized_mbid,
+                error=str(exc),
+            )
+            return [], {"community_seeded_failed_unavailable": 1}
+
+        if not isinstance(record, dict):
+            _log_event(logging.INFO, "community_cache_miss", recording_mbid=normalized_mbid)
+            return [], {"community_seeded_failed_unavailable": 1}
+        _log_event(logging.INFO, "community_cache_hit", recording_mbid=normalized_mbid)
+
+        video_id = extract_video_id(record.get("video_id")) or str(record.get("video_id") or "").strip()
+        if not video_id:
+            _log_event(logging.INFO, "community_candidate_rejected", recording_mbid=normalized_mbid, rejection_reason="community_no_candidate")
+            return [], {"community_seeded_failed_unavailable": 1}
+
+        duration_ms = record.get("duration_ms")
+        try:
+            duration_ms = int(duration_ms) if duration_ms is not None else None
+        except Exception:
+            duration_ms = None
+        expected_ms = None
+        try:
+            expected_ms = int(expected_duration_ms) if expected_duration_ms is not None else None
+        except Exception:
+            expected_ms = None
+        if expected_ms is not None and duration_ms is not None:
+            delta_ms = abs(int(duration_ms) - int(expected_ms))
+            if delta_ms > int(_MUSIC_DURATION_HARD_CAP_MS):
+                _log_event(
+                    logging.INFO,
+                    "community_candidate_rejected",
+                    recording_mbid=normalized_mbid,
+                    video_id=video_id,
+                    rejection_reason="community_duration_mismatch",
+                    duration_delta_ms=delta_ms,
+                )
+                return [], {"community_seeded_failed_duration": 1}
+
+        seed_url = canonicalize_url("youtube", f"https://www.youtube.com/watch?v={video_id}", video_id)
+        if not seed_url:
+            _log_event(logging.INFO, "community_candidate_rejected", recording_mbid=normalized_mbid, rejection_reason="community_no_candidate")
+            return [], {"community_seeded_failed_unavailable": 1}
+
+        candidate, probe_failure = self._probe_mb_relationship_candidate(
+            seed_url,
+            artist=artist,
+            track=track,
+            album=album,
+        )
+        if not isinstance(candidate, dict):
+            failure = self._classify_community_seeded_rejection(probe_failure or "community_cache_unavailable")
+            _log_event(
+                logging.INFO,
+                "community_candidate_rejected",
+                recording_mbid=normalized_mbid,
+                video_id=video_id,
+                rejection_reason=probe_failure or "community_cache_unavailable",
+                classified_reason=failure,
+            )
+            return [], {failure: 1}
+
+        seeded = dict(candidate)
+        seeded["source"] = "youtube"
+        seeded["community_seeded"] = True
+        seeded["community_confidence"] = record.get("confidence")
+        seeded["community_recording_mbid"] = normalized_mbid
+        seeded["community_video_id"] = video_id
+        _log_event(
+            logging.INFO,
+            "community_candidate_seed",
+            recording_mbid=normalized_mbid,
+            video_id=video_id,
+            candidate_id=seeded.get("candidate_id"),
+            confidence=seeded.get("community_confidence"),
+        )
+        return [seeded][: _COMMUNITY_CACHE_MAX_URLS], {}
 
     def _apply_album_coherence_tiebreak(self, ranked, *, coherence_key, pass_name, query_label):
         if not ranked:
@@ -1247,6 +1601,8 @@ class SearchResolutionService:
             elif overlap >= 0.30:
                 adjustment += 5.0
                 reasons.append("artist_uploader_overlap")
+        else:
+            overlap = 0.0
 
         expected_duration = expected.get("duration_hint_sec")
         candidate_duration = candidate.get("duration_sec")
@@ -1292,7 +1648,87 @@ class SearchResolutionService:
                         f"[MUSIC] penalizing token={token} new_score={adjustment:.0f} "
                         f"for {candidate.get('url')}"
                     )
+        if bool(expected.get("prefer_music_video")):
+            source_lower = source.strip().lower()
+            is_youtube_family = source_lower in {"youtube", "youtube_music"}
+            authority_match = bool(candidate.get("authority_channel_match")) or (
+                overlap >= 0.60 and "topic" not in uploader.lower()
+            )
+            has_official_video = ("official music video" in title_lower) or ("official video" in title_lower)
+            if is_youtube_family and authority_match and has_official_video:
+                adjustment += 18.0
+                reasons.append("mv_official_channel_official_title")
+            elif is_youtube_family and authority_match:
+                adjustment += 12.0
+                reasons.append("mv_official_channel")
+            elif has_official_video:
+                adjustment += 4.0
+                reasons.append("mv_official_title")
+            if "lyric" in title_lower or "visualizer" in title_lower:
+                adjustment -= 8.0
+                reasons.append("mv_non_primary_variant")
+            if "provided to youtube" in title_lower or "topic" in uploader.lower():
+                adjustment -= 6.0
+                reasons.append("mv_topic_audio_penalty")
+            if "official audio" in title_lower:
+                adjustment -= 18.0
+                reasons.append("mv_official_audio_penalty")
+            elif " audio" in title_lower and not has_official_video:
+                adjustment -= 12.0
+                reasons.append("mv_audio_penalty")
         return adjustment, reasons
+
+    def _music_video_authority_like(self, candidate, expected_base=None):
+        if not isinstance(candidate, dict):
+            return False
+        if bool(candidate.get("authority_channel_match")):
+            return True
+        expected_artist_tokens = set(self._music_tokens((expected_base or {}).get("artist")))
+        uploader = str(candidate.get("uploader") or candidate.get("artist_detected") or "").strip()
+        uploader_tokens = set(self._music_tokens(uploader))
+        if not expected_artist_tokens or not uploader_tokens:
+            return False
+        overlap = len(expected_artist_tokens & uploader_tokens) / max(len(expected_artist_tokens), 1)
+        if overlap < 0.60:
+            return False
+        if "topic" in uploader.lower():
+            return False
+        return True
+
+    def _music_video_priority_bucket(self, candidate, expected_base=None):
+        if not isinstance(candidate, dict):
+            return 0
+        source_lower = str(candidate.get("source") or "").strip().lower()
+        is_youtube_family = source_lower in {"youtube", "youtube_music"}
+        authority_match = self._music_video_authority_like(candidate, expected_base=expected_base)
+        title_lower = str(candidate.get("title") or "").strip().lower()
+        has_official_video = ("official music video" in title_lower) or ("official video" in title_lower)
+        if is_youtube_family and authority_match and has_official_video:
+            return 3
+        if is_youtube_family and authority_match:
+            return 2
+        return 1
+
+    def _prefer_music_video_candidate(self, eligible, ranked, *, expected_base=None):
+        if not eligible:
+            return None
+        index_map = {}
+        for idx, candidate in enumerate(ranked or []):
+            candidate_id = str(candidate.get("candidate_id") or "").strip()
+            if candidate_id and candidate_id not in index_map:
+                index_map[candidate_id] = idx
+        source_priority = {name: idx for idx, name in enumerate(MUSIC_TRACK_SOURCE_PRIORITY_WITH_MB)}
+        ordered = sorted(
+            eligible,
+            key=lambda candidate: (
+                -int(self._music_video_priority_bucket(candidate, expected_base=expected_base)),
+                -float(candidate.get("final_score") or 0.0),
+                int(source_priority.get(str(candidate.get("source") or "").strip().lower(), 999)),
+                int(index_map.get(str(candidate.get("candidate_id") or "").strip(), 99999)),
+                str(candidate.get("candidate_id") or ""),
+            ),
+        )
+        return ordered[0] if ordered else None
 
     def _build_music_track_query(self, artist, track, album=None, *, is_ep_release: bool = False):
         ladder = self._build_music_track_query_ladder(artist, track, album, is_ep_release=is_ep_release)
@@ -1366,6 +1802,104 @@ class SearchResolutionService:
             unique_ladder.append(entry)
         return unique_ladder
 
+    def _build_music_video_query_ladder(self, artist, track, album=None, *, is_ep_release: bool = False):
+        artist_v = str(artist or "").strip()
+        track_v = str(track or "").strip()
+        album_v = str(album or "").strip()
+        base_ladder = self._build_music_track_query_ladder(
+            artist,
+            track,
+            album,
+            is_ep_release=is_ep_release,
+        )
+        prefixed = [
+            {
+                "rung": -3,
+                "label": "mv_official_music_video",
+                "query": " ".join(
+                    part for part in [f'"{artist_v}"', f'"{track_v}"', '"official music video"'] if part
+                ).strip(),
+            },
+            {
+                "rung": -2,
+                "label": "mv_official_video",
+                "query": " ".join(
+                    part for part in [f'"{artist_v}"', f'"{track_v}"', '"official video"'] if part
+                ).strip(),
+            },
+            {
+                "rung": -1,
+                "label": "mv_artist_track_video",
+                "query": " ".join(
+                    part for part in [artist_v, track_v, "music video"] if part
+                ).strip(),
+            },
+            {
+                "rung": 0,
+                "label": "mv_official_music_video_with_album",
+                "query": " ".join(
+                    part for part in [f'"{artist_v}"', f'"{track_v}"', f'"{album_v}"' if album_v else "", '"official music video"'] if part
+                ).strip(),
+            },
+        ]
+        seen = set()
+        merged = []
+        for entry in prefixed + list(base_ladder):
+            query = str(entry.get("query") or "").strip()
+            if not query or query in seen:
+                continue
+            seen.add(query)
+            merged.append(entry)
+        return merged
+
+    def _build_search_cache_query(self, item, request_row):
+        return ""
+
+    def _normalize_search_cache_query_text(self, query):
+        return ""
+
+    def _search_cache_key_for_item(self, item, request_row):
+        return "", ""
+
+    def _search_cache_key_for_query(self, query, request_row, *, item_type):
+        return ""
+
+    def _search_cache_key_for_query_legacy(self, query, request_row, *, item_type):
+        return ""
+
+    def _build_search_cache_alias_query(self, item):
+        return ""
+
+    def _search_cache_candidates_for_item(self, item, request_row, *, limit):
+        return []
+
+    def _seed_request_from_search_cache(self, request_id):
+        return
+
+    def _refresh_search_cache_for_item(self, request_row, item, ranked):
+        return
+
+    def invalidate_search_cache_entry(self, *, url, reason=None):
+        return 0
+
+    def _annotate_candidate_with_community_reverse_lookup(self, candidate):
+        if not isinstance(candidate, dict):
+            return candidate
+        annotated = dict(candidate)
+        if not bool(self.community_cache_lookup_enabled):
+            return annotated
+        url = str(annotated.get("url") or "").strip()
+        video_id = extract_video_id(url) or str(annotated.get("video_id") or "").strip()
+        if not video_id:
+            return annotated
+        lookup = community_cache.lookup_video_id(video_id, db_path=self.search_db_path)
+        if not isinstance(lookup, dict):
+            return annotated
+        annotated["community_verified_transport"] = True
+        annotated["community_verified_recording_mbid"] = str(lookup.get("recording_mbid") or "").strip() or None
+        annotated["community_verified_confidence"] = lookup.get("confidence")
+        return annotated
+
     def _music_track_is_live(self, artist, track, album):
         return has_live_intent(artist, track, album)
 
@@ -1411,7 +1945,7 @@ class SearchResolutionService:
                         if not _is_http_url(candidate.get("url")):
                             continue
                         candidate["source"] = candidate.get("source") or source
-                        normalized.append(candidate)
+                        normalized.append(self._annotate_candidate_with_community_reverse_lookup(candidate))
                     candidate_batches[source] = normalized
 
         candidates = []
@@ -1436,20 +1970,67 @@ class SearchResolutionService:
         first_rung = int((ctx or {}).get("first_rung") or 0)
         injected = (ctx or {}).get("mb_injected_candidates")
         injected_candidates = [dict(c) for c in (injected or []) if isinstance(c, dict)]
+        community_injected = (ctx or {}).get("community_seeded_candidates")
+        community_seeded_candidates = [dict(c) for c in (community_injected or []) if isinstance(c, dict)]
 
         candidates = self.search_music_track_candidates(query, limit=limit, query_label=query_label)
-        if rung == first_rung and injected_candidates:
+        if rung == first_rung and (injected_candidates or community_seeded_candidates):
             deduped = []
-            seen_urls = set()
-            for candidate in list(injected_candidates) + list(candidates):
+            index_by_identity = {}
+
+            def _is_blank(value):
+                if value is None:
+                    return True
+                if isinstance(value, str):
+                    return not value.strip()
+                if isinstance(value, (list, tuple, dict, set)):
+                    return len(value) == 0
+                return False
+
+            def _transport_identity(candidate):
+                identity = _candidate_transport_identity(candidate)
+                if identity:
+                    return identity
+                community_video_id = str((candidate or {}).get("community_video_id") or "").strip()
+                if community_video_id:
+                    return f"youtube_video:{community_video_id.lower()}"
+                return None
+
+            def _merge_candidate(base, incoming):
+                out = dict(base or {})
+                inc = dict(incoming or {})
+                for key, value in inc.items():
+                    if key in {"community_seeded", "mb_injected", "community_verified_transport"}:
+                        out[key] = bool(out.get(key)) or bool(value)
+                        continue
+                    if _is_blank(out.get(key)) and not _is_blank(value):
+                        out[key] = value
+                provenance_sources = []
+                for source_value in (
+                    out.get("source"),
+                    *([v for v in (out.get("provenance_sources") or []) if isinstance(v, str)]),
+                    inc.get("source"),
+                    *([v for v in (inc.get("provenance_sources") or []) if isinstance(v, str)]),
+                ):
+                    text = str(source_value or "").strip()
+                    if not text or text in provenance_sources:
+                        continue
+                    provenance_sources.append(text)
+                if provenance_sources:
+                    out["provenance_sources"] = provenance_sources
+                return out
+
+            for candidate in list(injected_candidates) + list(community_seeded_candidates) + list(candidates):
                 if not isinstance(candidate, dict):
                     continue
-                url_key = str(candidate.get("url") or "").strip().lower()
-                if url_key and url_key in seen_urls:
+                identity = _transport_identity(candidate)
+                if identity and identity in index_by_identity:
+                    idx = index_by_identity[identity]
+                    deduped[idx] = _merge_candidate(deduped[idx], candidate)
                     continue
-                if url_key:
-                    seen_urls.add(url_key)
-                deduped.append(candidate)
+                if identity:
+                    index_by_identity[identity] = len(deduped)
+                deduped.append(dict(candidate))
             candidates = deduped
         return candidates
 
@@ -1638,6 +2219,7 @@ class SearchResolutionService:
 
     def rank_and_gate(self, ctx, candidates) -> MusicTrackSelectionResult:
         expected_base = dict((ctx or {}).get("expected_base") or {})
+        prefer_music_video = bool(expected_base.get("prefer_music_video"))
         coherence_key = (ctx or {}).get("coherence_key")
         query_label = str((ctx or {}).get("query_label") or "")
         rung = int((ctx or {}).get("rung") or 0)
@@ -1648,6 +2230,7 @@ class SearchResolutionService:
         failure_reason = "all_filtered_by_gate"
         coherence_boost_applied = 0
         mb_injected_rejections: dict[str, int] = {}
+        community_seeded_rejections: dict[str, int] = {}
         rejected_candidates: list[dict] = []
         accepted_selection = None
         final_rejection = None
@@ -1703,6 +2286,21 @@ class SearchResolutionService:
                     )
                 )
             if str(scored.get("source") or "").strip().lower() != "mb_relationship":
+                if bool(scored.get("community_seeded")) and (rejection_reason or float(scored.get("final_score", 0.0)) < float(self.music_source_match_threshold)):
+                    reason = rejection_reason or "score_threshold"
+                    key = self._classify_community_seeded_rejection(reason)
+                    community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + 1
+                    _log_event(
+                        logging.INFO,
+                        "community_candidate_rejected",
+                        recording_mbid=recording_mbid,
+                        candidate_id=scored.get("candidate_id"),
+                        url=scored.get("url"),
+                        rejection_reason=reason,
+                        classified_reason=key,
+                        selected_rung=rung,
+                        query_label=query_label,
+                    )
                 continue
             if not rejection_reason:
                 continue
@@ -1724,7 +2322,11 @@ class SearchResolutionService:
             if not c.get("rejection_reason")
             and float(c.get("final_score", 0.0)) >= float(self.music_source_match_threshold)
         ]
-        selected_a = eligible_a[0] if eligible_a else None
+        selected_a = (
+            self._prefer_music_video_candidate(eligible_a, ranked_a, expected_base=expected_base)
+            if prefer_music_video
+            else (eligible_a[0] if eligible_a else None)
+        )
         if selected_a is not None:
             selected = selected_a
             ranked_selected = ranked_a
@@ -1762,6 +2364,7 @@ class SearchResolutionService:
                 failure_reason="",
                 coherence_boost_applied=coherence_boost_applied,
                 mb_injected_rejections=mb_injected_rejections,
+                community_seeded_rejections=community_seeded_rejections,
                 rejected_candidates=rejected_candidates,
                 accepted_selection=accepted_selection,
                 final_rejection=None,
@@ -1828,6 +2431,20 @@ class SearchResolutionService:
                 if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
                     key = "mb_injected_failed_title"
                     mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                elif bool(candidate.get("community_seeded")):
+                    key = "community_seeded_failed_title"
+                    community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + 1
+                    _log_event(
+                        logging.INFO,
+                        "community_candidate_rejected",
+                        recording_mbid=recording_mbid,
+                        candidate_id=candidate.get("candidate_id"),
+                        url=candidate.get("url"),
+                        rejection_reason="pass_b_track_similarity",
+                        classified_reason=key,
+                        selected_rung=rung,
+                        query_label=query_label,
+                    )
                 continue
             if float(candidate.get("score_artist", 0.0)) < _MUSIC_PASS_B_MIN_ARTIST_SIMILARITY:
                 rejected_candidates.append(
@@ -1841,6 +2458,20 @@ class SearchResolutionService:
                 if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
                     key = "mb_injected_failed_artist"
                     mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                elif bool(candidate.get("community_seeded")):
+                    key = "community_seeded_failed_artist"
+                    community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + 1
+                    _log_event(
+                        logging.INFO,
+                        "community_candidate_rejected",
+                        recording_mbid=recording_mbid,
+                        candidate_id=candidate.get("candidate_id"),
+                        url=candidate.get("url"),
+                        rejection_reason="pass_b_artist_similarity",
+                        classified_reason=key,
+                        selected_rung=rung,
+                        query_label=query_label,
+                    )
                 continue
             if not bool(candidate.get("authority_channel_match")):
                 rejected_candidates.append(
@@ -1854,9 +2485,27 @@ class SearchResolutionService:
                 if str(candidate.get("source") or "").strip().lower() == "mb_relationship":
                     key = "mb_injected_failed_authority"
                     mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + 1
+                elif bool(candidate.get("community_seeded")):
+                    key = "community_seeded_failed_authority"
+                    community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + 1
+                    _log_event(
+                        logging.INFO,
+                        "community_candidate_rejected",
+                        recording_mbid=recording_mbid,
+                        candidate_id=candidate.get("candidate_id"),
+                        url=candidate.get("url"),
+                        rejection_reason="pass_b_authority",
+                        classified_reason=key,
+                        selected_rung=rung,
+                        query_label=query_label,
+                    )
                 continue
             eligible_b.append(candidate)
-        selected_b = eligible_b[0] if eligible_b else None
+        selected_b = (
+            self._prefer_music_video_candidate(eligible_b, ranked_b, expected_base=expected_base)
+            if prefer_music_video
+            else (eligible_b[0] if eligible_b else None)
+        )
         if selected_b is not None:
             selected = selected_b
             ranked_selected = ranked_b
@@ -1896,6 +2545,7 @@ class SearchResolutionService:
                 failure_reason="",
                 coherence_boost_applied=coherence_boost_applied,
                 mb_injected_rejections=mb_injected_rejections,
+                community_seeded_rejections=community_seeded_rejections,
                 rejected_candidates=rejected_candidates,
                 accepted_selection=accepted_selection,
                 final_rejection=None,
@@ -1926,6 +2576,7 @@ class SearchResolutionService:
             failure_reason=failure_reason,
             coherence_boost_applied=coherence_boost_applied,
             mb_injected_rejections=mb_injected_rejections,
+            community_seeded_rejections=community_seeded_rejections,
             rejected_candidates=rejected_candidates,
             accepted_selection=None,
             final_rejection=final_rejection,
@@ -1949,9 +2600,15 @@ class SearchResolutionService:
         mb_youtube_urls=None,
         recording_mbid=None,
         is_ep_release=False,
+        prefer_music_video=False,
+        excluded_candidate_ids=None,
     ):
         expected_duration_hint_sec = (int(duration_ms) // 1000) if duration_ms is not None else None
-        ladder = self._build_music_track_query_ladder(artist, track, album, is_ep_release=bool(is_ep_release))
+        ladder = (
+            self._build_music_video_query_ladder(artist, track, album, is_ep_release=bool(is_ep_release))
+            if bool(prefer_music_video)
+            else self._build_music_track_query_ladder(artist, track, album, is_ep_release=bool(is_ep_release))
+        )
         coherence_key = self._coherence_context_key(coherence_context)
         normalized_aliases = []
         if isinstance(track_aliases, (list, tuple, set)):
@@ -1977,6 +2634,12 @@ class SearchResolutionService:
                 "coherence_boost_applied": 0,
                 "ep_refinement_attempted": False,
                 "ep_refinement_candidates_considered": 0,
+                "mb_injected_candidates": 0,
+                "mb_injected_selected": False,
+                "mb_injected_rejections": {},
+                "community_seeded_candidates": 0,
+                "community_seeded_selected": False,
+                "community_seeded_rejections": {},
                 "decision_edge": {
                     "accepted_selection": None,
                     "rejected_candidates": [],
@@ -2009,6 +2672,15 @@ class SearchResolutionService:
             mb_injected_candidates, mb_probe_rejections = resolved_injected, {}
         mb_injected_rejections = dict(mb_probe_rejections or {})
         mb_injected_selected = False
+        community_seeded_candidates, community_seeded_probe_rejections = self._resolve_community_cache_candidates(
+            recording_mbid=recording_mbid,
+            artist=artist,
+            track=track,
+            album=album,
+            expected_duration_ms=duration_ms,
+        )
+        community_seeded_rejections = dict(community_seeded_probe_rejections or {})
+        community_seeded_selected = False
         decision_rejected_candidates = []
         decision_accepted = None
         decision_final_rejection = None
@@ -2017,6 +2689,12 @@ class SearchResolutionService:
         decision_top_rejected_variant_tags = []
         ep_refinement_attempted = False
         ep_refinement_candidates_considered = 0
+        excluded_ids = {
+            str(value or "").strip()
+            for value in (excluded_candidate_ids or [])
+            if str(value or "").strip()
+        }
+        excluded_candidates_total = 0
 
         for ladder_entry in ladder[first_rung:]:
             query = str(ladder_entry.get("query") or "").strip()
@@ -2035,6 +2713,7 @@ class SearchResolutionService:
                 "variant_allow_tokens": {"live"} if self._music_track_is_live(artist, track, album) else set(),
                 "track_aliases": normalized_aliases,
                 "track_disambiguation": normalized_disambiguation,
+                "prefer_music_video": bool(prefer_music_video),
             }
             candidates = self.retrieve_candidates(
                 {
@@ -2044,8 +2723,29 @@ class SearchResolutionService:
                     "rung": rung,
                     "first_rung": first_rung,
                     "mb_injected_candidates": mb_injected_candidates,
+                    "community_seeded_candidates": community_seeded_candidates,
                 }
             )
+            if excluded_ids:
+                filtered = []
+                excluded_this_rung = 0
+                for candidate in candidates or []:
+                    candidate_id = str(candidate.get("candidate_id") or "").strip()
+                    if candidate_id and candidate_id in excluded_ids:
+                        excluded_this_rung += 1
+                        continue
+                    filtered.append(candidate)
+                if excluded_this_rung:
+                    excluded_candidates_total += excluded_this_rung
+                    _log_event(
+                        logging.INFO,
+                        "music_candidates_excluded_by_cooldown",
+                        rung=rung,
+                        query_label=query_label,
+                        query=query,
+                        excluded=excluded_this_rung,
+                    )
+                candidates = filtered
             rung_meta = {
                 "rung": rung,
                 "query_label": query_label,
@@ -2083,6 +2783,8 @@ class SearchResolutionService:
             coherence_boost_applied += int(rank_result.coherence_boost_applied or 0)
             for key, value in (rank_result.mb_injected_rejections or {}).items():
                 mb_injected_rejections[key] = int(mb_injected_rejections.get(key) or 0) + int(value or 0)
+            for key, value in (rank_result.community_seeded_rejections or {}).items():
+                community_seeded_rejections[key] = int(community_seeded_rejections.get(key) or 0) + int(value or 0)
             for tag, count in (rank_result.candidate_variant_distribution or {}).items():
                 tag_key = str(tag or "").strip()
                 if not tag_key:
@@ -2098,6 +2800,7 @@ class SearchResolutionService:
                 selected_rung = rung
                 selected_pass = rank_result.selected_pass
                 mb_injected_selected = str(selected.get("source") or "").strip().lower() == "mb_relationship"
+                community_seeded_selected = bool(selected.get("community_seeded"))
                 decision_accepted = rank_result.accepted_selection if isinstance(rank_result.accepted_selection, dict) else None
                 decision_selected_variant_tags = list(rank_result.selected_candidate_variant_tags or [])
                 decision_top_rejected_variant_tags = list(rank_result.top_rejected_variant_tags or [])
@@ -2159,6 +2862,14 @@ class SearchResolutionService:
                 selected_pass=selected_pass,
                 count_for_album_run=current,
             )
+        if community_seeded_selected:
+            _log_event(
+                logging.INFO,
+                "community_candidate_selected",
+                recording_mbid=recording_mbid,
+                selected_rung=selected_rung,
+                selected_pass=selected_pass,
+            )
         self.last_music_track_search = {
             "attempted": attempted,
             "start_rung": first_rung,
@@ -2173,6 +2884,9 @@ class SearchResolutionService:
             "mb_injected_selected": mb_injected_selected,
             "mb_injected_rejections": mb_injected_rejections,
             "mb_injected_album_success_count": mb_injected_album_success_count,
+            "community_seeded_candidates": len(community_seeded_candidates or []),
+            "community_seeded_selected": bool(community_seeded_selected),
+            "community_seeded_rejections": dict(community_seeded_rejections or {}),
             "decision_edge": {
                 "accepted_selection": decision_accepted,
                 "rejected_candidates": decision_rejected_candidates,
@@ -2181,6 +2895,8 @@ class SearchResolutionService:
                 "selected_candidate_variant_tags": sorted({str(tag) for tag in (decision_selected_variant_tags or []) if str(tag or "").strip()}),
                 "top_rejected_variant_tags": list(decision_top_rejected_variant_tags or []),
             },
+            "prefer_music_video": bool(prefer_music_video),
+            "excluded_candidates_total": int(excluded_candidates_total),
         }
         ranked = selected_ranked
         if self.debug_music_scoring:
@@ -2255,7 +2971,8 @@ class SearchResolutionService:
                 )
             )
             return None
-        return self.store.create_request(payload)
+        request_id = self.store.create_request(payload)
+        return request_id
 
     def get_search_request(self, request_id):
         result = self.store.get_request(request_id)
@@ -2294,7 +3011,9 @@ class SearchResolutionService:
             return None
 
         request_id = request_row["id"]
+        request_started_monotonic = time.perf_counter()
         intent = request_row["intent"]
+        request_media_type = request_row.get("media_type") or "generic"
 
         auto_enqueue_value = request_row.get("auto_enqueue")
         auto_enqueue = True if auto_enqueue_value is None else bool(auto_enqueue_value)
@@ -2313,6 +3032,7 @@ class SearchResolutionService:
         items = self.store.list_items(request_id)
 
         for item in items:
+            item_started_monotonic = time.perf_counter()
             if stop_event and stop_event.is_set():
                 return request_id
             if item.get("status") in {"enqueued", "failed", "skipped"}:
@@ -2330,7 +3050,10 @@ class SearchResolutionService:
             )
 
             canonical_payload = None
-            if self.canonical_resolver:
+            should_resolve_canonical_presearch = (
+                bool(self.canonical_resolver) and request_media_type == "music"
+            )
+            if should_resolve_canonical_presearch:
                 if item["item_type"] == "album":
                     canonical_payload = self.canonical_resolver.resolve_album(item["artist"], item.get("album"))
                 else:
@@ -2342,132 +3065,314 @@ class SearchResolutionService:
 
             source_priority = _parse_source_priority(request_row.get("source_priority_json"))
             max_candidates = int(request_row.get("max_candidates_per_source") or 5)
+            if request_media_type in {"generic", "video"}:
+                max_candidates = min(max_candidates, int(self.discovery_max_candidates_per_source))
             scored = []
 
-            # --- Parallel adapter execution (bounded) ---
-            futures = {}
-            with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ADAPTERS, len(source_priority))) as pool:
-                for source in source_priority:
-                    adapter = self.adapters.get(source)
-                    if not adapter:
-                        _log_event(
-                            logging.ERROR,
-                            "adapter_missing",
-                            request_id=request_id,
-                            item_id=item["id"],
-                            source=source,
-                        )
-                        adapters_completed += 1
-                        self.store.update_request_progress(
-                            request_id,
-                            adapters_completed=adapters_completed,
-                        )
+            def _is_blank(value):
+                if value is None:
+                    return True
+                if isinstance(value, str):
+                    return not value.strip()
+                if isinstance(value, (list, tuple, dict, set)):
+                    return len(value) == 0
+                return False
+
+            def _candidate_identity(candidate):
+                return _candidate_transport_identity(candidate)
+
+            def _merge_candidate(base, incoming):
+                merged = dict(base or {})
+                incoming_candidate = dict(incoming or {})
+                for key, value in incoming_candidate.items():
+                    if key in {"community_seeded", "mb_injected", "community_verified_transport"}:
+                        merged[key] = bool(merged.get(key)) or bool(value)
                         continue
+                    if _is_blank(merged.get(key)) and not _is_blank(value):
+                        merged[key] = value
+                try:
+                    base_score = float(merged.get("final_score") or 0.0)
+                except Exception:
+                    base_score = 0.0
+                try:
+                    incoming_score = float(incoming_candidate.get("final_score") or 0.0)
+                except Exception:
+                    incoming_score = 0.0
+                if incoming_score > base_score:
+                    for score_key in (
+                        "score_artist",
+                        "score_track",
+                        "score_album",
+                        "score_duration",
+                        "score_source",
+                        "final_score",
+                        "rejection_reason",
+                        "duration_delta_ms",
+                        "score_breakdown",
+                        "base_score",
+                        "final_score_100",
+                    ):
+                        if score_key in incoming_candidate:
+                            merged[score_key] = incoming_candidate.get(score_key)
+                return merged
 
-                    self.store.update_item_status(item["id"], "searching_source")
-                    _log_event(
-                        logging.INFO,
-                        "adapter_search_started",
-                        request_id=request_id,
-                        item_id=item["id"],
-                        source=source,
-                        adapters_completed=adapters_completed,
-                        adapters_total=adapters_total,
-                    )
+            def _append_or_merge_candidate(candidate):
+                # For Home generic/video discovery, preserve per-source candidates as-is.
+                # Do not merge across identities; users should see each adapter's results.
+                if request_media_type in {"generic", "video"}:
+                    scored.append(candidate)
+                    return
+                identity = _candidate_identity(candidate)
+                if not identity:
+                    scored.append(candidate)
+                    return
+                for idx, existing in enumerate(scored):
+                    if _candidate_identity(existing) == identity:
+                        scored[idx] = _merge_candidate(existing, candidate)
+                        return
+                scored.append(candidate)
 
-                    futures[
-                        pool.submit(
-                            _run_adapter_search,
-                            adapter,
-                            item,
-                            max_candidates,
-                            canonical_payload,
-                        )
-                    ] = source
+            use_lightweight_discovery = (
+                bool(self.lightweight_discovery_enabled) and request_media_type in {"generic", "video"}
+            )
+            lightweight_had_timeouts = False
+            timed_out_sources = set()
 
-                for fut in as_completed(futures):
-                    source = futures[fut]
-                    try:
-                        candidates = fut.result()
-                    except Exception as exc:
-                        _log_event(
-                            logging.ERROR,
-                            "adapter_search_failed",
-                            request_id=request_id,
-                            item_id=item["id"],
-                            source=source,
-                            error=str(exc),
-                        )
-                        adapters_completed += 1
-                        self.store.update_request_progress(
-                            request_id,
-                            adapters_completed=adapters_completed,
-                        )
-                        continue
-
-                    for cand in candidates:
-                        if not _is_http_url(cand.get("url")):
+            def _execute_adapter_pass(*, lightweight_mode, source_subset=None, track_progress=True):
+                nonlocal adapters_completed, lightweight_had_timeouts
+                futures = {}
+                adapter_started_at = {}
+                pass_started_monotonic = time.perf_counter()
+                active_sources = (
+                    [src for src in source_priority if src in set(source_subset or [])]
+                    if source_subset is not None
+                    else list(source_priority)
+                )
+                if not active_sources:
+                    return
+                pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_ADAPTERS, len(active_sources)))
+                try:
+                    for source in active_sources:
+                        adapter = self.adapters.get(source)
+                        if not adapter:
                             _log_event(
-                                logging.WARNING,
-                                "adapter_candidate_invalid_url",
+                                logging.ERROR,
+                                "adapter_missing",
                                 request_id=request_id,
                                 item_id=item["id"],
                                 source=source,
-                                url=cand.get("url"),
                             )
+                            if track_progress:
+                                adapters_completed += 1
+                                self.store.update_request_progress(
+                                    request_id,
+                                    adapters_completed=adapters_completed,
+                                )
                             continue
-                        cand["source"] = source
-                        cand["candidate_id"] = str(
-                            cand.get("candidate_id")
-                            or cand.get("external_id")
-                            or cand.get("url")
-                            or ""
-                        )
-                        modifier = self.adapters[source].source_modifier(cand)
-                        scores = score_candidate(item, cand, source_modifier=modifier)
-                        cand.update(scores)
-                        cand["canonical_json"] = safe_json_dumps(canonical_payload) if canonical_payload else None
-                        cand["id"] = uuid4().hex
-                        scored.append(cand)
 
-                    if candidates:
-                        # Insert partial candidates immediately for progressive UI updates
-                        partial_ranked = rank_candidates(
-                            scored,
-                            source_priority=source_priority,
-                        )
-                        self.store.reset_candidates_for_item(item["id"])
-                        self.store.insert_candidates(item["id"], partial_ranked)
+                        self.store.update_item_status(item["id"], "searching_source")
                         _log_event(
                             logging.INFO,
-                            "adapter_candidates_emitted",
+                            "adapter_search_started",
                             request_id=request_id,
                             item_id=item["id"],
                             source=source,
-                            candidates_total=len(partial_ranked),
                             adapters_completed=adapters_completed,
                             adapters_total=adapters_total,
+                            search_mode=("lightweight" if lightweight_mode else "full"),
                         )
+                        adapter_started_at[source] = time.perf_counter()
+                        futures[
+                            pool.submit(
+                                _run_adapter_search,
+                                adapter,
+                                item,
+                                max_candidates,
+                                canonical_payload,
+                                lightweight=lightweight_mode,
+                                timeout_budget_sec=(self.discovery_source_timeout_sec if lightweight_mode else None),
+                            )
+                        ] = source
 
-                    adapters_completed += 1
+                    pending = set(futures.keys())
+                    while pending:
+                        done, not_done = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
+                        for fut in done:
+                            pending.discard(fut)
+                            source = futures[fut]
+                            source_started = adapter_started_at.get(source, pass_started_monotonic)
+                            try:
+                                candidates = fut.result()
+                            except Exception as exc:
+                                _log_event(
+                                    logging.ERROR,
+                                    "adapter_search_failed",
+                                    request_id=request_id,
+                                    item_id=item["id"],
+                                    source=source,
+                                    error=str(exc),
+                                    search_mode=("lightweight" if lightweight_mode else "full"),
+                                    duration_ms=int((time.perf_counter() - source_started) * 1000),
+                                )
+                                if track_progress:
+                                    adapters_completed += 1
+                                    self.store.update_request_progress(
+                                        request_id,
+                                        adapters_completed=adapters_completed,
+                                    )
+                                continue
+
+                            for cand in candidates:
+                                if not _is_http_url(cand.get("url")):
+                                    _log_event(
+                                        logging.WARNING,
+                                        "adapter_candidate_invalid_url",
+                                        request_id=request_id,
+                                        item_id=item["id"],
+                                        source=source,
+                                        url=cand.get("url"),
+                                    )
+                                    continue
+                                cand["source"] = source
+                                cand = self._annotate_candidate_with_community_reverse_lookup(cand)
+                                cand["candidate_id"] = str(
+                                    cand.get("candidate_id")
+                                    or cand.get("external_id")
+                                    or cand.get("url")
+                                    or ""
+                                )
+                                modifier = self.adapters[source].source_modifier(cand)
+                                scores = score_candidate(item, cand, source_modifier=modifier)
+                                cand.update(scores)
+                                cand["canonical_json"] = safe_json_dumps(canonical_payload) if canonical_payload else None
+                                cand["id"] = uuid4().hex
+                                _append_or_merge_candidate(cand)
+
+                            if candidates:
+                                # Insert partial candidates immediately for progressive UI updates
+                                partial_ranked = rank_candidates(
+                                    scored,
+                                    source_priority=source_priority,
+                                )
+                                self.store.reset_candidates_for_item(item["id"])
+                                self.store.insert_candidates(item["id"], partial_ranked)
+                                _log_event(
+                                    logging.INFO,
+                                    "adapter_candidates_emitted",
+                                    request_id=request_id,
+                                    item_id=item["id"],
+                                    source=source,
+                                    candidates_total=len(partial_ranked),
+                                    adapters_completed=adapters_completed,
+                                    adapters_total=adapters_total,
+                                    search_mode=("lightweight" if lightweight_mode else "full"),
+                                )
+
+                            if track_progress:
+                                adapters_completed += 1
+                            _log_event(
+                                logging.INFO,
+                                "adapter_search_completed",
+                                request_id=request_id,
+                                item_id=item["id"],
+                                source=source,
+                                adapters_completed=adapters_completed,
+                                adapters_total=adapters_total,
+                                search_mode=("lightweight" if lightweight_mode else "full"),
+                                duration_ms=int((time.perf_counter() - source_started) * 1000),
+                            )
+                            if track_progress:
+                                self.store.update_request_progress(
+                                    request_id,
+                                    adapters_completed=adapters_completed,
+                                )
+
+                        if lightweight_mode and not_done:
+                            now = time.perf_counter()
+                            expired = []
+                            for fut in list(not_done):
+                                source = futures[fut]
+                                started = adapter_started_at.get(source, pass_started_monotonic)
+                                if (now - started) >= float(self.discovery_source_timeout_sec):
+                                    expired.append((fut, source, started))
+                            for fut, source, started in expired:
+                                pending.discard(fut)
+                                fut.cancel()
+                                lightweight_had_timeouts = True
+                                timed_out_sources.add(source)
+                                if track_progress:
+                                    adapters_completed += 1
+                                    self.store.update_request_progress(
+                                        request_id,
+                                        adapters_completed=adapters_completed,
+                                    )
+                                _log_event(
+                                    logging.WARNING,
+                                    "adapter_search_timeout_budget_exceeded",
+                                    request_id=request_id,
+                                    item_id=item["id"],
+                                    source=source,
+                                    search_mode="lightweight",
+                                    timeout_budget_sec=float(self.discovery_source_timeout_sec),
+                                    duration_ms=int((time.perf_counter() - started) * 1000),
+                                )
+                finally:
+                    pool.shutdown(wait=False, cancel_futures=True)
                     _log_event(
                         logging.INFO,
-                        "adapter_search_completed",
+                        "search_adapter_pass_complete",
                         request_id=request_id,
                         item_id=item["id"],
-                        source=source,
-                        adapters_completed=adapters_completed,
-                        adapters_total=adapters_total,
+                        search_mode=("lightweight" if lightweight_mode else "full"),
+                        duration_ms=int((time.perf_counter() - pass_started_monotonic) * 1000),
+                        adapters_total=(len(active_sources) if source_subset is not None else adapters_total),
                     )
-                    self.store.update_request_progress(
-                        request_id,
-                        adapters_completed=adapters_completed,
-                    )
+
+            # --- Parallel adapter execution (bounded) ---
+            _execute_adapter_pass(lightweight_mode=use_lightweight_discovery)
+
+            if use_lightweight_discovery and not scored:
+                _log_event(
+                    logging.INFO,
+                    "adapter_lightweight_fallback_full",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    reason="no_candidates_after_lightweight_pass",
+                )
+                adapters_completed = 0
+                self.store.update_request_progress(
+                    request_id,
+                    adapters_total=adapters_total,
+                    adapters_completed=0,
+                )
+                _execute_adapter_pass(lightweight_mode=False)
+            elif use_lightweight_discovery and lightweight_had_timeouts and scored:
+                _log_event(
+                    logging.INFO,
+                    "adapter_lightweight_partial_due_timeout",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    candidates=len(scored),
+                )
+                # Recover missing adapters without blocking initial fast results.
+                _execute_adapter_pass(
+                    lightweight_mode=False,
+                    source_subset=timed_out_sources,
+                    track_progress=False,
+                )
 
             # --- Final selection logic below: do not change ---
             if not scored:
                 self.store.update_item_status(item["id"], "failed", error="no_candidates")
                 _log_event(logging.WARNING, "item_failed", request_id=request_id, item_id=item["id"], error="no_candidates")
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="failed",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+                )
                 continue
 
             ranked = rank_candidates(scored, source_priority=source_priority)
@@ -2490,6 +3395,14 @@ class SearchResolutionService:
                     item_id=item["id"],
                     error="no_candidate_above_threshold",
                 )
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="failed",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+                )
                 continue
 
             self.store.update_item_status(item["id"], "selected", chosen=chosen)
@@ -2505,12 +3418,28 @@ class SearchResolutionService:
             if not auto_enqueue:
                 # Invariant B: search-only requests never auto-enqueue download jobs.
                 # Manual enqueue via API is always allowed.
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="selected",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+                )
                 continue
 
             # Do not enqueue downloads from search for playlists (must bypass search)
             if chosen.get("url") and "list=" in chosen.get("url", ""):
                 self.store.update_item_status(
                     item["id"], "skipped", error="playlist_url_bypass"
+                )
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="skipped",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
                 )
                 continue
 
@@ -2575,6 +3504,14 @@ class SearchResolutionService:
                     item_id=item["id"],
                     error=f"invalid_destination: {exc}",
                 )
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="failed",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+                )
                 continue
             job_id, created, dedupe_reason = self.queue_store.enqueue_job(**enqueue_payload)
 
@@ -2596,6 +3533,14 @@ class SearchResolutionService:
                     destination=resolved_destination,
                     media_type=item["media_type"],
                     dedupe_result=dedupe_reason,
+                )
+                _log_event(
+                    logging.INFO,
+                    "search_item_complete",
+                    request_id=request_id,
+                    item_id=item["id"],
+                    status="skipped",
+                    duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
                 )
                 continue
 
@@ -2635,6 +3580,14 @@ class SearchResolutionService:
                 destination=resolved_destination,
                 media_type=item["media_type"],
             )
+            _log_event(
+                logging.INFO,
+                "search_item_complete",
+                request_id=request_id,
+                item_id=item["id"],
+                status="enqueued",
+                duration_ms=int((time.perf_counter() - item_started_monotonic) * 1000),
+            )
 
         items = self.store.list_items(request_id)
         if not auto_enqueue:
@@ -2647,6 +3600,14 @@ class SearchResolutionService:
                 self.store.update_request_status(request_id, "completed")
             else:
                 self.store.update_request_status(request_id, "failed", error="no_candidates")
+            _log_event(
+                logging.INFO,
+                "search_discovery_complete",
+                request_id=request_id,
+                media_type=request_media_type,
+                auto_enqueue=False,
+                duration_ms=int((time.perf_counter() - request_started_monotonic) * 1000),
+            )
             return request_id
 
         has_enqueued = any(item.get("status") == "enqueued" for item in items)
@@ -2662,6 +3623,14 @@ class SearchResolutionService:
                 request_id,
                 adapters_completed=adapters_total,
             )
+        _log_event(
+            logging.INFO,
+            "search_discovery_complete",
+            request_id=request_id,
+            media_type=request_media_type,
+            auto_enqueue=True,
+            duration_ms=int((time.perf_counter() - request_started_monotonic) * 1000),
+        )
         return request_id
 
     def enqueue_item_candidate(self, item_id, candidate_id, *, final_format_override=None):

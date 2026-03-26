@@ -32,7 +32,7 @@ def test_worker_sets_validation_failed_and_skips_record(monkeypatch, tmp_path: P
         lambda file_path, expected_ms, tolerance_seconds: False,
     )
     monkeypatch.setattr("download.worker.get_media_duration", lambda file_path: 1.0)
-    monkeypatch.setattr("download.worker.tag_file", lambda _path, _metadata: None)
+    monkeypatch.setattr("download.worker.tag_file", lambda _path, _metadata, **_kwargs: None)
 
     file_path = tmp_path / "short.wav"
     worker = DownloadWorker(_MockDownloader(file_path))

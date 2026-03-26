@@ -39,7 +39,11 @@ def build_music_relative_layout(
 def resolve_music_root_path(payload: dict) -> Path:
     """Resolve a base root path for canonical music placement from payload/config values."""
     config = payload.get("config") if isinstance(payload, dict) else None
+    music_cfg = config.get("music") if isinstance(config, dict) else None
     root_value = (
+        ((payload.get("music") or {}).get("library_path") if isinstance(payload.get("music"), dict) else None)
+        or (music_cfg.get("library_path") if isinstance(music_cfg, dict) else None)
+        or
         payload.get("music_root")
         or payload.get("destination")
         or payload.get("destination_dir")

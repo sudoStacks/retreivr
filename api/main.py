@@ -15,6 +15,8 @@ _require_python_311()
 
 import asyncio
 import functools
+import concurrent.futures
+import importlib
 import base64
 import binascii
 import hmac
@@ -29,17 +31,19 @@ import shutil
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import requests
 import musicbrainzngs
+import socket
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
-from urllib.parse import quote, urlparse
-from typing import Optional
+from urllib.parse import parse_qs, quote, urlparse
+from typing import Any, Optional
 
 import anyio
-from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -78,6 +82,8 @@ from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
 from engine.musicbrainz_binding import resolve_best_mb_pair, search_music_metadata
 from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
+from engine.search_adapters import YouTubeAdapter
+import engine.community_cache as community_cache
 from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
     SpotifyPlaylistImporter,
@@ -138,8 +144,44 @@ from scheduler.jobs.spotify_playlist_watch import (
     spotify_user_playlists_watch_job,
 )
 from metadata.importers.dispatcher import import_playlist as import_playlist_file_bytes
-from engine.import_pipeline import process_imported_tracks
+from engine.import_pipeline import (
+    get_import_batch_summary,
+    list_recent_import_batches,
+    process_imported_tracks,
+)
 from engine.import_m3u_builder import write_import_m3u_from_batch
+from library.reconcile import reconcile_library
+from library.review_queue import (
+    REVIEW_STATUS_PENDING,
+    accept_review_queue_items,
+    get_review_queue_item,
+    list_review_queue_items,
+    reject_review_queue_items,
+)
+from engine.community_publish_worker import (
+    CommunityPublishWorker,
+    apply_community_publish_defaults,
+    summarize_publish_runtime,
+    community_publish_worker_enabled,
+)
+from engine.community_publish_backfill import run_publish_backfill
+from engine.resolution_auth import resolve_node_auth
+from engine.resolution_api import (
+    RESOLUTION_VERIFY_THRESHOLD,
+    build_diff as build_resolution_diff,
+    build_health as build_resolution_health,
+    build_snapshot as build_resolution_snapshot,
+    build_stats as build_resolution_stats,
+    enqueue_unresolved_mbid as enqueue_resolution_unresolved_mbid,
+    get_local_sync_status as get_resolution_local_sync_status,
+    rebuild_resolution_index_from_dataset,
+    resolve_bulk as resolve_resolution_bulk,
+    resolve_recording as resolve_resolution_recording,
+    submit_mapping as submit_resolution_mapping,
+    sync_local_cache_from_api as sync_resolution_local_cache_from_api,
+    verify_mapping as verify_resolution_mapping,
+)
+from api.media_stream import build_media_file_response, guess_browser_media_type
 
 APP_NAME = "Retreivr API"
 STATUS_SCHEMA_VERSION = 2
@@ -155,9 +197,16 @@ LIKED_SONGS_JOB_ID = "spotify_liked_songs_watch"
 SAVED_ALBUMS_JOB_ID = "spotify_saved_albums_watch"
 USER_PLAYLISTS_JOB_ID = "spotify_user_playlists_watch"
 SPOTIFY_PLAYLISTS_WATCH_JOB_ID = "spotify_playlists_watch"
+COMMUNITY_PUBLISH_JOB_ID = "community_cache_publish"
+RESOLUTION_CACHE_SYNC_JOB_ID = "resolution_cache_sync"
 DEFERRED_RUN_JOB_ID = "deferred_run"
 WATCHER_QUIET_WINDOW_SECONDS = 60
+WATCHER_BATCH_MAX_WAIT_SECONDS = 300
+WATCHER_TELEGRAM_COOLDOWN_SECONDS = 300
+WATCHER_SUMMARY_WAIT_SECONDS = 900
+WATCHER_SUMMARY_POLL_SECONDS = 2
 COVER_ART_CACHE_TTL_SECONDS = 3600
+COVER_ART_NEGATIVE_CACHE_TTL_SECONDS = 120
 DEFAULT_LIKED_SONGS_SYNC_INTERVAL_MINUTES = 15
 DEFAULT_SAVED_ALBUMS_SYNC_INTERVAL_MINUTES = 30
 DEFAULT_USER_PLAYLISTS_SYNC_INTERVAL_MINUTES = 30
@@ -174,12 +223,58 @@ DIRECT_URL_PLAYLIST_ERROR = (
     "Playlist URLs are not supported in Direct URL mode. "
     "Please add this playlist via Scheduler or Playlist settings."
 )
+GHCR_PACKAGE_REPO = str(os.environ.get("RETREIVR_GHCR_REPO") or "sudostacks/retreivr").strip().lower()
+GHCR_TOKEN_URL = "https://ghcr.io/token"
+GHCR_TAGS_URL_TEMPLATE = "https://ghcr.io/v2/{repo}/tags/list"
+GITHUB_RELEASES_LATEST_URL = "https://api.github.com/repos/sudoStacks/retreivr/releases/latest"
+_SEMVER_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$", re.IGNORECASE)
 
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
-MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024
+MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024
 SUPPORTED_IMPORT_EXTENSIONS = {".m3u", ".m3u8", ".csv", ".xml", ".plist", ".json"}
 IMPORT_JOB_TTL_SECONDS = 6 * 60 * 60
 _LAST_TRANSITION_EVENT: str | None = None
+
+
+class ResolutionBulkRequest(BaseModel):
+    mbids: list[str]
+
+
+class ResolutionSubmitRequest(BaseModel):
+    mbid: str
+    source_url: str
+    source: str
+    node_id: str
+    duration_seconds: int | None = None
+    media_format: str | None = None
+    bitrate_kbps: int | None = None
+    file_hash: str | None = None
+    resolution_method: str | None = None
+    source_id: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class ResolutionVerifyRequest(BaseModel):
+    mbid: str
+    source_url: str
+    verifier_id: str
+    duration_seconds: int | None = None
+    media_format: str | None = None
+    bitrate_kbps: int | None = None
+    file_hash: str | None = None
+
+
+def _resolution_api_key_from_request(request: Request) -> str:
+    auth_header = str(request.headers.get("authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        return auth_header.split(" ", 1)[1].strip()
+    return str(request.headers.get("x-api-key") or "").strip()
+
+
+def _resolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else {}
+    value = cfg.get("resolution_api")
+    return value if isinstance(value, dict) else {}
 
 
 def _log_transition(event: str, **fields) -> None:
@@ -197,6 +292,173 @@ def _log_transition(event: str, **fields) -> None:
 
 def _mb_service():
     return get_musicbrainz_service()
+
+
+def _extract_mb_youtube_urls(entity: dict) -> list[str]:
+    urls: list[str] = []
+    rels = entity.get("url-relation-list") if isinstance(entity, dict) else None
+    if not isinstance(rels, list):
+        return urls
+    for rel in rels:
+        if not isinstance(rel, dict):
+            continue
+        url_obj = rel.get("target") if isinstance(rel.get("target"), dict) else {}
+        resource = str(url_obj.get("resource") or "").strip()
+        if not resource:
+            continue
+        lowered = resource.lower()
+        if "youtube.com" not in lowered and "youtu.be" not in lowered:
+            continue
+        if resource not in urls:
+            urls.append(resource)
+        if len(urls) >= 3:
+            break
+    return urls
+
+
+def _bounded_call(timeout_seconds: float, fn):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(fn)
+        return future.result(timeout=max(0.2, float(timeout_seconds)))
+
+
+_MV_HINT_STOPWORDS = {
+    "official",
+    "music",
+    "video",
+    "audio",
+    "lyrics",
+    "lyric",
+    "hd",
+    "hq",
+    "ft",
+    "feat",
+    "featuring",
+    "the",
+    "and",
+    "with",
+    "a",
+    "an",
+}
+
+
+def _mv_hint_tokens(text: str) -> list[str]:
+    raw = re.findall(r"[a-z0-9]+", str(text or "").lower())
+    return [token for token in raw if token and token not in _MV_HINT_STOPWORDS]
+
+
+def _mv_required_hits(tokens: list[str]) -> int:
+    if not tokens:
+        return 0
+    if len(tokens) <= 2:
+        return 1
+    return 2
+
+
+def _mv_has_intent(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    if "official music video" in lowered or "official video" in lowered or "music video" in lowered:
+        return True
+    if "lyric video" in lowered or "lyrics video" in lowered:
+        return True
+    if "visualizer" in lowered:
+        return True
+    if "official audio" in lowered or "audio" in lowered:
+        return True
+    words = set(re.findall(r"[a-z0-9]+", lowered))
+    return "official" in words and ("video" in words or "audio" in words)
+
+
+def _mv_intent_class(title: str, uploader: str | None = None) -> str:
+    title_lower = str(title or "").strip().lower()
+    uploader_lower = str(uploader or "").strip().lower()
+    if not title_lower and not uploader_lower:
+        return "none"
+    if "official music video" in title_lower or "official video" in title_lower or "music video" in title_lower:
+        return "official_video"
+    if "lyric video" in title_lower or "lyrics video" in title_lower:
+        return "lyric_video"
+    if "visualizer" in title_lower:
+        return "visualizer"
+    if "official audio" in title_lower:
+        return "official_audio"
+    if "audio" in title_lower and "official" in title_lower:
+        return "official_audio"
+    if "vevo" in uploader_lower and "official" in title_lower:
+        return "official_video"
+    if "vevo" in uploader_lower and ("lyric" in title_lower or "visualizer" in title_lower or "audio" in title_lower):
+        return "vevo_variant"
+    return "none"
+
+
+def _quick_youtube_mv_precheck(artist: str, track: str, album: str | None = None) -> dict:
+    artist_text = str(artist or "").strip()
+    track_text = str(track or "").strip()
+    album_text = str(album or "").strip()
+    if not artist_text and not track_text:
+        return {"matched": False, "reason": "missing_query"}
+    adapter = YouTubeAdapter()
+    queries = []
+    strict_query = " ".join(
+        part for part in [artist_text, track_text, album_text, "official music video"] if part
+    ).strip()
+    if strict_query:
+        queries.append(strict_query)
+    fallback_query = " ".join(part for part in [artist_text, track_text, "music video"] if part).strip()
+    if fallback_query and fallback_query not in queries:
+        queries.append(fallback_query)
+    if not queries:
+        return {"matched": False, "reason": "missing_query"}
+
+    artist_tokens = _mv_hint_tokens(artist_text)
+    track_tokens = _mv_hint_tokens(track_text)
+    first_candidate: dict | None = None
+    for query in queries:
+        try:
+            candidates = _bounded_call(4.2, lambda: adapter.search_music_track(query, limit=12))
+        except Exception:
+            continue
+        if not isinstance(candidates, list) or not candidates:
+            continue
+        if first_candidate is None and isinstance(candidates[0], dict):
+            first_candidate = dict(candidates[0])
+        for candidate in candidates[:12]:
+            title = str(candidate.get("title") or "").strip()
+            if not title:
+                continue
+            uploader = str(candidate.get("uploader") or candidate.get("artist") or "").strip()
+            searchable = f"{title} {uploader}".strip()
+            searchable_tokens = set(_mv_hint_tokens(searchable))
+            artist_hits = len(set(artist_tokens).intersection(searchable_tokens)) if artist_tokens else 0
+            track_hits = len(set(track_tokens).intersection(searchable_tokens)) if track_tokens else 0
+            artist_ok = artist_hits >= _mv_required_hits(artist_tokens)
+            track_ok = track_hits >= _mv_required_hits(track_tokens)
+            # Fallback acceptance: for long names, one strong track + artist hit is enough for hinting.
+            fallback_ok = artist_hits >= 1 and track_hits >= 1
+            intent_class = _mv_intent_class(title, uploader)
+            has_intent = intent_class != "none" or _mv_has_intent(title)
+            # Guide-level indicator: accept official/lyric/visualizer/audio signals when artist/track evidence is present.
+            if has_intent and ((artist_ok and track_ok) or fallback_ok):
+                return {
+                    "matched": True,
+                    "reason": "token_match",
+                    "intent_class": intent_class,
+                    "title": title,
+                    "url": candidate.get("url"),
+                    "uploader": uploader or None,
+                    "query": query,
+                }
+    if first_candidate is None:
+        return {"matched": False, "reason": "no_candidates"}
+    first = first_candidate if isinstance(first_candidate, dict) else {}
+    return {
+        "matched": False,
+        "reason": "weak_match",
+        "title": first.get("title"),
+        "url": first.get("url"),
+    }
 
 
 def get_loaded_config() -> dict:
@@ -277,7 +539,14 @@ def _get_playlist_import_snapshot() -> dict:
         "active": _playlist_imports_active(),
         "active_count": _playlist_imports_active_count(),
         "current_job": None,
+        "recent_batches": [],
     }
+    db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+    if db_path:
+        try:
+            snapshot["recent_batches"] = list_recent_import_batches(db_path, limit=5)
+        except Exception:
+            logging.exception("Failed to load recent import batches")
     lock = getattr(app.state, "playlist_import_jobs_lock", None)
     jobs = getattr(app.state, "playlist_import_jobs", None)
     if lock is None or not isinstance(jobs, dict):
@@ -299,18 +568,31 @@ def _get_playlist_import_snapshot() -> dict:
         "job_id": current.get("job_id"),
         "state": current.get("state"),
         "phase": current.get("phase"),
+        "current_phase_detail": current.get("current_phase_detail"),
         "message": current.get("message"),
         "total_tracks": current.get("total_tracks"),
         "processed_tracks": current.get("processed_tracks"),
         "resolved": current.get("resolved"),
         "unresolved": current.get("unresolved"),
         "enqueued": current.get("enqueued"),
+        "duplicate_skipped": current.get("duplicate_skipped"),
         "failed": current.get("failed"),
+        "top_rejection_reasons": current.get("top_rejection_reasons"),
+        "selected_bucket_counts": current.get("selected_bucket_counts"),
+        "import_batch_id": current.get("import_batch_id"),
         "error": current.get("error"),
         "started_at": current.get("started_at"),
         "finished_at": current.get("finished_at"),
         "updated_at": current.get("updated_at"),
     }
+    import_batch_id = str(current.get("import_batch_id") or "").strip()
+    if import_batch_id and db_path:
+        try:
+            batch_summary = get_import_batch_summary(db_path, import_batch_id)
+            if batch_summary:
+                snapshot["current_batch"] = batch_summary
+        except Exception:
+            logging.exception("Failed to load current import batch summary")
     return snapshot
 
 
@@ -327,6 +609,15 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
         },
         "active_count": 0,
         "active_jobs": [],
+        "counts_by_origin": {},
+        "stale_counts": {
+            "queued": 0,
+            "claimed": 0,
+            "downloading": 0,
+            "postprocessing": 0,
+        },
+        "last_job_started_at": None,
+        "last_job_completed_at": None,
         "runtime_metrics": {},
     }
     db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
@@ -347,6 +638,19 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
             key = str(row["status"] or "").strip().lower()
             if key in summary["counts"]:
                 summary["counts"][key] = int(row["count"] or 0)
+
+        cur.execute(
+            """
+            SELECT COALESCE(origin, 'unknown') AS origin, status, COUNT(*) AS count
+            FROM download_jobs
+            GROUP BY COALESCE(origin, 'unknown'), status
+            """
+        )
+        for row in cur.fetchall():
+            origin = str(row["origin"] or "unknown").strip() or "unknown"
+            status = str(row["status"] or "").strip().lower()
+            summary["counts_by_origin"].setdefault(origin, {})
+            summary["counts_by_origin"][origin][status] = int(row["count"] or 0)
 
         summary["active_count"] = int(
             summary["counts"]["queued"]
@@ -397,6 +701,37 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
             }
             for row in cur.fetchall()
         ]
+        cur.execute(
+            """
+            SELECT id, status, queued, claimed, downloading, postprocessing, updated_at, progress_updated_at
+            FROM download_jobs
+            WHERE status IN ('queued', 'claimed', 'downloading', 'postprocessing')
+            """
+        )
+        now_dt = datetime.now(timezone.utc)
+        for row in cur.fetchall():
+            status = str(row["status"] or "").strip().lower()
+            ts = None
+            if status == "queued":
+                ts = _parse_iso(row["queued"] or row["updated_at"])
+                threshold = 30 * 60
+            elif status == "claimed":
+                ts = _parse_iso(row["claimed"] or row["updated_at"])
+                threshold = 20 * 60
+            else:
+                ts = _parse_iso(row["progress_updated_at"] or row[status] or row["updated_at"])
+                threshold = 60 * 60
+            if ts is not None and (now_dt - ts).total_seconds() > threshold:
+                summary["stale_counts"][status] = int(summary["stale_counts"].get(status, 0) or 0) + 1
+
+        cur.execute("SELECT MAX(COALESCE(claimed, downloading, queued)) AS started_at FROM download_jobs")
+        started_row = cur.fetchone()
+        if started_row:
+            summary["last_job_started_at"] = started_row["started_at"]
+        cur.execute("SELECT MAX(completed) AS completed_at FROM download_jobs WHERE status='completed'")
+        completed_row = cur.fetchone()
+        if completed_row:
+            summary["last_job_completed_at"] = completed_row["completed_at"]
     except sqlite3.OperationalError as exc:
         msg = str(exc).lower()
         if "no such table" not in msg and "no such column" not in msg:
@@ -412,7 +747,14 @@ def _get_download_queue_snapshot(limit_active_jobs: int = 5) -> dict:
     return summary
 
 
-def _run_playlist_import_job(job_id: str, filename: str, payload: bytes) -> None:
+def _run_playlist_import_job(
+    job_id: str,
+    filename: str,
+    payload: bytes,
+    media_mode: str = "music",
+    destination_dir: str | None = None,
+    final_format: str | None = None,
+) -> None:
     try:
         _update_playlist_import_job(
             job_id,
@@ -457,12 +799,17 @@ def _run_playlist_import_job(job_id: str, filename: str, payload: bytes) -> None
             _update_playlist_import_job(
                 job_id,
                 phase=snapshot.get("phase") or "resolving",
+                current_phase_detail=snapshot.get("current_phase_detail"),
                 total_tracks=int(snapshot.get("total_tracks") or total_tracks),
                 processed_tracks=int(snapshot.get("processed_tracks") or 0),
                 resolved=int(snapshot.get("resolved_count") or 0),
                 unresolved=int(snapshot.get("unresolved_count") or 0),
                 enqueued=int(snapshot.get("enqueued_count") or 0),
+                duplicate_skipped=int(snapshot.get("duplicate_skipped_count") or 0),
                 failed=int(snapshot.get("failed_count") or 0),
+                top_rejection_reasons=snapshot.get("top_rejection_reasons") or {},
+                selected_bucket_counts=snapshot.get("selected_bucket_counts") or {},
+                batch_id=snapshot.get("batch_id"),
                 message="Resolving tracks and enqueueing jobs...",
             )
 
@@ -471,9 +818,10 @@ def _run_playlist_import_job(job_id: str, filename: str, payload: bytes) -> None
             {
                 "queue_store": queue_store,
                 "app_config": runtime_config,
+                "media_mode": str(media_mode or "music"),
                 "base_dir": app.state.paths.single_downloads_dir,
-                "destination_dir": None,
-                "final_format": runtime_config.get("final_format"),
+                "destination_dir": str(destination_dir or "").strip() or None,
+                "final_format": str(final_format or "").strip() or None,
                 "progress_callback": _progress,
             },
         )
@@ -489,7 +837,11 @@ def _run_playlist_import_job(job_id: str, filename: str, payload: bytes) -> None
             resolved=int(getattr(result, "resolved_count", 0) or 0),
             unresolved=int(getattr(result, "unresolved_count", 0) or 0),
             enqueued=int(getattr(result, "enqueued_count", 0) or 0),
+            duplicate_skipped=int(getattr(result, "duplicate_skipped_count", 0) or 0),
             failed=int(getattr(result, "failed_count", 0) or 0),
+            current_phase_detail=str(getattr(result, "current_phase_detail", "") or "completed"),
+            top_rejection_reasons=getattr(result, "top_rejection_reasons", {}) or {},
+            selected_bucket_counts=getattr(result, "selected_bucket_counts", {}) or {},
             import_batch_id=import_batch_id,
             error=None,
             finished_at=datetime.now(timezone.utc).isoformat(),
@@ -509,6 +861,68 @@ def _run_playlist_import_job(job_id: str, filename: str, payload: bytes) -> None
                 active_count = _playlist_imports_active_count()
                 app.state.playlist_import_active_count = max(0, active_count - 1)
                 _trim_playlist_import_jobs_locked()
+
+
+def _parse_semver_tag(tag: str | None) -> tuple[int, int, int] | None:
+    text = str(tag or "").strip()
+    if not text:
+        return None
+    match = _SEMVER_TAG_RE.match(text)
+    if not match:
+        return None
+    try:
+        return tuple(int(part) for part in match.groups())
+    except Exception:
+        return None
+
+
+def _resolve_latest_version_tag(timeout_seconds: float = 2.5) -> tuple[str | None, str]:
+    # Prefer GHCR tag inventory because runtime distribution is container-first.
+    try:
+        token_resp = requests.get(
+            GHCR_TOKEN_URL,
+            params={"service": "ghcr.io", "scope": f"repository:{GHCR_PACKAGE_REPO}:pull"},
+            timeout=max(0.5, float(timeout_seconds)),
+        )
+        token_resp.raise_for_status()
+        token = str((token_resp.json() or {}).get("token") or "").strip()
+        if not token:
+            raise RuntimeError("ghcr_token_missing")
+
+        tags_resp = requests.get(
+            GHCR_TAGS_URL_TEMPLATE.format(repo=GHCR_PACKAGE_REPO),
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=max(0.5, float(timeout_seconds)),
+        )
+        tags_resp.raise_for_status()
+        tags_json = tags_resp.json()
+        tags_payload = tags_json if isinstance(tags_json, dict) else {}
+        tags = tags_payload.get("tags") if isinstance(tags_payload, dict) else []
+        if isinstance(tags, list):
+            semver_tags = [str(tag).strip() for tag in tags if _parse_semver_tag(str(tag).strip())]
+            if semver_tags:
+                best = max(semver_tags, key=lambda value: _parse_semver_tag(value) or (0, 0, 0))
+                return best, "ghcr_tags"
+    except Exception as exc:
+        logging.warning("version_check_ghcr_failed: %s", exc)
+
+    # Fallback to GitHub releases if GHCR is unavailable.
+    try:
+        response = requests.get(
+            GITHUB_RELEASES_LATEST_URL,
+            timeout=max(0.5, float(timeout_seconds)),
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        response.raise_for_status()
+        payload_json = response.json()
+        payload = payload_json if isinstance(payload_json, dict) else {}
+        tag_name = str(payload.get("tag_name") or "").strip()
+        if tag_name:
+            return tag_name, "github_releases_latest"
+    except Exception as exc:
+        logging.warning("version_check_release_fallback_failed: %s", exc)
+
+    return None, "unavailable"
 
 
 def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
@@ -540,6 +954,7 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
         if not _is_allowed_album_release_group_type(primary_type):
             continue
         artist_credit = group.get("artist-credit")
+        artist_credit_ids: set[str] = set()
         artist_name = ""
         if isinstance(artist_credit, list):
             parts: list[str] = []
@@ -547,6 +962,9 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
                 if not isinstance(item, dict):
                     continue
                 artist_obj = item.get("artist") if isinstance(item.get("artist"), dict) else {}
+                artist_id = str(artist_obj.get("id") or "").strip()
+                if artist_id:
+                    artist_credit_ids.add(artist_id)
                 name = str(item.get("name") or artist_obj.get("name") or "").strip()
                 joinphrase = str(item.get("joinphrase") or "")
                 if name:
@@ -554,6 +972,8 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
                 if joinphrase:
                     parts.append(joinphrase)
             artist_name = "".join(parts).strip()
+        if artist_credit_ids and normalized_artist_mbid not in artist_credit_ids:
+            continue
         candidates.append(
             {
                 "release_group_id": group.get("id"),
@@ -818,7 +1238,189 @@ def _delete_music_failures(
     remaining = int((cur.fetchone() or [0])[0] or 0)
     return deleted, before_count, remaining
 
-def notify_run_summary(config, *, run_type: str, status, started_at, finished_at, force_send: bool = False):
+
+def _ensure_run_summary_dispatch_table(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_summary_dispatch (
+            run_type TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            summary_sent INTEGER NOT NULL DEFAULT 0,
+            telegram_message_id TEXT,
+            attempted INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (run_type, run_id)
+        )
+        """
+    )
+    conn.commit()
+
+
+def _read_persisted_run_summary_dispatch(run_type: str, run_id: str) -> dict[str, object] | None:
+    db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+    if not db_path:
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        _ensure_run_summary_dispatch_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT summary_sent, telegram_message_id, attempted
+            FROM run_summary_dispatch
+            WHERE run_type=? AND run_id=?
+            """,
+            (run_type, run_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        summary_sent, telegram_message_id, attempted = row
+        return {
+            "summary_sent": bool(summary_sent),
+            "telegram_message_id": telegram_message_id,
+            "attempted": int(attempted or 0),
+        }
+    except Exception:
+        logging.exception("Failed reading persisted run summary dispatch")
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _write_persisted_run_summary_dispatch(run_type: str, run_id: str, record: dict[str, object]) -> None:
+    db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+    if not db_path:
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        _ensure_run_summary_dispatch_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO run_summary_dispatch (
+                run_type, run_id, summary_sent, telegram_message_id, attempted, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_type, run_id) DO UPDATE SET
+                summary_sent=excluded.summary_sent,
+                telegram_message_id=excluded.telegram_message_id,
+                attempted=excluded.attempted,
+                updated_at=excluded.updated_at
+            """,
+            (
+                run_type,
+                run_id,
+                1 if bool(record.get("summary_sent")) else 0,
+                str(record.get("telegram_message_id") or "").strip() or None,
+                int(record.get("attempted") or 0),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        logging.exception("Failed writing persisted run summary dispatch")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _default_telegram_delivery_stats() -> dict[str, object]:
+    return {
+        "sent_count": 0,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "last_error": None,
+        "last_attempt_at": None,
+        "last_success_at": None,
+        "last_message_id": None,
+        "last_run_type": None,
+    }
+
+
+def _telegram_delivery_stats_snapshot() -> dict[str, object]:
+    stats = getattr(app.state, "telegram_delivery_stats", None)
+    lock = getattr(app.state, "telegram_delivery_stats_lock", None)
+    if not isinstance(stats, dict):
+        return _default_telegram_delivery_stats()
+    if lock is not None:
+        with lock:
+            return safe_json(dict(stats))
+    return safe_json(dict(stats))
+
+
+def _record_telegram_delivery(
+    *,
+    run_type: str | None,
+    sent: bool,
+    skipped: bool = False,
+    error: str | None = None,
+    message_id: str | None = None,
+) -> None:
+    stats = getattr(app.state, "telegram_delivery_stats", None)
+    lock = getattr(app.state, "telegram_delivery_stats_lock", None)
+    if not isinstance(stats, dict):
+        stats = _default_telegram_delivery_stats()
+        app.state.telegram_delivery_stats = stats
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    def _mutate() -> None:
+        stats["last_attempt_at"] = now_iso
+        stats["last_run_type"] = str(run_type or "").strip() or None
+        if message_id is not None:
+            stats["last_message_id"] = str(message_id).strip() or None
+        if skipped:
+            stats["skipped_count"] = int(stats.get("skipped_count") or 0) + 1
+            return
+        if sent:
+            stats["sent_count"] = int(stats.get("sent_count") or 0) + 1
+            stats["last_success_at"] = now_iso
+            stats["last_error"] = None
+        else:
+            stats["failed_count"] = int(stats.get("failed_count") or 0) + 1
+            stats["last_error"] = str(error or "").strip() or "telegram_send_failed"
+
+    if lock is not None:
+        with lock:
+            _mutate()
+    else:
+        _mutate()
+
+
+def _telegram_preflight_error(config) -> str | None:
+    telegram_cfg = config.get("telegram") if isinstance(config, dict) else None
+    if not isinstance(telegram_cfg, dict):
+        return "telegram_not_configured"
+    if "enabled" in telegram_cfg and not bool(telegram_cfg.get("enabled")):
+        return "telegram_disabled"
+    bot_token = str(telegram_cfg.get("bot_token") or "").strip()
+    chat_id = str(telegram_cfg.get("chat_id") or "").strip()
+    if not bot_token:
+        return "telegram_bot_token_missing"
+    if not chat_id:
+        return "telegram_chat_id_missing"
+    return None
+
+def notify_run_summary(
+    config,
+    *,
+    run_type: str,
+    status,
+    started_at,
+    finished_at,
+    force_send: bool = False,
+    attempted_override: int | None = None,
+):
     if run_type not in {"scheduled", "watcher", "api"}:
         return {"attempted": 0, "sent": False, "telegram_message_id": None}
 
@@ -850,6 +1452,8 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
                 pending_job_ids.append(text)
 
         job_id_to_path: dict[str, str] = {}
+        job_id_to_label: dict[str, str] = {}
+        job_id_to_video_id: dict[str, str] = {}
         if pending_job_ids:
             db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
             if db_path:
@@ -857,13 +1461,105 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
                     conn = sqlite3.connect(db_path)
                     cur = conn.cursor()
                     placeholders = ",".join("?" for _ in pending_job_ids)
+                    cur.execute("PRAGMA table_info(download_jobs)")
+                    download_job_columns = {str(row[1]).strip() for row in cur.fetchall() if len(row) > 1}
+                    selected_columns = ["id", "file_path", "output_template", "url"]
+                    for optional_col in ("source", "external_id", "input_url", "canonical_url"):
+                        if optional_col in download_job_columns:
+                            selected_columns.append(optional_col)
                     cur.execute(
-                        f"SELECT id, file_path FROM download_jobs WHERE id IN ({placeholders})",
+                        f"SELECT {', '.join(selected_columns)} FROM download_jobs WHERE id IN ({placeholders})",
                         pending_job_ids,
                     )
-                    for job_id, file_path in cur.fetchall():
+                    for row in cur.fetchall():
+                        row_map = {
+                            selected_columns[index]: row[index]
+                            for index in range(min(len(selected_columns), len(row)))
+                        }
+                        job_id = row_map.get("id")
+                        file_path = row_map.get("file_path")
+                        output_template_raw = row_map.get("output_template")
+                        url = row_map.get("url")
+                        source = str(row_map.get("source") or "").strip().lower()
+                        external_id = str(row_map.get("external_id") or "").strip()
+                        input_url = str(row_map.get("input_url") or "").strip()
+                        canonical_url = str(row_map.get("canonical_url") or "").strip()
+                        if job_id and output_template_raw:
+                            try:
+                                parsed = json.loads(output_template_raw)
+                            except Exception:
+                                parsed = {}
+                            if isinstance(parsed, dict):
+                                canonical = parsed.get("canonical_metadata") if isinstance(parsed.get("canonical_metadata"), dict) else {}
+                                label = (
+                                    canonical.get("track")
+                                    or parsed.get("track")
+                                    or canonical.get("title")
+                                    or parsed.get("title")
+                                )
+                                if label:
+                                    job_id_to_label[str(job_id)] = str(label).strip()
+                        job_key = str(job_id or "").strip()
+                        if job_key:
+                            video_id = external_id
+                            if not video_id:
+                                for fallback_url in (str(url or "").strip(), input_url, canonical_url):
+                                    if not fallback_url:
+                                        continue
+                                    parsed_url = urlparse(fallback_url)
+                                    qs = parse_qs(parsed_url.query)
+                                    video_id = str((qs.get("v") or [None])[0] or "").strip()
+                                    if not video_id and "youtu.be" in parsed_url.netloc and parsed_url.path:
+                                        video_id = str(parsed_url.path.lstrip("/").split("/")[0] or "").strip()
+                                    if video_id:
+                                        break
+                            if video_id:
+                                job_id_to_video_id[job_key] = video_id
+                            # Preserve source-based video id extraction for old rows that omitted external_id.
+                            if not video_id and source in {"youtube", "youtube_music"}:
+                                fallback_url = str(url or "").strip() or input_url or canonical_url
+                                if fallback_url:
+                                    parsed_url = urlparse(fallback_url)
+                                    qs = parse_qs(parsed_url.query)
+                                    parsed_video_id = str((qs.get("v") or [None])[0] or "").strip()
+                                    if parsed_video_id:
+                                        job_id_to_video_id[job_key] = parsed_video_id
                         if job_id and file_path:
                             job_id_to_path[str(job_id)] = str(file_path)
+
+                    unresolved_video_ids = sorted(
+                        {
+                            video_id
+                            for job_id, video_id in job_id_to_video_id.items()
+                            if video_id and not job_id_to_label.get(job_id)
+                        }
+                    )
+                    if unresolved_video_ids:
+                        cur.execute("PRAGMA table_info(download_history)")
+                        history_columns = {str(row[1]).strip() for row in cur.fetchall() if len(row) > 1}
+                        if {"video_id", "title"}.issubset(history_columns):
+                            history_sort_col = "completed_at" if "completed_at" in history_columns else "id"
+                            history_placeholders = ",".join("?" for _ in unresolved_video_ids)
+                            cur.execute(
+                                "SELECT video_id, title "
+                                f"FROM download_history WHERE video_id IN ({history_placeholders}) "
+                                "AND title IS NOT NULL AND TRIM(title) != '' "
+                                f"ORDER BY {history_sort_col} DESC",
+                                unresolved_video_ids,
+                            )
+                            video_id_to_title: dict[str, str] = {}
+                            for raw_video_id, raw_title in cur.fetchall():
+                                video_key = str(raw_video_id or "").strip()
+                                title_text = str(raw_title or "").strip()
+                                if not video_key or not title_text or video_key in video_id_to_title:
+                                    continue
+                                video_id_to_title[video_key] = title_text
+                            for job_id, video_id in job_id_to_video_id.items():
+                                if job_id_to_label.get(job_id):
+                                    continue
+                                resolved_title = video_id_to_title.get(video_id)
+                                if resolved_title:
+                                    job_id_to_label[job_id] = resolved_title
                 except Exception:
                     logging.exception("Failed to resolve run success labels from download_jobs")
                 finally:
@@ -874,11 +1570,22 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
 
         seen: set[str] = set()
         for raw in raw_values:
-            candidate = job_id_to_path.get(raw, raw)
-            if os.path.sep in candidate:
-                candidate = os.path.basename(candidate)
+            candidate = job_id_to_label.get(raw)
+            if not candidate:
+                candidate = job_id_to_path.get(raw, raw)
+                if os.path.sep in candidate:
+                    candidate = os.path.basename(candidate)
+            if (
+                isinstance(candidate, str)
+                and raw in job_id_to_video_id
+                and candidate == raw
+            ):
+                candidate = f"YouTube Video ({job_id_to_video_id.get(raw)})"
             candidate = str(candidate or "").strip()
             if not candidate:
+                continue
+            # Never leak opaque job IDs in user-facing Telegram summaries.
+            if re.fullmatch(r"[0-9a-f]{32}", candidate):
                 continue
             if candidate in seen:
                 continue
@@ -887,17 +1594,62 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
 
         return labels
 
+    def _resolve_attempted_job_outcomes(values) -> tuple[list[str], list[str]]:
+        if not isinstance(values, (list, tuple, set)):
+            return [], []
+        job_ids = [str(v or "").strip() for v in values if re.fullmatch(r"[0-9a-f]{32}", str(v or "").strip())]
+        if not job_ids:
+            return [], []
+        db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+        if not db_path:
+            return [], []
+        completed_ids: list[str] = []
+        failed_ids: list[str] = []
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            placeholders = ",".join("?" for _ in job_ids)
+            cur.execute(
+                f"SELECT id, status FROM download_jobs WHERE id IN ({placeholders})",
+                job_ids,
+            )
+            for job_id, raw_status in cur.fetchall():
+                normalized = str(raw_status or "").strip().lower()
+                if normalized == "completed":
+                    completed_ids.append(str(job_id))
+                elif normalized in {"failed", "cancelled"}:
+                    failed_ids.append(str(job_id))
+        except Exception:
+            logging.exception("Failed to resolve attempted outcomes from download_jobs")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        return completed_ids, failed_ids
+
     def _build_message(success_count: int, failure_count: int, duration_text: str, downloaded_labels: list[str]) -> str:
         status_text = "completed" if failure_count <= 0 else "completed_with_errors"
+        success_label = "Attempted successes"
+        failure_label = "Attempted failures"
+        downloaded_heading = "Attempted:"
+        if run_type == "scheduled":
+            title = "Retreivr Scheduler Run Summary\nYouTube Playlist Download Attempts"
+        elif run_type == "watcher":
+            title = "Retreivr Watcher Run Summary\nYouTube Playlist Download Attempts"
+        else:
+            title = "YouTube Archiver Summary"
         header = (
-            "YouTube Archiver Summary\n"
+            f"{title}\n"
             f"Status: {status_text}\n"
-            f"\u2714 Success: {success_count}\n"
-            f"\u2716 Failed: {failure_count}\n"
+            f"\u2714 {success_label}: {success_count}\n"
+            f"\u2716 {failure_label}: {failure_count}\n"
             f"Duration: {duration_text}"
         )
         footer = "\n\n__________"
-        lines = ["", "Downloaded:"]
+        lines = ["", downloaded_heading]
         if downloaded_labels:
             lines.extend([f"\u2022 {label}" for label in downloaded_labels])
         else:
@@ -908,7 +1660,7 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
             return message
 
         # Trim downloaded list first, preserving header and a clear overflow marker.
-        trimmed_lines = ["", "Downloaded:"]
+        trimmed_lines = ["", downloaded_heading]
         remaining = list(downloaded_labels)
         while remaining:
             next_line = f"\u2022 {remaining[0]}"
@@ -927,15 +1679,44 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
             return f"{capped[:TELEGRAM_MAX_MESSAGE_CHARS - 1]}\u2026"
         return capped
 
-    successes = _count(getattr(status, "run_successes", 0))
-    failures = _count(getattr(status, "run_failures", 0))
-    attempted = successes + failures
+    raw_successes = getattr(status, "run_successes", []) or []
+    raw_success_values = list(raw_successes) if isinstance(raw_successes, (list, tuple, set)) else []
+    has_job_ids = any(re.fullmatch(r"[0-9a-f]{32}", str(v or "").strip()) for v in raw_success_values)
+    completed_ids, failed_ids = _resolve_attempted_job_outcomes(raw_successes)
+    if has_job_ids:
+        # For queue-backed runs, only terminal jobs count as attempted.
+        successes = len(completed_ids)
+        failures = len(failed_ids)
+        attempted = successes + failures
+        summary_values = list(completed_ids) + list(failed_ids)
+    elif completed_ids or failed_ids:
+        successes = len(completed_ids)
+        failures = len(failed_ids)
+        attempted = successes + failures
+        summary_values = list(completed_ids) + list(failed_ids)
+    else:
+        successes = _count(raw_successes)
+        failures = _count(getattr(status, "run_failures", 0))
+        attempted = successes + failures
+        summary_values = raw_success_values
 
-    if attempted <= 0 and not force_send:
+    # Attempt-driven summaries only: no synthetic sends when nothing was attempted.
+    if attempted <= 0 and isinstance(attempted_override, int) and attempted_override > 0:
+        # Watcher batches enqueue jobs asynchronously; terminal states may not be visible
+        # at summary time yet. Allow caller to provide a queue-backed attempted count.
+        attempted = attempted_override
+        successes = attempted_override
+        failures = 0
+
+    if attempted <= 0:
+        _record_telegram_delivery(
+            run_type=run_type,
+            sent=False,
+            skipped=True,
+            error="no_attempted_jobs",
+            message_id=None,
+        )
         return {"attempted": 0, "sent": False, "telegram_message_id": None}
-    if attempted <= 0 and force_send:
-        failures = 1
-        attempted = 1
 
     duration_label = "unknown"
     if started_at and finished_at:
@@ -946,7 +1727,7 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
             m, s = divmod(max(0, duration_sec), 60)
             duration_label = f"{m}m {s}s" if m else f"{s}s"
 
-    downloaded_labels = _resolve_downloaded_labels(getattr(status, "run_successes", []) or [])
+    downloaded_labels = _resolve_downloaded_labels(summary_values)
     msg = _build_message(successes, failures, duration_label, downloaded_labels)
 
     telegram_message_id = None
@@ -962,6 +1743,22 @@ def notify_run_summary(config, *, run_type: str, status, started_at, finished_at
         logging.exception("Telegram notify failed (run_type=%s)", run_type)
         sent = False
         telegram_message_id = None
+        _record_telegram_delivery(
+            run_type=run_type,
+            sent=False,
+            skipped=False,
+            error="telegram_exception",
+            message_id=None,
+        )
+    else:
+        preflight_error = None if sent else _telegram_preflight_error(config)
+        _record_telegram_delivery(
+            run_type=run_type,
+            sent=sent,
+            skipped=False,
+            error=preflight_error or ("telegram_api_not_ok" if not sent else None),
+            message_id=telegram_message_id,
+        )
 
     return {
         "attempted": attempted,
@@ -986,6 +1783,7 @@ def dispatch_run_summary_once(
         app.state.run_summary_dispatch = registry
 
     dedupe_key = f"{run_type}:{str(run_id or '').strip() or 'unknown'}"
+    dedupe_run_id = str(run_id or "").strip() or "unknown"
     existing = registry.get(dedupe_key) if isinstance(registry.get(dedupe_key), dict) else None
     if existing and bool(existing.get("summary_sent")):
         setattr(status, "summary_sent", True)
@@ -998,6 +1796,19 @@ def dispatch_run_summary_once(
         )
         return existing
 
+    persisted = _read_persisted_run_summary_dispatch(run_type, dedupe_run_id)
+    if persisted and bool(persisted.get("summary_sent")):
+        setattr(status, "summary_sent", True)
+        setattr(status, "telegram_message_id", persisted.get("telegram_message_id"))
+        registry[dedupe_key] = persisted
+        logging.info(
+            "run_summary_telegram_dispatch_skipped run_id=%s run_type=%s reason=already_sent_persisted message_id=%s",
+            run_id,
+            run_type,
+            persisted.get("telegram_message_id"),
+        )
+        return persisted
+
     if bool(getattr(status, "summary_sent", False)):
         cached = {
             "summary_sent": True,
@@ -1005,6 +1816,7 @@ def dispatch_run_summary_once(
             "attempted": 0,
         }
         registry[dedupe_key] = cached
+        _write_persisted_run_summary_dispatch(run_type, dedupe_run_id, cached)
         logging.info(
             "run_summary_telegram_dispatch_skipped run_id=%s run_type=%s reason=status_summary_sent message_id=%s",
             run_id,
@@ -1034,6 +1846,7 @@ def dispatch_run_summary_once(
         "attempted": attempted,
     }
     registry[dedupe_key] = record
+    _write_persisted_run_summary_dispatch(run_type, dedupe_run_id, record)
     logging.info(
         "run_summary_telegram_dispatch run_id=%s run_type=%s attempted=%s sent=%s message_id=%s",
         run_id,
@@ -1043,6 +1856,10 @@ def dispatch_run_summary_once(
         telegram_message_id,
     )
     return record
+
+
+def _should_dispatch_run_summary(run_source: str | None) -> bool:
+    return str(run_source or "").strip().lower() != "watcher"
 
 
 def normalize_search_payload(payload: dict | None, *, default_sources: list[str]) -> dict:
@@ -1130,6 +1947,12 @@ def normalize_search_payload(payload: dict | None, *, default_sources: list[str]
         media_type = _clean_str(payload.get("media_type"), "media_type")
         lossless_only = _coerce_bool(payload.get("lossless_only"), "lossless_only")
         music_mode = bool(lossless_only) or (media_type in {"music", "audio"})
+    raw_media_mode = _clean_str(payload.get("media_mode"), "media_mode")
+    media_mode = str(raw_media_mode or "").strip().lower() if raw_media_mode else ""
+    if media_mode and media_mode not in {"video", "music", "music_video"}:
+        raise ValueError("media_mode must be one of: video, music, music_video")
+    if not media_mode:
+        media_mode = "music" if bool(music_mode) else "video"
 
     final_format = _clean_str(payload.get("final_format"), "final_format")
     if final_format is None:
@@ -1153,6 +1976,7 @@ def normalize_search_payload(payload: dict | None, *, default_sources: list[str]
         "sources": sources,
         "search_only": bool(search_only),
         "music_mode": bool(music_mode),
+        "media_mode": media_mode,
         "final_format": final_format,
         "destination": destination,
         "destination_type": delivery_mode,
@@ -1267,6 +2091,32 @@ def _acquire_watcher_lock(lock_dir):
     return fd
 
 
+def _watcher_lock_is_valid(lock_fd) -> bool:
+    if lock_fd is None:
+        return False
+    try:
+        os.fstat(int(lock_fd))
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _ensure_watcher_lock_runtime() -> bool:
+    lock_fd = getattr(app.state, "watcher_lock", None)
+    if _watcher_lock_is_valid(lock_fd):
+        return True
+    if lock_fd is not None:
+        logging.warning("Watcher lock handle invalid; attempting reacquire")
+    app.state.watcher_lock = None
+    recovered = _acquire_watcher_lock(DATA_DIR)
+    if recovered is None:
+        logging.warning("Watcher lock recovery failed; watcher disabled")
+        return False
+    app.state.watcher_lock = recovered
+    logging.info("Watcher lock recovered")
+    return True
+
+
 class RunRequest(BaseModel):
     single_url: str | None = None
     playlist_id: str | None = None
@@ -1275,6 +2125,7 @@ class RunRequest(BaseModel):
     final_format_override: str | None = None
     js_runtime: str | None = None
     music_mode: bool | None = None
+    media_mode: str | None = None
     delivery_mode: str | None = None
 
 
@@ -1351,6 +2202,7 @@ class SearchRequestPayload(BaseModel):
     quality_min_bitrate_kbps: int | None = None
     lossless_only: bool = False
     music_mode: bool = False
+    media_mode: str | None = None
     auto_enqueue: bool = True
     source_priority: list[str] | str | None = None
     max_candidates_per_source: int = 5
@@ -1379,6 +2231,31 @@ class IntentExecutePayload(BaseModel):
     identifier: str
 
 
+class IntakeDeliveryPayload(BaseModel):
+    destination: str | None = None
+    final_format: str | None = None
+    media_mode: str | None = None
+
+
+class IntakeProvenancePayload(BaseModel):
+    origin: str | None = None
+    origin_id: str | None = None
+    source: str | None = None
+    external_id: str | None = None
+    submitted_by: str | None = None
+
+
+class IntakeRequestPayload(BaseModel):
+    source_url: str | None = None
+    url: str | None = None
+    media_class: str | None = None
+    media_intent: str | None = None
+    metadata: dict[str, Any] | None = None
+    delivery: IntakeDeliveryPayload | None = None
+    provenance: IntakeProvenancePayload | None = None
+    force_redownload: bool = False
+
+
 def _build_music_track_canonical_id(
     artist,
     album,
@@ -1405,15 +2282,13 @@ def _build_music_track_canonical_id(
 class _IntentQueueAdapter:
     """Queue adapter that writes intent payloads into the unified download queue."""
 
-    def enqueue(self, payload: dict) -> None:
+    def enqueue(self, payload: dict) -> dict[str, object]:
         if not isinstance(payload, dict):
-            logging.warning("Intent enqueue skipped: payload is not a dict")
-            return
+            raise HTTPException(status_code=400, detail="intent_enqueue_invalid_payload")
         engine = getattr(app.state, "worker_engine", None)
         store = getattr(engine, "store", None) if engine is not None else None
         if store is None:
-            logging.warning("Intent enqueue skipped: worker engine store unavailable")
-            return
+            raise HTTPException(status_code=503, detail="intent_queue_store_unavailable")
         try:
             runtime_config = load_config(app.state.config_path)
         except Exception:
@@ -1487,7 +2362,8 @@ class _IntentQueueAdapter:
             recording_mbid: str | None = None,
             mb_release_id: str | None = None,
             mb_release_group_id: str | None = None,
-        ) -> None:
+            media_mode: str | None = None,
+        ) -> dict[str, object]:
             def _optional_pos_int(value):
                 if value is None or str(value).strip() == "":
                     return None
@@ -1525,10 +2401,11 @@ class _IntentQueueAdapter:
                 else []
             )
             if not normalized_artist or not normalized_track:
-                logging.warning("Intent enqueue skipped: music query missing artist/track")
-                return
+                raise HTTPException(status_code=400, detail="intent_enqueue_missing_artist_or_track")
             query = quote(f"{normalized_artist} {normalized_track}".strip())
             url = f"https://music.youtube.com/search?q={query}"
+            normalized_media_mode = str(media_mode or "").strip().lower()
+            target_media_type = "video" if normalized_media_mode == "music_video" else "music"
             canonical_metadata = {
                 "artist": normalized_artist,
                 "track": normalized_track,
@@ -1564,7 +2441,7 @@ class _IntentQueueAdapter:
                 config=runtime_config,
                 origin=origin,
                 origin_id=origin_id,
-                media_type="music",
+                media_type=target_media_type,
                 media_intent="music_track",
                 source="youtube_music",
                 url=url,
@@ -1574,7 +2451,7 @@ class _IntentQueueAdapter:
                 final_format_override=final_format,
                 resolved_metadata=canonical_metadata,
                 output_template_overrides={
-                    "audio_mode": True,
+                    "audio_mode": target_media_type == "music",
                     "album_artist": normalized_album_artist,
                     "track_number": normalized_track_number,
                     "disc_number": normalized_disc_number,
@@ -1594,15 +2471,23 @@ class _IntentQueueAdapter:
                 },
                 canonical_id=canonical_id,
             )
-            store.enqueue_job(
+            job_id, created, dedupe_reason = store.enqueue_job(
                 **enqueue_payload,
                 force_requeue=force_redownload,
             )
             logging.info(
-                "Intent payload queued playlist_id=%s spotify_track_id=%s",
+                "Intent payload queued playlist_id=%s spotify_track_id=%s job_id=%s created=%s dedupe_reason=%s",
                 payload.get("playlist_id"),
                 payload.get("spotify_track_id"),
+                job_id,
+                bool(created),
+                dedupe_reason,
             )
+            return {
+                "job_id": job_id,
+                "created": bool(created),
+                "dedupe_reason": dedupe_reason,
+            }
 
         if media_intent == "music_track":
             recording_mbid = str(
@@ -1613,15 +2498,15 @@ class _IntentQueueAdapter:
             if not recording_mbid:
                 logging.error("[MUSIC] enqueue_rejected missing_recording_mbid")
                 raise HTTPException(status_code=400, detail="recording_mbid required for music_track enqueue")
-            _enqueue_music_query_job(
+            return _enqueue_music_query_job(
                 str(payload.get("artist") or ""),
                 str(payload.get("track") or payload.get("title") or ""),
                 str(payload.get("album") or ""),
                 recording_mbid=recording_mbid,
                 mb_release_id=str(payload.get("mb_release_id") or payload.get("release_id") or ""),
                 mb_release_group_id=str(payload.get("mb_release_group_id") or payload.get("release_group_id") or ""),
+                media_mode=str(payload.get("media_mode") or ""),
             )
-            return
 
         resolved_media = payload.get("resolved_media") if isinstance(payload.get("resolved_media"), dict) else {}
         media_url = str(resolved_media.get("media_url") or payload.get("url") or "").strip()
@@ -1633,10 +2518,14 @@ class _IntentQueueAdapter:
             fallback_track = str(payload.get("track") or payload.get("title") or "").strip()
             fallback_album = str(payload.get("album") or "").strip() or None
             if fallback_artist and fallback_track:
-                _enqueue_music_query_job(fallback_artist, fallback_track, fallback_album)
-                return
+                return _enqueue_music_query_job(
+                    fallback_artist,
+                    fallback_track,
+                    fallback_album,
+                    media_mode=str(payload.get("media_mode") or ""),
+                )
             logging.warning("Intent enqueue skipped: no media URL or searchable artist/title available")
-            return
+            raise HTTPException(status_code=400, detail="intent_enqueue_missing_media_url")
         source = str(resolved_media.get("source_id") or payload.get("source") or resolve_source(media_url)).strip() or "unknown"
         music_metadata = _to_dict(payload.get("music_metadata"))
         external_ids = music_metadata.get("external_ids") if isinstance(music_metadata.get("external_ids"), dict) else {}
@@ -1648,11 +2537,20 @@ class _IntentQueueAdapter:
             external_ids,
             fallback_spotify_id=payload.get("spotify_track_id"),
         )
+        requested_media_type = str(payload.get("media_type") or "").strip().lower()
+        if requested_media_type in {"music", "audio"}:
+            target_media_type = "music"
+        elif requested_media_type == "video":
+            target_media_type = "video"
+        elif music_metadata or is_music_mode_origin:
+            target_media_type = "music"
+        else:
+            target_media_type = resolve_media_type(runtime_config, url=media_url)
         enqueue_payload = build_download_job_payload(
             config=runtime_config,
             origin=origin,
             origin_id=origin_id,
-            media_type="music",
+            media_type=target_media_type,
             media_intent=media_intent,
             source=source,
             url=media_url,
@@ -1662,20 +2560,30 @@ class _IntentQueueAdapter:
             final_format_override=final_format,
             resolved_metadata=music_metadata,
             output_template_overrides={
-                "audio_mode": True,
+                "audio_mode": target_media_type == "music",
                 "duration_ms": resolved_media.get("duration_ms"),
+                "kind": payload.get("kind"),
             },
             canonical_id=canonical_id,
+            external_id=str(payload.get("external_id") or "").strip() or None,
         )
-        store.enqueue_job(
+        job_id, created, dedupe_reason = store.enqueue_job(
             **enqueue_payload,
             force_requeue=force_redownload,
         )
         logging.info(
-            "Intent payload queued playlist_id=%s spotify_track_id=%s",
+            "Intent payload queued playlist_id=%s spotify_track_id=%s job_id=%s created=%s dedupe_reason=%s",
             payload.get("playlist_id"),
             payload.get("spotify_track_id"),
+            job_id,
+            bool(created),
+            dedupe_reason,
         )
+        return {
+            "job_id": job_id,
+            "created": bool(created),
+            "dedupe_reason": dedupe_reason,
+        }
 
 
 class SafeJSONResponse(JSONResponse):
@@ -1693,6 +2601,85 @@ app = FastAPI(
     description="Retreivr API for self-hosted playlist archiving, scheduling, and metrics.",
     default_response_class=SafeJSONResponse,
 )
+
+
+def _normalize_intake_media_class(value: str | None) -> tuple[str, str]:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "auto"}:
+        return "video", "download"
+    if normalized in {"music", "track", "song", "audio"}:
+        return "music", "track"
+    if normalized in {"audiobook", "podcast"}:
+        return "music", normalized
+    if normalized in {"music_video", "video", "movie", "episode"}:
+        return "video", normalized if normalized != "music_video" else "music_video"
+    if normalized in {"book", "pdf", "ebook", "document"}:
+        return "video", "book"
+    raise HTTPException(status_code=400, detail="unsupported media_class")
+
+
+def _normalize_intake_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    source = metadata if isinstance(metadata, dict) else {}
+    normalized = dict(source)
+    title = str(source.get("title") or source.get("track") or "").strip()
+    if title:
+        normalized.setdefault("title", title)
+        normalized.setdefault("track", title)
+    artist = str(source.get("artist") or source.get("album_artist") or source.get("author") or "").strip()
+    if artist:
+        normalized.setdefault("artist", artist)
+        normalized.setdefault("album_artist", artist)
+    album = str(source.get("album") or source.get("series") or "").strip()
+    if album:
+        normalized.setdefault("album", album)
+    if "track_num" not in normalized and source.get("track_number") is not None:
+        normalized["track_num"] = source.get("track_number")
+    if "disc_num" not in normalized and source.get("disc_number") is not None:
+        normalized["disc_num"] = source.get("disc_number")
+    if "date" not in normalized and source.get("release_date") is not None:
+        normalized["date"] = source.get("release_date")
+    if "mbid" not in normalized:
+        normalized["mbid"] = (
+            source.get("mbid")
+            or source.get("recording_mbid")
+            or source.get("mb_recording_id")
+        )
+    return normalized
+
+
+def _normalize_intake_payload(payload: IntakeRequestPayload) -> tuple[dict[str, Any], str]:
+    source_url = str(payload.source_url or payload.url or "").strip()
+    if not source_url:
+        raise HTTPException(status_code=400, detail="source_url is required")
+
+    metadata = _normalize_intake_metadata(payload.metadata)
+    delivery = payload.delivery.dict(exclude_none=True) if payload.delivery is not None else {}
+    provenance = payload.provenance.dict(exclude_none=True) if payload.provenance is not None else {}
+
+    media_type, default_intent = _normalize_intake_media_class(payload.media_class)
+    media_intent = str(payload.media_intent or "").strip().lower() or default_intent
+    raw_media_class = str(payload.media_class or "").strip().lower() or "auto"
+
+    adapter_payload: dict[str, Any] = {
+        "url": source_url,
+        "resolved_media": {"media_url": source_url},
+        "media_type": media_type,
+        "media_intent": media_intent,
+        "destination": str(delivery.get("destination") or "").strip() or None,
+        "final_format": str(delivery.get("final_format") or "").strip() or None,
+        "media_mode": str(delivery.get("media_mode") or "").strip() or None,
+        "origin": str(provenance.get("origin") or "api_intake").strip() or "api_intake",
+        "origin_id": str(provenance.get("origin_id") or provenance.get("external_id") or source_url).strip() or source_url,
+        "source": str(provenance.get("source") or "").strip() or None,
+        "external_id": str(provenance.get("external_id") or "").strip() or None,
+        "force_redownload": bool(payload.force_redownload),
+        "kind": media_intent if raw_media_class == "auto" else raw_media_class,
+    }
+    if metadata:
+        adapter_payload["music_metadata"] = metadata
+    if metadata.get("duration_ms") is not None:
+        adapter_payload["resolved_media"]["duration_ms"] = metadata.get("duration_ms")
+    return adapter_payload, media_type
 
 if _TRUST_PROXY:
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
@@ -1735,6 +2722,8 @@ async def startup():
     app.state.stop_event = threading.Event()
     app.state.run_task = None
     app.state.run_summary_dispatch = {}
+    app.state.telegram_delivery_stats_lock = threading.Lock()
+    app.state.telegram_delivery_stats = _default_telegram_delivery_stats()
     app.state.loop = asyncio.get_running_loop()
     app.state.schedule_lock = threading.Lock()
     app.state.ytdlp_update_lock = threading.Lock()
@@ -1801,15 +2790,28 @@ async def startup():
     app.state.scheduler.start()
     _apply_schedule_config(schedule_config)
     _apply_spotify_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
+    _apply_community_publish_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
+    _apply_resolution_cache_sync_schedule(startup_cfg if isinstance(startup_cfg, dict) else {})
     if schedule_config.get("enabled") and schedule_config.get("run_on_startup"):
         asyncio.create_task(_handle_scheduled_run())
     if schedule_config.get("enabled"):
         logging.info("Scheduler active — fixed interval bulk runs")
 
     init_db(app.state.paths.db_path)
+    with sqlite3.connect(app.state.paths.db_path) as _conn:
+        _ensure_run_summary_dispatch_table(_conn)
     _ensure_watch_tables(app.state.paths.db_path)
     app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, startup_cfg)
     logging.info("Search DB path: %s", app.state.search_db_path)
+    community_cache.configure_resolution_index_db_path(app.state.search_db_path)
+    try:
+        resolution_stats = rebuild_resolution_index_from_dataset(
+            db_path=app.state.search_db_path,
+            dataset_root=str(DATA_DIR / "community_cache_dataset"),
+        )
+        logging.info("Resolution index ready: %s", safe_json_dump(resolution_stats))
+    except Exception:
+        logging.exception("Resolution index rebuild failed")
     app.state.search_service = SearchResolutionService(
         search_db_path=app.state.search_db_path,
         queue_db_path=app.state.paths.db_path,
@@ -1838,6 +2840,17 @@ async def startup():
     app.state.playlist_import_jobs_lock = threading.Lock()
     app.state.playlist_import_active_count = 0
     app.state.music_cover_art_cache = {}
+    app.state.community_publish_last_summary = None
+    app.state.community_publish_backfill_last_summary = None
+    app.state.community_publish_task_lock = threading.Lock()
+    app.state.community_publish_active_task = None
+    app.state.resolution_sync_last_summary = None
+    app.state.resolution_sync_task_lock = threading.Lock()
+    app.state.resolution_sync_active_task = None
+    app.state.community_publish_worker = CommunityPublishWorker(
+        db_path=app.state.paths.db_path,
+        config_getter=get_loaded_config,
+    )
 
     app.state.worker_stop_event = threading.Event()
     app.state.worker_engine = DownloadWorkerEngine(
@@ -1859,12 +2872,40 @@ async def startup():
     )
     app.state.worker_thread.start()
 
+    if community_publish_worker_enabled(startup_cfg if isinstance(startup_cfg, dict) else {}):
+        app.state.scheduler.add_job(
+            _community_publish_schedule_tick,
+            trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=20)),
+            id=f"{COMMUNITY_PUBLISH_JOB_ID}_startup",
+            replace_existing=True,
+        )
+    resolution_cfg = _resolution_config(startup_cfg if isinstance(startup_cfg, dict) else {})
+    if bool(resolution_cfg.get("sync_enabled", False)) and str(resolution_cfg.get("upstream_base_url") or "").strip():
+        app.state.scheduler.add_job(
+            _resolution_cache_sync_tick,
+            trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=25)),
+            id=f"{RESOLUTION_CACHE_SYNC_JOB_ID}_startup",
+            replace_existing=True,
+        )
+
 
     watch_policy = normalize_watch_policy(startup_cfg)
     app.state.watch_policy = watch_policy
     app.state.watch_config_cache = startup_cfg
     app.state.watcher_clients_cache = {}
-    enable_watcher = bool(startup_cfg.get("enable_watcher")) if isinstance(startup_cfg, dict) else False
+    enable_watcher = _config_watcher_enabled(startup_cfg)
+    if enable_watcher:
+        reset_count = _reset_watch_state_for_startup(
+            app.state.paths.db_path,
+            startup_cfg.get("playlists") or [],
+            watch_policy,
+        )
+        if reset_count:
+            logging.info(
+                "Watcher startup state reset playlists=%s min_interval=%s",
+                reset_count,
+                watch_policy.get("min_interval_minutes") or 5,
+            )
     if not enable_watcher:
         app.state.watcher_lock = None
         app.state.watcher_task = None
@@ -1881,7 +2922,7 @@ async def startup():
         if app.state.watcher_lock is None:
             logging.info("Watcher disabled due to guardrails (lock unavailable)")
         else:
-            app.state.watcher_task = asyncio.create_task(_watcher_supervisor())
+            _start_watcher_supervisor_task()
             logging.info("Watcher active — adaptive monitoring enabled")
 
     app.state.watcher_status = {
@@ -1949,11 +2990,15 @@ async def shutdown():
 
 
 def _browse_root_map():
-    return {
+    roots = {
         "downloads": os.path.realpath(DOWNLOADS_DIR),
         "config": os.path.realpath(CONFIG_DIR),
         "tokens": os.path.realpath(TOKENS_DIR),
     }
+    library_exports_dir = "/library-exports"
+    if os.path.isdir(library_exports_dir):
+        roots["library_exports"] = os.path.realpath(library_exports_dir)
+    return roots
 
 
 def _path_allowed(path, roots):
@@ -2729,6 +3774,17 @@ def _merge_schedule_config(schedule):
     return merged
 
 
+def _config_watcher_enabled(config: dict | None) -> bool:
+    if not isinstance(config, dict):
+        return False
+    if isinstance(config.get("enable_watcher"), bool):
+        return config.get("enable_watcher")
+    watcher_cfg = config.get("watcher")
+    if isinstance(watcher_cfg, dict) and isinstance(watcher_cfg.get("enabled"), bool):
+        return watcher_cfg.get("enabled")
+    return False
+
+
 def _merge_watch_policy(policy):
     merged = _default_watch_policy()
     if isinstance(policy, dict):
@@ -2918,7 +3974,7 @@ def _read_config_or_404():
     if not os.path.exists(config_path):
         raise HTTPException(status_code=404, detail=f"Config not found: {config_path}")
     try:
-        config = load_config(config_path)
+        config = load_config(config_path, write_back_defaults=True)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON in config: {exc}") from exc
     except OSError as exc:
@@ -2973,7 +4029,7 @@ def _read_config_for_scheduler():
         logging.error("Schedule skipped: config not found at %s", config_path)
         return None
     try:
-        config = load_config(config_path)
+        config = load_config(config_path, write_back_defaults=True)
     except json.JSONDecodeError as exc:
         logging.error("Schedule skipped: invalid JSON in config: %s", exc)
         return None
@@ -2998,9 +4054,7 @@ def _read_config_for_watcher():
         logging.error("Watcher skipped: config not found at %s", config_path)
         return cached
     try:
-        with open(config_path, "r") as handle:
-            data = handle.read()
-        config = json.loads(data)
+        config = load_config(config_path, write_back_defaults=True)
     except json.JSONDecodeError as exc:
         logging.error("Watcher skipped: invalid JSON in config: %s", exc)
         return cached
@@ -3035,6 +4089,7 @@ async def _start_run_with_config(
     final_format_override=None,
     js_runtime=None,
     music_mode=None,
+    media_mode=None,
     run_source="api",
     skip_downtime=False,
     run_id_override=None,
@@ -3049,6 +4104,18 @@ async def _start_run_with_config(
     if not runtime_config:
         runtime_config = _read_config_or_404()
     config = runtime_config
+
+    # Enforce downtime guardrail for automated runs before taking the run lock.
+    if not skip_downtime and run_source in {"scheduled", "watcher"}:
+        in_dt, next_allowed = _check_downtime(config, now=now)
+        if in_dt:
+            next_allowed_iso = _format_iso(next_allowed) if next_allowed else None
+            logging.info(
+                "%s run deferred due to downtime window%s",
+                run_source.capitalize(),
+                f" (next_allowed={next_allowed_iso})" if next_allowed_iso else "",
+            )
+            return "deferred", next_allowed
 
     async with app.state.run_lock:
         if app.state.running:
@@ -3104,6 +4171,7 @@ async def _start_run_with_config(
                         js_runtime_override=js_runtime,
                         stop_event=app.state.stop_event,
                         music_mode=bool(music_mode) if music_mode is not None else False,
+                        media_mode=media_mode,
                         mode=playlist_mode or "full",
                     )
                 else:
@@ -3111,7 +4179,10 @@ async def _start_run_with_config(
                         runtime_config = get_loaded_config() or config
                         if not isinstance(runtime_config, dict) or not runtime_config:
                             raise RuntimeError("direct_url_runtime_config_missing")
+                        requested_media_mode = str(media_mode or "").strip().lower()
                         resolved_music_mode = bool(music_mode) if music_mode is not None else False
+                        if requested_media_mode == "music":
+                            resolved_music_mode = True
                         if resolved_music_mode:
                             resolved_media_type = "music"
                             resolved_media_intent = "music_track"
@@ -3236,15 +4307,16 @@ async def _start_run_with_config(
                 elif app.state.state in {"running", "completed"}:
                     app.state.state = "idle"
                 
-                dispatch_run_summary_once(
-                    config,
-                    run_type=run_source,
-                    run_id=app.state.run_id,
-                    status=status,
-                    started_at=app.state.started_at,
-                    finished_at=app.state.finished_at,
-                    last_error=app.state.last_error,
-                )
+                if _should_dispatch_run_summary(run_source):
+                    dispatch_run_summary_once(
+                        config,
+                        run_type=run_source,
+                        run_id=app.state.run_id,
+                        status=status,
+                        started_at=app.state.started_at,
+                        finished_at=app.state.finished_at,
+                        last_error=app.state.last_error,
+                    )
 
         app.state.run_task = asyncio.create_task(_runner())
 
@@ -3393,6 +4465,15 @@ async def _handle_scheduled_run():
     config = _read_config_for_scheduler()
     if not config:
         _set_schedule_state(next_run=_get_next_run_iso())
+        return
+    downtime_active, next_allowed = _check_downtime(config)
+    if downtime_active:
+        next_iso = _format_iso(next_allowed) if next_allowed else _get_next_run_iso()
+        logging.info(
+            "Scheduled run skipped due to downtime window%s",
+            f" (next_allowed={next_iso})" if next_iso else "",
+        )
+        _set_schedule_state(next_run=next_iso)
         return
     result, next_allowed = await _start_run_with_config(config, run_source="scheduled")
     if result == "started":
@@ -3685,6 +4766,284 @@ def _apply_spotify_schedule(config: dict):
         logger.info("Spotify manual playlist watch enabled")
     else:
         logger.info("Spotify manual playlist watch disabled")
+
+
+def _community_publish_schedule_tick() -> None:
+    worker = getattr(app.state, "community_publish_worker", None)
+    if worker is None:
+        return
+    try:
+        summary = worker.run_once()
+        logger.info(
+            "Community publish tick status=%s ingested=%s published=%s pr=%s branch=%s errors=%s",
+            summary.get("status"),
+            ((summary.get("ingest") or {}).get("ingested") if isinstance(summary.get("ingest"), dict) else 0),
+            summary.get("published_proposals"),
+            summary.get("pr_number"),
+            summary.get("branch"),
+            summary.get("errors"),
+        )
+        app.state.community_publish_last_summary = summary
+    except Exception:
+        logger.exception("Community publish worker tick failed")
+
+
+def _get_next_community_publish_run_iso() -> str | None:
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return None
+    job = scheduler.get_job(COMMUNITY_PUBLISH_JOB_ID)
+    if not job or not job.next_run_time:
+        return None
+    next_run = job.next_run_time
+    if next_run.tzinfo is None:
+        next_run = next_run.replace(tzinfo=timezone.utc)
+    return next_run.astimezone(timezone.utc).isoformat()
+
+
+def _resolution_sync_task_snapshot() -> dict[str, Any] | None:
+    lock = getattr(app.state, "resolution_sync_task_lock", None)
+    task = getattr(app.state, "resolution_sync_active_task", None)
+    if lock is None:
+        return dict(task) if isinstance(task, dict) else None
+    with lock:
+        task = getattr(app.state, "resolution_sync_active_task", None)
+        return dict(task) if isinstance(task, dict) else None
+
+
+def _set_resolution_sync_task(task: dict[str, Any] | None) -> None:
+    lock = getattr(app.state, "resolution_sync_task_lock", None)
+    if lock is None:
+        app.state.resolution_sync_active_task = task
+        return
+    with lock:
+        app.state.resolution_sync_active_task = dict(task) if isinstance(task, dict) else None
+
+
+def _start_resolution_sync_background_task(*, kind: str, runner) -> dict[str, Any]:
+    active = _resolution_sync_task_snapshot()
+    if isinstance(active, dict) and active.get("running"):
+        raise HTTPException(status_code=409, detail="resolution_sync_task_already_running")
+    task_state = {
+        "kind": kind,
+        "running": True,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "finished_at": None,
+        "summary": None,
+        "error": None,
+    }
+    _set_resolution_sync_task(task_state)
+
+    def _runner():
+        try:
+            summary = runner()
+            updated = _resolution_sync_task_snapshot() or {}
+            updated.update(
+                {
+                    "running": False,
+                    "status": "completed",
+                    "finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "summary": summary if isinstance(summary, dict) else None,
+                    "error": None,
+                }
+            )
+            _set_resolution_sync_task(updated)
+        except Exception as exc:
+            logger.exception("resolution_sync_background_task_failed kind=%s", kind)
+            updated = _resolution_sync_task_snapshot() or {}
+            updated.update(
+                {
+                    "running": False,
+                    "status": "failed",
+                    "finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "error": str(exc) or f"{kind}_failed",
+                }
+            )
+            _set_resolution_sync_task(updated)
+
+    threading.Thread(target=_runner, name=f"resolution-sync-{kind}", daemon=True).start()
+    return task_state
+
+
+def _run_resolution_sync_once(config: dict[str, Any]) -> dict[str, Any]:
+    resolution_cfg = _resolution_config(config)
+    api_base_url = str(resolution_cfg.get("upstream_base_url") or "").strip()
+    batch_size = int(resolution_cfg.get("sync_batch_size") or 500)
+    summary = sync_resolution_local_cache_from_api(
+        db_path=app.state.search_db_path,
+        dataset_root=str(DATA_DIR / "community_cache_dataset"),
+        api_base_url=api_base_url,
+        limit=batch_size,
+    )
+    app.state.resolution_sync_last_summary = summary
+    return summary
+
+
+def _resolution_cache_sync_tick() -> None:
+    config = get_loaded_config() or {}
+    resolution_cfg = _resolution_config(config)
+    if not bool(resolution_cfg.get("sync_enabled", False)):
+        return
+    try:
+        summary = _run_resolution_sync_once(config if isinstance(config, dict) else {})
+        logger.info(
+            "Resolution cache sync tick status=%s mode=%s records=%s files=%s cursor=%s",
+            summary.get("status"),
+            summary.get("mode"),
+            summary.get("results_count"),
+            summary.get("files_written"),
+            summary.get("cursor"),
+        )
+    except Exception:
+        logger.exception("Resolution cache sync tick failed")
+
+
+def _get_next_resolution_cache_sync_run_iso() -> str | None:
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return None
+    job = scheduler.get_job(RESOLUTION_CACHE_SYNC_JOB_ID)
+    if not job or not job.next_run_time:
+        return None
+    next_run = job.next_run_time
+    if next_run.tzinfo is None:
+        next_run = next_run.replace(tzinfo=timezone.utc)
+    return next_run.astimezone(timezone.utc).isoformat()
+
+
+def _community_publish_task_snapshot() -> dict[str, Any] | None:
+    lock = getattr(app.state, "community_publish_task_lock", None)
+    task = getattr(app.state, "community_publish_active_task", None)
+    if lock is None:
+        return dict(task) if isinstance(task, dict) else None
+    with lock:
+        task = getattr(app.state, "community_publish_active_task", None)
+        return dict(task) if isinstance(task, dict) else None
+
+
+def _set_community_publish_task(task: dict[str, Any] | None) -> None:
+    lock = getattr(app.state, "community_publish_task_lock", None)
+    if lock is None:
+        app.state.community_publish_active_task = task
+        return
+    with lock:
+        app.state.community_publish_active_task = dict(task) if isinstance(task, dict) else None
+
+
+def _start_community_publish_background_task(*, kind: str, runner) -> dict[str, Any]:
+    active = _community_publish_task_snapshot()
+    if isinstance(active, dict) and active.get("running"):
+        raise HTTPException(status_code=409, detail="community_publish_task_already_running")
+
+    task_state = {
+        "kind": kind,
+        "running": True,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "finished_at": None,
+        "summary": None,
+        "error": None,
+    }
+    _set_community_publish_task(task_state)
+
+    def _runner():
+        try:
+            summary = runner()
+            updated = _community_publish_task_snapshot() or {}
+            updated.update(
+                {
+                    "running": False,
+                    "status": "completed",
+                    "finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "summary": summary if isinstance(summary, dict) else None,
+                    "error": None,
+                }
+            )
+            _set_community_publish_task(updated)
+        except Exception as exc:
+            logger.exception("community_publish_background_task_failed kind=%s", kind)
+            updated = _community_publish_task_snapshot() or {}
+            updated.update(
+                {
+                    "running": False,
+                    "status": "failed",
+                    "finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "error": str(exc) or f"{kind}_failed",
+                }
+            )
+            _set_community_publish_task(updated)
+
+    threading.Thread(target=_runner, name=f"community-publish-{kind}", daemon=True).start()
+    return task_state
+
+
+def _apply_community_publish_schedule(config: dict):
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return
+    try:
+        scheduler.remove_job(COMMUNITY_PUBLISH_JOB_ID)
+    except Exception:
+        pass
+
+    normalized = apply_community_publish_defaults(config if isinstance(config, dict) else {})
+    if not community_publish_worker_enabled(normalized):
+        logger.info("Community publish worker disabled by config")
+        return
+    interval = normalized.get("community_cache_publish_poll_minutes", 15)
+    try:
+        interval = int(interval)
+    except (TypeError, ValueError):
+        interval = 15
+    interval = max(1, interval)
+    start_date = datetime.now(timezone.utc) + timedelta(minutes=1)
+    scheduler.add_job(
+        _community_publish_schedule_tick,
+        trigger=IntervalTrigger(minutes=interval, start_date=start_date),
+        id=COMMUNITY_PUBLISH_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=60,
+    )
+    logger.info("Community publish worker enabled (interval=%s min)", interval)
+
+
+def _apply_resolution_cache_sync_schedule(config: dict):
+    scheduler = app.state.scheduler
+    if not scheduler:
+        return
+    try:
+        scheduler.remove_job(RESOLUTION_CACHE_SYNC_JOB_ID)
+    except Exception:
+        pass
+
+    resolution_cfg = _resolution_config(config if isinstance(config, dict) else {})
+    if not bool(resolution_cfg.get("sync_enabled", False)):
+        logger.info("Resolution cache sync disabled by config")
+        return
+    api_base_url = str(resolution_cfg.get("upstream_base_url") or "").strip()
+    if not api_base_url:
+        logger.info("Resolution cache sync disabled: upstream_base_url missing")
+        return
+    interval = resolution_cfg.get("sync_poll_minutes", 1440)
+    try:
+        interval = int(interval)
+    except (TypeError, ValueError):
+        interval = 1440
+    interval = max(1, interval)
+    start_date = datetime.now(timezone.utc) + timedelta(minutes=1)
+    scheduler.add_job(
+        _resolution_cache_sync_tick,
+        trigger=IntervalTrigger(minutes=interval, start_date=start_date),
+        id=RESOLUTION_CACHE_SYNC_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
+    logger.info("Resolution cache sync enabled (interval=%s min, upstream=%s)", interval, api_base_url)
 
 
 def _apply_schedule_config(schedule):
@@ -3987,6 +5346,44 @@ def _write_watch_state(
     conn.close()
 
 
+def _reset_watch_state_for_startup(db_path, playlists, policy):
+    if not isinstance(playlists, list) or not playlists:
+        return 0
+    min_interval = 5
+    if isinstance(policy, dict):
+        try:
+            min_interval = int(policy.get("min_interval_minutes") or min_interval)
+        except Exception:
+            min_interval = 5
+    min_interval = max(1, min_interval)
+    now_iso = _format_iso(datetime.now(timezone.utc))
+    existing = _read_watch_state(db_path)
+    reset_count = 0
+    for pl in playlists:
+        if not isinstance(pl, dict):
+            continue
+        playlist_key = pl.get("playlist_id") or pl.get("id")
+        playlist_id = extract_playlist_id(playlist_key) or playlist_key
+        if not playlist_id:
+            continue
+        prior = existing.get(playlist_id) or {}
+        _write_watch_state(
+            db_path,
+            playlist_id,
+            last_checked_at=prior.get("last_checked_at"),
+            next_poll_at=now_iso,
+            idle_count=0,
+            current_interval_min=min_interval,
+            consecutive_no_change=0,
+            last_change_at=prior.get("last_change_at"),
+            skip_reason=None,
+            last_error=None,
+            last_error_at=prior.get("last_error_at"),
+        )
+        reset_count += 1
+    return reset_count
+
+
 def _playlist_label(playlist_id, playlist_name):
     label = playlist_name or playlist_id
     return label if label else "unknown"
@@ -4037,86 +5434,103 @@ async def _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batc
 
     account = pl.get("account")
     yt = yt_clients.get(account) if account else None
+    videos = []
     if not yt:
-        skip_reason = _log_skip_reason(playlist_id, "oauth missing", watch)
-        error_at = _format_iso(now)
-        consecutive_no_change += 1
-        current_interval = min(current_interval * backoff_factor, max_interval)
-        logging.debug(
-            "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
-            playlist_id,
-            current_interval,
-            consecutive_no_change,
+        cookie_file = resolve_cookie_file(config)
+        videos, fallback_error = await anyio.to_thread.run_sync(
+            lambda: get_playlist_videos_fallback(playlist_id, cookie_file=cookie_file)
         )
-        _write_watch_state(
-            app.state.paths.db_path,
+        if fallback_error:
+            skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
+            error_at = _format_iso(now)
+            consecutive_no_change += 1
+            current_interval = min(current_interval * backoff_factor, max_interval)
+            logging.debug(
+                "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
+                playlist_id,
+                current_interval,
+                consecutive_no_change,
+            )
+            error_message = (
+                "oauth missing and yt-dlp fallback failed"
+                if account
+                else "yt-dlp fallback failed"
+            )
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=watch.get("last_checked_at"),
+                next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
+                idle_count=consecutive_no_change,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=skip_reason,
+                last_error=error_message,
+                last_error_at=error_at,
+            )
+            return
+        logging.info(
+            "Watcher poll using yt-dlp fallback playlist_id=%s account=%s",
             playlist_id,
-            last_checked_at=watch.get("last_checked_at"),
-            next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
-            idle_count=consecutive_no_change,
-            current_interval_min=current_interval,
-            consecutive_no_change=consecutive_no_change,
-            last_change_at=watch.get("last_change_at"),
-            skip_reason=skip_reason,
-            last_error="oauth missing",
-            last_error_at=error_at,
+            account or "public",
         )
-        return
-
-    try:
-        videos = get_playlist_videos(yt, playlist_id)
-    except RefreshError as exc:
-        logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
-        skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
-        error_at = _format_iso(now)
-        consecutive_no_change += 1
-        current_interval = min(current_interval * backoff_factor, max_interval)
-        logging.debug(
-            "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
-            playlist_id,
-            current_interval,
-            consecutive_no_change,
-        )
-        _write_watch_state(
-            app.state.paths.db_path,
-            playlist_id,
-            last_checked_at=_format_iso(now),
-            next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
-            idle_count=consecutive_no_change,
-            current_interval_min=current_interval,
-            consecutive_no_change=consecutive_no_change,
-            last_change_at=watch.get("last_change_at"),
-            skip_reason=skip_reason,
-            last_error=f"api error: {exc}",
-            last_error_at=error_at,
-        )
-        return
-    except HttpError as exc:
-        logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
-        skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
-        error_at = _format_iso(now)
-        consecutive_no_change += 1
-        current_interval = min(current_interval * backoff_factor, max_interval)
-        logging.debug(
-            "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
-            playlist_id,
-            current_interval,
-            consecutive_no_change,
-        )
-        _write_watch_state(
-            app.state.paths.db_path,
-            playlist_id,
-            last_checked_at=_format_iso(now),
-            next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
-            idle_count=consecutive_no_change,
-            current_interval_min=current_interval,
-            consecutive_no_change=consecutive_no_change,
-            last_change_at=watch.get("last_change_at"),
-            skip_reason=skip_reason,
-            last_error=f"api error: {exc}",
-            last_error_at=error_at,
-        )
-        return
+    else:
+        try:
+            # Google client calls are blocking; run off the event loop thread.
+            videos = await anyio.to_thread.run_sync(get_playlist_videos, yt, playlist_id)
+        except RefreshError as exc:
+            logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
+            skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
+            error_at = _format_iso(now)
+            consecutive_no_change += 1
+            current_interval = min(current_interval * backoff_factor, max_interval)
+            logging.debug(
+                "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
+                playlist_id,
+                current_interval,
+                consecutive_no_change,
+            )
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=_format_iso(now),
+                next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
+                idle_count=consecutive_no_change,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=skip_reason,
+                last_error=f"api error: {exc}",
+                last_error_at=error_at,
+            )
+            return
+        except HttpError as exc:
+            logging.error("Watcher poll error playlist_id=%s error=%s", playlist_id, exc)
+            skip_reason = _log_skip_reason(playlist_id, "poll error", watch)
+            error_at = _format_iso(now)
+            consecutive_no_change += 1
+            current_interval = min(current_interval * backoff_factor, max_interval)
+            logging.debug(
+                "Watcher backoff applied playlist_id=%s interval_min=%s no_change=%s",
+                playlist_id,
+                current_interval,
+                consecutive_no_change,
+            )
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=_format_iso(now),
+                next_poll_at=_format_iso(now + timedelta(minutes=current_interval)),
+                idle_count=consecutive_no_change,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=skip_reason,
+                last_error=f"api error: {exc}",
+                last_error_at=error_at,
+            )
+            return
 
     if not videos:
         logging.debug("Watcher polled playlist_id=%s items=0", playlist_id)
@@ -4198,9 +5612,13 @@ async def _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batc
                 vid = entry.get("videoId") or entry.get("id")
                 if not vid:
                     continue
-                if is_video_seen(conn, playlist_id, vid):
-                    break
-                new_ids.append(vid)
+                if not is_video_seen(conn, playlist_id, vid):
+                    new_ids.append(vid)
+                    # Mark as seen when detected to avoid re-triggering the same
+                    # IDs on subsequent polls before/after batch execution.
+                    mark_video_seen(conn, playlist_id, vid, downloaded=False)
+            if new_ids:
+                conn.commit()
         else:
             for entry in videos:
                 vid = entry.get("videoId") or entry.get("id")
@@ -4265,14 +5683,19 @@ async def _watcher_supervisor():
     logging.info("Watcher started")
     _set_watcher_status("idle")
     startup_logged = False
+    startup_fast_poll_done = False
     last_candidate_state = None
     batch_state = {
         "pending_playlists": set(),
         "last_detection_ts": None,
         "batch_active": False,
+        "batch_opened_ts": None,
+        "batch_opened_at": None,
+        "polled_playlists": set(),
+        "last_telegram_sent_ts": None,
     }
     while True:
-        if getattr(app.state, "watcher_lock", None) is None:
+        if not _ensure_watcher_lock_runtime():
             _set_watcher_status("disabled", batch_active=False, pending_playlists_count=0, quiet_window_remaining_sec=None)
             return
         config = _read_config_for_watcher()
@@ -4298,14 +5721,18 @@ async def _watcher_supervisor():
         now = local_now.astimezone(tzinfo)
 
         downtime_active = False
+        next_allowed_dt = None
         if downtime.get("enabled"):
-            downtime_active, _next_allowed = in_downtime(
+            downtime_active, next_allowed_dt = in_downtime(
                 now,
                 downtime.get("start"),
                 downtime.get("end"),
             )
             if downtime_active and not app.state.was_in_downtime:
-                logging.info("Watcher entering downtime window")
+                logging.info(
+                    "Watcher entering downtime window%s",
+                    f" (next_allowed={_format_iso(next_allowed_dt)})" if next_allowed_dt else "",
+                )
             if not downtime_active and app.state.was_in_downtime:
                 logging.info("Watcher exiting downtime window")
             if downtime_active:
@@ -4346,10 +5773,35 @@ async def _watcher_supervisor():
                 0,
                 int(WATCHER_QUIET_WINDOW_SECONDS - (time.monotonic() - batch_state["last_detection_ts"])),
             )
+        if downtime.get("enabled") and downtime_active:
+            sleep_seconds = 60.0
+            if next_allowed_dt is not None:
+                until_resume = max(0.0, (next_allowed_dt - now).total_seconds())
+                if until_resume > 0:
+                    sleep_seconds = min(60.0, max(1.0, until_resume))
+            _set_watcher_status(
+                "paused_downtime",
+                pending_playlists_count=pending_count,
+                quiet_window_remaining_sec=None,
+                batch_active=batch_state["batch_active"],
+                next_poll_ts=_format_iso(next_allowed_dt) if next_allowed_dt else None,
+            )
+            await asyncio.sleep(sleep_seconds)
+            continue
         if (pending_count and batch_state["last_detection_ts"] is not None
                 and not batch_state["batch_active"]):
             elapsed = time.monotonic() - batch_state["last_detection_ts"]
-            if elapsed >= WATCHER_QUIET_WINDOW_SECONDS:
+            opened_elapsed = (
+                time.monotonic() - batch_state["batch_opened_ts"]
+                if batch_state.get("batch_opened_ts") is not None
+                else elapsed
+            )
+            required_playlists = set(playlist_map.keys())
+            polled_playlists = set(batch_state.get("polled_playlists") or set())
+            all_playlists_polled = bool(required_playlists) and required_playlists.issubset(polled_playlists)
+            if elapsed >= WATCHER_QUIET_WINDOW_SECONDS and (
+                all_playlists_polled or opened_elapsed >= WATCHER_BATCH_MAX_WAIT_SECONDS
+            ):
                 _set_watcher_status(
                     "batch_ready",
                     pending_playlists_count=pending_count,
@@ -4357,8 +5809,13 @@ async def _watcher_supervisor():
                     batch_active=False,
                 )
                 logging.info(
-                    "Watcher: quiet window elapsed (%ss), preparing batch run",
+                    "Watcher: quiet window elapsed (%ss), preparing batch run all_playlists_polled=%s "
+                    "opened_elapsed=%ss required=%s polled=%s",
                     WATCHER_QUIET_WINDOW_SECONDS,
+                    all_playlists_polled,
+                    int(opened_elapsed),
+                    len(required_playlists),
+                    len(polled_playlists),
                 )
                 batch_state["batch_active"] = True
                 batch_playlists = list(batch_state["pending_playlists"])
@@ -4373,8 +5830,8 @@ async def _watcher_supervisor():
                     "Watcher: starting batch run playlists=%s",
                     ",".join(batch_playlists),
                 )
-                batch_start = time.monotonic()
-                total_downloaded = 0
+                batch_started_at = batch_state.get("batch_opened_at") or datetime.now(timezone.utc).isoformat()
+                batch_job_ids: list[str] = []
                 for playlist_id in batch_playlists:
                     pl = playlist_map.get(playlist_id)
                     if not pl:
@@ -4389,6 +5846,10 @@ async def _watcher_supervisor():
                         destination=pl.get("folder") or pl.get("directory"),
                         final_format_override=pl.get("final_format"),
                         music_mode=bool(pl.get("music_mode")),
+                        media_mode=(
+                            str(pl.get("media_mode") or "").strip().lower()
+                            or ("music_video" if bool(pl.get("music_video")) else ("music" if bool(pl.get("music_mode")) else "video"))
+                        ),
                         run_source="watcher",
                         now=now,
                     )
@@ -4397,30 +5858,120 @@ async def _watcher_supervisor():
                             await app.state.run_task
                         status = app.state.status
                         if status:
-                            total_downloaded += len(status.run_successes or [])
+                            for value in (status.run_successes or []):
+                                text = str(value or "").strip()
+                                if re.fullmatch(r"[0-9a-f]{32}", text):
+                                    batch_job_ids.append(text)
                     elif result == "deferred":
                         logging.info("Watcher: batch deferred playlist_id=%s", playlist_id)
                     else:
                         logging.debug("Watcher: batch skipped (run active) playlist_id=%s", playlist_id)
-                duration_seconds = max(0, int(time.monotonic() - batch_start))
+                attempted_job_ids = list(dict.fromkeys(batch_job_ids))
+                completed_job_ids: list[str] = []
+                failed_job_ids: list[str] = []
+                if attempted_job_ids:
+                    pending_job_ids = set(attempted_job_ids)
+                    summary_deadline = time.monotonic() + WATCHER_SUMMARY_WAIT_SECONDS
+                    while pending_job_ids:
+                        conn = None
+                        try:
+                            conn = sqlite3.connect(app.state.paths.db_path)
+                            cur = conn.cursor()
+                            placeholders = ",".join("?" for _ in attempted_job_ids)
+                            cur.execute(
+                                f"SELECT id, status FROM download_jobs WHERE id IN ({placeholders})",
+                                attempted_job_ids,
+                            )
+                            seen_terminal: set[str] = set()
+                            for raw_id, raw_status in cur.fetchall():
+                                job_id = str(raw_id)
+                                normalized = str(raw_status or "").strip().lower()
+                                if normalized == "completed":
+                                    completed_job_ids.append(job_id)
+                                    seen_terminal.add(job_id)
+                                elif normalized in {"failed", "cancelled"}:
+                                    failed_job_ids.append(job_id)
+                                    seen_terminal.add(job_id)
+                            completed_job_ids = list(dict.fromkeys(completed_job_ids))
+                            failed_job_ids = list(dict.fromkeys(failed_job_ids))
+                            pending_job_ids = set(attempted_job_ids) - seen_terminal
+                        except Exception:
+                            logging.exception("Watcher batch attempted-summary query failed")
+                            break
+                        finally:
+                            if conn is not None:
+                                try:
+                                    conn.close()
+                                except Exception:
+                                    pass
+                        if not pending_job_ids:
+                            break
+                        if time.monotonic() >= summary_deadline:
+                            logging.info(
+                                "Watcher: summary wait timeout pending_jobs=%s waited=%ss",
+                                len(pending_job_ids),
+                                WATCHER_SUMMARY_WAIT_SECONDS,
+                            )
+                            break
+                        await asyncio.sleep(WATCHER_SUMMARY_POLL_SECONDS)
+                attempted_success = len(completed_job_ids)
+                attempted_failed = len(failed_job_ids)
+                attempted_total = len(attempted_job_ids)
                 logging.info(
-                    "Watcher: batch complete playlists=%s videos=%s",
+                    "Watcher: batch complete playlists=%s attempted_total=%s attempted_success=%s attempted_failed=%s",
                     len(batch_playlists),
-                    total_downloaded,
+                    attempted_total,
+                    attempted_success,
+                    attempted_failed,
                 )
-                if batch_playlists:
-                    minutes = duration_seconds // 60
-                    seconds = duration_seconds % 60
-                    duration_label = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
-                    msg = (
-                        "Retreivr Watcher Batch\n"
-                        f"Playlists: {len(batch_playlists)}\n"
-                        f"Videos downloaded: {total_downloaded}\n"
-                        f"Duration: {duration_label}"
+                if batch_playlists and attempted_total > 0:
+                    cooldown_remaining = None
+                    if batch_state.get("last_telegram_sent_ts") is not None:
+                        elapsed_since_tg = time.monotonic() - batch_state["last_telegram_sent_ts"]
+                        if elapsed_since_tg < WATCHER_TELEGRAM_COOLDOWN_SECONDS:
+                            cooldown_remaining = int(WATCHER_TELEGRAM_COOLDOWN_SECONDS - elapsed_since_tg)
+                    if cooldown_remaining is not None and cooldown_remaining > 0:
+                        logging.info(
+                            "Watcher: batch telegram skipped (cooldown) remaining=%ss attempted=%s",
+                            cooldown_remaining,
+                            attempted_total,
+                        )
+                    else:
+                        batch_finished_at = datetime.now(timezone.utc).isoformat()
+                        summary_job_ids = (
+                            list(completed_job_ids) + list(failed_job_ids)
+                            if (completed_job_ids or failed_job_ids)
+                            else list(attempted_job_ids)
+                        )
+                        watcher_summary_status = SimpleNamespace(
+                            run_successes=summary_job_ids,
+                            run_failures=0,
+                        )
+                        result = notify_run_summary(
+                            config,
+                            run_type="watcher",
+                            status=watcher_summary_status,
+                            started_at=batch_started_at,
+                            finished_at=batch_finished_at,
+                            attempted_override=attempted_total,
+                        )
+                        if isinstance(result, dict) and bool(result.get("sent")):
+                            batch_state["last_telegram_sent_ts"] = time.monotonic()
+                        logging.info(
+                            "Watcher: batch telegram dispatched sent=%s attempted=%s",
+                            bool(result.get("sent")) if isinstance(result, dict) else False,
+                            int(result.get("attempted") or 0) if isinstance(result, dict) else 0,
+                        )
+                elif batch_playlists:
+                    logging.info(
+                        "Watcher: batch telegram skipped (no attempted downloads) playlists=%s",
+                        len(batch_playlists),
                     )
-                    telegram_notify(config, msg)
                 batch_state["batch_active"] = False
                 batch_state["last_detection_ts"] = None
+                batch_state["batch_opened_ts"] = None
+                batch_state["batch_opened_at"] = None
+                batch_state["polled_playlists"] = set()
                 _set_watcher_status("idle", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
                 logging.info("Watcher: batch state reset, resuming monitoring")
                 continue
@@ -4432,10 +5983,6 @@ async def _watcher_supervisor():
             )
         else:
             _set_watcher_status("idle", pending_playlists_count=pending_count, quiet_window_remaining_sec=None, batch_active=batch_state["batch_active"])
-
-        if downtime.get("enabled") and downtime_active:
-            await asyncio.sleep(60)
-            continue
 
         watch_state = _read_watch_state(app.state.paths.db_path)
         if app.state.was_in_downtime:
@@ -4493,7 +6040,18 @@ async def _watcher_supervisor():
             continue
 
         candidates.sort(key=lambda item: item[0])
-        next_poll_at, pl, watch = candidates[0]
+        selected = candidates[0]
+        if pending_count and not batch_state["batch_active"]:
+            polled = set(batch_state.get("polled_playlists") or set())
+            unpolled = []
+            for item in candidates:
+                item_playlist_key = item[1].get("playlist_id") or item[1].get("id")
+                item_playlist_id = extract_playlist_id(item_playlist_key) or item_playlist_key
+                if item_playlist_id and item_playlist_id not in polled:
+                    unpolled.append(item)
+            if unpolled:
+                selected = sorted(unpolled, key=lambda item: item[0])[0]
+        next_poll_at, pl, watch = selected
         if last_candidate_state != "available":
             logging.info("Watcher: candidates available")
             last_candidate_state = "available"
@@ -4511,9 +6069,38 @@ async def _watcher_supervisor():
                 bool(getattr(app.state, "watcher_lock", None)),
             )
             startup_logged = True
+        # Ensure watcher restarts do not sit idle for hours due to persisted backoff.
+        # We only do this once per supervisor lifecycle, then adaptive intervals resume.
+        if not startup_fast_poll_done and next_poll_at > now + timedelta(seconds=30):
+            playlist_key = pl.get("playlist_id") or pl.get("id")
+            playlist_id = extract_playlist_id(playlist_key) or playlist_key
+            consecutive_no_change = watch.get("consecutive_no_change") or 0
+            current_interval = watch.get("current_interval_min")
+            if not isinstance(current_interval, int):
+                current_interval = min_interval_minutes
+            _write_watch_state(
+                app.state.paths.db_path,
+                playlist_id,
+                last_checked_at=watch.get("last_checked_at"),
+                next_poll_at=_format_iso(now),
+                idle_count=watch.get("idle_count") or 0,
+                current_interval_min=current_interval,
+                consecutive_no_change=consecutive_no_change,
+                last_change_at=watch.get("last_change_at"),
+                skip_reason=watch.get("skip_reason"),
+                last_error=watch.get("last_error"),
+                last_error_at=watch.get("last_error_at"),
+            )
+            logging.info(
+                "Watcher startup fast poll forced playlist_id=%s previous_next_poll_at=%s",
+                playlist_id,
+                _format_iso(next_poll_at),
+            )
+            next_poll_at = now
+        startup_fast_poll_done = True
         min_interval_minutes = policy.get("min_interval_minutes") or 5
         interval_seconds = max(60, int(min_interval_minutes * 60))
-        max_sleep_seconds = max(interval_seconds * 3, 900)
+        max_sleep_seconds = _watcher_next_poll_skew_limit_seconds(policy, watch)
         if delta_seconds > max_sleep_seconds:
             clamped = now + timedelta(seconds=min(30, interval_seconds))
             logging.warning(
@@ -4572,6 +6159,8 @@ async def _watcher_supervisor():
             else {}
         )
         pending_before = len(batch_state["pending_playlists"])
+        polled_playlist_key = pl.get("playlist_id") or pl.get("id")
+        polled_playlist_id = extract_playlist_id(polled_playlist_key) or polled_playlist_key
         _set_watcher_status(
             "polling",
             last_poll_ts=_format_iso(now),
@@ -4581,6 +6170,19 @@ async def _watcher_supervisor():
         )
         await _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batch_state)
         pending_after = len(batch_state["pending_playlists"])
+        if pending_after > 0 and polled_playlist_id:
+            polled_set = batch_state.get("polled_playlists")
+            if not isinstance(polled_set, set):
+                polled_set = set()
+                batch_state["polled_playlists"] = polled_set
+            polled_set.add(polled_playlist_id)
+            if batch_state.get("batch_opened_ts") is None:
+                batch_state["batch_opened_ts"] = time.monotonic()
+                batch_state["batch_opened_at"] = datetime.now(timezone.utc).isoformat()
+        if pending_after == 0 and not batch_state["batch_active"]:
+            batch_state["batch_opened_ts"] = None
+            batch_state["batch_opened_at"] = None
+            batch_state["polled_playlists"] = set()
         if pending_after > pending_before:
             logging.info("Watcher poll complete: updates detected")
         else:
@@ -4605,6 +6207,161 @@ async def _watcher_supervisor():
             )
 
 
+def _watcher_supervisor_task_done(task: asyncio.Task):
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    if _is_recoverable_watcher_exception(exc):
+        logging.warning("Watcher supervisor hit recoverable error; scheduling restart: %s", exc)
+    else:
+        logging.exception("Watcher supervisor crashed; scheduling restart", exc_info=(type(exc), exc, exc.__traceback__))
+    app.state.watcher_task = None
+    # Prevent stale UI/runtime state after a crash.
+    _set_watcher_status("recovering", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
+    if not _ensure_watcher_lock_runtime():
+        _set_watcher_status("disabled", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
+        return
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return
+    loop.create_task(_restart_watcher_supervisor())
+
+
+def _is_recoverable_watcher_exception(exc: Exception) -> bool:
+    if isinstance(exc, (socket.gaierror, TimeoutError, ConnectionError)):
+        return True
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    return (
+        "remote end closed connection without response" in text
+        or "no address associated with hostname" in text
+        or "temporary failure" in text
+        or "timed out" in text
+        or "connection reset" in text
+    )
+
+
+def _watcher_next_poll_skew_limit_seconds(policy, watch):
+    min_interval = 5
+    max_interval = 360
+    if isinstance(policy, dict):
+        try:
+            min_interval = int(policy.get("min_interval_minutes") or min_interval)
+        except Exception:
+            min_interval = 5
+        try:
+            max_interval = int(policy.get("max_interval_minutes") or max_interval)
+        except Exception:
+            max_interval = 360
+    min_interval = max(1, min_interval)
+    max_interval = max(min_interval, max_interval)
+    current_interval = None
+    if isinstance(watch, dict):
+        try:
+            current_interval = int(watch.get("current_interval_min"))
+        except Exception:
+            current_interval = None
+    if isinstance(current_interval, int):
+        effective_interval = max(min_interval, min(max_interval, current_interval))
+    else:
+        effective_interval = min_interval
+    # Skew should exceed plausible adaptive cadence by a wide margin.
+    return max(900, effective_interval * 60 * 3, max_interval * 60 * 2)
+
+
+async def _restart_watcher_supervisor(delay_seconds: int = 5):
+    await asyncio.sleep(max(0, int(delay_seconds)))
+    if not _ensure_watcher_lock_runtime():
+        _set_watcher_status("disabled", pending_playlists_count=0, quiet_window_remaining_sec=None, batch_active=False)
+        return
+    current = getattr(app.state, "watcher_task", None)
+    if current and not current.done():
+        return
+    _start_watcher_supervisor_task()
+
+
+def _start_watcher_supervisor_task():
+    loop = app.state.loop
+    if not loop or loop.is_closed():
+        return None
+    current = getattr(app.state, "watcher_task", None)
+    if current and not current.done():
+        return current
+    task = loop.create_task(_watcher_supervisor())
+    task.add_done_callback(_watcher_supervisor_task_done)
+    app.state.watcher_task = task
+    return task
+
+
+async def _disable_watcher_runtime(reason: str | None = None):
+    watcher_task = getattr(app.state, "watcher_task", None)
+    if watcher_task:
+        watcher_task.cancel()
+        try:
+            await watcher_task
+        except asyncio.CancelledError:
+            pass
+    app.state.watcher_task = None
+
+    lock_fd = getattr(app.state, "watcher_lock", None)
+    if lock_fd is not None:
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+    app.state.watcher_lock = None
+    _set_watcher_status(
+        "disabled",
+        pending_playlists_count=0,
+        quiet_window_remaining_sec=None,
+        batch_active=False,
+        next_poll_ts=None,
+    )
+    if reason:
+        logging.info("Watcher disabled: %s", reason)
+
+
+def _enable_watcher_runtime():
+    if not bool(getattr(app.state, "single_worker_enforced", False)):
+        logging.info(
+            "Watcher disabled due to guardrails (multiple workers detected=%d)",
+            int(getattr(app.state, "worker_count", 0) or 0),
+        )
+        _set_watcher_status(
+            "disabled",
+            pending_playlists_count=0,
+            quiet_window_remaining_sec=None,
+            batch_active=False,
+            next_poll_ts=None,
+        )
+        return
+
+    if getattr(app.state, "watcher_lock", None) is None:
+        app.state.watcher_lock = _acquire_watcher_lock(DATA_DIR)
+    if getattr(app.state, "watcher_lock", None) is None:
+        logging.info("Watcher disabled due to guardrails (lock unavailable)")
+        _set_watcher_status(
+            "disabled",
+            pending_playlists_count=0,
+            quiet_window_remaining_sec=None,
+            batch_active=False,
+            next_poll_ts=None,
+        )
+        return
+
+    _start_watcher_supervisor_task()
+    _set_watcher_status(
+        "idle",
+        pending_playlists_count=0,
+        quiet_window_remaining_sec=None,
+        batch_active=False,
+    )
+    logging.info("Watcher active — adaptive monitoring enabled")
+
+
 def _apply_watch_policy(policy):
     if getattr(app.state, "watcher_lock", None) is None:
         return
@@ -4621,26 +6378,56 @@ def _set_watcher_status(state=None, **fields):
     if state and state != prev_state:
         _log_transition("WATCHER_STATE", from_state=prev_state or "-", to_state=state)
         status["state"] = state
-        if state == "polling":
-            logging.info("Watcher state → polling")
-        elif state == "waiting_quiet_window":
-            remaining = fields.get("quiet_window_remaining_sec")
-            if remaining is None:
-                remaining = WATCHER_QUIET_WINDOW_SECONDS
-            logging.info("Watcher state → waiting_quiet_window (%ss)", remaining)
-        elif state == "batch_ready":
-            logging.info("Watcher state → batch_ready")
-        elif state == "running_batch":
-            count = fields.get("pending_playlists_count")
-            if count is None:
-                count = 0
-            logging.info("Watcher state → running_batch playlists=%s", count)
-        elif state == "disabled":
-            logging.info("Watcher state → disabled")
-        else:
-            logging.info("Watcher state → %s", state)
+        logging.info(
+            {
+                "message": "watcher_state_changed",
+                "from_state": prev_state,
+                "to_state": state,
+                "pending_playlists_count": fields.get("pending_playlists_count"),
+                "batch_active": fields.get("batch_active"),
+                "quiet_window_remaining_sec": fields.get("quiet_window_remaining_sec"),
+                "next_poll_ts": fields.get("next_poll_ts"),
+            }
+        )
     for key, value in fields.items():
         status[key] = value
+
+
+def _acoustid_runtime_status(config: dict | None) -> dict[str, object]:
+    music_meta = (config or {}).get("music_metadata") if isinstance(config, dict) else {}
+    if not isinstance(music_meta, dict):
+        music_meta = {}
+    metadata_enabled = bool(music_meta.get("enabled", False))
+    use_acoustid = bool(music_meta.get("use_acoustid", False))
+    key_configured = bool(str(music_meta.get("acoustid_api_key") or "").strip())
+    fpcalc_available = bool(shutil.which("fpcalc"))
+    pyacoustid_available = False
+    try:
+        importlib.import_module("acoustid")
+        pyacoustid_available = True
+    except Exception:
+        pyacoustid_available = False
+
+    configured = bool(metadata_enabled and use_acoustid)
+    missing_requirements: list[str] = []
+    if configured and not key_configured:
+        missing_requirements.append("api_key")
+    if configured and not fpcalc_available:
+        missing_requirements.append("fpcalc")
+    if configured and not pyacoustid_available:
+        missing_requirements.append("pyacoustid")
+
+    ready = bool(configured and key_configured and fpcalc_available and pyacoustid_available)
+    return {
+        "configured": configured,
+        "metadata_enabled": metadata_enabled,
+        "use_acoustid": use_acoustid,
+        "key_configured": key_configured,
+        "fpcalc_available": fpcalc_available,
+        "pyacoustid_available": pyacoustid_available,
+        "missing_requirements": missing_requirements,
+        "ready": ready,
+    }
 
 
 @app.get("/api/status")
@@ -4669,11 +6456,43 @@ async def api_status():
     paused = False
     if watcher_downtime.get("enabled"):
         paused, _ = in_downtime(now, watcher_downtime.get("start"), watcher_downtime.get("end"))
+    loaded_cfg = get_loaded_config()
+    watcher_config_enabled = _config_watcher_enabled(loaded_cfg)
+    watcher_lock_enabled = bool(getattr(app.state, "watcher_lock", None))
+    single_worker_enforced = bool(getattr(app.state, "single_worker_enforced", False))
+    watcher_disabled_reasons: list[str] = []
+    if not watcher_config_enabled:
+        watcher_disabled_reasons.append("config")
+    if watcher_config_enabled and not single_worker_enforced:
+        watcher_disabled_reasons.append("multi-worker")
+    if watcher_config_enabled and single_worker_enforced and not watcher_lock_enabled:
+        watcher_disabled_reasons.append("lock")
+    if paused:
+        watcher_disabled_reasons.append("downtime")
+
+    schedule_cfg = app.state.schedule_config or {}
+    scheduler_config_enabled = bool(schedule_cfg.get("enabled", False))
+    scheduler_instance = getattr(app.state, "scheduler", None)
+    scheduler_running = bool(scheduler_instance and getattr(scheduler_instance, "running", False))
+    scheduler_disabled_reasons: list[str] = []
+    if not scheduler_config_enabled:
+        scheduler_disabled_reasons.append("config")
+    if scheduler_config_enabled and paused:
+        scheduler_disabled_reasons.append("downtime")
+    scheduler_effective_enabled = bool(scheduler_config_enabled and scheduler_running and not paused)
+    watcher_effective_enabled = bool(
+        watcher_config_enabled
+        and single_worker_enforced
+        and watcher_lock_enabled
+        and not paused
+    )
     watcher_status = dict(getattr(app.state, "watcher_status", {}) or {})
     if not bool(getattr(app.state, "watcher_lock", None)):
         watcher_status["state"] = "disabled"
+    acoustid_status = _acoustid_runtime_status(loaded_cfg)
     playlist_import = _get_playlist_import_snapshot()
     queue_status = _get_download_queue_snapshot()
+    telegram_delivery = _telegram_delivery_stats_snapshot()
     return safe_json({
         "schema_version": STATUS_SCHEMA_VERSION,
         "server_time": datetime.now(timezone.utc).isoformat(),
@@ -4684,16 +6503,33 @@ async def api_status():
         "finished_at": app.state.finished_at,
         "error": app.state.last_error,
         "watcher": {
-            "enabled": bool(getattr(app.state, "watcher_lock", None)),
+            "enabled": watcher_lock_enabled,
             "paused": bool(paused),
         },
         "watcher_status": watcher_status,
         "scheduler": {
-            "enabled": bool((app.state.schedule_config or {}).get("enabled", False)),
+            "enabled": scheduler_config_enabled,
+        },
+        "automation_effective": {
+            "watcher": {
+                "config_enabled": watcher_config_enabled,
+                "runtime_enabled": watcher_lock_enabled,
+                "effective_enabled": watcher_effective_enabled,
+                "disabled_reasons": watcher_disabled_reasons,
+            },
+            "scheduler": {
+                "config_enabled": scheduler_config_enabled,
+                "runtime_enabled": scheduler_running,
+                "effective_enabled": scheduler_effective_enabled,
+                "disabled_reasons": scheduler_disabled_reasons,
+            },
         },
         "queue": queue_status,
+        "acoustid_ready": bool(acoustid_status.get("ready")),
+        "acoustid": acoustid_status,
         "playlist_import": playlist_import,
         "watcher_errors": watcher_errors,
+        "telegram_delivery": telegram_delivery,
         "status": status,
     })
 
@@ -4739,6 +6575,8 @@ async def api_update_schedule(payload: ScheduleRequest):
     app.state.schedule_config = current
     _apply_schedule_config(current)
     _apply_spotify_schedule(config or {})
+    app.state.loaded_config = safe_json(config) if isinstance(config, dict) else {}
+    app.state.config = app.state.loaded_config
     return _schedule_response()
 
 
@@ -4756,12 +6594,157 @@ async def api_metrics():
         "disk_free_bytes": disk["free_bytes"],
         "disk_used_bytes": disk["used_bytes"],
         "disk_free_percent": disk["free_percent"],
+        "telegram_delivery": _telegram_delivery_stats_snapshot(),
     }
 
 
 @app.get("/api/version")
 async def api_version():
     return get_runtime_info()
+
+
+@app.get("/api/version/latest")
+async def api_version_latest():
+    runtime = get_runtime_info() or {}
+    latest_tag, source = _resolve_latest_version_tag()
+    current = str(runtime.get("app_version") or "").strip()
+    latest = str(latest_tag or "").strip()
+    update_available = False
+    current_semver = _parse_semver_tag(current)
+    latest_semver = _parse_semver_tag(latest)
+    if current_semver is not None and latest_semver is not None:
+        update_available = current_semver < latest_semver
+    return {
+        "current_version": current,
+        "latest_version": latest,
+        "source": source,
+        "update_available": bool(update_available),
+    }
+
+
+@app.get("/resolve/recording/{mbid}")
+async def resolution_api_resolve_recording(mbid: str):
+    payload = resolve_resolution_recording(app.state.search_db_path, mbid)
+    if str(((payload.get("availability") or {}).get("status") or "")).strip() == "not_found":
+        try:
+            enqueue_resolution_unresolved_mbid(
+                app.state.search_db_path,
+                mbid=mbid,
+                reason="resolution_api_not_found",
+                source="resolve_recording",
+            )
+        except Exception:
+            logger.debug("resolution_api_unresolved_enqueue_failed mbid=%s", mbid, exc_info=True)
+    return safe_json(payload)
+
+
+@app.post("/resolve/bulk")
+async def resolution_api_resolve_bulk(payload: ResolutionBulkRequest):
+    result = resolve_resolution_bulk(app.state.search_db_path, list(payload.mbids or []))
+    for item in result.get("results") if isinstance(result.get("results"), list) else []:
+        if str((((item.get("availability") or {}).get("status")) or "")).strip() != "not_found":
+            continue
+        try:
+            enqueue_resolution_unresolved_mbid(
+                app.state.search_db_path,
+                mbid=str(item.get("mbid") or ""),
+                reason="resolution_api_bulk_not_found",
+                source="resolve_bulk",
+            )
+        except Exception:
+            logger.debug("resolution_api_bulk_unresolved_enqueue_failed", exc_info=True)
+    return safe_json(result)
+
+
+@app.get("/resolve/snapshot")
+async def resolution_api_snapshot(limit: int = Query(500, ge=1, le=5000)):
+    payload = build_resolution_snapshot(app.state.search_db_path, limit=limit)
+    return safe_json(payload)
+
+
+@app.get("/resolve/diff")
+async def resolution_api_diff(since: str = Query(...), limit: int = Query(500, ge=1, le=5000)):
+    payload = build_resolution_diff(app.state.search_db_path, since=since, limit=limit)
+    return safe_json(payload)
+
+
+@app.post("/submit", status_code=202)
+async def resolution_api_submit(payload: ResolutionSubmitRequest, request: Request):
+    cfg = get_loaded_config() or {}
+    try:
+        auth = resolve_node_auth(
+            cfg if isinstance(cfg, dict) else {},
+            provided_key=_resolution_api_key_from_request(request),
+            provided_node_id=payload.node_id,
+            allow_anonymous=False,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 401 if detail in {"api_key_required", "invalid_api_key", "node_id_mismatch"} else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    try:
+        result = submit_resolution_mapping(
+            app.state.search_db_path,
+            mbid=payload.mbid,
+            source_url=payload.source_url,
+            source=payload.source,
+            node_id=str(auth.get("node_id") or payload.node_id),
+            duration_seconds=payload.duration_seconds,
+            media_format=payload.media_format,
+            bitrate_kbps=payload.bitrate_kbps,
+            file_hash=payload.file_hash,
+            resolution_method=payload.resolution_method,
+            source_id=payload.source_id,
+            raw_payload=payload.metadata or {},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return safe_json({"schema_version": 1, "status": "accepted", "mapping": result})
+
+
+@app.post("/verify")
+async def resolution_api_verify(payload: ResolutionVerifyRequest, request: Request):
+    cfg = get_loaded_config() or {}
+    try:
+        auth = resolve_node_auth(
+            cfg if isinstance(cfg, dict) else {},
+            provided_key=_resolution_api_key_from_request(request),
+            provided_node_id=payload.verifier_id,
+            allow_anonymous=False,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 401 if detail in {"api_key_required", "invalid_api_key", "node_id_mismatch"} else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    try:
+        result = verify_resolution_mapping(
+            app.state.search_db_path,
+            mbid=payload.mbid,
+            source_url=payload.source_url,
+            verifier_id=str(auth.get("node_id") or payload.verifier_id),
+            duration_seconds=payload.duration_seconds,
+            media_format=payload.media_format,
+            bitrate_kbps=payload.bitrate_kbps,
+            file_hash=payload.file_hash,
+            threshold=RESOLUTION_VERIFY_THRESHOLD,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return safe_json({"schema_version": 1, "status": "ok", "verification": result})
+
+
+@app.get("/stats")
+async def resolution_api_stats():
+    payload = build_resolution_stats(app.state.search_db_path)
+    return safe_json(payload)
+
+
+@app.get("/health")
+async def resolution_api_health():
+    payload = build_resolution_health(app.state.search_db_path)
+    return safe_json(payload)
 
 
 @app.post("/api/yt-dlp/update")
@@ -4872,7 +6855,7 @@ async def api_put_config_path(payload: ConfigPathRequest):
     if not os.path.exists(target):
         raise HTTPException(status_code=404, detail=f"Config not found: {target}")
     try:
-        config = load_config(target)
+        config = load_config(target, write_back_defaults=True)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON in config: {exc}") from exc
     except OSError as exc:
@@ -4916,6 +6899,7 @@ async def api_run(request: RunRequest):
                     {
                         "message": "direct_url_request_received",
                         "music_mode": bool(request.music_mode),
+                        "media_mode": str(request.media_mode or "").strip().lower() or None,
                         "url": request.single_url,
                     }
                 ),
@@ -4931,6 +6915,7 @@ async def api_run(request: RunRequest):
         final_format_override=request.final_format_override,
         js_runtime=request.js_runtime,
         music_mode=request.music_mode,
+        media_mode=request.media_mode,
         run_source="api",
         skip_downtime=bool(request.single_url),
         delivery_mode=request.delivery_mode,
@@ -5055,7 +7040,7 @@ async def create_search_request(request: dict = Body(...)):
         normalized = normalize_search_payload(raw_payload, default_sources=enabled_sources)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if bool(normalized.get("music_mode")):
+    if str(normalized.get("media_mode") or "video") != "video":
         raise HTTPException(
             status_code=400,
             detail="music_mode_requests_must_use_api_music_search",
@@ -5076,6 +7061,7 @@ async def create_search_request(request: dict = Body(...)):
             "detected_intent": intent.type.value,
             "identifier": intent.identifier,
             "music_mode": bool(normalized["music_mode"]),
+            "media_mode": str(normalized["media_mode"] or "video"),
             "music_candidates": [],
             "music_resolution": None,
         }
@@ -5088,6 +7074,8 @@ async def create_search_request(request: dict = Body(...)):
         raw_payload["media_type"] = "music" if normalized["music_mode"] else "generic"
     if "music_mode" not in raw_payload:
         raw_payload["music_mode"] = normalized["music_mode"]
+    if "media_mode" not in raw_payload:
+        raw_payload["media_mode"] = normalized["media_mode"]
     if "destination_dir" not in raw_payload and normalized["destination"] is not None:
         raw_payload["destination_dir"] = normalized["destination"]
 
@@ -5106,6 +7094,7 @@ async def create_search_request(request: dict = Body(...)):
         "quality_min_bitrate_kbps",
         "lossless_only",
         "music_mode",
+        "media_mode",
         "auto_enqueue",
         "source_priority",
         "max_candidates_per_source",
@@ -5132,13 +7121,19 @@ async def create_search_request(request: dict = Body(...)):
     return {
         "request_id": request_id,
         "music_mode": bool(normalized["music_mode"]),
+        "media_mode": str(normalized["media_mode"] or "video"),
         "music_candidates": [],
         "music_resolution": None,
     }
 
 
 @app.post("/api/import/playlist")
-async def import_playlist(file: UploadFile = File(...)):
+async def import_playlist(
+    file: UploadFile = File(...),
+    media_mode: str = Form("music"),
+    destination_dir: str | None = Form(None),
+    final_format: str | None = Form(None),
+):
     filename = str(getattr(file, "filename", "") or "").strip()
     ext = Path(filename).suffix.lower()
     if ext not in SUPPORTED_IMPORT_EXTENSIONS:
@@ -5182,7 +7177,14 @@ async def import_playlist(file: UploadFile = File(...)):
 
     thread = threading.Thread(
         target=_run_playlist_import_job,
-        args=(job_id, filename, payload),
+        args=(
+            job_id,
+            filename,
+            payload,
+            str(media_mode or "music").strip().lower() or "music",
+            str(destination_dir or "").strip() or None,
+            str(final_format or "").strip() or None,
+        ),
         name=f"playlist-import-{job_id[:8]}",
         daemon=True,
     )
@@ -5199,6 +7201,15 @@ async def get_import_playlist_job(job_id: str):
     if not status_entry:
         raise HTTPException(status_code=404, detail="import_job_not_found")
     status_entry["active"] = bool(status_entry.get("state") in {"queued", "parsing", "resolving"})
+    import_batch_id = str(status_entry.get("import_batch_id") or "").strip()
+    db_path = getattr(getattr(app.state, "paths", None), "db_path", None)
+    if import_batch_id and db_path:
+        try:
+            batch_summary = get_import_batch_summary(db_path, import_batch_id)
+            if batch_summary:
+                status_entry["batch_summary"] = batch_summary
+        except Exception:
+            logging.exception("Failed to load import batch summary")
     return {"job_id": normalized, "status": status_entry}
 
 
@@ -5250,6 +7261,23 @@ async def execute_intent(payload: dict = Body(...)):
         queue=queue,
         spotify_client=spotify_client,
     )
+
+
+@app.post("/api/intake", status_code=202)
+async def intake_external_package(payload: IntakeRequestPayload):
+    """Accept a normalized acquisition package from external integrations."""
+    adapter_payload, effective_media_type = _normalize_intake_payload(payload)
+    result = _IntentQueueAdapter().enqueue(adapter_payload)
+    return {
+        "status": "accepted",
+        "job_id": result.get("job_id"),
+        "created": bool(result.get("created")),
+        "dedupe_reason": result.get("dedupe_reason"),
+        "effective_media_type": effective_media_type,
+        "effective_media_intent": str(adapter_payload.get("media_intent") or ""),
+        "origin": str(adapter_payload.get("origin") or ""),
+        "source_url": str(adapter_payload.get("url") or ""),
+    }
 
 
 @app.post("/api/intent/preview")
@@ -5315,7 +7343,11 @@ async def list_search_requests(status: str | None = None, limit: int | None = No
     except Exception:
         logging.exception("Failed to list search requests")
         raise HTTPException(status_code=500, detail="Failed to load search requests")
-    return _sanitize_non_http_urls({"requests": requests})
+    payload = _sanitize_non_http_urls({"requests": requests})
+    return JSONResponse(
+        content=payload,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/api/search/requests/{request_id}")
@@ -5324,7 +7356,11 @@ async def get_search_request(request_id: str):
     result = service.get_search_request(request_id)
     if not result:
         raise HTTPException(status_code=404, detail="Search request not found")
-    return _sanitize_non_http_urls(result)
+    payload = _sanitize_non_http_urls(result)
+    return JSONResponse(
+        content=payload,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.post("/api/search/requests/{request_id}/cancel")
@@ -5335,10 +7371,21 @@ async def cancel_search_request(request_id: str):
 
 
 @app.post("/api/search/resolve/once")
-async def run_search_resolution_once():
+async def run_search_resolution_once(payload: dict = Body(default_factory=dict)):
     service = app.state.search_service
-    request_id = service.run_search_resolution_once()
-    return {"request_id": request_id}
+    requested_id = None
+    if isinstance(payload, dict):
+        raw = payload.get("request_id")
+        if isinstance(raw, str):
+            candidate = raw.strip()
+            if candidate:
+                requested_id = candidate
+    # Resolver is synchronous/heavy; run it off the event loop so polling endpoints
+    # can continue serving incremental search updates while resolution is in progress.
+    request_id = await anyio.to_thread.run_sync(
+        lambda: service.run_search_resolution_once(request_id=requested_id)
+    )
+    return {"request_id": request_id, "requested_request_id": requested_id}
 
 
 def _album_run_summary_dir() -> Path:
@@ -5602,6 +7649,30 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
     no_viable = max(0, len(unresolved) - source_unavailable)
     completion_percent = (tracks_resolved / tracks_total * 100.0) if tracks_total else 0.0
     per_album_id = str(release_group_mbid or "").strip() or album_run_id
+    export_summary = {}
+    for row in rows:
+        output_template = row["output_template"]
+        parsed = {}
+        if isinstance(output_template, str) and output_template.strip():
+            try:
+                loaded = json.loads(output_template)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = {}
+        export_results = parsed.get("export_results") if isinstance(parsed.get("export_results"), dict) else {}
+        for export_name, result in export_results.items():
+            name = str(export_name or "").strip()
+            if not name or not isinstance(result, dict):
+                continue
+            target = export_summary.setdefault(name, {"copied": 0, "transcoded": 0, "failed": 0})
+            status = str(result.get("status") or "").strip().lower()
+            if status == "copied":
+                target["copied"] += 1
+            elif status == "transcoded":
+                target["transcoded"] += 1
+            else:
+                target["failed"] += 1
     return {
         "schema_version": 1,
         "run_type": "music_album",
@@ -5612,6 +7683,7 @@ def _compute_music_album_run_summary(db_path: str, album_run_id: str, release_gr
         "tracks_total": tracks_total,
         "tracks_resolved": tracks_resolved,
         "completion_percent": completion_percent,
+        "exports": dict(sorted(export_summary.items(), key=lambda item: item[0])),
         "unresolved_classification": {
             "source_unavailable": source_unavailable,
             "no_viable_match": no_viable,
@@ -5642,12 +7714,97 @@ def _write_music_album_run_summary(summary: dict[str, object]) -> str:
     return str(output_path)
 
 
+def _release_media_has_track_entries(release_obj: dict) -> bool:
+    if not isinstance(release_obj, dict):
+        return False
+    media = release_obj.get("medium-list", [])
+    if not isinstance(media, list):
+        return False
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        track_list = medium.get("track-list", [])
+        if not isinstance(track_list, list):
+            continue
+        for track in track_list:
+            if not isinstance(track, dict):
+                continue
+            recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+            recording_mbid = str(recording.get("id") or "").strip()
+            title = str(track.get("title") or recording.get("title") or "").strip()
+            if recording_mbid and title:
+                return True
+    return False
+
+
+def _select_release_with_tracks(mb, release_group_mbid: str, release_dicts: list[dict], *, include_tags: bool = False) -> tuple[dict, dict]:
+    official = [rel for rel in release_dicts if str(rel.get("status") or "").strip().lower() == "official"]
+    us_official = [rel for rel in official if str(rel.get("country") or "").strip().upper() == "US"]
+    ordered_candidates = us_official + [rel for rel in official if rel not in us_official] + [
+        rel for rel in release_dicts if rel not in official
+    ]
+
+    selected_release = None
+    selected_release_obj = {}
+    fallback_release = None
+    fallback_release_obj = {}
+    release_includes = ["recordings", "media", "artists"]
+    if include_tags:
+        release_includes.append("tags")
+
+    for candidate in ordered_candidates:
+        release_mbid = str(candidate.get("id") or "").strip()
+        if not release_mbid:
+            continue
+        try:
+            release_payload = mb._call_with_retry(  # noqa: SLF001
+                lambda rid=release_mbid: musicbrainzngs.get_release_by_id(
+                    rid,
+                    includes=release_includes,
+                )
+            )
+        except Exception:
+            logger.exception("[MUSIC] release fetch failed release_group=%s release=%s", release_group_mbid, release_mbid)
+            continue
+        release_obj = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
+        if fallback_release is None:
+            fallback_release = candidate
+            fallback_release_obj = release_obj if isinstance(release_obj, dict) else {}
+        if _release_media_has_track_entries(release_obj):
+            selected_release = candidate
+            selected_release_obj = release_obj if isinstance(release_obj, dict) else {}
+            logger.info(
+                "[MUSIC] selected release with tracks release_group=%s release=%s status=%s country=%s",
+                release_group_mbid,
+                release_mbid,
+                candidate.get("status"),
+                candidate.get("country"),
+            )
+            break
+
+    if selected_release is not None:
+        return selected_release, selected_release_obj
+    if fallback_release is not None:
+        logger.info(
+            "[MUSIC] no release with tracks found; falling back release_group=%s release=%s",
+            release_group_mbid,
+            fallback_release.get("id"),
+        )
+        return fallback_release, fallback_release_obj
+    raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
+
+
 @app.post("/api/music/album/download")
 def download_full_album(data: dict):
     release_group_mbid = str((data or {}).get("release_group_mbid") or "").strip()
     if not release_group_mbid:
         raise HTTPException(status_code=400, detail="release_group_mbid required")
     force_redownload = bool((data or {}).get("force_redownload"))
+    destination = str((data or {}).get("destination") or (data or {}).get("destination_dir") or "").strip() or None
+    final_format = str((data or {}).get("final_format") or "").strip() or None
+    requested_media_mode = str((data or {}).get("media_mode") or "").strip().lower()
+    if requested_media_mode not in {"music", "music_video"}:
+        requested_media_mode = "music"
 
     cfg = _read_config_or_404()
     threshold_raw = (cfg or {}).get("music_mb_binding_threshold", 0.78)
@@ -5678,31 +7835,15 @@ def download_full_album(data: dict):
     if not release_dicts:
         raise HTTPException(status_code=404, detail="musicbrainz_release_group_has_no_releases")
 
-    official = [rel for rel in release_dicts if str(rel.get("status") or "").strip().lower() == "official"]
-    us_official = [rel for rel in official if str(rel.get("country") or "").strip().upper() == "US"]
-    if us_official:
-        selected_release = us_official[0]
-    elif official:
-        selected_release = official[0]
-    else:
-        selected_release = release_dicts[0]
+    selected_release, release_obj = _select_release_with_tracks(
+        mb,
+        release_group_mbid,
+        release_dicts,
+        include_tags=True,
+    )
     release_mbid = str(selected_release.get("id") or "").strip()
     if not release_mbid:
         raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
-
-    try:
-        release_payload = mb._call_with_retry(  # noqa: SLF001
-            lambda: musicbrainzngs.get_release_by_id(
-                release_mbid,
-                # Keep include list contract-safe; use tags fallback for genre best-effort.
-                includes=["recordings", "media", "artists", "tags"],
-            )
-        )
-    except Exception:
-        logger.exception("[MUSIC] release fetch failed release=%s", release_mbid)
-        raise HTTPException(status_code=502, detail="musicbrainz_release_fetch_failed")
-
-    release_obj = release_payload.get("release", {}) if isinstance(release_payload, dict) else {}
     release_title = str(release_obj.get("title") or "").strip() or None
     release_date = str(release_obj.get("date") or "").strip() or None
     release_artist_credit = release_obj.get("artist-credit", []) if isinstance(release_obj, dict) else []
@@ -5802,7 +7943,10 @@ def download_full_album(data: dict):
     queue = _IntentQueueAdapter()
     engine = getattr(app.state, "worker_engine", None)
     store = getattr(engine, "store", None) if engine is not None else None
+    tracks_considered = 0
     tracks_enqueued = 0
+    duplicate_tracks_count = 0
+    duplicate_tracks = []
     job_ids = []
     failed_tracks = []
     album_duration_delta_limit_ms = 25000
@@ -5826,6 +7970,7 @@ def download_full_album(data: dict):
             title = str(track.get("title") or recording.get("title") or "").strip()
             if not recording_mbid or not title:
                 continue
+            tracks_considered += 1
             artist = _credit_name(recording.get("artist-credit")) or _credit_name(track.get("artist-credit")) or _credit_name(release_artist_credit)
             duration_ms = recording.get("length") or track.get("length")
             try:
@@ -5838,56 +7983,60 @@ def download_full_album(data: dict):
                 track_number = None
 
             try:
-                resolved = resolve_best_mb_pair(
-                    mb,
-                    artist=artist or None,
-                    track=title,
-                    album=release_title,
-                    duration_ms=duration_ms_int,
-                    threshold=binding_threshold,
-                    max_duration_delta_ms=album_duration_delta_limit_ms,
-                )
+                resolved = None
+                try:
+                    resolved = resolve_best_mb_pair(
+                        mb,
+                        artist=artist or None,
+                        track=title,
+                        album=release_title,
+                        duration_ms=duration_ms_int,
+                        threshold=binding_threshold,
+                        max_duration_delta_ms=album_duration_delta_limit_ms,
+                    )
+                except Exception as resolve_exc:
+                    logger.info(
+                        "[MUSIC] album track resolver_enrichment_failed recording=%s track=%s reason=%s",
+                        recording_mbid,
+                        title,
+                        str(resolve_exc) or "resolver_failed",
+                    )
+
                 if not resolved:
                     reasons = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
-                    reason_text = ",".join(reasons) if reasons else "mb_pair_not_resolved"
                     logger.info(
-                        "[MUSIC] album track skipped recording=%s track=%s reasons=%s",
+                        "[MUSIC] album track using_release_metadata recording=%s track=%s resolver_reasons=%s",
                         recording_mbid,
                         title,
                         reasons,
                     )
-                    failed_tracks.append(
-                        {
-                            "recording_mbid": recording_mbid,
-                            "track": title,
-                            "reason": reason_text,
-                        }
-                    )
-                    continue
 
                 payload = {
                     "origin": "music_album",
                     "origin_id": album_run_id,
+                    "destination": destination,
+                    "final_format": final_format,
+                    "media_mode": requested_media_mode,
                     "media_intent": "music_track",
                     "force_redownload": force_redownload,
-                    "artist": resolved.get("artist") or artist,
+                    "artist": artist or (resolved.get("artist") if isinstance(resolved, dict) else None),
                     "album": release_title,
-                    "album_artist": album_artist or (resolved.get("album_artist") or resolved.get("artist") or artist),
-                    "track": title,
-                    "recording_mbid": resolved.get("recording_mbid") or recording_mbid,
-                    "mb_recording_id": resolved.get("recording_mbid") or recording_mbid,
-                    "track_number": track_number or resolved.get("track_number"),
-                    "disc_number": disc_number or resolved.get("disc_number"),
+                    "album_artist": album_artist or artist or (resolved.get("album_artist") if isinstance(resolved, dict) else None),
+                    "track": title or (resolved.get("track") if isinstance(resolved, dict) else None),
+                    "recording_mbid": recording_mbid,
+                    "mb_recording_id": recording_mbid,
+                    "track_number": track_number or (resolved.get("track_number") if isinstance(resolved, dict) else None),
+                    "disc_number": disc_number or (resolved.get("disc_number") if isinstance(resolved, dict) else None),
                     "track_total": track_total or None,
                     "disc_total": disc_total,
-                    "release_date": release_date or resolved.get("release_date"),
+                    "release_date": release_date or (resolved.get("release_date") if isinstance(resolved, dict) else None),
                     "mb_release_id": release_mbid,
                     "mb_release_group_id": release_group_mbid,
                     "release_id": release_mbid,
                     "release_group_id": release_group_mbid,
                     "artwork_url": album_artwork_url,
                     "genre": album_genre or (resolved.get("genre") if isinstance(resolved, dict) else None),
-                    "duration_ms": resolved.get("duration_ms") or duration_ms_int,
+                    "duration_ms": duration_ms_int or (resolved.get("duration_ms") if isinstance(resolved, dict) else None),
                     "track_aliases": resolved.get("track_aliases") if isinstance(resolved, dict) else None,
                     "track_disambiguation": resolved.get("track_disambiguation") if isinstance(resolved, dict) else None,
                     "mb_recording_title": resolved.get("mb_recording_title") if isinstance(resolved, dict) else None,
@@ -5905,12 +8054,25 @@ def download_full_album(data: dict):
                     mb_release_group_id=payload.get("mb_release_group_id") or payload.get("release_group_id"),
                     disc_number=payload.get("disc_number"),
                 )
-                queue.enqueue(payload)
-                tracks_enqueued += 1
-                if store is not None:
-                    existing = store.get_job_by_canonical_id(canonical_id)
-                    if existing is not None and existing.id:
-                        job_ids.append(existing.id)
+                queue_result = queue.enqueue(payload)
+                created = bool(queue_result.get("created")) if isinstance(queue_result, dict) else True
+                dedupe_reason = str(queue_result.get("dedupe_reason") or "").strip() if isinstance(queue_result, dict) else ""
+                queued_job_id = str(queue_result.get("job_id") or "").strip() if isinstance(queue_result, dict) else ""
+                if created:
+                    tracks_enqueued += 1
+                    if queued_job_id:
+                        job_ids.append(queued_job_id)
+                else:
+                    duplicate_tracks_count += 1
+                    duplicate_tracks.append(
+                        {
+                            "recording_mbid": payload.get("recording_mbid") or recording_mbid,
+                            "track": title,
+                            "reason": dedupe_reason or "duplicate",
+                        }
+                    )
+            except HTTPException:
+                raise
             except Exception as exc:
                 reason_text = str(exc) or "track_enqueue_failed"
                 logger.warning(
@@ -5952,6 +8114,16 @@ def download_full_album(data: dict):
         },
     }
     summary_path = _write_music_album_run_summary(initial_summary)
+    logger.info(
+        "[MUSIC] album enqueue summary release_group=%s release=%s album_run_id=%s considered=%s queued=%s duplicates=%s failed=%s",
+        release_group_mbid,
+        release_mbid,
+        album_run_id,
+        tracks_considered,
+        tracks_enqueued,
+        duplicate_tracks_count,
+        len(failed_tracks),
+    )
 
     return {
         "status": "enqueued",
@@ -5959,7 +8131,10 @@ def download_full_album(data: dict):
         "run_summary_path": summary_path,
         "release_group_mbid": release_group_mbid,
         "release_mbid": release_mbid,
+        "tracks_considered": tracks_considered,
         "tracks_enqueued": tracks_enqueued,
+        "duplicate_tracks_count": duplicate_tracks_count,
+        "duplicate_tracks": duplicate_tracks,
         "failed_tracks_count": len(failed_tracks),
         "failed_tracks": failed_tracks,
         "job_ids": job_ids,
@@ -6025,6 +8200,142 @@ def music_albums_search(
     return _search_music_album_candidates(str(q or ""), limit=int(limit))
 
 
+@app.get("/api/music/albums/{release_group_mbid}/tracks")
+def music_album_tracks(
+    release_group_mbid: str,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    group_id = str(release_group_mbid or "").strip()
+    if not group_id:
+        raise HTTPException(status_code=400, detail="release_group_mbid required")
+
+    mb = _mb_service()
+    try:
+        release_group_payload = mb._call_with_retry(  # noqa: SLF001
+            lambda: musicbrainzngs.get_release_group_by_id(
+                group_id,
+                includes=["releases"],
+            )
+        )
+    except Exception:
+        logging.exception("music_album_tracks release-group fetch failed release_group_mbid=%s", group_id)
+        raise HTTPException(status_code=502, detail="musicbrainz_release_group_fetch_failed")
+
+    release_group = release_group_payload.get("release-group", {}) if isinstance(release_group_payload, dict) else {}
+    releases = release_group.get("release-list", []) if isinstance(release_group, dict) else []
+    release_dicts = [entry for entry in releases if isinstance(entry, dict)]
+    if not release_dicts:
+        return {
+            "release_group_mbid": group_id,
+            "release_mbid": None,
+            "tracks": [],
+        }
+
+    selected_release, release = _select_release_with_tracks(
+        mb,
+        group_id,
+        release_dicts,
+        include_tags=False,
+    )
+    release_mbid = str(selected_release.get("id") or "").strip()
+    if not release_mbid:
+        return {
+            "release_group_mbid": group_id,
+            "release_mbid": None,
+            "tracks": [],
+        }
+    release_title = str(release.get("title") or "").strip()
+    release_date = str(release.get("date") or "").strip()
+    release_year = release_date[:4] if len(release_date) >= 4 and release_date[:4].isdigit() else None
+    media = release.get("medium-list", []) if isinstance(release, dict) else []
+    if not isinstance(media, list):
+        media = []
+
+    def _credit_name(artist_credit):
+        if not isinstance(artist_credit, list):
+            return ""
+        parts = []
+        for item in artist_credit:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            artist_obj = item.get("artist") if isinstance(item.get("artist"), dict) else {}
+            name = str(item.get("name") or artist_obj.get("name") or "").strip()
+            joinphrase = str(item.get("joinphrase") or "")
+            if name:
+                parts.append(name)
+            if joinphrase:
+                parts.append(joinphrase)
+        return "".join(parts).strip()
+
+    release_artist = _credit_name(release.get("artist-credit"))
+    tracks: list[dict[str, object]] = []
+    for medium in media:
+        if not isinstance(medium, dict):
+            continue
+        try:
+            disc_number = int(medium.get("position")) if medium.get("position") is not None else 1
+        except Exception:
+            disc_number = 1
+        track_list = medium.get("track-list", []) if isinstance(medium.get("track-list"), list) else []
+        for track in track_list:
+            if not isinstance(track, dict):
+                continue
+            recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
+            recording_mbid = str(recording.get("id") or "").strip()
+            title = str(track.get("title") or recording.get("title") or "").strip()
+            if not recording_mbid or not title:
+                continue
+            try:
+                track_number = int(track.get("position")) if track.get("position") is not None else None
+            except Exception:
+                track_number = None
+            duration_ms = None
+            for value in (recording.get("length"), track.get("length")):
+                try:
+                    parsed = int(value)
+                except Exception:
+                    parsed = None
+                if parsed and parsed > 0:
+                    duration_ms = parsed
+                    break
+            artist_name = (
+                _credit_name(recording.get("artist-credit"))
+                or _credit_name(track.get("artist-credit"))
+                or release_artist
+                or None
+            )
+            tracks.append(
+                {
+                    "recording_mbid": recording_mbid,
+                    "release_mbid": release_mbid,
+                    "release_group_mbid": group_id,
+                    "artist": artist_name,
+                    "track": title,
+                    "album": release_title or None,
+                    "release_year": release_year,
+                    "track_number": track_number,
+                    "disc_number": disc_number,
+                    "duration_ms": duration_ms,
+                }
+            )
+
+    tracks.sort(
+        key=lambda item: (
+            int(item.get("disc_number") or 0),
+            int(item.get("track_number") or 0),
+            str(item.get("track") or ""),
+        )
+    )
+    return {
+        "release_group_mbid": group_id,
+        "release_mbid": release_mbid,
+        "tracks": tracks[: int(limit)],
+    }
+
+
 @app.get("/api/music/search")
 def music_search(
     artist: str = Query(""),
@@ -6032,7 +8343,7 @@ def music_search(
     track: str = Query(""),
     mode: str = Query("auto"),
     offset: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(100, ge=1, le=1000),
 ):
     artist_value = str(artist or "").strip()
     album_value = str(album or "").strip()
@@ -6046,6 +8357,94 @@ def music_search(
         offset=int(offset),
         limit=int(limit),
     )
+
+
+@app.post("/api/music/video/availability")
+def music_video_availability(data: dict = Body(...)):
+    payload = data if isinstance(data, dict) else {}
+    recording_mbid = str(payload.get("recording_mbid") or "").strip()
+    artist = str(payload.get("artist") or "").strip()
+    track = str(payload.get("track") or "").strip()
+    album = str(payload.get("album") or "").strip()
+    include_youtube_probe = bool(payload.get("include_youtube_probe", True))
+
+    signals: dict[str, object] = {
+        "mb_linked": False,
+        "community_seeded": False,
+        "youtube_precheck": None,
+    }
+    score = 0
+
+    if recording_mbid:
+        try:
+            recording_payload = _bounded_call(
+                2.8,
+                lambda: _mb_service().get_recording(
+                    recording_mbid,
+                    includes=["url-rels"],
+                ),
+            )
+            recording = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
+            mb_urls = _extract_mb_youtube_urls(recording)
+            if mb_urls:
+                signals["mb_linked"] = True
+                signals["mb_youtube_urls"] = mb_urls
+                score += 2
+        except Exception:
+            signals["mb_lookup_error"] = "lookup_failed"
+
+        cfg = get_loaded_config()
+        community_lookup_enabled = bool(
+            cfg.get("community_cache_lookup_enabled", cfg.get("community_cache_enabled", False))
+        )
+        if community_lookup_enabled:
+            try:
+                community_record = _bounded_call(
+                    1.6,
+                    lambda: community_cache.cached_lookup(
+                        recording_mbid,
+                        dataset_root=str(DATA_DIR / "community_cache_dataset"),
+                        allow_remote=True,
+                    ),
+                )
+                if isinstance(community_record, dict) and str(community_record.get("video_id") or "").strip():
+                    signals["community_seeded"] = True
+                    signals["community_video_id"] = str(community_record.get("video_id") or "").strip()
+                    signals["community_confidence"] = community_record.get("confidence")
+                    score += 2
+            except Exception:
+                signals["community_lookup_error"] = "lookup_failed"
+
+    if include_youtube_probe:
+        precheck = _quick_youtube_mv_precheck(artist, track, album=album)
+        signals["youtube_precheck"] = precheck
+        _log_event(
+            logging.INFO,
+            "music_video_precheck_result",
+            recording_mbid=recording_mbid or None,
+            matched=bool(precheck.get("matched")) if isinstance(precheck, dict) else False,
+            reason=(precheck.get("reason") if isinstance(precheck, dict) else None),
+            title=(precheck.get("title") if isinstance(precheck, dict) else None),
+            query=(precheck.get("query") if isinstance(precheck, dict) else None),
+        )
+        if isinstance(precheck, dict) and bool(precheck.get("matched")):
+            score += 1
+
+    if score >= 4:
+        likelihood = "high"
+    elif score >= 2:
+        likelihood = "medium"
+    elif score >= 1:
+        likelihood = "low"
+    else:
+        likelihood = "none"
+
+    return {
+        "recording_mbid": recording_mbid or None,
+        "likelihood": likelihood,
+        "score": score,
+        "signals": signals,
+    }
 
 
 @app.post("/api/music/enqueue")
@@ -6157,6 +8556,10 @@ def enqueue_music_track(data: dict = Body(...)):
     destination = str(payload.get("destination") or payload.get("destination_dir") or "").strip() or None
     final_format_override = str(payload.get("final_format") or "").strip() or None
     force_redownload = bool(payload.get("force_redownload"))
+    requested_media_mode = str(payload.get("media_mode") or "").strip().lower()
+    if requested_media_mode not in {"music", "music_video"}:
+        requested_media_mode = "music"
+    target_media_type = "video" if requested_media_mode == "music_video" else "music"
     runtime_config = _read_config_or_404()
     engine = getattr(app.state, "worker_engine", None)
     queue_store = getattr(engine, "store", None) if engine is not None else None
@@ -6179,7 +8582,7 @@ def enqueue_music_track(data: dict = Body(...)):
             config=runtime_config,
             origin="music_search",
             origin_id=recording_mbid,
-            media_type="music",
+            media_type=target_media_type,
             media_intent="music_track",
             source="music_search",
             url=placeholder_url,
@@ -6202,6 +8605,7 @@ def enqueue_music_track(data: dict = Body(...)):
                 "track_disambiguation": canonical_metadata.get("track_disambiguation"),
                 "mb_recording_title": canonical_metadata.get("mb_recording_title"),
                 "mb_youtube_urls": canonical_metadata.get("mb_youtube_urls"),
+                "audio_mode": target_media_type == "music",
             },
             canonical_id=canonical_id,
         )
@@ -6243,10 +8647,16 @@ def music_album_art(album_id: str):
         cached = cache.get(album_id)
         if isinstance(cached, dict):
             cached_at = float(cached.get("cached_at") or 0)
-            if now - cached_at < COVER_ART_CACHE_TTL_SECONDS:
+            cached_url = cached.get("cover_url")
+            ttl = COVER_ART_CACHE_TTL_SECONDS if cached_url else COVER_ART_NEGATIVE_CACHE_TTL_SECONDS
+            if now - cached_at < ttl:
                 return {"status": "ok", "cover_url": cached.get("cover_url")}
 
-    cover_url = _mb_service().fetch_release_group_cover_art_url(album_id, timeout=8)
+    try:
+        cover_url = _mb_service().fetch_release_group_cover_art_url(album_id, timeout=8)
+    except Exception:
+        logging.exception("music_album_art fetch failed album_id=%s", album_id)
+        cover_url = None
 
     if isinstance(cache, dict):
         cache[album_id] = {
@@ -6505,7 +8915,33 @@ async def spotify_oauth_disconnect():
 async def get_search_candidates(item_id: str):
     service = app.state.search_service
     candidates = service.list_item_candidates(item_id)
-    return {"candidates": candidates}
+    return JSONResponse(
+        content={"candidates": candidates},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
+
+
+@app.get("/api/search/sources")
+async def get_search_sources():
+    service = app.state.search_service
+    adapters = getattr(service, "adapters", {}) or {}
+    keys = [str(key).strip() for key in adapters.keys() if str(key).strip()]
+    preferred_order = [
+        "youtube",
+        "youtube_music",
+        "rumble",
+        "archive_org",
+        "soundcloud",
+        "bandcamp",
+    ]
+    ranked = sorted(
+        keys,
+        key=lambda value: (
+            preferred_order.index(value) if value in preferred_order else len(preferred_order) + 100,
+            value,
+        ),
+    )
+    return {"sources": ranked}
 
 
 @app.post("/api/search/items/{item_id}/enqueue")
@@ -7006,6 +9442,81 @@ async def clear_failed_download_jobs():
     return safe_json({"deleted": deleted_count, "before": before_count, "remaining": max(0, before_count - deleted_count)})
 
 
+@app.post("/api/download_jobs/cancel_active")
+async def cancel_active_download_jobs():
+    store = DownloadJobStore(app.state.paths.db_path)
+    cancelled = int(
+        store.cancel_jobs_by_statuses(
+            ["claimed", "downloading", "postprocessing"],
+            reason="cancel_active_requested",
+        )
+        or 0
+    )
+    return safe_json({"cancelled": cancelled})
+
+
+@app.post("/api/download_jobs/recover_stale")
+async def recover_stale_download_jobs():
+    store = DownloadJobStore(app.state.paths.db_path)
+    result = store.recover_stale_jobs(reason="manual_stale_recovery")
+    return safe_json(result if isinstance(result, dict) else {"recovered": 0, "job_ids": []})
+
+
+@app.post("/api/download_jobs/clear_queue")
+async def clear_pending_download_jobs():
+    store = DownloadJobStore(app.state.paths.db_path)
+    deleted = int(
+        store.clear_jobs_by_statuses(
+            ["queued", "claimed", "downloading", "postprocessing"],
+        )
+        or 0
+    )
+    return safe_json({"deleted": deleted})
+
+
+class ReviewQueueActionPayload(BaseModel):
+    item_ids: list[str]
+
+
+@app.get("/api/review_queue")
+async def api_list_review_queue(
+    status: str = Query(REVIEW_STATUS_PENDING, max_length=32),
+    limit: int = Query(200, ge=1, le=2000),
+):
+    return safe_json(list_review_queue_items(app.state.paths.db_path, status=status, limit=limit))
+
+
+@app.post("/api/review_queue/accept")
+async def api_accept_review_queue(payload: ReviewQueueActionPayload):
+    result = accept_review_queue_items(app.state.paths.db_path, list(payload.item_ids or []))
+    return safe_json(result)
+
+
+@app.post("/api/review_queue/reject")
+async def api_reject_review_queue(payload: ReviewQueueActionPayload):
+    result = reject_review_queue_items(app.state.paths.db_path, list(payload.item_ids or []))
+    return safe_json(result)
+
+
+@app.get("/api/review_queue/{item_id}/preview")
+async def api_review_queue_preview(item_id: str, request: Request):
+    item = get_review_queue_item(app.state.paths.db_path, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Review item not found")
+    file_path = str(item.get("file_path") or "").strip()
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Preview file not found")
+    allowed_roots = [app.state.paths.review_queue_dir, DOWNLOADS_DIR]
+    if not _path_allowed(file_path, allowed_roots):
+        raise HTTPException(status_code=403, detail="Preview path not allowed")
+    return build_media_file_response(
+        request,
+        file_path,
+        media_type=guess_browser_media_type(file_path, mimetypes.guess_type(file_path)[0]),
+        content_disposition="inline",
+    )
+
+
 @app.get("/api/music/failures")
 async def list_music_failures(limit: int = Query(50, ge=1, le=500)):
     conn = sqlite3.connect(app.state.paths.db_path)
@@ -7143,19 +9654,132 @@ async def api_put_config(payload: dict = Body(...)):
     normalized_payload = safe_json(payload)
     app.state.loaded_config = normalized_payload if isinstance(normalized_payload, dict) else {}
     app.state.config = app.state.loaded_config
+    worker_engine = getattr(app.state, "worker_engine", None)
+    if worker_engine is not None:
+        worker_engine.config = app.state.loaded_config
+    search_service = getattr(app.state, "search_service", None)
+    if search_service is not None:
+        search_service.config = app.state.loaded_config
 
     if "schedule" in payload:
         schedule = _merge_schedule_config(payload.get("schedule"))
         app.state.schedule_config = schedule
         _apply_schedule_config(schedule)
     _apply_spotify_schedule(payload or {})
+    _apply_community_publish_schedule(payload or {})
+    _apply_resolution_cache_sync_schedule(payload or {})
     policy = normalize_watch_policy(payload)
     if getattr(normalize_watch_policy, "valid", True):
         app.state.watch_policy = policy
         _apply_watch_policy(policy)
         app.state.watch_config_cache = payload
+    enable_watcher = _config_watcher_enabled(payload)
+    if enable_watcher:
+        _enable_watcher_runtime()
+    else:
+        await _disable_watcher_runtime("config updated (enable_watcher=false)")
 
     return {"status": "updated"}
+
+
+@app.get("/api/community-cache/publish/status")
+async def api_community_cache_publish_status():
+    config = get_loaded_config() or _read_config_or_404()
+    status = summarize_publish_runtime(
+        config=config if isinstance(config, dict) else {},
+        db_path=app.state.paths.db_path,
+        last_summary=getattr(app.state, "community_publish_last_summary", None),
+        active_task=_community_publish_task_snapshot(),
+    )
+    backfill_last_summary = getattr(app.state, "community_publish_backfill_last_summary", None)
+    if isinstance(backfill_last_summary, dict):
+        status["backfill_last_summary"] = backfill_last_summary
+    status["next_run_at"] = _get_next_community_publish_run_iso()
+    return safe_json(status)
+
+
+@app.get("/api/community-cache/sync/status")
+async def api_community_cache_sync_status():
+    config = get_loaded_config() or _read_config_or_404()
+    resolution_cfg = _resolution_config(config if isinstance(config, dict) else {})
+    status = {
+        "enabled": bool(resolution_cfg.get("sync_enabled", False)),
+        "api_base_url": str(resolution_cfg.get("upstream_base_url") or "").strip() or None,
+        "poll_minutes": int(resolution_cfg.get("sync_poll_minutes") or 1440),
+        "batch_size": int(resolution_cfg.get("sync_batch_size") or 500),
+        "last_summary": getattr(app.state, "resolution_sync_last_summary", None),
+        "stored_status": get_resolution_local_sync_status(app.state.search_db_path),
+        "active_task": _resolution_sync_task_snapshot(),
+        "next_run_at": _get_next_resolution_cache_sync_run_iso(),
+    }
+    return safe_json(status)
+
+
+@app.post("/api/community-cache/publish/run", status_code=202)
+async def api_community_cache_publish_run():
+    worker = getattr(app.state, "community_publish_worker", None)
+    if worker is None:
+        raise HTTPException(status_code=503, detail="community_publish_worker_unavailable")
+
+    def _run_once():
+        summary = worker.run_once()
+        app.state.community_publish_last_summary = summary
+        return summary
+
+    task_state = _start_community_publish_background_task(kind="publish", runner=_run_once)
+    return {"status": "started", "task": safe_json(task_state)}
+
+
+@app.post("/api/community-cache/sync/run", status_code=202)
+async def api_community_cache_sync_run():
+    config = get_loaded_config() or _read_config_or_404()
+    resolution_cfg = _resolution_config(config if isinstance(config, dict) else {})
+    if not str(resolution_cfg.get("upstream_base_url") or "").strip():
+        raise HTTPException(status_code=400, detail="resolution_api.upstream_base_url is required")
+
+    def _run_sync():
+        return _run_resolution_sync_once(config if isinstance(config, dict) else {})
+
+    task_state = _start_resolution_sync_background_task(kind="sync", runner=_run_sync)
+    return {"status": "started", "task": safe_json(task_state)}
+
+
+@app.post("/api/community-cache/publish/backfill", status_code=202)
+async def api_community_cache_publish_backfill(payload: dict | None = Body(default=None)):
+    options = payload if isinstance(payload, dict) else {}
+    dry_run = bool(options.get("dry_run", False))
+    limit = options.get("limit")
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="limit must be an integer") from exc
+        if limit <= 0:
+            limit = None
+    config = get_loaded_config() or _read_config_or_404()
+
+    def _run_backfill():
+        summary = run_publish_backfill(
+            db_path=app.state.paths.db_path,
+            config=config if isinstance(config, dict) else {},
+            dry_run=dry_run,
+            limit=limit,
+        )
+        app.state.community_publish_backfill_last_summary = summary
+        return summary
+
+    task_state = _start_community_publish_background_task(kind="backfill", runner=_run_backfill)
+    return {"status": "started", "task": safe_json(task_state)}
+
+
+@app.post("/api/library/reconcile")
+async def api_reconcile_library():
+    config = _read_config_or_404()
+    summary = reconcile_library(
+        db_path=app.state.paths.db_path,
+        config=config if isinstance(config, dict) else {},
+    )
+    return safe_json({"status": "completed", **summary})
 
 
 @app.get("/api/history")
@@ -7288,7 +9912,7 @@ async def api_cleanup():
 
 @app.get("/api/browse")
 async def api_browse(
-    root: str = Query(..., description="downloads, config, or tokens"),
+    root: str = Query(..., description="Browse root key"),
     path: str = Query("", description="Relative path within the root"),
     mode: str = Query("dir", description="dir or file"),
     ext: str = Query("", description="Optional file extension filter, e.g. .json"),
@@ -7297,7 +9921,8 @@ async def api_browse(
     root = (root or "").strip().lower()
     roots = app.state.browse_roots
     if root not in roots:
-        raise HTTPException(status_code=400, detail="root must be downloads, config, or tokens")
+        allowed_roots = ", ".join(sorted(roots.keys()))
+        raise HTTPException(status_code=400, detail=f"root must be one of: {allowed_roots}")
 
     mode = mode.lower()
     if mode not in {"dir", "file"}:

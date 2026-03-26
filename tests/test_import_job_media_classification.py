@@ -21,6 +21,41 @@ def _load_module(name: str, path: Path):
 
 
 def _load_import_pipeline():
+    if "engine" not in sys.modules:
+        engine_pkg = types.ModuleType("engine")
+        engine_pkg.__path__ = [str(_ROOT / "engine")]  # type: ignore[attr-defined]
+        sys.modules["engine"] = engine_pkg
+    for name in (
+        "google",
+        "google.auth",
+        "google.auth.exceptions",
+        "google.auth.transport",
+        "google.auth.transport.requests",
+        "google.oauth2",
+        "google.oauth2.credentials",
+        "googleapiclient",
+        "googleapiclient.discovery",
+        "googleapiclient.errors",
+        "musicbrainzngs",
+    ):
+        sys.modules.setdefault(name, types.ModuleType(name))
+    sys.modules["google.auth.exceptions"].RefreshError = Exception
+    sys.modules["google.auth.transport.requests"].Request = object
+    sys.modules["google.oauth2.credentials"].Credentials = object
+    sys.modules["googleapiclient.discovery"].build = lambda *_a, **_k: None
+    sys.modules["googleapiclient.errors"].HttpError = Exception
+    if "metadata.queue" not in sys.modules:
+        metadata_queue = types.ModuleType("metadata.queue")
+        metadata_queue.enqueue_metadata = lambda file_path, meta, config: None
+        sys.modules["metadata.queue"] = metadata_queue
+    if "metadata.services.musicbrainz_service" not in sys.modules:
+        mb_service = types.ModuleType("metadata.services.musicbrainz_service")
+        mb_service.get_musicbrainz_service = lambda: None
+        sys.modules["metadata.services.musicbrainz_service"] = mb_service
+    if "metadata.services" not in sys.modules:
+        metadata_services = types.ModuleType("metadata.services")
+        metadata_services.get_musicbrainz_service = lambda: None
+        sys.modules["metadata.services"] = metadata_services
     return _load_module("engine_import_pipeline_media_classification", _ROOT / "engine" / "import_pipeline.py")
 
 
@@ -131,8 +166,9 @@ def test_import_job_media_type_and_ytdlp_audio_flags(monkeypatch, tmp_path: Path
         cancel_check=None,
         cancel_reason=None,
         output_template_meta=None,
+        progress_callback=None,
     ):
-        _ = output_template_meta
+        _ = output_template_meta, progress_callback
         context = {
             "operation": "download",
             "url": url,
@@ -202,3 +238,71 @@ def test_import_job_media_type_and_ytdlp_audio_flags(monkeypatch, tmp_path: Path
     assert captured["opts"]["writethumbnail"] is True
     assert captured["opts"]["format"] == "bestaudio/best"
     assert any(pp.get("key") == "FFmpegExtractAudio" for pp in (captured["opts"].get("postprocessors") or []))
+
+
+def test_import_music_mode_defaults_to_home_music_destination(monkeypatch, tmp_path: Path) -> None:
+    pipeline = _load_import_pipeline()
+    jq = _load_job_queue()
+    monkeypatch.setattr(
+        pipeline,
+        "resolve_best_mb_pair",
+        lambda *_args, **_kwargs: {
+            "recording_mbid": "mbid-abc-123",
+            "mb_release_id": "release-xyz",
+            "mb_release_group_id": "release-group-xyz",
+            "artist": "Artist",
+            "track": "Song",
+            "album": "Album",
+            "release_date": "2024",
+            "track_number": 1,
+            "disc_number": 1,
+            "duration_ms": 210000,
+        },
+    )
+
+    class _FakeMB:
+        def search_recordings(self, artist, title, *, album=None, limit=5):
+            return {
+                "recording-list": [
+                    {
+                        "id": "mbid-abc-123",
+                        "title": title,
+                        "ext:score": "99",
+                        "artist-credit": [{"name": artist}],
+                        "release-list": [{"id": "release-xyz"}],
+                    }
+                ]
+            }
+
+    class _Queue:
+        def __init__(self):
+            self.payload = None
+
+        def enqueue_job(self, **kwargs):
+            self.payload = kwargs
+            return "job-1", True, None
+
+    queue = _Queue()
+    result = pipeline.process_imported_tracks(
+        [TrackIntent(artist="Artist", title="Song", album="Album", raw_line="", source_format="m3u")],
+        {
+            "musicbrainz_service": _FakeMB(),
+            "queue_store": queue,
+            "job_payload_builder": jq.build_download_job_payload,
+            "app_config": {
+                "home_music_download_folder": "Music",
+                "music_download_folder": "LegacyMusic",
+                "single_download_folder": "YouTube-Downloads",
+                "home_music_final_format": "m4a",
+                "music_final_format": "mp3",
+                "final_format": "mkv",
+            },
+            "base_dir": str(tmp_path / "downloads"),
+            "media_mode": "music",
+        },
+    )
+
+    assert result.enqueued_count == 1
+    assert queue.payload is not None
+    assert str(queue.payload["resolved_destination"]).endswith("/Music")
+    assert (queue.payload.get("output_template") or {}).get("music_final_format") == "m4a"

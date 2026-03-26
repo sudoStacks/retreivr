@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 import urllib.parse
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Thread
@@ -41,6 +42,63 @@ _GOOGLE_AUTH_RETRY = re.compile(r"Refreshing credentials due to a 401 response\.
 _SPOTIFY_PLAYLIST_RE = re.compile(
     r"^(?:https?://open\.spotify\.com/playlist/|spotify:playlist:)([A-Za-z0-9]+)"
 )
+_COMMUNITY_PUBLISH_MODES = {"off", "dry_run", "write_outbox"}
+_COMMUNITY_PUBLISH_BRANCH_PREFIX = "retreivr-community-publish/"
+_DEFAULT_CONFIG_TEMPLATE = None
+
+
+def _deep_copy_json_compatible(value):
+    return json.loads(json.dumps(value))
+
+
+def _sanitize_default_config_template(defaults: dict) -> dict:
+    sanitized = _deep_copy_json_compatible(defaults if isinstance(defaults, dict) else {})
+    # Never inject sample/demo entities into user configs during upgrade backfill.
+    # These collections are user-managed and should only contain user-provided entries.
+    if isinstance(sanitized.get("accounts"), dict):
+        sanitized["accounts"] = {}
+    if isinstance(sanitized.get("playlists"), list):
+        sanitized["playlists"] = []
+    if isinstance(sanitized.get("spotify_playlists"), list):
+        sanitized["spotify_playlists"] = []
+    return sanitized
+
+
+def _load_default_config_template():
+    global _DEFAULT_CONFIG_TEMPLATE
+    if isinstance(_DEFAULT_CONFIG_TEMPLATE, dict):
+        return _deep_copy_json_compatible(_DEFAULT_CONFIG_TEMPLATE)
+
+    defaults = {}
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        sample_path = repo_root / "config" / "config_sample.json"
+        with sample_path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            defaults = _sanitize_default_config_template(loaded)
+    except Exception:
+        logging.warning("Failed to load config sample defaults", exc_info=True)
+    _DEFAULT_CONFIG_TEMPLATE = (
+        defaults if isinstance(defaults, dict) else _sanitize_default_config_template({})
+    )
+    return _deep_copy_json_compatible(_DEFAULT_CONFIG_TEMPLATE)
+
+
+def _merge_missing_defaults(current, defaults):
+    if isinstance(current, dict) and isinstance(defaults, dict):
+        merged = {}
+        for key, default_value in defaults.items():
+            if key in current:
+                merged[key] = _merge_missing_defaults(current[key], default_value)
+            else:
+                merged[key] = _deep_copy_json_compatible(default_value)
+        for key, current_value in current.items():
+            if key not in merged:
+                merged[key] = current_value
+        return merged
+    # Lists and scalars: user value wins whenever present.
+    return current
 
 
 def _install_google_auth_filter():
@@ -49,7 +107,7 @@ def _install_google_auth_filter():
         match = _GOOGLE_AUTH_RETRY.search(msg)
         if match:
             attempt, total = match.groups()
-            record.msg = f"Signing into Google OAuth. Attempt {attempt}/{total}."
+            record.msg = f"Refreshing credentials - Attempt {attempt}/{total}"
             record.args = ()
         return True
 
@@ -226,15 +284,108 @@ def _finalize_client_delivery(delivery_id, *, timeout=False):
     return bool(entry.get("delivered"))
 
 
-def load_config(path):
+def _write_config_atomic(path, config):
+    target_dir = os.path.dirname(path) or "."
+    os.makedirs(target_dir, exist_ok=True)
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w") as handle:
+        json.dump(config, handle, indent=4, sort_keys=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, path)
+
+
+def load_config(path, *, write_back_defaults=False):
     with open(path, "r") as f:
-        return json.load(f)
+        loaded = json.load(f)
+    normalized = apply_config_defaults(loaded)
+    if (
+        write_back_defaults
+        and isinstance(loaded, dict)
+        and isinstance(normalized, dict)
+        and normalized != loaded
+    ):
+        try:
+            _write_config_atomic(path, normalized)
+        except Exception:
+            logging.warning("Failed to persist config defaults to %s", path, exc_info=True)
+    return normalized
+
+
+def apply_config_defaults(config):
+    if not isinstance(config, dict):
+        return config
+
+    original = dict(config)
+    normalized = dict(config)
+
+    template_defaults = _load_default_config_template()
+    if isinstance(template_defaults, dict) and template_defaults:
+        normalized = _merge_missing_defaults(normalized, template_defaults)
+
+    # Preserve prior behavior for upgrades: if watcher policy didn't exist before,
+    # keep downtime disabled by default instead of inheriting sample downtime=true.
+    if "watch_policy" not in original:
+        normalized["watch_policy"] = {
+            "min_interval_minutes": 5,
+            "max_interval_minutes": 360,
+            "idle_backoff_factor": 2,
+            "active_reset_minutes": 5,
+            "downtime": {
+                "enabled": False,
+                "start": "23:00",
+                "end": "09:00",
+                "timezone": "local",
+            },
+        }
+
+    lookup_enabled = normalized.get("community_cache_lookup_enabled")
+    legacy_lookup = normalized.get("community_cache_enabled")
+    if lookup_enabled is None:
+        lookup_enabled = legacy_lookup if legacy_lookup is not None else True
+    normalized["community_cache_lookup_enabled"] = bool(lookup_enabled)
+
+    # Legacy alias retained for backward compatibility with existing code paths.
+    normalized["community_cache_enabled"] = bool(normalized.get("community_cache_lookup_enabled"))
+
+    normalized.setdefault("community_cache_publish_enabled", False)
+    normalized.setdefault("community_cache_publish_mode", "off")
+    normalized.setdefault("community_cache_publish_min_score", 0.78)
+    normalized.setdefault("community_cache_publish_outbox_dir", "")
+    normalized.setdefault("community_cache_publish_repo", "sudostacks/retreivr-community-cache")
+    normalized.setdefault("community_cache_publish_target_branch", "main")
+    normalized.setdefault("community_cache_publish_branch", "")
+    normalized.setdefault("community_cache_publish_open_pr", True)
+    normalized.setdefault("community_cache_publish_poll_minutes", 15)
+    normalized.setdefault("community_cache_publish_token_env", "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN")
+    normalized.setdefault("community_cache_publish_batch_size", 25)
+    normalized.setdefault("community_cache_publish_publisher", "")
+    normalized.setdefault(
+        "resolution_api",
+        {
+            "require_api_key": False,
+            "nodes": [],
+            "upstream_base_url": "",
+            "sync_enabled": False,
+            "sync_poll_minutes": 1440,
+            "sync_batch_size": 500,
+            "local_node_id": "local_node",
+        },
+    )
+    normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
+    normalized.setdefault("music_skip_metadata_probe", True)
+    normalized.setdefault("music_candidate_cooldown_enabled", True)
+    normalized.setdefault("music_candidate_cooldown_seconds", 21600)
+    normalized.setdefault("music_candidate_cooldown_min_failures", 1)
+
+    return normalized
 
 
 def validate_config(config):
     errors = []
     if not isinstance(config, dict):
         return ["config must be a JSON object"]
+    config = apply_config_defaults(config)
 
     accounts = config.get("accounts")
     if accounts is not None and not isinstance(accounts, dict):
@@ -256,6 +407,9 @@ def validate_config(config):
             mode = pl.get("mode")
             if mode is not None and mode not in {"full", "subscribe"}:
                 errors.append(f"playlists[{idx}].mode must be 'full' or 'subscribe'")
+            media_mode = pl.get("media_mode")
+            if media_mode is not None and media_mode not in {"video", "music", "music_video"}:
+                errors.append(f"playlists[{idx}].media_mode must be 'video', 'music', or 'music_video'")
             media_type = pl.get("media_type")
             if media_type is not None and media_type not in {"music", "audio", "video"}:
                 errors.append(f"playlists[{idx}].media_type must be 'music', 'audio', or 'video'")
@@ -320,6 +474,18 @@ def validate_config(config):
     cookie_file = config.get("yt_dlp_cookies")
     if cookie_file is not None and not isinstance(cookie_file, str):
         errors.append("yt_dlp_cookies must be a string")
+    music_skip_probe = config.get("music_skip_metadata_probe")
+    if music_skip_probe is not None and not isinstance(music_skip_probe, bool):
+        errors.append("music_skip_metadata_probe must be true/false")
+    music_candidate_cooldown_enabled = config.get("music_candidate_cooldown_enabled")
+    if music_candidate_cooldown_enabled is not None and not isinstance(music_candidate_cooldown_enabled, bool):
+        errors.append("music_candidate_cooldown_enabled must be true/false")
+    music_candidate_cooldown_seconds = config.get("music_candidate_cooldown_seconds")
+    if music_candidate_cooldown_seconds is not None and not isinstance(music_candidate_cooldown_seconds, int):
+        errors.append("music_candidate_cooldown_seconds must be an integer")
+    music_candidate_cooldown_min_failures = config.get("music_candidate_cooldown_min_failures")
+    if music_candidate_cooldown_min_failures is not None and not isinstance(music_candidate_cooldown_min_failures, int):
+        errors.append("music_candidate_cooldown_min_failures must be an integer")
 
     youtube_cfg = config.get("youtube")
     if youtube_cfg is not None:
@@ -347,14 +513,68 @@ def validate_config(config):
 
     final_format = config.get("final_format")
     music_final_format = config.get("music_final_format")
+    home_music_final_format = config.get("home_music_final_format")
+    home_music_video_final_format = config.get("home_music_video_final_format")
+    single_folder = config.get("single_download_folder")
     music_folder = config.get("music_download_folder")
+    home_music_folder = config.get("home_music_download_folder")
+    home_music_video_folder = config.get("home_music_video_download_folder")
+    if single_folder is not None and not isinstance(single_folder, str):
+        errors.append("single_download_folder must be a string")
     if music_folder is not None and not isinstance(music_folder, str):
         errors.append("music_download_folder must be a string")
+    if home_music_folder is not None and not isinstance(home_music_folder, str):
+        errors.append("home_music_download_folder must be a string")
+    if home_music_video_folder is not None and not isinstance(home_music_video_folder, str):
+        errors.append("home_music_video_download_folder must be a string")
+
+    music_cfg = config.get("music")
+    if music_cfg is not None:
+        if not isinstance(music_cfg, dict):
+            errors.append("music must be an object")
+        else:
+            library_path = music_cfg.get("library_path")
+            if library_path is not None and not isinstance(library_path, str):
+                errors.append("music.library_path must be a string")
+            elif isinstance(library_path, str) and library_path.strip() and not os.path.exists(library_path.strip()):
+                errors.append("music.library_path must exist")
+            exports = music_cfg.get("exports")
+            if exports is not None and not isinstance(exports, list):
+                errors.append("music.exports must be a list")
+            elif isinstance(exports, list):
+                for index, export in enumerate(exports, start=1):
+                    prefix = f"music.exports[{index}]"
+                    if not isinstance(export, dict):
+                        errors.append(f"{prefix} must be an object")
+                        continue
+                    if export.get("name") is not None and not isinstance(export.get("name"), str):
+                        errors.append(f"{prefix}.name must be a string")
+                    if not isinstance(export.get("enabled"), bool):
+                        errors.append(f"{prefix}.enabled must be true/false")
+                    if export.get("type") not in {"copy", "transcode"}:
+                        errors.append(f"{prefix}.type must be 'copy' or 'transcode'")
+                    if export.get("path") is not None and not isinstance(export.get("path"), str):
+                        errors.append(f"{prefix}.path must be a string")
+                    elif (
+                        bool(export.get("enabled"))
+                        and isinstance(export.get("path"), str)
+                        and export.get("path").strip()
+                        and not os.path.exists(export.get("path").strip())
+                    ):
+                        errors.append(f"{prefix}.path must exist when enabled")
+                    if export.get("codec") is not None and not isinstance(export.get("codec"), str):
+                        errors.append(f"{prefix}.codec must be a string")
+                    if export.get("bitrate") is not None and not isinstance(export.get("bitrate"), str):
+                        errors.append(f"{prefix}.bitrate must be a string")
 
     if final_format is not None and not isinstance(final_format, str):
         errors.append("final_format must be a string")
     if music_final_format is not None and not isinstance(music_final_format, str):
         errors.append("music_final_format must be a string")
+    if home_music_final_format is not None and not isinstance(home_music_final_format, str):
+        errors.append("home_music_final_format must be a string")
+    if home_music_video_final_format is not None and not isinstance(home_music_video_final_format, str):
+        errors.append("home_music_video_final_format must be a string")
 
     media_type = config.get("media_type")
     if media_type is not None and media_type not in {"music", "audio", "video"}:
@@ -377,6 +597,150 @@ def validate_config(config):
                 errors.append("watch_policy.idle_backoff_factor must be an integer")
             if active_reset is not None and not isinstance(active_reset, int):
                 errors.append("watch_policy.active_reset_minutes must be an integer")
+
+    community_cache_lookup_enabled = config.get("community_cache_lookup_enabled")
+    if community_cache_lookup_enabled is not None and not isinstance(community_cache_lookup_enabled, bool):
+        errors.append("community_cache_lookup_enabled must be true/false")
+
+    community_cache_enabled = config.get("community_cache_enabled")
+    if community_cache_enabled is not None and not isinstance(community_cache_enabled, bool):
+        errors.append("community_cache_enabled must be true/false")
+
+    community_cache_publish_enabled = config.get("community_cache_publish_enabled")
+    if community_cache_publish_enabled is not None and not isinstance(community_cache_publish_enabled, bool):
+        errors.append("community_cache_publish_enabled must be true/false")
+
+    community_cache_publish_mode = config.get("community_cache_publish_mode")
+    if community_cache_publish_mode is not None:
+        if not isinstance(community_cache_publish_mode, str):
+            errors.append("community_cache_publish_mode must be a string")
+        elif community_cache_publish_mode not in _COMMUNITY_PUBLISH_MODES:
+            errors.append("community_cache_publish_mode must be one of: off, dry_run, write_outbox")
+
+    community_cache_publish_min_score = config.get("community_cache_publish_min_score")
+    if community_cache_publish_min_score is not None:
+        try:
+            min_score = float(community_cache_publish_min_score)
+        except (TypeError, ValueError):
+            errors.append("community_cache_publish_min_score must be a number")
+        else:
+            if min_score < 0.0 or min_score > 1.0:
+                errors.append("community_cache_publish_min_score must be between 0 and 1")
+
+    community_cache_publish_outbox_dir = config.get("community_cache_publish_outbox_dir")
+    if community_cache_publish_outbox_dir is not None and not isinstance(community_cache_publish_outbox_dir, str):
+        errors.append("community_cache_publish_outbox_dir must be a string")
+
+    community_cache_publish_repo = config.get("community_cache_publish_repo")
+    if community_cache_publish_repo is not None and not isinstance(community_cache_publish_repo, str):
+        errors.append("community_cache_publish_repo must be a string")
+
+    community_cache_publish_target_branch = config.get("community_cache_publish_target_branch")
+    if community_cache_publish_target_branch is not None and not isinstance(community_cache_publish_target_branch, str):
+        errors.append("community_cache_publish_target_branch must be a string")
+
+    community_cache_publish_branch = config.get("community_cache_publish_branch")
+    if community_cache_publish_branch is not None and not isinstance(community_cache_publish_branch, str):
+        errors.append("community_cache_publish_branch must be a string")
+    elif isinstance(community_cache_publish_branch, str):
+        branch_value = community_cache_publish_branch.strip()
+        if branch_value and not branch_value.startswith(_COMMUNITY_PUBLISH_BRANCH_PREFIX):
+            errors.append(
+                f"community_cache_publish_branch must start with {_COMMUNITY_PUBLISH_BRANCH_PREFIX}"
+            )
+
+    community_cache_publish_open_pr = config.get("community_cache_publish_open_pr")
+    if community_cache_publish_open_pr is not None and not isinstance(community_cache_publish_open_pr, bool):
+        errors.append("community_cache_publish_open_pr must be true/false")
+
+    community_cache_publish_poll_minutes = config.get("community_cache_publish_poll_minutes")
+    if community_cache_publish_poll_minutes is not None:
+        try:
+            poll_minutes = int(community_cache_publish_poll_minutes)
+        except (TypeError, ValueError):
+            errors.append("community_cache_publish_poll_minutes must be an integer")
+        else:
+            if poll_minutes < 1:
+                errors.append("community_cache_publish_poll_minutes must be >= 1")
+
+    community_cache_publish_token_env = config.get("community_cache_publish_token_env")
+    if community_cache_publish_token_env is not None and not isinstance(community_cache_publish_token_env, str):
+        errors.append("community_cache_publish_token_env must be a string")
+
+    community_cache_publish_publisher = config.get("community_cache_publish_publisher")
+    if community_cache_publish_publisher is not None and not isinstance(community_cache_publish_publisher, str):
+        errors.append("community_cache_publish_publisher must be a string")
+
+    community_cache_publish_batch_size = config.get("community_cache_publish_batch_size")
+    if community_cache_publish_batch_size is not None:
+        try:
+            batch_size = int(community_cache_publish_batch_size)
+        except (TypeError, ValueError):
+            errors.append("community_cache_publish_batch_size must be an integer")
+        else:
+            if batch_size < 1:
+                errors.append("community_cache_publish_batch_size must be >= 1")
+
+    resolution_api = config.get("resolution_api")
+    if resolution_api is not None:
+        if not isinstance(resolution_api, dict):
+            errors.append("resolution_api must be an object")
+        else:
+            require_api_key = resolution_api.get("require_api_key")
+            if require_api_key is not None and not isinstance(require_api_key, bool):
+                errors.append("resolution_api.require_api_key must be true/false")
+            upstream_base_url = resolution_api.get("upstream_base_url")
+            if upstream_base_url is not None and not isinstance(upstream_base_url, str):
+                errors.append("resolution_api.upstream_base_url must be a string")
+            sync_enabled = resolution_api.get("sync_enabled")
+            if sync_enabled is not None and not isinstance(sync_enabled, bool):
+                errors.append("resolution_api.sync_enabled must be true/false")
+            sync_poll_minutes = resolution_api.get("sync_poll_minutes")
+            if sync_poll_minutes is not None:
+                try:
+                    parsed = int(sync_poll_minutes)
+                except Exception:
+                    errors.append("resolution_api.sync_poll_minutes must be an integer")
+                else:
+                    if parsed < 1:
+                        errors.append("resolution_api.sync_poll_minutes must be >= 1")
+            sync_batch_size = resolution_api.get("sync_batch_size")
+            if sync_batch_size is not None:
+                try:
+                    parsed = int(sync_batch_size)
+                except Exception:
+                    errors.append("resolution_api.sync_batch_size must be an integer")
+                else:
+                    if parsed < 1:
+                        errors.append("resolution_api.sync_batch_size must be >= 1")
+            local_node_id = resolution_api.get("local_node_id")
+            if local_node_id is not None and (not isinstance(local_node_id, str) or not local_node_id.strip()):
+                errors.append("resolution_api.local_node_id must be a non-empty string")
+            nodes = resolution_api.get("nodes")
+            if nodes is not None:
+                if not isinstance(nodes, list):
+                    errors.append("resolution_api.nodes must be a list")
+                else:
+                    for index, item in enumerate(nodes):
+                        if not isinstance(item, dict):
+                            errors.append(f"resolution_api.nodes[{index}] must be an object")
+                            continue
+                        node_id = item.get("node_id")
+                        api_key = item.get("api_key")
+                        if not isinstance(node_id, str) or not node_id.strip():
+                            errors.append(f"resolution_api.nodes[{index}].node_id must be a non-empty string")
+                        if not isinstance(api_key, str) or not api_key.strip():
+                            errors.append(f"resolution_api.nodes[{index}].api_key must be a non-empty string")
+
+    custom_adapter_file = config.get("custom_search_adapters_file")
+    if custom_adapter_file is not None:
+        if isinstance(custom_adapter_file, str):
+            pass
+        elif isinstance(custom_adapter_file, list):
+            if not all(isinstance(entry, str) for entry in custom_adapter_file):
+                errors.append("custom_search_adapters_file list entries must be strings")
+        else:
+            errors.append("custom_search_adapters_file must be a string or list of strings")
 
     return errors
 
@@ -561,6 +925,12 @@ def init_db(db_path):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_videos_playlist ON playlist_videos (playlist_id)")
     ensure_download_jobs_table(conn)
+    try:
+        from engine.import_pipeline import ensure_import_batch_tables
+
+        ensure_import_batch_tables(conn)
+    except Exception:
+        logging.exception("Failed to ensure import batch tables")
     conn.commit()
     return conn
 
@@ -677,9 +1047,9 @@ def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=Non
                 try:
                     creds.refresh(Request())
                     if name in refresh_log_state:
-                        logging.debug("OAuth refreshed for account=%s", name)
+                        logging.debug("[Success] Credentials Refreshed account=%s", name)
                     else:
-                        logging.info("OAuth refreshed for account=%s", name)
+                        logging.info("[Success] Credentials Refreshed account=%s", name)
                         refresh_log_state.add(name)
                     cached["client"] = youtube_service(creds)
                 except RefreshError as exc:
@@ -696,9 +1066,9 @@ def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=Non
                 try:
                     creds.refresh(Request())
                     if name in refresh_log_state:
-                        logging.debug("OAuth refreshed for account=%s", name)
+                        logging.debug("[Success] Credentials Refreshed account=%s", name)
                     else:
-                        logging.info("OAuth refreshed for account=%s", name)
+                        logging.info("[Success] Credentials Refreshed account=%s", name)
                         refresh_log_state.add(name)
                 except RefreshError as exc:
                     logging.error("OAuth refresh failed for account %s: %s", name, exc)
@@ -841,6 +1211,10 @@ def build_video_url(video_id):
 def telegram_notify_result(config, message):
     telegram = config.get("telegram") if isinstance(config, dict) else None
     if not telegram or not message:
+        return {"ok": False, "message_id": None}
+    # Respect explicit telegram.enabled=false while preserving legacy behavior
+    # for configs that only provide bot token/chat id.
+    if isinstance(telegram, dict) and "enabled" in telegram and not bool(telegram.get("enabled")):
         return {"ok": False, "message_id": None}
     bot_token = telegram.get("bot_token")
     chat_id = telegram.get("chat_id")
@@ -1032,7 +1406,10 @@ def run_single_playlist(
         return status
 
     normalized_final_format = str(final_format_override or "").strip().lower()
-    explicit_music_mode = bool(_ignored.get("music_mode"))
+    requested_media_mode = str(_ignored.get("media_mode") or "").strip().lower()
+    if requested_media_mode not in {"video", "music", "music_video"}:
+        requested_media_mode = "music_video" if bool(_ignored.get("music_video")) else ""
+    explicit_music_mode = bool(_ignored.get("music_mode")) or requested_media_mode == "music"
     configured_media_type = str((config or {}).get("media_type") or "").strip().lower()
     inferred_music_mode = explicit_music_mode or configured_media_type in {"music", "audio"} or normalized_final_format in {
         "mp3",
@@ -1054,7 +1431,11 @@ def run_single_playlist(
         "remove_after_download": False,
         "mode": "full",
     }
-    if inferred_music_mode:
+    if requested_media_mode:
+        entry["media_mode"] = requested_media_mode
+    if requested_media_mode == "music_video":
+        entry["media_type"] = "video"
+    elif inferred_music_mode:
         entry["media_type"] = "music"
     if account:
         entry["account"] = account

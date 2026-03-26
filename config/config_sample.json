@@ -32,7 +32,7 @@
       "remove_after_download": false,
       "mode": "full",
       "final_format": "mkv",
-      "music_mode": false
+      "media_mode": "video"
     }
   ],
   "spotify_playlists": [
@@ -45,6 +45,10 @@
     }
   ],
   "yt_dlp_cookies": "",
+  "music_skip_metadata_probe": true,
+  "music_candidate_cooldown_enabled": true,
+  "music_candidate_cooldown_seconds": 21600,
+  "music_candidate_cooldown_min_failures": 1,
   "yt_dlp_opts": {},
   "youtube": {
     "cookies": {
@@ -69,15 +73,46 @@
     "genius_api_token": "…"
   },
   "music_metadata_debug": false,
+  "music": {
+    "library_path": "",
+    "exports": []
+  },
   "dry_run": false,
   "upload_date_format": "MM-YYYY",
   "final_format": "mkv",
   "music_final_format": "mp3",
+  "home_music_final_format": "mp3",
+  "home_music_video_final_format": "mp4",
   "js_runtimes": ["node:/usr/bin/node"],
   "telegram": {
     "bot_token": "",
     "chat_id": ""
   },
   "music_download_folder": "Music",
-  "single_download_folder": "Singles"
+  "home_music_download_folder": "Music",
+  "home_music_video_download_folder": "Videos/Music Videos",
+  "single_download_folder": "Singles",
+  "community_cache_lookup_enabled": true,
+  "community_cache_publish_enabled": false,
+  "community_cache_publish_mode": "off",
+  "community_cache_publish_min_score": 0.78,
+  "community_cache_publish_outbox_dir": "",
+  "community_cache_publish_repo": "sudostacks/retreivr-community-cache",
+  "community_cache_publish_target_branch": "main",
+  "community_cache_publish_branch": "",
+  "community_cache_publish_open_pr": true,
+  "community_cache_publish_poll_minutes": 15,
+  "community_cache_publish_token_env": "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN",
+  "community_cache_publish_batch_size": 25,
+  "community_cache_publish_publisher": "",
+  "resolution_api": {
+    "require_api_key": false,
+    "nodes": [],
+    "upstream_base_url": "",
+    "sync_enabled": false,
+    "sync_poll_minutes": 1440,
+    "sync_batch_size": 500,
+    "local_node_id": "local_node"
+  },
+  "custom_search_adapters_file": "config/custom_search_adapters.yaml"
 }
