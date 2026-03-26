@@ -182,7 +182,7 @@ const DIRECT_URL_PLAYLIST_ERROR =
   "Playlist URLs are not supported in Direct URL mode. Please add this playlist via Scheduler or Playlist settings.";
 const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
   "Playlist URL detected. Use Search & Download to enqueue all videos in the playlist.";
-const HOME_HOVER_PREVIEW_DELAY_MS = 3000;
+const HOME_HOVER_PREVIEW_DELAY_MS = 1500;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
