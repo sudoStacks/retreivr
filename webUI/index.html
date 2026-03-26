@@ -45,22 +45,22 @@
 
   <main class="layout">
     <section class="panel full page-full" id="home-panel" data-page="home">
-      <div class="home-search-shell">
-        <div class="music-mode-toggle-row">
-          <div class="home-media-mode-group" role="group" aria-label="Search mode">
-            <span class="home-media-mode-label">Mode</span>
-            <div id="home-media-mode-toggle" class="home-media-mode-toggle" role="radiogroup" aria-label="Media mode">
-              <button type="button" class="home-media-mode-pill active" data-mode="video" role="radio" aria-checked="true">Video</button>
-              <button type="button" class="home-media-mode-pill" data-mode="music_video" role="radio" aria-checked="false">Music Video</button>
-              <button type="button" class="home-media-mode-pill" data-mode="music" role="radio" aria-checked="false">Music</button>
-            </div>
-            <select id="home-media-mode" class="hidden" aria-hidden="true" tabindex="-1">
-              <option value="video">Video Mode</option>
-              <option value="music_video">Music Video Mode</option>
-              <option value="music">Music Mode</option>
-            </select>
+      <div class="music-mode-toggle-row home-mode-toggle-shell">
+        <div class="home-media-mode-group" role="group" aria-label="Search mode">
+          <span class="home-media-mode-label">Mode</span>
+          <div id="home-media-mode-toggle" class="home-media-mode-toggle" role="radiogroup" aria-label="Media mode">
+            <button type="button" class="home-media-mode-pill active" data-mode="video" role="radio" aria-checked="true">Video</button>
+            <button type="button" class="home-media-mode-pill" data-mode="music_video" role="radio" aria-checked="false">Music Video</button>
+            <button type="button" class="home-media-mode-pill" data-mode="music" role="radio" aria-checked="false">Music</button>
           </div>
+          <select id="home-media-mode" class="hidden" aria-hidden="true" tabindex="-1">
+            <option value="video">Video Mode</option>
+            <option value="music_video">Music Video Mode</option>
+            <option value="music">Music Mode</option>
+          </select>
         </div>
+      </div>
+      <div class="home-search-shell">
         <div id="standard-search-container">
           <input
             id="home-search-input"
@@ -147,7 +147,10 @@
 
         <div id="music-mode-console" class="music-search-console hidden">
           <div class="music-search-header">
-            <div class="panel-title">Music Search</div>
+            <div class="music-search-header-row">
+              <div class="panel-title">Music Search</div>
+              <button id="import-playlist-toggle" class="button ghost small music-import-toggle" type="button">Import Playlist</button>
+            </div>
           </div>
           <div class="music-search-grid">
             <label class="field">
@@ -203,7 +206,6 @@
             <button id="search-create-only" class="button primary">Search</button>
             <div id="search-create-message" class="notice" role="status"></div>
           </div>
-          <button id="import-playlist-toggle" class="button ghost small" type="button">Import Playlist</button>
           <div id="import-playlist-panel" class="hidden">
             <div class="home-advanced-row">
               <label class="home-advanced-field">

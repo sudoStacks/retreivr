@@ -182,7 +182,7 @@ const DIRECT_URL_PLAYLIST_ERROR =
   "Playlist URLs are not supported in Direct URL mode. Please add this playlist via Scheduler or Playlist settings.";
 const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
   "Playlist URL detected. Use Search & Download to enqueue all videos in the playlist.";
-const HOME_HOVER_PREVIEW_DELAY_MS = 1500;
+const HOME_HOVER_PREVIEW_DELAY_MS = 800;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -354,7 +354,7 @@ function createMusicCardThumb(altText) {
 
   const placeholder = document.createElement("div");
   placeholder.className = "music-card-thumb-placeholder";
-  placeholder.textContent = "Loading artwork";
+  placeholder.setAttribute("aria-hidden", "true");
 
   img.addEventListener("load", () => {
     shell.classList.remove("loading", "no-art");
@@ -364,20 +364,17 @@ function createMusicCardThumb(altText) {
     shell.classList.remove("loading", "loaded");
     shell.classList.add("no-art");
     img.removeAttribute("src");
-    placeholder.textContent = "No artwork";
   });
 
   const setLoading = () => {
     shell.classList.remove("loaded", "no-art");
     shell.classList.add("loading");
-    placeholder.textContent = "Loading artwork";
   };
 
   const setNoArt = () => {
     shell.classList.remove("loading", "loaded");
     shell.classList.add("no-art");
     img.removeAttribute("src");
-    placeholder.textContent = "No artwork";
   };
 
   const setImage = (url) => {
@@ -3880,6 +3877,22 @@ function setHomeResultsState({ hasResults = false, terminal = false } = {}) {
   section.classList.toggle("search-complete", !!terminal);
 }
 
+function focusHomeResults(options = {}) {
+  const musicResults = $("#music-results-container");
+  const homeResults = $("#home-results");
+  const target =
+    musicResults && musicResults.childElementCount > 0
+      ? musicResults
+      : homeResults;
+
+  if (!target || target.classList.contains("hidden")) {
+    return;
+  }
+
+  const behavior = options.instant ? "auto" : "smooth";
+  target.scrollIntoView({ behavior, block: "start" });
+}
+
 function clearHomeEnqueueError(container) {
   if (!container) return;
   const existing = container.querySelector(".home-enqueue-error");
@@ -4437,7 +4450,9 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       content.appendChild(albumRef);
       card.appendChild(content);
       const action = document.createElement("div");
-      action.className = "home-candidate-action";
+      action.className = "home-candidate-action home-candidate-action-primary-stack";
+      action.dataset.actionKind = "album";
+      action.dataset.cardKind = "music";
       const viewTracksButton = document.createElement("button");
       viewTracksButton.className = "button ghost small album-view-tracks-btn";
       viewTracksButton.dataset.releaseGroupMbid = releaseGroupMbid;
@@ -4446,7 +4461,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       viewTracksButton.dataset.artistCredit = String(albumItem?.artist || "");
       viewTracksButton.textContent = "View Tracks";
       const button = document.createElement("button");
-      button.className = "button primary small album-download-btn";
+      button.className = "button primary small album-download-btn home-candidate-download-primary";
       button.dataset.releaseGroupMbid = releaseGroupMbid;
       button.dataset.releaseGroupId = releaseGroupMbid;
       button.dataset.albumTitle = String(albumItem?.title || "");
@@ -4525,8 +4540,8 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
           setNotice($("#home-search-message"), `Album queue failed: ${err.message}`, true);
         }
       });
-      action.appendChild(viewTracksButton);
       action.appendChild(button);
+      action.appendChild(viewTracksButton);
       card.appendChild(action);
       albumGrid.appendChild(card);
 
@@ -4635,12 +4650,14 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
 
       const action = document.createElement("div");
       action.className = "home-candidate-action";
+      action.dataset.actionKind = "track";
+      action.dataset.cardKind = "music";
       const previewButton = document.createElement("button");
       previewButton.className = "button ghost small music-preview-btn";
       previewButton.dataset.musicResultKey = key;
       previewButton.textContent = "Preview";
       const button = document.createElement("button");
-      button.className = "button primary small music-download-btn";
+      button.className = "button primary small music-download-btn home-candidate-download-primary";
       button.dataset.musicResultKey = key;
       button.dataset.recordingMbid = String(result.recording_mbid || "").trim();
       button.dataset.releaseMbid = String(result.mb_release_id || "").trim();
@@ -4814,6 +4831,7 @@ async function performMusicModeSearch() {
   const displayQuery = [artist, album, track].filter(Boolean).join(" ");
   clearMusicResultsHistory();
   renderMusicModeResults(payload, displayQuery);
+  focusHomeResults();
 }
 
 function clearLegacyHomeSearchState() {
@@ -4891,6 +4909,7 @@ async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   updateHomeViewAdvancedLink();
   setNotice(messageEl, `${modeLabel}: created ${data.request_id}`, false);
   showHomeResults(true);
+  focusHomeResults();
   startHomeResultPolling(data.request_id);
   triggerHomeSearchResolution(data.request_id);
 }
@@ -5028,23 +5047,24 @@ function renderHomeAlbumCandidates(candidates, query = "") {
     card.appendChild(body);
 
     const actions = document.createElement("div");
-    actions.className = "home-candidate-action";
+    actions.className = "home-candidate-action home-candidate-action-primary-stack";
+    actions.dataset.actionKind = "album";
+    actions.dataset.cardKind = "video";
     const viewTracksButton = document.createElement("button");
     viewTracksButton.className = "button ghost small album-view-tracks-btn";
     viewTracksButton.dataset.releaseGroupId = candidate.release_group_id || "";
     viewTracksButton.dataset.albumTitle = candidate.title || "";
     viewTracksButton.dataset.artistCredit = candidate.artist_credit || "";
     viewTracksButton.textContent = "View Tracks";
-    actions.appendChild(viewTracksButton);
-
     const button = document.createElement("button");
-    button.className = "button primary small album-download-btn";
+    button.className = "button primary small album-download-btn home-candidate-download-primary";
     button.dataset.releaseGroupId = candidate.release_group_id || "";
     button.dataset.albumTitle = candidate.title || "";
     const alreadyQueued = state.homeQueuedAlbumReleaseGroups.has(candidate.release_group_id || "");
     button.textContent = alreadyQueued ? "Queued..." : "Download Album";
     button.disabled = alreadyQueued;
     actions.appendChild(button);
+    actions.appendChild(viewTracksButton);
     card.appendChild(actions);
 
     container.appendChild(card);
@@ -5197,6 +5217,7 @@ async function loadAndRenderHomeAlbumCandidates(query, preloadedCandidates = nul
   }
   homeMusicDebugLog("[MUSIC UI] album candidates", { query: normalized, count: candidates.length });
   renderHomeAlbumCandidates(candidates, normalized);
+  focusHomeResults();
 }
 
 async function fetchHomeAlbumCoverUrl(albumId) {
@@ -5788,11 +5809,21 @@ function renderHomeCandidateRow(candidate, item) {
     fallbackYouTubeThumb ||
     null;
   const artwork = document.createElement("div");
-  artwork.className = "home-candidate-artwork";
+  artwork.className = `home-candidate-artwork ${artworkUrl ? "loading" : "no-art"}`;
   if (artworkUrl) {
     const img = document.createElement("img");
     img.src = artworkUrl;
     img.alt = candidate.source || "";
+    img.loading = "lazy";
+    img.addEventListener("load", () => {
+      artwork.classList.remove("loading", "no-art");
+      artwork.classList.add("loaded");
+    });
+    img.addEventListener("error", () => {
+      artwork.classList.remove("loading", "loaded");
+      artwork.classList.add("no-art");
+      img.removeAttribute("src");
+    });
     artwork.appendChild(img);
   }
   row.appendChild(artwork);
@@ -5823,6 +5854,9 @@ function renderHomeCandidateRow(candidate, item) {
 
   const action = document.createElement("div");
   action.className = "home-candidate-action";
+  if (item.media_type !== "music") {
+    action.classList.add("home-candidate-action-video");
+  }
   const allowDownload = (candidate.allow_download ?? item.allow_download);
   const canDownload = allowDownload !== false;
   const isSearchOnly = state.homeSearchMode === "searchOnly";
@@ -5847,6 +5881,9 @@ function renderHomeCandidateRow(candidate, item) {
       button.setAttribute("aria-disabled", "true");
     }
 
+    if (item.media_type !== "music") {
+      button.classList.add("home-candidate-download-primary");
+    }
     action.appendChild(button);
   } else if (isSearchOnly && canDownload) {
     const jobStatus = candidate.job_status || "";
@@ -5857,6 +5894,9 @@ function renderHomeCandidateRow(candidate, item) {
     button.dataset.directUrl = candidate.url || "";
     button.textContent = queued ? "Queued" : "Download";
     button.disabled = queued || !candidate.url;
+    if (item.media_type !== "music") {
+      button.classList.add("home-candidate-download-primary");
+    }
     action.appendChild(button);
   } else if (isSearchOnly) {
     const button = document.createElement("button");
@@ -7000,6 +7040,7 @@ async function handleHomePlaylistUrlPreview(url, playlistId, messageEl) {
     container.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "candidate_found", { hideStatusBadge: true }));
   }
   setHomeResultsState({ hasResults: true, terminal: false });
+  focusHomeResults();
   setHomeSearchActive(false);
   setHomeSearchControlsEnabled(true);
   setNotice(messageEl, "Playlist URL detected. Click Download to enqueue all playlist videos.", false);
@@ -7021,6 +7062,7 @@ async function handleHomePlaylistUrlPreview(url, playlistId, messageEl) {
     }
     liveContainer.textContent = "";
     liveContainer.appendChild(renderHomeDirectUrlCard(state.homeDirectPreview, "candidate_found", { hideStatusBadge: true }));
+    focusHomeResults();
   } catch (_err) {
     // Best-effort only.
   }
@@ -7067,6 +7109,7 @@ async function importHomePlaylistFile() {
   if (summaryEl) {
     summaryEl.textContent = "";
   }
+  focusHomeResults();
   setNotice(messageEl, "Playlist import started. Tracking progress...", false);
   setPlaylistImportControlsEnabled(false);
   try {
