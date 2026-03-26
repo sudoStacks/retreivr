@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.19 — Search UX Hardening + Plugin Setup Fixes
+
+### High-Level
+This release is a bug-fix and usability pass focused on the day-to-day operator surface. Video search results now use the same modern grid treatment as the newer music views, hover previews feel more alive, Music Mode respects its configured default audio format again, and the Jellyfin plugin setup flow is hardened so real external testing can continue.
+
+### Added
+- Responsive grid layout for standard video search result cards.
+- Muted hover-preview playback for supported video result cards after a short delay.
+- Source-aware external action labels such as `Open in YouTube` and `Open in SoundCloud`.
+
+### Changed
+- Video result cards now share the newer grid-first presentation language already used for music artist and album search results.
+- Grid-card hover/focus states and narrow-viewport spacing were tightened so search results feel more intentional on both desktop and mobile.
+- Release-facing docs, highlights, Docker examples, and starter defaults now point to `v0.9.19`.
+
+### Fixed
+- Home Music Mode now reapplies its configured default format correctly instead of falling back to `mp3` after config reloads.
+- Video result card actions are aligned more consistently, including centered external-link buttons and clearer action ordering.
+- Jellyfin plugin configuration now uses plugin-owned config endpoints and explicit save handling instead of depending on Jellyfin’s generic plugin-config round-trip behavior.
+
 ## v0.9.18 — Community Cache Publish Branch Reset + Sync Docs
 
 ### High-Level

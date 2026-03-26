@@ -54,6 +54,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from google.auth.exceptions import RefreshError
+from yt_dlp import YoutubeDL
 
 from engine.job_queue import (
     DownloadJobStore,
@@ -459,6 +460,159 @@ def _quick_youtube_mv_precheck(artist: str, track: str, album: str | None = None
         "title": first.get("title"),
         "url": first.get("url"),
     }
+
+
+def _build_youtube_watch_url(video_id: str | None) -> str | None:
+    normalized = str(video_id or "").strip()
+    if not normalized:
+        return None
+    return f"https://www.youtube.com/watch?v={quote(normalized)}"
+
+
+def _normalize_preview_source_url(source: str | None, candidate_url: str | None, video_id: str | None = None) -> str | None:
+    candidate = str(candidate_url or "").strip()
+    if candidate:
+        return candidate
+    source_key = str(source or "").strip().lower()
+    if source_key in {"youtube", "youtube_music"}:
+        return _build_youtube_watch_url(video_id)
+    return None
+
+
+def _resolve_music_preview_candidate(
+    *,
+    recording_mbid: str,
+    artist: str,
+    track: str,
+    album: str,
+    media_mode: str,
+) -> dict[str, Any] | None:
+    normalized_media_mode = str(media_mode or "music").strip().lower() or "music"
+    cfg = get_loaded_config()
+    if recording_mbid:
+        community_lookup_enabled = bool(
+            cfg.get("community_cache_lookup_enabled", cfg.get("community_cache_enabled", False))
+        )
+        if community_lookup_enabled:
+            try:
+                community_record = _bounded_call(
+                    1.8,
+                    lambda: community_cache.cached_lookup(
+                        recording_mbid,
+                        dataset_root=str(DATA_DIR / "community_cache_dataset"),
+                        allow_remote=True,
+                    ),
+                )
+                if isinstance(community_record, dict):
+                    source = str(community_record.get("source") or "").strip().lower()
+                    video_id = str(community_record.get("video_id") or "").strip()
+                    source_url = _normalize_preview_source_url(
+                        source,
+                        community_record.get("candidate_url"),
+                        video_id,
+                    )
+                    if source and source_url:
+                        return {
+                            "source": source,
+                            "source_url": source_url,
+                            "title": track or "Preview",
+                            "resolved_via": "community_cache",
+                            "video_id": video_id or None,
+                        }
+            except Exception:
+                logging.debug("music_preview_community_lookup_failed mbid=%s", recording_mbid, exc_info=True)
+
+        try:
+            recording_payload = _bounded_call(
+                2.8,
+                lambda: _mb_service().get_recording(
+                    recording_mbid,
+                    includes=["url-rels"],
+                ),
+            )
+            recording = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
+            mb_urls = _extract_mb_youtube_urls(recording)
+            if mb_urls:
+                return {
+                    "source": "youtube",
+                    "source_url": str(mb_urls[0] or "").strip(),
+                    "title": track or "Preview",
+                    "resolved_via": "musicbrainz_url_rel",
+                }
+        except Exception:
+            logging.debug("music_preview_mb_lookup_failed mbid=%s", recording_mbid, exc_info=True)
+
+    if normalized_media_mode == "music_video":
+        precheck = _quick_youtube_mv_precheck(artist, track, album=album)
+        if isinstance(precheck, dict):
+            source_url = str(precheck.get("url") or "").strip()
+            if source_url:
+                return {
+                    "source": "youtube",
+                    "source_url": source_url,
+                    "title": str(precheck.get("title") or track or "Preview").strip() or "Preview",
+                    "resolved_via": "youtube_mv_precheck",
+                }
+        return None
+
+    query = " ".join(part for part in [artist, track, album] if str(part or "").strip()).strip()
+    if not query:
+        return None
+    try:
+        candidates = _bounded_call(
+            4.2,
+            lambda: YouTubeAdapter().search_music_track(query, limit=8),
+        )
+    except Exception:
+        logging.debug("music_preview_search_failed query=%s", query, exc_info=True)
+        return None
+    if not isinstance(candidates, list):
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source") or "").strip().lower()
+        source_url = _normalize_preview_source_url(
+            source,
+            candidate.get("url"),
+            candidate.get("video_id"),
+        )
+        if not source or not source_url:
+            continue
+        return {
+            "source": source,
+            "source_url": source_url,
+            "title": str(candidate.get("title") or track or "Preview").strip() or "Preview",
+            "resolved_via": "search_fallback",
+            "video_id": str(candidate.get("video_id") or "").strip() or None,
+        }
+    return None
+
+
+def _resolve_audio_preview_stream_url(source_url: str) -> str:
+    normalized = str(source_url or "").strip()
+    if not normalized:
+        raise RuntimeError("missing_preview_source_url")
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "format": "bestaudio/best",
+    }
+    cookie_file = resolve_cookie_file(get_loaded_config())
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(normalized, download=False)
+    if isinstance(info, dict) and isinstance(info.get("entries"), list):
+        entries = [entry for entry in info.get("entries") or [] if isinstance(entry, dict)]
+        info = entries[0] if entries else {}
+    if not isinstance(info, dict):
+        raise RuntimeError("preview_probe_failed")
+    direct_url = str(info.get("url") or "").strip()
+    if not direct_url:
+        raise RuntimeError("preview_stream_url_missing")
+    return direct_url
 
 
 def get_loaded_config() -> dict:
@@ -8445,6 +8599,60 @@ def music_video_availability(data: dict = Body(...)):
         "score": score,
         "signals": signals,
     }
+
+
+@app.post("/api/music/preview")
+def music_preview(data: dict = Body(...)):
+    payload = data if isinstance(data, dict) else {}
+    recording_mbid = str(payload.get("recording_mbid") or "").strip()
+    artist = str(payload.get("artist") or "").strip()
+    track = str(payload.get("track") or "").strip()
+    album = str(payload.get("album") or "").strip()
+    media_mode = str(payload.get("media_mode") or "music").strip().lower() or "music"
+
+    if not recording_mbid and not (artist and track):
+        raise HTTPException(status_code=400, detail="recording_mbid or artist+track required")
+
+    preview = _resolve_music_preview_candidate(
+        recording_mbid=recording_mbid,
+        artist=artist,
+        track=track,
+        album=album,
+        media_mode=media_mode,
+    )
+    if not isinstance(preview, dict):
+        raise HTTPException(status_code=404, detail="preview_not_available")
+
+    source = str(preview.get("source") or "").strip().lower()
+    source_url = str(preview.get("source_url") or "").strip()
+    title = str(preview.get("title") or track or "Preview").strip() or "Preview"
+    if not source or not source_url:
+        raise HTTPException(status_code=404, detail="preview_not_available")
+
+    response = {
+        "preview_type": "video" if media_mode == "music_video" else "audio",
+        "source": source,
+        "source_url": source_url,
+        "title": title,
+        "resolved_via": str(preview.get("resolved_via") or "").strip() or None,
+    }
+    if media_mode != "music_video":
+        response["stream_url"] = f"/api/music/preview/stream?url={quote(source_url, safe='')}"
+    return response
+
+
+@app.get("/api/music/preview/stream")
+def music_preview_stream(url: str = Query(..., min_length=5, max_length=4000)):
+    source_url = str(url or "").strip()
+    parsed = urlparse(source_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="invalid_preview_url")
+    try:
+        direct_url = _resolve_audio_preview_stream_url(source_url)
+    except Exception as exc:
+        logging.exception("music_preview_stream_failed url=%s", source_url)
+        raise HTTPException(status_code=502, detail=f"preview_stream_failed: {exc}") from exc
+    return RedirectResponse(url=direct_url, status_code=307)
 
 
 @app.post("/api/music/enqueue")

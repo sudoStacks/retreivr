@@ -1089,6 +1089,13 @@ body.home-page .home-source-panel .home-source-pill.selected {
   gap: 10px;
 }
 
+.home-candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 320px));
+  justify-content: start;
+  gap: 14px;
+}
+
 .home-candidate-row {
   display: flex;
   flex-wrap: wrap;
@@ -1100,6 +1107,26 @@ body.home-page .home-source-panel .home-source-pill.selected {
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.02);
   width: 100%;
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease, background 180ms ease;
+  will-change: transform;
+}
+
+.home-candidate-grid .home-candidate-row {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 12px;
+  min-height: 100%;
+  padding: 14px;
+}
+
+.home-candidate-grid .home-candidate-row:hover,
+.home-candidate-grid .home-candidate-row:focus-within {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.22);
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.035);
 }
 
 .home-candidate-posted {
@@ -1119,9 +1146,16 @@ body.home-page .home-source-panel .home-source-pill.selected {
   width: 168px;
   height: 94px;
   flex-shrink: 0;
+  position: relative;
   border-radius: 12px;
   overflow: hidden;
   background: #000;
+}
+
+.home-candidate-grid .home-candidate-artwork {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
 }
 
 /* Ensure artwork thumbnails always display */
@@ -1131,6 +1165,21 @@ body.home-page .home-source-panel .home-source-pill.selected {
   object-fit: cover;
   display: block !important;
   visibility: visible !important;
+  transition: opacity 180ms ease;
+}
+
+.home-candidate-hover-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  pointer-events: none;
+  display: block;
+}
+
+.home-candidate-row.hover-preview-active .home-candidate-artwork img {
+  opacity: 0;
 }
 
 .home-candidate-artwork:empty::before {
@@ -1146,6 +1195,10 @@ body.home-page .home-source-panel .home-source-pill.selected {
   font-weight: 600;
   flex: 1;
   min-width: 0;
+}
+
+.home-candidate-grid .home-candidate-info {
+  width: 100%;
 }
 
 body.home-page .home-candidate-title {
@@ -1220,6 +1273,25 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
   visibility: hidden;
 }
 
+.music-mode-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.music-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 240px));
+  justify-content: start;
+  gap: 18px;
+}
+
+.music-meta-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .music-meta-card {
   display: flex;
   flex-direction: row;
@@ -1240,6 +1312,56 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
 
 .music-meta-card .home-candidate-action {
   margin-left: auto;
+}
+
+.music-grid-card {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 14px;
+  padding: 14px;
+  min-height: 100%;
+}
+
+.music-grid-card .music-card-thumb-shell {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1.18;
+  border-radius: 14px;
+}
+
+.music-grid-card .music-meta-main {
+  gap: 8px;
+  width: 100%;
+}
+
+.music-grid-card .home-result-header {
+  align-items: flex-start;
+}
+
+.music-grid-card .home-result-badge {
+  flex-shrink: 0;
+}
+
+.music-grid-card .home-mb-entity-ref {
+  margin-top: 2px;
+}
+
+.music-grid-card .home-candidate-action {
+  margin-left: 0;
+  margin-top: auto;
+  width: 100%;
+  align-items: stretch;
+}
+
+.music-grid-card .home-candidate-action .button {
+  width: 100%;
+  justify-content: center;
+}
+
+.music-album-grid-card .home-candidate-action,
+.music-artist-grid-card .home-candidate-action {
+  gap: 10px;
 }
 
 body.home-page .home-candidate-source-tag {
@@ -1265,6 +1387,104 @@ body.home-page .home-candidate-source-tag {
   gap: 8px;
   justify-content: center;
   flex-shrink: 0;
+}
+
+.home-candidate-grid .home-candidate-action {
+  width: 100%;
+  align-items: stretch;
+  margin-top: auto;
+}
+
+.home-candidate-grid .home-candidate-action .button {
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  justify-content: center;
+  text-align: center;
+}
+
+.home-candidate-grid .home-candidate-posted {
+  text-align: left;
+  margin-top: 0;
+}
+
+@media (max-width: 900px) {
+  .home-candidate-grid {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .home-candidate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+    gap: 12px;
+  }
+
+  .home-candidate-grid .home-candidate-row {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .home-candidate-grid .home-candidate-info {
+    gap: 5px;
+  }
+
+  body.home-page .home-candidate-title {
+    font-size: 15px;
+  }
+
+  .home-candidate-grid .home-candidate-posted {
+    font-size: 10px;
+  }
+}
+
+@media (max-width: 560px) {
+  .home-candidate-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .home-candidate-grid .home-candidate-row {
+    padding: 12px;
+  }
+}
+
+@media (max-width: 900px) {
+  .music-meta-grid {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 220px));
+    gap: 14px;
+  }
+}
+
+@media (max-width: 640px) {
+  .music-meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+    gap: 12px;
+  }
+
+  .music-grid-card {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .music-grid-card .home-result-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 560px) {
+  .music-meta-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .music-grid-card {
+    gap: 10px;
+    padding: 12px;
+  }
 }
 
 .home-candidate-state {

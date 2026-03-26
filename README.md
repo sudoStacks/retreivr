@@ -36,11 +36,11 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 0.9.18 Highlights
-- Community cache publish now resets stale rejected publish branches back to clean `main` before republishing
-- The public dataset contract stays strict around canonical `youtube` source naming without replaying old invalid branch state
-- Tagged music exports still inherit finalized canonical metadata deterministically before copy/transcode targets are written
-- Local cache sync settings and operator workflow are now documented clearly for `0.9.18` deployments
+## 0.9.19 Highlights
+- Video search results now use the newer grid-style layout instead of a long vertical stack
+- Supported video cards can start a muted hover preview directly from the result grid
+- Music Mode now respects its configured default output format again after config reloads
+- Jellyfin plugin setup is being hardened so external testing can continue from a more stable base
 
 ## Product Tour
 
@@ -250,7 +250,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `0.9.18`, pull the latest image and restart:
+If you are upgrading to `0.9.19`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
