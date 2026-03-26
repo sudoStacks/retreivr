@@ -36,11 +36,11 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 0.9.17 Highlights
-- Community cache publish hardening so live and stale queued proposals normalize cleanly into the public `youtube` dataset contract
-- Tagged music exports now inherit finalized canonical metadata deterministically before copy/transcode targets are written
-- Community cache backfill/runtime handling is quieter and more resilient around unresolved release-enrichment edge cases
-- Release/runtime docs and Docker examples are aligned for the `0.9.17` deployment cycle
+## 0.9.18 Highlights
+- Community cache publish now resets stale rejected publish branches back to clean `main` before republishing
+- The public dataset contract stays strict around canonical `youtube` source naming without replaying old invalid branch state
+- Tagged music exports still inherit finalized canonical metadata deterministically before copy/transcode targets are written
+- Local cache sync settings and operator workflow are now documented clearly for `0.9.18` deployments
 
 ## Product Tour
 
@@ -237,7 +237,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `0.9.17`, pull the latest image and restart:
+If you are upgrading to `0.9.18`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull

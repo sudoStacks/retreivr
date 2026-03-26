@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.18 — Community Cache Publish Branch Reset + Sync Docs
+
+### High-Level
+This release closes the last major community-cache publish loop around stale rejected PR branches. Retreivr now resets orphaned publish branches back to clean `main` before republishing, keeps the public dataset contract strict around canonical `youtube` source naming, and improves operator-facing documentation for local cache sync behavior.
+
+### Added
+- Regression coverage for resetting stale publish branches when no open PR exists for the active publish branch.
+- Operator-facing documentation for `resolution_api` local cache sync fields, intended usage, and UI actions.
+
+### Changed
+- Community-cache publishing now treats a closed or rejected publish PR as a clean-reset boundary instead of continuing to reuse the stale branch contents indefinitely.
+- Release-facing docs, highlights, Docker examples, and starter defaults now point to `v0.9.18`.
+
+### Fixed
+- Rejected or closed publish branches no longer keep replaying old invalid dataset files into later publish attempts.
+- Local cache sync settings are now documented clearly enough to distinguish single-node installs from upstream-mirror sync setups.
+
 ## v0.9.17 — Community Cache Contract Hardening + Export Tag Ordering
 
 ### High-Level
