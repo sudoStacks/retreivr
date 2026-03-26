@@ -29,3 +29,8 @@ docker build -f docker/Dockerfile --build-arg RETREIVR_VERSION=0.9.17 -t retreiv
 Notes
 - Bind to all interfaces in containers with `RETREIVR_HOST=0.0.0.0` if needed.
 - Consider running as a non-root user with a fixed UID/GID to match volume permissions.
+- `resolution_api.upstream_base_url` is optional. Leave local cache sync off unless this node should mirror another Retreivr Resolution API node.
+- If you do enable local cache sync, set:
+  - `resolution_api.upstream_base_url`
+  - `resolution_api.sync_enabled=true`
+  - `resolution_api.local_node_id`

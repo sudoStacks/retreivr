@@ -206,6 +206,30 @@ Related controls:
 - `community_cache_publish_token_env`
 - `community_cache_publish_batch_size`
 
+### Local Cache Sync
+The `resolution_api` block controls optional node-to-node dataset sync for the Resolution API layer.
+
+- `resolution_api.upstream_base_url`: Base URL of another Retreivr Resolution API node to sync from.
+- `resolution_api.sync_enabled`: Enables scheduled pulls from that upstream node.
+- `resolution_api.sync_poll_minutes`: How often to check for updates.
+- `resolution_api.sync_batch_size`: How many records to request per sync batch.
+- `resolution_api.local_node_id`: Stable identifier for this node in sync and verification flows.
+
+When to use it:
+- Leave it off for a single-node install that is already doing its own local acquisition and community-cache publishing.
+- Enable it when you want this Retreivr instance to mirror resolution data from another Resolution API node for faster local lookups.
+
+What the UI buttons do:
+- `Run Cache Sync Now`: immediately pulls a sync batch from the configured upstream API.
+- `Refresh Sync Status`: refreshes the last-sync state shown in Settings.
+
+Minimum working setup for sync:
+- set `resolution_api.upstream_base_url`
+- enable `resolution_api.sync_enabled`
+- choose a `resolution_api.local_node_id`
+
+If `upstream_base_url` is blank, local cache sync should remain disabled.
+
 ## Docs
 - Docker runtime notes: [docker/README.md](docker/README.md)
 - Portainer deployment: [docs/portainer.md](docs/portainer.md)
