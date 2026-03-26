@@ -59,6 +59,10 @@ The starter bundle version matches the Docker image tag for that release.
 ## Notes
 
 - Full source code and development files are available in the main repository.
+- Network participation repos:
+  - Community cache dataset: `https://github.com/sudoStacks/retreivr-community-cache`
+  - Jellyfin plugin: `https://github.com/sudoStacks/retreivr-jellyfin-plugin`
+  - Plex plugin: `https://github.com/sudoStacks/retreivr-plex-plugin`
 - The starter bundle is intended for simplified Docker deployment only.
 - Optional custom search adapters can be defined in `config/custom_search_adapters.yaml`.
   - Start from `config/custom_search_adapters.example.yaml`.

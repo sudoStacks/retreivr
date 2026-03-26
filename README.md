@@ -145,6 +145,19 @@ The Docker starter bundle contains:
 - `config/config.json.example`
 - `README-runtime.md`
 
+## Ecosystem Repos
+Retreivr is now part of a broader resolution-network ecosystem. If you want to participate beyond running a single node, these side repositories matter:
+
+- Community cache dataset: `https://github.com/sudoStacks/retreivr-community-cache`
+  - canonical public transport-resolution dataset
+  - trusted publisher policy, validation rules, and contribution flow
+- Jellyfin plugin: `https://github.com/sudoStacks/retreivr-jellyfin-plugin`
+  - early Jellyfin-side integration for search, availability, and Retreivr-backed acquisition
+- Plex plugin: `https://github.com/sudoStacks/retreivr-plex-plugin`
+  - experimental legacy Plex integration path
+
+If you want to contribute verified mappings back to the shared network, start with the community cache repository and its trusted publisher workflow.
+
 ## Canonical Docker Mounts
 Use these container paths for predictable behavior:
 - `/downloads` media output
