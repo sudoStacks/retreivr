@@ -251,3 +251,48 @@ def test_community_publish_worker_resets_branch_when_no_open_pr(monkeypatch, tmp
 
     assert summary["status"] == "ok"
     assert captured["reset_existing"] is True
+
+
+def test_github_publisher_resets_existing_branch_via_git_refs_endpoint(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, payload: dict | None = None, text: str = "") -> None:
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.headers = {}
+
+        def request(self, method, url, params=None, json=None, timeout=None):
+            path = url.replace(community_publish_worker.GITHUB_API_BASE, "")
+            calls.append((method.upper(), path, json))
+            if method.upper() == "GET" and path == "/repos/sudoStacks/retreivr-community-cache/git/ref/heads/main":
+                return FakeResponse(200, {"object": {"sha": "target-sha"}})
+            if method.upper() == "PATCH" and path == "/repos/sudoStacks/retreivr-community-cache/git/refs/heads/retreivr-community-publish/tester":
+                return FakeResponse(200, {"object": {"sha": "target-sha"}})
+            raise AssertionError(f"unexpected request {method} {path} {json}")
+
+        def get(self, url, timeout=None, headers=None):
+            path = url.replace(community_publish_worker.GITHUB_API_BASE, "")
+            calls.append(("GET", path, None))
+            if path == "/repos/sudoStacks/retreivr-community-cache/git/ref/heads/retreivr-community-publish/tester":
+                return FakeResponse(200, {"object": {"sha": "old-sha"}})
+            raise AssertionError(f"unexpected get {path}")
+
+    monkeypatch.setattr(community_publish_worker.requests, "Session", FakeSession)
+    publisher = community_publish_worker.GitHubCommunityCachePublisher(
+        repo="sudoStacks/retreivr-community-cache",
+        token="token",
+        branch="retreivr-community-publish/tester",
+        target_branch="main",
+    )
+
+    publisher.ensure_branch(reset_existing=True)
+
+    assert ("PATCH", "/repos/sudoStacks/retreivr-community-cache/git/refs/heads/retreivr-community-publish/tester", {"sha": "target-sha", "force": True}) in calls

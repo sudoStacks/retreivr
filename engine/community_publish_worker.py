@@ -447,7 +447,7 @@ class GitHubCommunityCachePublisher:
             if reset_existing:
                 self._request(
                     "PATCH",
-                    branch_path,
+                    branch_path.replace("/git/ref/", "/git/refs/"),
                     json_body={"sha": target_sha, "force": True},
                 )
             return
