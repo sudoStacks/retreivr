@@ -6,8 +6,8 @@
   <title>Retreivr</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=0.9.8-ui-1">
-  <script defer src="app.js?v=0.9.8-ui-1"></script>
+  <link rel="stylesheet" href="styles.css?v=0.9.20-ui-2">
+  <script defer src="app.js?v=0.9.20-ui-2"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -24,7 +24,8 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
-      <button class="button ghost small nav-button nav-button-with-count" data-page="review" type="button">
+      <button class="button ghost small nav-button nav-button-advanced hidden" data-page="movies-tv" type="button">Movies &amp; TV</button>
+      <button class="button ghost small nav-button nav-button-with-count hidden" data-page="review" type="button">
         <span>Review</span>
         <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
       </button>
@@ -249,6 +250,67 @@
           <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
         </span>
       </footer>
+    </section>
+    <section class="panel full page-full page-hidden" id="movies-tv-panel" data-page="movies-tv">
+      <div class="movies-tv-page-header">
+        <div class="panel-title movies-tv-page-title">Movies &amp; TV</div>
+        <div class="meta movies-tv-page-subtitle">Experimental metadata-first search powered by TMDb with add actions sent to Radarr and Sonarr.</div>
+      </div>
+      <div class="music-mode-toggle-row home-mode-toggle-shell">
+        <div class="home-media-mode-group" role="group" aria-label="Movies and TV mode">
+          <span class="home-media-mode-label">Mode</span>
+          <div id="arr-mode-toggle" class="home-media-mode-toggle" role="radiogroup" aria-label="ARR media mode">
+            <button type="button" class="home-media-mode-pill active" data-mode="movies" role="radio" aria-checked="true">Movies</button>
+            <button type="button" class="home-media-mode-pill" data-mode="tv" role="radio" aria-checked="false">TV</button>
+          </div>
+        </div>
+      </div>
+      <div class="home-search-shell movies-tv-shell">
+        <div class="movies-tv-header">
+          <button id="movies-tv-refresh-connections" class="button ghost small" type="button">Refresh ARR Status</button>
+        </div>
+        <div class="movies-tv-connection-strip">
+          <div id="movies-tv-radarr-status" class="notice movies-tv-connection-chip">Radarr: Not configured</div>
+          <div id="movies-tv-sonarr-status" class="notice movies-tv-connection-chip">Sonarr: Not configured</div>
+        </div>
+        <div class="movies-tv-search-row">
+          <input
+            id="movies-tv-search-input"
+            class="home-search-input"
+            type="text"
+            placeholder="Search movies or TV shows via TMDb…"
+            autocomplete="off"
+          />
+          <button id="movies-tv-search-button" class="button primary" type="button">Search</button>
+        </div>
+        <div id="movies-tv-message" class="notice" role="status">Enter a title to search TMDb. Search works without ARR, but add actions require a verified Radarr or Sonarr connection.</div>
+      </div>
+      <div class="home-results hidden" id="movies-tv-results">
+        <div class="home-results-header">
+          <span>Results</span>
+          <div class="home-results-header-actions">
+            <label class="movies-tv-size-control" for="movies-tv-card-size">
+              <span class="meta">Card Size</span>
+              <input id="movies-tv-card-size" type="range" min="220" max="340" step="10" value="280">
+              <span id="movies-tv-card-size-value" class="meta">Default</span>
+            </label>
+            <label class="movies-tv-sort-control" for="movies-tv-sort">
+              <span class="meta">Sort</span>
+              <select id="movies-tv-sort" class="input small">
+                <option value="best_match">Best Match</option>
+                <option value="newest">Release Date: Newest First</option>
+                <option value="oldest">Release Date: Oldest First</option>
+                <option value="rating_desc">Rating: Highest First</option>
+                <option value="popularity_desc">Popularity: Highest First</option>
+                <option value="title_asc">Title: A-Z</option>
+              </select>
+            </label>
+            <span id="movies-tv-results-status-text" class="meta">Ready to search</span>
+          </div>
+        </div>
+        <div id="movies-tv-results-detail" class="meta home-results-detail hidden"></div>
+        <div id="movies-tv-results-list" class="music-meta-grid movies-tv-results-grid"></div>
+      </div>
     </section>
     <section class="panel full" id="review-panel" data-page="review">
       <div class="panel-header-row">
@@ -596,6 +658,7 @@
             <a class="settings-nav-link settings-advanced-link" href="#settings-telegram" data-settings-link="telegram" data-settings-level="advanced">Telegram</a>
             <a class="settings-nav-link" href="#settings-tagging" data-settings-link="tagging">Tagging</a>
             <a class="settings-nav-link" href="#settings-community-cache" data-settings-link="community-cache">Community Cache</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-arr" data-settings-link="arr" data-settings-level="advanced">ARR Integration</a>
             <a class="settings-nav-link settings-advanced-link" href="#settings-runtime" data-settings-link="runtime" data-settings-level="advanced">Runtime</a>
           </nav>
           <label class="field short settings-mobile-jump">
@@ -609,6 +672,7 @@
               <option value="settings-telegram" data-settings-level="advanced">Telegram</option>
               <option value="settings-tagging">Tagging</option>
               <option value="settings-community-cache">Community Cache</option>
+              <option value="settings-arr" data-settings-level="advanced">ARR Integration</option>
               <option value="settings-runtime" data-settings-level="advanced">Runtime</option>
             </select>
           </label>
@@ -912,6 +976,54 @@
                   </div>
                   <div id="community-cache-sync-message" class="notice" role="status"></div>
                   <div id="community-cache-sync-status" class="meta">Status unavailable</div>
+                </div>
+              </div>
+            </section>
+
+            <section id="settings-arr" class="settings-section" data-settings-section="arr" data-settings-level="advanced">
+              <div class="settings-section-heading">ARR Integration</div>
+              <div class="group">
+                <div class="group-title">TMDb Metadata</div>
+                <div class="grid two">
+                  <label class="field long">
+                    <span>TMDb API key</span>
+                    <input id="cfg-arr-tmdb-api-key" type="password" placeholder="Required for Movies &amp; TV metadata search">
+                  </label>
+                </div>
+                <div class="notice">Retreivr performs metadata-first Movies &amp; TV search through TMDb, then hands add actions off to Radarr or Sonarr.</div>
+              </div>
+              <div class="group">
+                <div class="group-title">Radarr</div>
+                <div class="grid two">
+                  <label class="field full">
+                    <span>Radarr base URL</span>
+                    <input id="cfg-arr-radarr-base-url" type="text" placeholder="http://radarr.local:7878">
+                  </label>
+                  <label class="field full">
+                    <span>Radarr API key</span>
+                    <input id="cfg-arr-radarr-api-key" type="password" placeholder="API key">
+                  </label>
+                </div>
+                <div class="row">
+                  <button id="arr-test-radarr" class="button ghost small" type="button">Test Radarr</button>
+                  <span id="arr-test-radarr-status" class="meta">Status unknown</span>
+                </div>
+              </div>
+              <div class="group">
+                <div class="group-title">Sonarr</div>
+                <div class="grid two">
+                  <label class="field full">
+                    <span>Sonarr base URL</span>
+                    <input id="cfg-arr-sonarr-base-url" type="text" placeholder="http://sonarr.local:8989">
+                  </label>
+                  <label class="field full">
+                    <span>Sonarr API key</span>
+                    <input id="cfg-arr-sonarr-api-key" type="password" placeholder="API key">
+                  </label>
+                </div>
+                <div class="row">
+                  <button id="arr-test-sonarr" class="button ghost small" type="button">Test Sonarr</button>
+                  <span id="arr-test-sonarr-status" class="meta">Status unknown</span>
                 </div>
               </div>
             </section>
@@ -1440,6 +1552,34 @@
           allowfullscreen
           referrerpolicy="strict-origin-when-cross-origin"
         ></iframe>
+      </div>
+    </div>
+  </div>
+
+  <div id="arr-details-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="arr-details-title">
+    <div class="modal-card arr-details-card">
+      <div class="row space-between">
+        <div id="arr-details-title" class="panel-title">Details</div>
+        <button id="arr-details-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div class="arr-details-layout">
+        <div class="arr-details-poster-wrap">
+          <img id="arr-details-poster" class="arr-details-poster" src="assets/no_artwork.png" alt="Poster">
+        </div>
+        <div class="arr-details-main">
+          <div id="arr-details-meta" class="arr-details-meta"></div>
+          <div id="arr-details-status" class="notice"></div>
+          <div class="arr-details-actions">
+            <div class="arr-details-action-group arr-details-action-group-primary">
+              <button id="arr-details-add" class="button primary" type="button">Add to ARR</button>
+            </div>
+            <div class="arr-details-action-group arr-details-action-group-secondary">
+              <button id="arr-details-trailer" class="button ghost" type="button">Watch Trailer</button>
+              <a id="arr-details-tmdb-link" class="button ghost" href="#" target="_blank" rel="noopener">Visit TMDb Page</a>
+            </div>
+          </div>
+          <div id="arr-details-overview" class="arr-details-overview"></div>
+        </div>
       </div>
     </div>
   </div>

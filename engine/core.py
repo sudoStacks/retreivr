@@ -372,6 +372,20 @@ def apply_config_defaults(config):
             "local_node_id": "local_node",
         },
     )
+    normalized.setdefault(
+        "arr",
+        {
+            "tmdb_api_key": "",
+            "radarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "sonarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+        },
+    )
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
     normalized.setdefault("music_skip_metadata_probe", True)
     normalized.setdefault("music_candidate_cooldown_enabled", True)
@@ -731,6 +745,28 @@ def validate_config(config):
                             errors.append(f"resolution_api.nodes[{index}].node_id must be a non-empty string")
                         if not isinstance(api_key, str) or not api_key.strip():
                             errors.append(f"resolution_api.nodes[{index}].api_key must be a non-empty string")
+
+    arr_cfg = config.get("arr")
+    if arr_cfg is not None:
+        if not isinstance(arr_cfg, dict):
+            errors.append("arr must be an object")
+        else:
+            tmdb_api_key = arr_cfg.get("tmdb_api_key")
+            if tmdb_api_key is not None and not isinstance(tmdb_api_key, str):
+                errors.append("arr.tmdb_api_key must be a string")
+            for service_name in ("radarr", "sonarr"):
+                service_cfg = arr_cfg.get(service_name)
+                if service_cfg is None:
+                    continue
+                if not isinstance(service_cfg, dict):
+                    errors.append(f"arr.{service_name} must be an object")
+                    continue
+                base_url = service_cfg.get("base_url")
+                if base_url is not None and not isinstance(base_url, str):
+                    errors.append(f"arr.{service_name}.base_url must be a string")
+                api_key = service_cfg.get("api_key")
+                if api_key is not None and not isinstance(api_key, str):
+                    errors.append(f"arr.{service_name}.api_key must be a string")
 
     custom_adapter_file = config.get("custom_search_adapters_file")
     if custom_adapter_file is not None:

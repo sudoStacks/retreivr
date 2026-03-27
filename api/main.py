@@ -130,6 +130,17 @@ from engine.paths import (
     resolve_dir,
 )
 from engine.runtime import get_runtime_info
+from engine.arr_services import (
+    ArrServiceError,
+    add_movie_to_radarr,
+    add_series_to_sonarr,
+    build_movie_search_response,
+    build_tv_search_response,
+    get_bulk_status,
+    get_tmdb_trailer,
+    test_radarr_connection,
+    test_sonarr_connection,
+)
 from input.intent_router import IntentType, detect_intent
 from api.intent_dispatcher import execute_intent as dispatch_intent
 from spotify.oauth_client import SPOTIFY_TOKEN_URL, build_auth_url
@@ -9873,6 +9884,84 @@ async def api_put_config(payload: dict = Body(...)):
         schedule = _merge_schedule_config(payload.get("schedule"))
         app.state.schedule_config = schedule
         _apply_schedule_config(schedule)
+
+
+def _current_loaded_config() -> dict:
+    cfg = getattr(app.state, "loaded_config", None)
+    return cfg if isinstance(cfg, dict) else {}
+
+
+@app.get("/api/arr/radarr/health")
+async def api_arr_radarr_health():
+    return safe_json(test_radarr_connection(_current_loaded_config()))
+
+
+@app.get("/api/arr/sonarr/health")
+async def api_arr_sonarr_health():
+    return safe_json(test_sonarr_connection(_current_loaded_config()))
+
+
+@app.get("/api/arr/search/movies")
+async def api_arr_search_movies(q: str = Query("", min_length=1), limit: int = Query(20, ge=1, le=50)):
+    try:
+        return safe_json(build_movie_search_response(_current_loaded_config(), q, limit=limit))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/search/tv")
+async def api_arr_search_tv(q: str = Query("", min_length=1), limit: int = Query(20, ge=1, le=50)):
+    try:
+        return safe_json(build_tv_search_response(_current_loaded_config(), q, limit=limit))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.post("/api/arr/radarr/add")
+async def api_arr_add_movie(payload: dict = Body(...)):
+    try:
+        tmdb_id = int(payload.get("tmdb_id"))
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": "tmdb_id is required"})
+    try:
+        status = add_movie_to_radarr(_current_loaded_config(), tmdb_id)
+        return safe_json({"tmdb_id": tmdb_id, "status": status})
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.post("/api/arr/sonarr/add")
+async def api_arr_add_series(payload: dict = Body(...)):
+    try:
+        tmdb_id = int(payload.get("tmdb_id"))
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": "tmdb_id is required"})
+    try:
+        status = add_series_to_sonarr(_current_loaded_config(), tmdb_id)
+        return safe_json({"tmdb_id": tmdb_id, "status": status})
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.post("/api/arr/status/bulk")
+async def api_arr_status_bulk(payload: dict = Body(...)):
+    kind = str(payload.get("kind") or "").strip().lower()
+    tmdb_ids = payload.get("tmdb_ids")
+    if not isinstance(tmdb_ids, list):
+        raise HTTPException(status_code=400, detail={"error": "tmdb_ids must be a list"})
+    try:
+        statuses = get_bulk_status(_current_loaded_config(), kind, tmdb_ids)
+        return safe_json({"kind": kind, "statuses": statuses})
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/trailer")
+async def api_arr_trailer(kind: str = Query(...), tmdb_id: int = Query(...)):
+    try:
+        return safe_json(get_tmdb_trailer(_current_loaded_config(), kind, tmdb_id))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
     _apply_spotify_schedule(payload or {})
     _apply_community_publish_schedule(payload or {})
     _apply_resolution_cache_sync_schedule(payload or {})

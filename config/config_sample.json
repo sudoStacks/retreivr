@@ -77,6 +77,7 @@
     "library_path": "",
     "exports": []
   },
+  "settings_advanced_mode": false,
   "dry_run": false,
   "upload_date_format": "MM-YYYY",
   "final_format": "mkv",
@@ -113,6 +114,17 @@
     "sync_poll_minutes": 1440,
     "sync_batch_size": 500,
     "local_node_id": "local_node"
+  },
+  "arr": {
+    "tmdb_api_key": "",
+    "radarr": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "sonarr": {
+      "base_url": "",
+      "api_key": ""
+    }
   },
   "custom_search_adapters_file": "config/custom_search_adapters.yaml"
 }
