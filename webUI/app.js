@@ -174,7 +174,7 @@ const DEFAULT_MUSIC_GENRES = [
   "Folk",
   "R&B",
   "Classical",
-  "Contemporary Christian",
+  "Christian",
   "Indie",
 ];
 const MUSIC_GENRE_INTENT_MAP = {
@@ -188,7 +188,7 @@ const MUSIC_GENRE_INTENT_MAP = {
   folk: { label: "Folk", aliases: ["folk", "indie folk", "folk rock", "singer-songwriter", "acoustic folk"] },
   "r&b": { label: "R&B", aliases: ["r&b", "rnb", "rhythm and blues", "neo soul", "contemporary r&b", "soul"] },
   classical: { label: "Classical", aliases: ["classical", "orchestral", "opera", "chamber music", "instrumental classical"] },
-  "contemporary christian": { label: "Contemporary Christian", aliases: ["contemporary christian", "ccm", "christian", "christian pop", "christian rock", "worship"] },
+  "contemporary christian": { label: "Christian", aliases: ["contemporary christian", "ccm", "christian", "christian pop", "christian rock", "worship"] },
   indie: { label: "Indie", aliases: ["indie", "indie pop", "indie rock", "alternative", "lo-fi", "dream pop"] },
 };
 const ARR_POPULARITY_FRESH_THRESHOLD = 25;
