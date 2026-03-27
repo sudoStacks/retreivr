@@ -13,6 +13,30 @@ DEFAULT_TIMEOUT = 15
 ALLOWED_MOVIE_CERTIFICATIONS = {"", "G", "PG", "PG-13", "R", "NR", "NOT RATED"}
 ALLOWED_TV_CERTIFICATIONS = {"", "TV-Y", "TV-Y7", "TV-G", "TV-PG", "TV-14", "TV-MA"}
 CURRENT_YEAR = datetime.utcnow().year
+DEFAULT_MOVIE_GENRE_NAMES = [
+    "Action",
+    "Adventure",
+    "Animation",
+    "Comedy",
+    "Crime",
+    "Drama",
+    "Family",
+    "Fantasy",
+    "Horror",
+    "Science Fiction",
+]
+DEFAULT_TV_GENRE_NAMES = [
+    "Action & Adventure",
+    "Animation",
+    "Comedy",
+    "Crime",
+    "Documentary",
+    "Drama",
+    "Family",
+    "Mystery",
+    "Reality",
+    "Sci-Fi & Fantasy",
+]
 
 
 class ArrServiceError(RuntimeError):
@@ -415,6 +439,64 @@ def _tv_mainstream_score(item: dict, *, query: str, requested_year: int | None =
     return score
 
 
+def _movie_genre_browse_score(item: dict, *, requested_year: int | None = None) -> float:
+    popularity = float(item.get("popularity") or 0.0)
+    rating = float(item.get("rating") or 0.0)
+    vote_count = int(item.get("vote_count") or 0)
+    year_text = item.get("year")
+    poster_bonus = 10.0 if _trimmed(item.get("poster_url")) else -30.0
+    language_bonus = 18.0 if _trimmed(item.get("language")).lower() in {"en", ""} else -16.0
+    year_bonus = 0.0
+    year_value = _normalize_search_year(year_text)
+    if requested_year is not None:
+        if year_value == requested_year:
+            year_bonus = 30.0
+        elif year_value is not None:
+            year_bonus = max(-12.0, 12.0 - abs(year_value - requested_year) * 2.0)
+    score = 0.0
+    score += min(popularity, 250.0) * 0.95
+    score += min(vote_count, 12000) * 0.03
+    score += rating * 4.5
+    score += _recency_score(year_text) * 26.0
+    score += poster_bonus + language_bonus + year_bonus
+    if vote_count < 25:
+        score -= 55.0
+    elif vote_count < 100:
+        score -= 28.0
+    if popularity < 6.0:
+        score -= 18.0
+    return score
+
+
+def _tv_genre_browse_score(item: dict, *, requested_year: int | None = None) -> float:
+    popularity = float(item.get("popularity") or 0.0)
+    rating = float(item.get("rating") or 0.0)
+    vote_count = int(item.get("vote_count") or 0)
+    year_text = item.get("year")
+    poster_bonus = 10.0 if _trimmed(item.get("poster_url")) else -28.0
+    language_bonus = 16.0 if _trimmed(item.get("language")).lower() in {"en", ""} else -14.0
+    year_bonus = 0.0
+    year_value = _normalize_search_year(year_text)
+    if requested_year is not None:
+        if year_value == requested_year:
+            year_bonus = 24.0
+        elif year_value is not None:
+            year_bonus = max(-10.0, 10.0 - abs(year_value - requested_year) * 1.5)
+    score = 0.0
+    score += min(popularity, 250.0) * 1.0
+    score += min(vote_count, 12000) * 0.03
+    score += rating * 4.8
+    score += _recency_score(year_text) * 22.0
+    score += poster_bonus + language_bonus + year_bonus
+    if vote_count < 25:
+        score -= 48.0
+    elif vote_count < 100:
+        score -= 24.0
+    if popularity < 5.0:
+        score -= 16.0
+    return score
+
+
 def _title_result_is_strong(item: dict | None, *, query: str) -> bool:
     if not isinstance(item, dict):
         return False
@@ -459,6 +541,110 @@ def _fetch_person_known_for(config: dict | None, query: str, *, kind: str, reque
         boosted = [row for row in boosted if _tv_allowed(row)]
         boosted.sort(key=lambda item: _tv_mainstream_score(item, query=query, requested_year=requested_year, person_boost=True), reverse=True)
     return boosted
+
+
+def _normalized_arr_kind(kind: str) -> str:
+    normalized = _trimmed(kind).lower()
+    if normalized in {"movies", "movie"}:
+        return "movie"
+    if normalized in {"tv", "series", "show", "shows"}:
+        return "tv"
+    raise ArrServiceError("Unsupported ARR media kind")
+
+
+def get_tmdb_genres(config: dict | None, kind: str) -> list[dict]:
+    normalized = _normalized_arr_kind(kind)
+    payload = _tmdb_request(config, f"/genre/{normalized}/list")
+    raw_genres = payload.get("genres") or []
+    if not isinstance(raw_genres, list):
+        raw_genres = []
+    default_names = DEFAULT_MOVIE_GENRE_NAMES if normalized == "movie" else DEFAULT_TV_GENRE_NAMES
+    by_name = {}
+    for item in raw_genres:
+        if not isinstance(item, dict):
+            continue
+        genre_id = item.get("id")
+        name = _trimmed(item.get("name"))
+        if genre_id is None or not name:
+            continue
+        by_name[name.lower()] = {"id": int(genre_id), "name": name}
+    ordered = []
+    seen = set()
+    for name in default_names:
+        item = by_name.get(name.lower())
+        if not item:
+            continue
+        seen.add(item["id"])
+        ordered.append(item)
+    for item in raw_genres:
+        if not isinstance(item, dict):
+            continue
+        genre_id = item.get("id")
+        name = _trimmed(item.get("name"))
+        if genre_id is None or not name:
+            continue
+        genre_id = int(genre_id)
+        if genre_id in seen:
+            continue
+        ordered.append({"id": genre_id, "name": name})
+    return ordered
+
+
+def discover_tmdb_by_genre(
+    config: dict | None,
+    *,
+    kind: str,
+    genre_id: int | str,
+    limit: int = 20,
+    year: int | None = None,
+) -> list[dict]:
+    normalized = _normalized_arr_kind(kind)
+    normalized_year = _normalize_search_year(year)
+    params = {
+        "include_adult": "false",
+        "with_genres": str(int(genre_id)),
+        "sort_by": "popularity.desc",
+        "vote_count.gte": "100" if normalized == "movie" else "60",
+        "page": "1",
+    }
+    if normalized == "movie":
+        params["region"] = "US"
+        if normalized_year is not None:
+            params["primary_release_year"] = str(normalized_year)
+    else:
+        if normalized_year is not None:
+            params["first_air_date_year"] = str(normalized_year)
+    results: list[dict] = []
+    page = 1
+    while len(results) < max(1, int(limit)) and page <= 2:
+        params["page"] = str(page)
+        payload = _tmdb_request(config, f"/discover/{normalized}", params=params)
+        seed = payload.get("results") or []
+        if not isinstance(seed, list) or not seed:
+            break
+        for raw in seed:
+            row = _movie_result_row(raw) if normalized == "movie" else _tv_result_row(raw)
+            if row:
+                results.append(row)
+        page += 1
+    if normalized == "movie":
+        _enrich_movie_certifications(config, results)
+        filtered = [row for row in results if _movie_allowed(row)]
+        for row in filtered:
+            row["_mainstream_score"] = _movie_genre_browse_score(row, requested_year=normalized_year)
+    else:
+        _enrich_tv_certifications(config, results)
+        filtered = [row for row in results if _tv_allowed(row)]
+        for row in filtered:
+            row["_mainstream_score"] = _tv_genre_browse_score(row, requested_year=normalized_year)
+    deduped: dict[int, dict] = {}
+    for row in filtered:
+        tmdb_id = int(row["tmdb_id"])
+        existing = deduped.get(tmdb_id)
+        if existing is None or float(row.get("_mainstream_score") or 0.0) > float(existing.get("_mainstream_score") or 0.0):
+            deduped[tmdb_id] = row
+    ranked = sorted(deduped.values(), key=lambda item: float(item.get("_mainstream_score") or 0.0), reverse=True)
+    return ranked[: max(1, int(limit))]
 
 
 def search_tmdb_movies(config: dict | None, query: str, *, limit: int = 20, year: int | None = None) -> list[dict]:
@@ -728,6 +914,33 @@ def build_tv_search_response(config: dict | None, query: str, *, limit: int = 20
     for item in results:
         item["arr_status"] = statuses.get(str(item["tmdb_id"])) or _status_record(False, False)
     return {"results": results, "connection": sonarr}
+
+
+def build_arr_genre_browse_response(
+    config: dict | None,
+    *,
+    kind: str,
+    genre_id: int | str,
+    limit: int = 20,
+    year: int | None = None,
+) -> dict:
+    normalized = _normalized_arr_kind(kind)
+    genres = get_tmdb_genres(config, normalized)
+    match = next((item for item in genres if int(item["id"]) == int(genre_id)), None)
+    if not match:
+        raise ArrServiceError("Unknown TMDb genre")
+    results = discover_tmdb_by_genre(config, kind=normalized, genre_id=genre_id, limit=limit, year=year)
+    tmdb_ids = [item["tmdb_id"] for item in results]
+    statuses = get_movie_status_map(config, tmdb_ids) if normalized == "movie" else get_series_status_map(config, tmdb_ids)
+    connection = test_radarr_connection(config) if normalized == "movie" else test_sonarr_connection(config)
+    for item in results:
+        item["arr_status"] = statuses.get(str(item["tmdb_id"])) or _status_record(False, False)
+    return {
+        "kind": normalized,
+        "genre": match,
+        "results": results,
+        "connection": connection,
+    }
 
 
 def get_bulk_status(config: dict | None, kind: str, tmdb_ids: list[int | str]) -> dict[str, dict]:

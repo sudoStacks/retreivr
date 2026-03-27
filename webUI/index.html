@@ -295,6 +295,16 @@
         </div>
         <div id="movies-tv-message" class="notice" role="status">Enter a title to search TMDb. Search works without ARR, but add actions require a verified Radarr or Sonarr connection.</div>
       </div>
+      <div class="home-results movies-tv-genres-shell" id="movies-tv-genres">
+        <div class="home-results-header">
+          <span>Browse Genres</span>
+          <div class="home-results-header-actions">
+            <span id="movies-tv-genres-status-text" class="meta">Loading genres</span>
+          </div>
+        </div>
+        <div id="movies-tv-genres-detail" class="meta home-results-detail">Pick a genre to open top current titles ranked toward mainstream, popular, and recent releases.</div>
+        <div id="movies-tv-genres-list" class="movies-tv-genre-grid"></div>
+      </div>
       <div class="home-results hidden" id="movies-tv-results">
         <div class="home-results-header">
           <span>Results</span>
@@ -333,7 +343,7 @@
         </span>
       </footer>
     </section>
-    <section class="panel full" id="review-panel" data-page="review">
+    <section class="panel full page-hidden" id="review-panel" data-page="review">
       <div class="panel-header-row">
         <div class="panel-title">Review Queue</div>
         <div class="settings-header-actions">
@@ -355,7 +365,7 @@
       <div id="review-message" class="notice" role="status"></div>
       <div id="review-list" class="review-list"></div>
     </section>
-    <section class="panel full" id="status-panel" data-page="status">
+    <section class="panel full page-hidden" id="status-panel" data-page="status">
       <div class="panel-header-row">
         <div class="panel-title">Operations Status (Live)</div>
         <div class="settings-header-actions status-action-row">
@@ -566,7 +576,7 @@
       </div>
     </section>
 
-    <section class="panel full" id="search-queue-panel" data-page="status">
+    <section class="panel full page-hidden" id="search-queue-panel" data-page="status">
       <div class="panel-title">Download Queue</div>
       <div class="notice">Live operations queue (completed jobs are shown in Download History).</div>
       <div class="row">
@@ -599,7 +609,7 @@
       </div>
     </section>
 
-    <section class="panel full" id="metrics-panel" data-page="info">
+    <section class="panel full page-hidden" id="metrics-panel" data-page="info">
       <div class="panel-title">Metrics</div>
       <div class="metrics-main">
         <div class="panel-body">
@@ -655,7 +665,7 @@
       </footer>
     </section>
 
-    <section class="panel full" id="config-panel" data-page="config">
+    <section class="panel full page-hidden" id="config-panel" data-page="config">
       <div class="panel-header-row">
         <div class="panel-title">Settings</div>
         <div class="settings-header-actions">
@@ -1285,7 +1295,7 @@
       </div>
     </section>
 
-    <section class="panel" id="search-items-panel" data-page="info">
+    <section class="panel page-hidden" id="search-items-panel" data-page="info">
       <div class="panel-title">Search Results (Discovery)</div>
       <div class="notice">Selected request: <span id="search-selected-request">-</span></div>
       <div class="group">
@@ -1330,7 +1340,7 @@
     </section>
 
 
-    <section class="panel" id="search-requests-panel" data-page="info">
+    <section class="panel page-hidden" id="search-requests-panel" data-page="info">
       <div class="panel-title">Search History (Requests)</div>
       <div class="row">
         <button id="search-requests-refresh" class="button ghost">Refresh</button>
@@ -1354,7 +1364,7 @@
       </div>
     </section>
 
-    <section class="panel full page-full" id="logs-panel" data-page="status">
+    <section class="panel full page-full page-hidden" id="logs-panel" data-page="status">
       <div class="panel-title">System Logs (Diagnostics)</div>
       <div class="row">
         <label class="field inline short">
@@ -1370,7 +1380,7 @@
       <pre id="logs-output" class="log-output" aria-live="polite"></pre>
     </section>
 
-    <section class="panel full page-full" id="downloads-panel" data-page="status">
+    <section class="panel full page-full page-hidden" id="downloads-panel" data-page="status">
       <div class="panel-title">Library Downloads (Files)</div>
       <div class="row">
         <button id="downloads-refresh" class="button ghost">Refresh</button>
@@ -1409,7 +1419,7 @@
       </div>
     </section>
 
-    <section class="panel full page-full" id="history-panel" data-page="status">
+    <section class="panel full page-full page-hidden" id="history-panel" data-page="status">
       <div class="panel-title">Download History (Completed)</div>
       <div class="row">
         <button class="button ghost small filters-toggle" data-target="history-filters" type="button">Filters</button>

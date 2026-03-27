@@ -134,9 +134,11 @@ from engine.arr_services import (
     ArrServiceError,
     add_movie_to_radarr,
     add_series_to_sonarr,
+    build_arr_genre_browse_response,
     build_movie_search_response,
     build_tv_search_response,
     get_bulk_status,
+    get_tmdb_genres,
     get_tmdb_cast,
     get_tmdb_person_titles,
     get_tmdb_trailer,
@@ -1347,6 +1349,71 @@ def _ensure_music_failures_table(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_music_failures_created_at ON music_failures (created_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_music_failures_batch ON music_failures (origin_batch_id)")
     conn.commit()
+
+
+def _ensure_music_artwork_cache_table(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS music_artwork_cache (
+            cache_kind TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (cache_kind, cache_key)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_music_artwork_cache_updated_at ON music_artwork_cache (updated_at)")
+    conn.commit()
+
+
+def _get_music_artwork_cache_entry(cache_kind: str, cache_key: str) -> dict[str, Any] | None:
+    db_path = app.state.paths.db_path
+    with sqlite3.connect(db_path) as conn:
+        _ensure_music_artwork_cache_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT payload_json, updated_at FROM music_artwork_cache WHERE cache_kind=? AND cache_key=? LIMIT 1",
+            (str(cache_kind or "").strip(), str(cache_key or "").strip()),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    payload_raw, updated_at = row
+    try:
+        payload = json.loads(str(payload_raw or "{}"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["updated_at"] = float(updated_at or 0)
+    return payload
+
+
+def _set_music_artwork_cache_entry(cache_kind: str, cache_key: str, payload: dict[str, Any]) -> None:
+    db_path = app.state.paths.db_path
+    serialized = safe_json_dump(payload if isinstance(payload, dict) else {}, sort_keys=True)
+    now_ts = time.time()
+    with sqlite3.connect(db_path) as conn:
+        _ensure_music_artwork_cache_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO music_artwork_cache (cache_kind, cache_key, payload_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(cache_kind, cache_key) DO UPDATE SET
+                payload_json=excluded.payload_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                str(cache_kind or "").strip(),
+                str(cache_key or "").strip(),
+                serialized,
+                now_ts,
+            ),
+        )
+        conn.commit()
 
 
 def _parse_iso_datetime(value: str, *, field_name: str) -> datetime:
@@ -2968,6 +3035,7 @@ async def startup():
     init_db(app.state.paths.db_path)
     with sqlite3.connect(app.state.paths.db_path) as _conn:
         _ensure_run_summary_dispatch_table(_conn)
+        _ensure_music_artwork_cache_table(_conn)
     _ensure_watch_tables(app.state.paths.db_path)
     app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, startup_cfg)
     logging.info("Search DB path: %s", app.state.search_db_path)
@@ -8983,6 +9051,109 @@ def music_album_art(album_id: str):
     return {"status": "ok", "cover_url": cover_url}
 
 
+@app.get("/api/music/artist/art/{artist_mbid}")
+def music_artist_art(artist_mbid: str):
+    artist_key = str(artist_mbid or "").strip()
+    if not artist_key:
+        raise HTTPException(status_code=400, detail="artist_mbid is required")
+    payload = _get_music_artwork_cache_entry("artist", artist_key) or {}
+    return {
+        "status": "ok",
+        "cover_url": payload.get("cover_url"),
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+@app.put("/api/music/artist/art/{artist_mbid}")
+def music_artist_art_update(artist_mbid: str, payload: dict = Body(...)):
+    artist_key = str(artist_mbid or "").strip()
+    if not artist_key:
+        raise HTTPException(status_code=400, detail="artist_mbid is required")
+    cover_url = str((payload or {}).get("cover_url") or "").strip()
+    if not cover_url:
+        raise HTTPException(status_code=400, detail="cover_url is required")
+    _set_music_artwork_cache_entry("artist", artist_key, {"cover_url": cover_url})
+    return {"status": "ok", "cover_url": cover_url}
+
+
+@app.get("/api/music/genre/art/{genre}")
+def music_genre_art(genre: str):
+    genre_key = str(genre or "").strip().lower()
+    if not genre_key:
+        raise HTTPException(status_code=400, detail="genre is required")
+    payload = _get_music_artwork_cache_entry("genre", genre_key) or {}
+    cover_urls = payload.get("cover_urls")
+    if not isinstance(cover_urls, list):
+        cover_urls = []
+    return {
+        "status": "ok",
+        "cover_urls": cover_urls,
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+@app.put("/api/music/genre/art/{genre}")
+def music_genre_art_update(genre: str, payload: dict = Body(...)):
+    genre_key = str(genre or "").strip().lower()
+    if not genre_key:
+        raise HTTPException(status_code=400, detail="genre is required")
+    cover_urls = (payload or {}).get("cover_urls")
+    if not isinstance(cover_urls, list):
+        raise HTTPException(status_code=400, detail="cover_urls must be a list")
+    normalized = []
+    seen = set()
+    for value in cover_urls:
+        url = str(value or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        normalized.append(url)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="cover_urls must contain at least one URL")
+    _set_music_artwork_cache_entry("genre", genre_key, {"cover_urls": normalized[:4]})
+    return {"status": "ok", "cover_urls": normalized[:4]}
+
+
+@app.get("/api/arr/genre/art/{kind}/{genre_id}")
+def arr_genre_art(kind: str, genre_id: int):
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind not in {"movie", "tv"}:
+        raise HTTPException(status_code=400, detail="kind must be movie or tv")
+    cache_key = f"{normalized_kind}:{int(genre_id)}"
+    payload = _get_music_artwork_cache_entry("arr_genre", cache_key) or {}
+    cover_urls = payload.get("cover_urls")
+    if not isinstance(cover_urls, list):
+        cover_urls = []
+    return {
+        "status": "ok",
+        "cover_urls": cover_urls,
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+@app.put("/api/arr/genre/art/{kind}/{genre_id}")
+def arr_genre_art_update(kind: str, genre_id: int, payload: dict = Body(...)):
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind not in {"movie", "tv"}:
+        raise HTTPException(status_code=400, detail="kind must be movie or tv")
+    cover_urls = (payload or {}).get("cover_urls")
+    if not isinstance(cover_urls, list):
+        raise HTTPException(status_code=400, detail="cover_urls must be a list")
+    normalized = []
+    seen = set()
+    for value in cover_urls:
+        url = str(value or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        normalized.append(url)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="cover_urls must contain at least one URL")
+    cache_key = f"{normalized_kind}:{int(genre_id)}"
+    _set_music_artwork_cache_entry("arr_genre", cache_key, {"cover_urls": normalized[:4]})
+    return {"status": "ok", "cover_urls": normalized[:4]}
+
+
 @app.post("/api/spotify/playlists/import")
 async def import_spotify_playlist(payload: SpotifyPlaylistImportPayload):
     playlist_url = (payload.playlist_url or "").strip()
@@ -10086,6 +10257,27 @@ async def api_arr_search_movies(
 ):
     try:
         return safe_json(build_movie_search_response(_current_loaded_config(), q, limit=limit, year=year))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/genres")
+async def api_arr_genres(kind: str = Query(...)):
+    try:
+        return safe_json({"kind": kind, "genres": get_tmdb_genres(_current_loaded_config(), kind)})
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/genre/browse")
+async def api_arr_genre_browse(
+    kind: str = Query(...),
+    genre_id: int = Query(...),
+    limit: int = Query(24, ge=1, le=50),
+    year: int | None = Query(None, ge=1888, le=2100),
+):
+    try:
+        return safe_json(build_arr_genre_browse_response(_current_loaded_config(), kind=kind, genre_id=genre_id, limit=limit, year=year))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 

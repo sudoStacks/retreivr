@@ -76,11 +76,22 @@ const state = {
   arrResults: [],
   arrSearchQuery: "",
   arrSearchYear: "",
+  arrSearchContext: "search",
   arrSort: "best_match",
   arrCardSize: 280,
   arrExpandedIds: new Set(),
   arrDetailsItemId: null,
   arrCastCache: {},
+  arrGenres: {
+    movie: [],
+    tv: [],
+  },
+  arrGenreArtworkCache: {
+    movie: {},
+    tv: {},
+  },
+  arrGenreRenderToken: 0,
+  arrActiveGenre: null,
   arrConnectionStatus: {
     radarr: { configured: false, reachable: false, message: "Radarr is not configured" },
     sonarr: { configured: false, reachable: false, message: "Sonarr is not configured" },
@@ -134,6 +145,7 @@ const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
 const HOME_ALBUM_COVER_CACHE_KEY = "retreivr.home.album_cover_cache.v1";
 const HOME_ARTIST_COVER_CACHE_KEY = "retreivr.home.artist_cover_cache.v1";
 const HOME_GENRE_COVER_CACHE_KEY = "retreivr.home.genre_cover_cache.v2";
+const MUSIC_ARTWORK_CACHE_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
 const HOME_SOURCE_PRIORITY_MAP = {
   auto: null,
   youtube: ["youtube"],
@@ -162,9 +174,23 @@ const DEFAULT_MUSIC_GENRES = [
   "Folk",
   "R&B",
   "Classical",
-  "Soul",
+  "Contemporary Christian",
   "Indie",
 ];
+const MUSIC_GENRE_INTENT_MAP = {
+  rock: { label: "Rock", aliases: ["rock", "alternative rock", "hard rock", "classic rock", "pop rock", "indie rock"] },
+  pop: { label: "Pop", aliases: ["pop", "dance-pop", "synth-pop", "electropop", "teen pop"] },
+  "hip hop": { label: "Hip Hop", aliases: ["hip hop", "hip-hop", "rap", "trap", "conscious hip hop", "southern hip hop"] },
+  jazz: { label: "Jazz", aliases: ["jazz", "smooth jazz", "vocal jazz", "jazz fusion", "bebop"] },
+  electronic: { label: "Electronic", aliases: ["electronic", "electronica", "edm", "house", "techno", "ambient", "downtempo", "trance"] },
+  metal: { label: "Metal", aliases: ["metal", "heavy metal", "thrash metal", "death metal", "black metal", "metalcore"] },
+  country: { label: "Country", aliases: ["country", "contemporary country", "alt-country", "country pop", "americana"] },
+  folk: { label: "Folk", aliases: ["folk", "indie folk", "folk rock", "singer-songwriter", "acoustic folk"] },
+  "r&b": { label: "R&B", aliases: ["r&b", "rnb", "rhythm and blues", "neo soul", "contemporary r&b", "soul"] },
+  classical: { label: "Classical", aliases: ["classical", "orchestral", "opera", "chamber music", "instrumental classical"] },
+  "contemporary christian": { label: "Contemporary Christian", aliases: ["contemporary christian", "ccm", "christian", "christian pop", "christian rock", "worship"] },
+  indie: { label: "Indie", aliases: ["indie", "indie pop", "indie rock", "alternative", "lo-fi", "dream pop"] },
+};
 const ARR_POPULARITY_FRESH_THRESHOLD = 25;
 const HOME_VIDEO_SOURCE_PRIORITY = [
   "youtube",
@@ -562,6 +588,126 @@ function setCachedGenreCoverUrls(key, urls) {
   writeSessionObject(HOME_GENRE_COVER_CACHE_KEY, sessionCache);
 }
 
+function isArtworkCacheStale(updatedAt) {
+  const ts = Number(updatedAt || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return true;
+  return (Date.now() - (ts * 1000)) > MUSIC_ARTWORK_CACHE_REFRESH_MS;
+}
+
+async function fetchPersistentArtistCoverEntry(key) {
+  const normalizedKey = String(key || "").trim();
+  if (!normalizedKey) return null;
+  try {
+    const payload = await fetchJson(`/api/music/artist/art/${encodeURIComponent(normalizedKey)}`);
+    const coverUrl = normalizeArtworkUrl(payload?.cover_url);
+    if (!coverUrl) return null;
+    return {
+      coverUrl,
+      updatedAt: Number(payload?.updated_at || 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function persistArtistCoverEntry(key, coverUrl) {
+  const normalizedKey = String(key || "").trim();
+  const normalizedUrl = normalizeArtworkUrl(coverUrl);
+  if (!normalizedKey || !normalizedUrl) return;
+  try {
+    await fetchJson(`/api/music/artist/art/${encodeURIComponent(normalizedKey)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cover_url: normalizedUrl }),
+    });
+  } catch {
+    // best-effort only
+  }
+}
+
+async function fetchPersistentGenreCoverEntry(key) {
+  const normalizedKey = String(key || "").trim().toLowerCase();
+  if (!normalizedKey) return null;
+  try {
+    const payload = await fetchJson(`/api/music/genre/art/${encodeURIComponent(normalizedKey)}`);
+    const coverUrls = normalizeGenreArtworkSet(payload?.cover_urls);
+    if (!coverUrls.length) return null;
+    return {
+      coverUrls,
+      updatedAt: Number(payload?.updated_at || 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function persistGenreCoverEntry(key, coverUrls) {
+  const normalizedKey = String(key || "").trim().toLowerCase();
+  const normalizedUrls = normalizeGenreArtworkSet(coverUrls);
+  if (!normalizedKey || !normalizedUrls.length) return;
+  try {
+    await fetchJson(`/api/music/genre/art/${encodeURIComponent(normalizedKey)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cover_urls: normalizedUrls }),
+    });
+  } catch {
+    // best-effort only
+  }
+}
+
+function getCachedArrGenreCoverUrls(kind, genreId) {
+  const normalizedKind = String(kind || "").trim().toLowerCase();
+  const normalizedId = String(genreId || "").trim();
+  const bucket = state.arrGenreArtworkCache[normalizedKind];
+  if (!bucket || !normalizedId) return [];
+  return normalizeGenreArtworkSet(bucket[normalizedId]);
+}
+
+function setCachedArrGenreCoverUrls(kind, genreId, coverUrls) {
+  const normalizedKind = String(kind || "").trim().toLowerCase();
+  const normalizedId = String(genreId || "").trim();
+  const normalizedUrls = normalizeGenreArtworkSet(coverUrls);
+  if (!normalizedKind || !normalizedId || !normalizedUrls.length) return;
+  if (!state.arrGenreArtworkCache[normalizedKind]) {
+    state.arrGenreArtworkCache[normalizedKind] = {};
+  }
+  state.arrGenreArtworkCache[normalizedKind][normalizedId] = normalizedUrls;
+}
+
+async function fetchPersistentArrGenreCoverEntry(kind, genreId) {
+  const normalizedKind = String(kind || "").trim().toLowerCase();
+  const normalizedId = String(genreId || "").trim();
+  if (!normalizedKind || !normalizedId) return null;
+  try {
+    const payload = await fetchJson(`/api/arr/genre/art/${encodeURIComponent(normalizedKind)}/${encodeURIComponent(normalizedId)}`);
+    const coverUrls = normalizeGenreArtworkSet(payload?.cover_urls);
+    if (!coverUrls.length) return null;
+    return {
+      coverUrls,
+      updatedAt: Number(payload?.updated_at || 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function persistArrGenreCoverEntry(kind, genreId, coverUrls) {
+  const normalizedKind = String(kind || "").trim().toLowerCase();
+  const normalizedId = String(genreId || "").trim();
+  const normalizedUrls = normalizeGenreArtworkSet(coverUrls);
+  if (!normalizedKind || !normalizedId || !normalizedUrls.length) return;
+  try {
+    await fetchJson(`/api/arr/genre/art/${encodeURIComponent(normalizedKind)}/${encodeURIComponent(normalizedId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cover_urls: normalizedUrls }),
+    });
+  } catch {
+    // best-effort only
+  }
+}
+
 function triggerClientDeliveryDownload(downloadUrl, filename = "") {
   const url = String(downloadUrl || "").trim();
   if (!url) {
@@ -629,6 +775,73 @@ function normalizeMusicExports(cfg) {
       codec: entry.codec ?? "aac",
       bitrate: entry.bitrate ?? "256k",
     }));
+}
+
+function getMusicGenreIntentDefinition(genre) {
+  const raw = String(genre || "").trim();
+  if (!raw) {
+    return { label: "", aliases: [] };
+  }
+  const key = raw.toLowerCase();
+  const direct = MUSIC_GENRE_INTENT_MAP[key];
+  if (direct) {
+    return {
+      label: direct.label,
+      aliases: [...direct.aliases],
+    };
+  }
+  for (const entry of Object.values(MUSIC_GENRE_INTENT_MAP)) {
+    if (entry.aliases.some((alias) => String(alias || "").trim().toLowerCase() === key)) {
+      return {
+        label: entry.label,
+        aliases: [...entry.aliases],
+      };
+    }
+  }
+  return { label: raw, aliases: [raw] };
+}
+
+function normalizeMusicGenreIntent(genre) {
+  return getMusicGenreIntentDefinition(genre).label;
+}
+
+function getMusicGenreIntentAliases(genre) {
+  const definition = getMusicGenreIntentDefinition(genre);
+  const seen = new Set();
+  return definition.aliases
+    .map((value) => String(value || "").trim())
+    .filter((value) => {
+      const key = value.toLowerCase();
+      if (!value || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+async function fetchArtistsForGenreIntent(genre, { limit = 24 } = {}) {
+  const aliases = getMusicGenreIntentAliases(genre);
+  const perAliasLimit = Math.max(8, Math.min(24, Math.ceil(Number(limit || 24) / Math.max(1, aliases.length)) * 2));
+  const responses = await Promise.all(
+    aliases.map(async (alias) => {
+      const payload = await fetchJson(`/api/music/genres/${encodeURIComponent(alias)}/artists?limit=${perAliasLimit}`);
+      return Array.isArray(payload?.artists) ? payload.artists : [];
+    })
+  );
+  const label = normalizeMusicGenreIntent(genre);
+  const merged = [];
+  const seen = new Set();
+  responses.forEach((artists) => {
+    artists.forEach((artist) => {
+      const key = String(artist?.artist_mbid || artist?.name || "").trim().toLowerCase();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      merged.push({
+        ...artist,
+        genre: label,
+      });
+    });
+  });
+  return merged.slice(0, Math.max(1, Number(limit || 24)));
 }
 
 function syncMusicExportRow(row) {
@@ -886,6 +1099,7 @@ function setPage(page) {
     refreshReviewQueue();
   } else if (target === "movies-tv") {
     refreshArrConnectionStatus({ quiet: true }).catch(() => {});
+    loadArrGenres().catch(() => {});
     renderArrResults();
     startArrStatusPolling();
   } else if (target === "config") {
@@ -4212,6 +4426,202 @@ function getArrServiceKey() {
   return state.arrMode === "tv" ? "sonarr" : "radarr";
 }
 
+function getArrGenreKind() {
+  return getArrKind();
+}
+
+function normalizeArrGenreQuery(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getCurrentArrGenres() {
+  const kind = getArrGenreKind();
+  return Array.isArray(state.arrGenres[kind]) ? state.arrGenres[kind] : [];
+}
+
+function findArrGenreMatch(query) {
+  const normalizedQuery = normalizeArrGenreQuery(query);
+  if (!normalizedQuery) return null;
+  const genres = getCurrentArrGenres();
+  let exact = genres.find((item) => normalizeArrGenreQuery(item?.name) === normalizedQuery);
+  if (exact) return exact;
+  exact = genres.find((item) => {
+    const name = normalizeArrGenreQuery(item?.name);
+    return normalizedQuery.length >= 4 && (name.includes(normalizedQuery) || normalizedQuery.includes(name));
+  });
+  return exact || null;
+}
+
+async function loadArrGenres() {
+  const kind = getArrGenreKind();
+  if (Array.isArray(state.arrGenres[kind]) && state.arrGenres[kind].length) {
+    renderArrGenreShelf();
+    return state.arrGenres[kind];
+  }
+  const data = await fetchJson(`/api/arr/genres?kind=${encodeURIComponent(kind)}`);
+  state.arrGenres[kind] = Array.isArray(data?.genres) ? data.genres : [];
+  renderArrGenreShelf();
+  return state.arrGenres[kind];
+}
+
+function applyArrGenreTileArtwork(tile, artworkUrls) {
+  if (!tile) return;
+  const normalizedUrls = normalizeGenreArtworkSet(artworkUrls);
+  const cells = [...tile.querySelectorAll(".movies-tv-genre-collage-cell")];
+  cells.forEach((cell, index) => {
+    const img = cell.querySelector("img");
+    const nextUrl = normalizedUrls[index] || "";
+    if (img && nextUrl) {
+      img.src = nextUrl;
+      img.alt = "";
+      cell.classList.add("has-artwork");
+    } else {
+      if (img) {
+        img.removeAttribute("src");
+        img.alt = "";
+      }
+      cell.classList.remove("has-artwork");
+    }
+  });
+  tile.classList.toggle("has-artwork", normalizedUrls.length > 0);
+}
+
+function queueArrGenreArtworkJob(genre, tile, renderToken) {
+  const kind = getArrGenreKind();
+  const genreId = String(genre?.id || "").trim();
+  if (!genreId || !tile) return;
+  const cached = getCachedArrGenreCoverUrls(kind, genreId);
+  if (cached.length) {
+    applyArrGenreTileArtwork(tile, cached);
+    return;
+  }
+  window.setTimeout(async () => {
+    if (state.arrGenreRenderToken !== renderToken) return;
+    try {
+      const persistent = await fetchPersistentArrGenreCoverEntry(kind, genreId);
+      if (persistent?.coverUrls?.length) {
+        setCachedArrGenreCoverUrls(kind, genreId, persistent.coverUrls);
+        if (state.arrGenreRenderToken === renderToken) {
+          applyArrGenreTileArtwork(tile, persistent.coverUrls);
+        }
+        if (!isArtworkCacheStale(persistent.updatedAt)) {
+          return;
+        }
+      }
+      const data = await fetchJson(
+        `/api/arr/genre/browse?kind=${encodeURIComponent(kind)}&genre_id=${encodeURIComponent(genreId)}&limit=8`
+      );
+      const results = Array.isArray(data?.results) ? data.results : [];
+      const coverUrls = normalizeGenreArtworkSet(results.map((item) => item?.poster_url));
+      if (!coverUrls.length) return;
+      setCachedArrGenreCoverUrls(kind, genreId, coverUrls);
+      await persistArrGenreCoverEntry(kind, genreId, coverUrls);
+      if (state.arrGenreRenderToken === renderToken) {
+        applyArrGenreTileArtwork(tile, coverUrls);
+      }
+    } catch {
+      // leave fallback theme if browse artwork load fails
+    }
+  }, 0);
+}
+
+function createArrGenreCard(genre, renderToken) {
+  const genreId = String(genre?.id || "").trim();
+  const genreName = String(genre?.name || "").trim() || "Genre";
+  const card = document.createElement("article");
+  card.className = "home-result-card movies-tv-genre-card";
+  card.dataset.genreId = genreId;
+  const tile = document.createElement("div");
+  tile.className = "movies-tv-genre-tile";
+  const collage = document.createElement("div");
+  collage.className = "movies-tv-genre-collage";
+  for (let i = 0; i < 4; i += 1) {
+    const cell = document.createElement("div");
+    cell.className = "movies-tv-genre-collage-cell";
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.alt = "";
+    cell.appendChild(img);
+    collage.appendChild(cell);
+  }
+  tile.appendChild(collage);
+  const label = document.createElement("span");
+  label.className = "movies-tv-genre-tile-label";
+  label.textContent = genreName;
+  tile.appendChild(label);
+  card.appendChild(tile);
+  const content = document.createElement("div");
+  content.className = "movies-tv-genre-card-body";
+  content.innerHTML = `
+    <div class="home-candidate-title">${escapeHtml(genreName)}</div>
+    <div class="home-candidate-meta">Open top recent titles in this genre</div>
+  `;
+  card.appendChild(content);
+  card.addEventListener("click", () => browseArrGenre(genre));
+  queueArrGenreArtworkJob(genre, tile, renderToken);
+  return card;
+}
+
+function renderArrGenreShelf() {
+  const section = $("#movies-tv-genres");
+  const listEl = $("#movies-tv-genres-list");
+  const statusTextEl = $("#movies-tv-genres-status-text");
+  if (!section || !listEl || !statusTextEl) return;
+  const genres = getCurrentArrGenres();
+  if (!genres.length) {
+    listEl.innerHTML = "";
+    statusTextEl.textContent = "No genres loaded";
+    return;
+  }
+  state.arrGenreRenderToken += 1;
+  const renderToken = state.arrGenreRenderToken;
+  listEl.innerHTML = "";
+  genres.slice(0, 10).forEach((genre) => {
+    listEl.appendChild(createArrGenreCard(genre, renderToken));
+  });
+  statusTextEl.textContent = `${Math.min(genres.length, 10)} genres ready`;
+}
+
+async function browseArrGenre(genre, { year = "" } = {}) {
+  const genreId = Number.parseInt(String(genre?.id || "").trim(), 10);
+  const genreName = String(genre?.name || "").trim() || "Genre";
+  if (!Number.isFinite(genreId)) return;
+  const messageEl = $("#movies-tv-message");
+  const yearValue = /^\d{4}$/.test(String(year || "").trim()) ? String(year).trim() : "";
+  setNotice(messageEl, `Loading top ${genreName} titles…`, false);
+  try {
+    const params = new URLSearchParams();
+    params.set("kind", getArrGenreKind());
+    params.set("genre_id", String(genreId));
+    params.set("limit", "24");
+    if (yearValue) {
+      params.set("year", yearValue);
+    }
+    const data = await fetchJson(`/api/arr/genre/browse?${params.toString()}`);
+    state.arrActiveGenre = { id: genreId, name: genreName };
+    state.arrSearchContext = "genre";
+    state.arrSearchQuery = genreName;
+    state.arrSearchYear = yearValue;
+    state.arrResults = Array.isArray(data?.results)
+      ? data.results.map((item, index) => ({ ...item, _search_rank: index }))
+      : [];
+    state.arrConnectionStatus[getArrServiceKey()] = data?.connection || state.arrConnectionStatus[getArrServiceKey()];
+    renderArrConnectionStatus();
+    renderArrResults();
+    focusMoviesTvResults();
+    startArrStatusPolling();
+    setNotice(messageEl, state.arrResults.length ? `Loaded top ${genreName} titles.` : `No ${genreName} titles found.`, false);
+  } catch (err) {
+    setNotice(messageEl, `Genre browse failed: ${toUserErrorMessage(err)}`, true);
+  }
+}
+
 function focusMoviesTvResults(options = {}) {
   const target = $("#movies-tv-results");
   if (!target || target.classList.contains("hidden")) {
@@ -4411,6 +4821,8 @@ async function openArrPersonTitles(personId) {
       `/api/arr/person?person_id=${encodeURIComponent(String(numeric))}&kind=${encodeURIComponent(getArrKind())}&limit=24`
     );
     const personName = String(data?.person_name || "Person").trim() || "Person";
+    state.arrActiveGenre = null;
+    state.arrSearchContext = "person";
     state.arrSearchQuery = personName;
     state.arrSearchYear = "";
     state.arrResults = Array.isArray(data?.results)
@@ -4523,9 +4935,18 @@ function renderArrResults() {
   statusTextEl.textContent = `Showing ${state.arrResults.length} ${modeLabel}`;
   if (detailEl) {
     const yearText = String(state.arrSearchYear || "").trim();
-    detailEl.textContent = yearText
-      ? `TMDb results for “${state.arrSearchQuery}” in ${yearText}`
-      : `TMDb results for “${state.arrSearchQuery}”`;
+    const context = String(state.arrSearchContext || "search");
+    if (context === "genre") {
+      detailEl.textContent = yearText
+        ? `Top ${modeLabel} in ${state.arrSearchQuery} for ${yearText}`
+        : `Top ${modeLabel} in ${state.arrSearchQuery}`;
+    } else if (context === "person") {
+      detailEl.textContent = `Filmography results for ${state.arrSearchQuery}`;
+    } else {
+      detailEl.textContent = yearText
+        ? `TMDb results for “${state.arrSearchQuery}” in ${yearText}`
+        : `TMDb results for “${state.arrSearchQuery}”`;
+    }
     detailEl.classList.remove("hidden");
   }
   const sortedResults = getSortedArrResults();
@@ -4618,7 +5039,10 @@ function setArrMode(mode) {
   state.arrResults = [];
   state.arrSearchQuery = "";
   state.arrSearchYear = "";
+  state.arrSearchContext = "search";
+  state.arrActiveGenre = null;
   updateArrModeToggleUI();
+  loadArrGenres().catch(() => {});
   renderArrResults();
 }
 
@@ -4723,7 +5147,13 @@ async function performArrSearch() {
   const yearRaw = String(yearInput?.value || "").trim();
   const year = /^\d{4}$/.test(yearRaw) ? yearRaw : "";
   if (!query) {
-    setNotice(messageEl, "Enter a movie or TV show title to search TMDb.", true);
+    setNotice(messageEl, "Enter a movie, show, actor, director, or genre to search TMDb.", true);
+    return;
+  }
+  await loadArrGenres().catch(() => {});
+  const matchedGenre = findArrGenreMatch(query);
+  if (matchedGenre) {
+    await browseArrGenre(matchedGenre, { year });
     return;
   }
   const endpoint = state.arrMode === "tv" ? "/api/arr/search/tv" : "/api/arr/search/movies";
@@ -4735,6 +5165,8 @@ async function performArrSearch() {
       params.set("year", year);
     }
     const data = await fetchJson(`${endpoint}?${params.toString()}`);
+    state.arrActiveGenre = null;
+    state.arrSearchContext = "search";
     state.arrSearchQuery = query;
     state.arrSearchYear = year;
     state.arrResults = Array.isArray(data?.results)
@@ -4948,7 +5380,7 @@ function normalizeMusicPreferences(payload = {}) {
   const genreSeen = new Set();
   const rawGenres = Array.isArray(raw.favorite_genres) ? raw.favorite_genres : [];
   rawGenres.forEach((value) => {
-    const genre = String(value || "").trim();
+    const genre = normalizeMusicGenreIntent(value);
     const key = genre.toLowerCase();
     if (!genre || genreSeen.has(key)) return;
     genreSeen.add(key);
@@ -4981,7 +5413,7 @@ function syncMusicPreferencesFromConfig(cfg = {}) {
 }
 
 function isFavoriteGenre(genre) {
-  const key = String(genre || "").trim().toLowerCase();
+  const key = normalizeMusicGenreIntent(genre).toLowerCase();
   return !!key && state.musicPreferences.favorite_genres.some((value) => String(value || "").trim().toLowerCase() === key);
 }
 
@@ -5007,7 +5439,7 @@ async function saveMusicPreferences(nextPrefs) {
 }
 
 async function toggleFavoriteGenre(genre) {
-  const normalizedGenre = String(genre || "").trim();
+  const normalizedGenre = normalizeMusicGenreIntent(genre);
   if (!normalizedGenre) return;
   const next = normalizeMusicPreferences(state.musicPreferences);
   const key = normalizedGenre.toLowerCase();
@@ -5076,12 +5508,12 @@ const MUSIC_GENRE_THEMES = {
   folk: { accent: "#84cc16", glow: "rgba(132,204,22,0.24)", base: "#17210f" },
   "r&b": { accent: "#ec4899", glow: "rgba(236,72,153,0.26)", base: "#24121d" },
   classical: { accent: "#eab308", glow: "rgba(234,179,8,0.24)", base: "#221d11" },
-  soul: { accent: "#fb7185", glow: "rgba(251,113,133,0.24)", base: "#24141a" },
+  "contemporary christian": { accent: "#a78bfa", glow: "rgba(167,139,250,0.24)", base: "#171327" },
   indie: { accent: "#22c55e", glow: "rgba(34,197,94,0.22)", base: "#102118" },
 };
 
 function getMusicGenreTheme(genre) {
-  const key = String(genre || "").trim().toLowerCase();
+  const key = normalizeMusicGenreIntent(genre).toLowerCase();
   return MUSIC_GENRE_THEMES[key] || {
     accent: "#60a5fa",
     glow: "rgba(96,165,250,0.24)",
@@ -5121,7 +5553,7 @@ function applyGenreTileArtwork(tile, artworkUrls) {
 }
 
 function queueGenreArtworkJob(genre, tile, thumbnailJobs, renderToken) {
-  const genreKey = String(genre || "").trim();
+  const genreKey = normalizeMusicGenreIntent(genre);
   if (!genreKey || !tile) return;
   const cachedCovers = getCachedGenreCoverUrls(genreKey);
   if (cachedCovers.length) {
@@ -5134,8 +5566,17 @@ function queueGenreArtworkJob(genre, tile, thumbnailJobs, renderToken) {
   thumbnailJobs.push(async (activeToken) => {
     if (state.homeMusicRenderToken !== activeToken) return;
     try {
-      const payload = await fetchJson(`/api/music/genres/${encodeURIComponent(genreKey)}/artists?limit=10`);
-      const artists = Array.isArray(payload?.artists) ? payload.artists : [];
+      const persistent = await fetchPersistentGenreCoverEntry(genreKey);
+      if (persistent?.coverUrls?.length) {
+        setCachedGenreCoverUrls(genreKey, persistent.coverUrls);
+        if (state.homeMusicRenderToken === activeToken) {
+          applyGenreTileArtwork(tile, persistent.coverUrls);
+        }
+        if (!isArtworkCacheStale(persistent.updatedAt)) {
+          return;
+        }
+      }
+      const artists = await fetchArtistsForGenreIntent(genreKey, { limit: 10 });
       const candidateReleaseGroups = [];
       await Promise.all(
         artists.slice(0, 8).map(async (artist, artistIndex) => {
@@ -5204,6 +5645,7 @@ function queueGenreArtworkJob(genre, tile, thumbnailJobs, renderToken) {
       });
       if (selectedCovers.length) {
         setCachedGenreCoverUrls(genreKey, selectedCovers);
+        await persistGenreCoverEntry(genreKey, selectedCovers);
         if (state.homeMusicRenderToken === activeToken) {
           applyGenreTileArtwork(tile, selectedCovers);
         }
@@ -5217,25 +5659,26 @@ function queueGenreArtworkJob(genre, tile, thumbnailJobs, renderToken) {
 }
 
 function createMusicGenreCard(genre, thumbnailJobs, renderToken) {
+  const displayGenre = normalizeMusicGenreIntent(genre);
   const card = document.createElement("article");
   card.className = "home-result-card music-meta-card music-grid-card music-genre-grid-card";
   const favoriteButton = createMusicFavoriteButton({
-    active: isFavoriteGenre(genre),
-    label: `${genre} genre`,
+    active: isFavoriteGenre(displayGenre),
+    label: `${displayGenre} genre`,
   });
   favoriteButton.dataset.favoriteKind = "genre";
-  favoriteButton.dataset.favoriteKey = String(genre || "").trim().toLowerCase();
+  favoriteButton.dataset.favoriteKey = displayGenre.toLowerCase();
   favoriteButton.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
     favoriteButton.disabled = true;
     try {
-      await toggleFavoriteGenre(genre);
+      await toggleFavoriteGenre(displayGenre);
       updateMatchingMusicFavoriteButtons(
         "genre",
-        genre,
-        isFavoriteGenre(genre),
-        `${genre} genre`
+        displayGenre,
+        isFavoriteGenre(displayGenre),
+        `${displayGenre} genre`
       );
     } catch (err) {
       setNotice($("#home-search-message"), `Favorite update failed: ${toUserErrorMessage(err)}`, true);
@@ -5246,7 +5689,7 @@ function createMusicGenreCard(genre, thumbnailJobs, renderToken) {
   card.appendChild(favoriteButton);
   const tile = document.createElement("div");
   tile.className = "music-genre-tile";
-  applyGenreTileTheme(tile, genre);
+  applyGenreTileTheme(tile, displayGenre);
   const collage = document.createElement("div");
   collage.className = "music-genre-collage";
   for (let i = 0; i < 4; i += 1) {
@@ -5261,37 +5704,35 @@ function createMusicGenreCard(genre, thumbnailJobs, renderToken) {
   tile.appendChild(collage);
   const tileLabel = document.createElement("span");
   tileLabel.className = "music-genre-tile-label";
-  tileLabel.textContent = genre;
+  tileLabel.textContent = displayGenre;
   tile.appendChild(tileLabel);
   card.appendChild(tile);
   const content = document.createElement("div");
   content.className = "music-meta-main";
   const title = document.createElement("div");
   title.className = "home-candidate-title";
-  title.textContent = genre;
+  title.textContent = displayGenre;
   content.appendChild(title);
   const meta = document.createElement("div");
   meta.className = "home-candidate-meta";
   meta.textContent = "Open artists in this genre";
   content.appendChild(meta);
   card.appendChild(content);
-  tile.addEventListener("click", () => browseMusicGenre(genre, { pushHistory: true }));
-  title.addEventListener("click", () => browseMusicGenre(genre, { pushHistory: true }));
-  queueGenreArtworkJob(genre, tile, thumbnailJobs, renderToken);
+  tile.addEventListener("click", () => browseMusicGenre(displayGenre, { pushHistory: true }));
+  title.addEventListener("click", () => browseMusicGenre(displayGenre, { pushHistory: true }));
+  queueGenreArtworkJob(displayGenre, tile, thumbnailJobs, renderToken);
   return card;
 }
 
 async function browseMusicGenre(genre, { pushHistory = true } = {}) {
-  const genreValue = String(genre || "").trim();
+  const genreValue = normalizeMusicGenreIntent(genre);
   if (!genreValue) return;
   const messageEl = $("#home-search-message");
   setNotice(messageEl, `Loading artists for ${genreValue}...`, false);
   try {
-    const payload = await fetchJson(`/api/music/genres/${encodeURIComponent(genreValue)}/artists?limit=24`);
+    const mergedArtists = await fetchArtistsForGenreIntent(genreValue, { limit: 24 });
     setNotice(messageEl, `Ranking artists for ${genreValue}...`, false);
-    const rankedArtists = await enrichGenreArtistsForRecommendation(
-      Array.isArray(payload?.artists) ? payload.artists : []
-    );
+    const rankedArtists = await enrichGenreArtistsForRecommendation(mergedArtists);
     state.musicResultsSort = "recommended";
     renderMusicModeResults(
       {
@@ -5423,6 +5864,16 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken) {
           return;
         }
         try {
+          const persistent = await fetchPersistentArtistCoverEntry(artistMbidValue);
+          if (persistent?.coverUrl) {
+            setCachedArtistCoverUrl(artistMbidValue, persistent.coverUrl);
+            if (state.homeMusicRenderToken === activeToken) {
+              artistThumb.setImage(persistent.coverUrl);
+            }
+            if (!isArtworkCacheStale(persistent.updatedAt)) {
+              return;
+            }
+          }
           const albums = await fetchMusicAlbumsByArtist({
             name: String(artistItem?.name || "").trim(),
             artist_mbid: artistMbidValue,
@@ -5442,6 +5893,7 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken) {
             return;
           }
           setCachedArtistCoverUrl(artistMbidValue, coverUrl);
+          await persistArtistCoverEntry(artistMbidValue, coverUrl);
           if (state.homeMusicRenderToken !== activeToken) {
             return;
           }
@@ -5786,16 +6238,13 @@ function renderMusicLanding() {
   );
 
   const favoriteGenreSeed = favoriteGenres.slice(0, 2);
+  const suggestedGenreSeed = favoriteGenres.slice(0, 5);
   const favoriteArtistSeed = favoriteArtists.slice(0, 3);
 
   if (!favoriteGenreSeed.length) {
     updateSectionEmptyState(
       becauseYouLikeGrid,
       "Favorite a genre to unlock artist recommendations here."
-    );
-    updateSectionEmptyState(
-      suggestedArtistsGrid,
-      "Favorite a genre to generate suggested artists."
     );
   } else {
     appendLoadingState(
@@ -5804,6 +6253,14 @@ function renderMusicLanding() {
         ? `Loading artists from ${favoriteGenreSeed.join(" and ")}...`
         : `Loading artists from ${favoriteGenreSeed[0]}...`
     );
+  }
+
+  if (!suggestedGenreSeed.length) {
+    updateSectionEmptyState(
+      suggestedArtistsGrid,
+      "Favorite a genre to generate suggested artists."
+    );
+  } else {
     appendLoadingState(suggestedArtistsGrid, "Finding more artists you might like...");
   }
 
@@ -5817,14 +6274,13 @@ function renderMusicLanding() {
   }
 
   (async () => {
-    if (!favoriteGenreSeed.length) return;
+    if (!favoriteGenreSeed.length && !suggestedGenreSeed.length) return;
     try {
       const genreResponses = await Promise.all(
-        favoriteGenreSeed.map(async (genre) => {
-          const payload = await fetchJson(`/api/music/genres/${encodeURIComponent(genre)}/artists?limit=18`);
+        suggestedGenreSeed.map(async (genre) => {
           return {
             genre,
-            artists: Array.isArray(payload?.artists) ? payload.artists : [],
+            artists: await fetchArtistsForGenreIntent(genre, { limit: 18 }),
           };
         })
       );
@@ -5842,7 +6298,11 @@ function renderMusicLanding() {
         artists.forEach((artist) => {
           const dedupeKey = String(artist?.artist_mbid || artist?.name || "").trim().toLowerCase();
           if (!dedupeKey) return;
-          if (!seenBecause.has(dedupeKey) && becauseArtists.length < 10) {
+          if (
+            favoriteGenreSeed.includes(genre) &&
+            !seenBecause.has(dedupeKey) &&
+            becauseArtists.length < 10
+          ) {
             seenBecause.add(dedupeKey);
             becauseArtists.push({
               ...artist,
