@@ -385,6 +385,39 @@ def apply_config_defaults(config):
                 "base_url": "",
                 "api_key": "",
             },
+            "readarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "prowlarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "bazarr": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "qbittorrent": {
+                "base_url": "",
+                "username": "",
+                "password": "",
+                "download_dir": "",
+                "category_movies": "movies",
+                "category_tv": "tv",
+                "category_books": "books",
+            },
+            "jellyfin": {
+                "base_url": "",
+                "api_key": "",
+            },
+            "vpn": {
+                "provider": "gluetun",
+                "control_url": "",
+                "enabled": False,
+                "route_qbittorrent": True,
+                "route_prowlarr": False,
+                "route_retreivr": False,
+            },
         },
     )
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
@@ -823,7 +856,7 @@ def validate_config(config):
             tmdb_api_key = arr_cfg.get("tmdb_api_key")
             if tmdb_api_key is not None and not isinstance(tmdb_api_key, str):
                 errors.append("arr.tmdb_api_key must be a string")
-            for service_name in ("radarr", "sonarr"):
+            for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"):
                 service_cfg = arr_cfg.get(service_name)
                 if service_cfg is None:
                     continue
@@ -836,6 +869,100 @@ def validate_config(config):
                 api_key = service_cfg.get("api_key")
                 if api_key is not None and not isinstance(api_key, str):
                     errors.append(f"arr.{service_name}.api_key must be a string")
+            qb_cfg = arr_cfg.get("qbittorrent")
+            if qb_cfg is not None:
+                if not isinstance(qb_cfg, dict):
+                    errors.append("arr.qbittorrent must be an object")
+                else:
+                    for field_name in (
+                        "base_url",
+                        "username",
+                        "password",
+                        "download_dir",
+                        "category_movies",
+                        "category_tv",
+                        "category_books",
+                    ):
+                        value = qb_cfg.get(field_name)
+                        if value is not None and not isinstance(value, str):
+                            errors.append(f"arr.qbittorrent.{field_name} must be a string")
+            vpn_cfg = arr_cfg.get("vpn")
+            if vpn_cfg is not None:
+                if not isinstance(vpn_cfg, dict):
+                    errors.append("arr.vpn must be an object")
+                else:
+                    provider = vpn_cfg.get("provider")
+                    if provider is not None and not isinstance(provider, str):
+                        errors.append("arr.vpn.provider must be a string")
+                    control_url = vpn_cfg.get("control_url")
+                    if control_url is not None and not isinstance(control_url, str):
+                        errors.append("arr.vpn.control_url must be a string")
+                    enabled = vpn_cfg.get("enabled")
+                    if enabled is not None and not isinstance(enabled, bool):
+                        errors.append("arr.vpn.enabled must be true/false")
+                    for field_name in ("route_qbittorrent", "route_prowlarr", "route_retreivr"):
+                        value = vpn_cfg.get(field_name)
+                        if value is not None and not isinstance(value, bool):
+                            errors.append(f"arr.vpn.{field_name} must be true/false")
+
+    music_player_cfg = config.get("music_player")
+    if music_player_cfg is not None:
+        if not isinstance(music_player_cfg, dict):
+            errors.append("music_player must be an object")
+        else:
+            for bool_name in ("local_library_first", "cache_stream_fallback"):
+                value = music_player_cfg.get(bool_name)
+                if value is not None and not isinstance(value, bool):
+                    errors.append(f"music_player.{bool_name} must be true/false")
+            radio_history_limit = music_player_cfg.get("radio_history_limit")
+            if radio_history_limit is not None:
+                try:
+                    parsed = int(radio_history_limit)
+                except Exception:
+                    errors.append("music_player.radio_history_limit must be an integer")
+                else:
+                    if parsed < 1:
+                        errors.append("music_player.radio_history_limit must be >= 1")
+
+    setup_cfg = config.get("setup")
+    if setup_cfg is not None:
+        if not isinstance(setup_cfg, dict):
+            errors.append("setup must be an object")
+        else:
+            show_on_startup = setup_cfg.get("show_on_startup")
+            if show_on_startup is not None and not isinstance(show_on_startup, bool):
+                errors.append("setup.show_on_startup must be true/false")
+            completed_modules = setup_cfg.get("completed_modules")
+            if completed_modules is not None:
+                if not isinstance(completed_modules, list) or not all(isinstance(entry, str) for entry in completed_modules):
+                    errors.append("setup.completed_modules must be a list of strings")
+            stack_cfg = setup_cfg.get("stack")
+            if stack_cfg is not None:
+                if not isinstance(stack_cfg, dict):
+                    errors.append("setup.stack must be an object")
+                else:
+                    for bool_name in (
+                        "enable_arr_stack",
+                        "enable_radarr",
+                        "enable_sonarr",
+                        "enable_readarr",
+                        "enable_prowlarr",
+                        "enable_bazarr",
+                        "enable_qbittorrent",
+                        "enable_vpn",
+                        "enable_jellyfin",
+                    ):
+                        value = stack_cfg.get(bool_name)
+                        if value is not None and not isinstance(value, bool):
+                            errors.append(f"setup.stack.{bool_name} must be true/false")
+                    for str_name in ("env_path", "media_root", "movies_root", "tv_root", "downloads_root", "books_root"):
+                        value = stack_cfg.get(str_name)
+                        if value is not None and not isinstance(value, str):
+                            errors.append(f"setup.stack.{str_name} must be a string")
+                    compose_profiles = stack_cfg.get("compose_profiles")
+                    if compose_profiles is not None:
+                        if not isinstance(compose_profiles, list) or not all(isinstance(entry, str) for entry in compose_profiles):
+                            errors.append("setup.stack.compose_profiles must be a list of strings")
 
     custom_adapter_file = config.get("custom_search_adapters_file")
     if custom_adapter_file is not None:

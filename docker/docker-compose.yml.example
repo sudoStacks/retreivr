@@ -1,28 +1,188 @@
 version: "3.9"
 
+# Retreivr canonical compose example
+#
+# Default behavior:
+# - Running `docker compose up -d` starts Retreivr only.
+# - ARR, downloader, VPN, and Jellyfin services are included here, but they are opt-in.
+# - Those optional services stay off until you explicitly enable them with Compose profiles.
+#
+# Recommended operator flow:
+# 1. Start Retreivr only.
+# 2. Open the Retreivr UI and complete Guided Setup / Settings.
+# 3. Let Retreivr generate the exact `docker compose --profile ... up -d` command for the
+#    optional stack services you want to enable.
+# 4. Re-run compose with those profiles when you are ready.
+#
+# This file is intentionally shipped as a Retreivr-first stack, not an ARR-by-default bundle.
+
 services:
   retreivr:
-    image: ghcr.io/sudoStacks/retreivr:v0.9.20
+    image: ghcr.io/sudoStacks/retreivr:v0.9.21
     container_name: retreivr
     ports:
-      # host:container -> access via http://<host>:8090, app listens on 8000 in-container
       - "8090:8000"
     environment:
-      - TZ=America/Chicago 
-      # Change to your local TZ
-
+      TZ: ${TZ:-America/Chicago}
+      RETREIVR_DATA_DIR: /data
+      RETREIVR_DOWNLOADS_DIR: /downloads
+      RETREIVR_HOST: 0.0.0.0
+      RETREIVR_PORT: 8000
+      RETREIVR_ENV_FILE: /workspace/.env
     volumes:
-      # Canonical container layout:
-      # /downloads /data /config /logs /tokens
+      - ./:/workspace
       - ./downloads:/downloads
       - ./data:/data
       - ./config:/config
       - ./logs:/logs
       - ./tokens:/tokens
+      - ${RETREIVR_MEDIA_ROOT:-./media}:/media
+    restart: unless-stopped
+    networks:
+      - retreivr
 
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: retreivr-gluetun
+    profiles: ["vpn"]
+    cap_add:
+      - NET_ADMIN
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      VPN_SERVICE_PROVIDER: ${GLUETUN_PROVIDER:-}
+      OPENVPN_USER: ${GLUETUN_OPENVPN_USER:-}
+      OPENVPN_PASSWORD: ${GLUETUN_OPENVPN_PASSWORD:-}
+      WIREGUARD_PRIVATE_KEY: ${GLUETUN_WIREGUARD_PRIVATE_KEY:-}
+      SERVER_COUNTRIES: ${GLUETUN_SERVER_COUNTRIES:-}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - retreivr
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: retreivr-qbittorrent
+    profiles: ["downloader"]
+    depends_on:
+      - gluetun
+    network_mode: "service:gluetun"
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      WEBUI_PORT: 8080
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./config/qbittorrent:/config
+      - ${RETREIVR_DOWNLOADS_ROOT:-./downloads}:/downloads
     restart: unless-stopped
 
-# Notes:
-# - Playlist folder paths in config.json are relative to /downloads inside the container.
-# - No RETREIVR_*_DIR overrides are required for Docker when using the canonical layout above.
-# - Default video container is MKV as of v0.9.3 (configurable in config.json).
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: retreivr-radarr
+    profiles: ["arr"]
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./config/radarr:/config
+      - ${RETREIVR_MOVIES_ROOT:-./media/movies}:/movies
+      - ${RETREIVR_DOWNLOADS_ROOT:-./downloads}:/downloads
+    ports:
+      - "7878:7878"
+    restart: unless-stopped
+    networks:
+      - retreivr
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: retreivr-sonarr
+    profiles: ["arr"]
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./config/sonarr:/config
+      - ${RETREIVR_TV_ROOT:-./media/tv}:/tv
+      - ${RETREIVR_DOWNLOADS_ROOT:-./downloads}:/downloads
+    ports:
+      - "8989:8989"
+    restart: unless-stopped
+    networks:
+      - retreivr
+
+  readarr:
+    image: lscr.io/linuxserver/readarr:develop
+    container_name: retreivr-readarr
+    profiles: ["arr", "books"]
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./config/readarr:/config
+      - ${RETREIVR_BOOKS_ROOT:-./media/books}:/books
+      - ${RETREIVR_DOWNLOADS_ROOT:-./downloads}:/downloads
+    ports:
+      - "8787:8787"
+    restart: unless-stopped
+    networks:
+      - retreivr
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: retreivr-prowlarr
+    profiles: ["arr"]
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./config/prowlarr:/config
+    ports:
+      - "9696:9696"
+    restart: unless-stopped
+    networks:
+      - retreivr
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: retreivr-bazarr
+    profiles: ["arr", "subtitles"]
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./config/bazarr:/config
+      - ${RETREIVR_MOVIES_ROOT:-./media/movies}:/movies
+      - ${RETREIVR_TV_ROOT:-./media/tv}:/tv
+    ports:
+      - "6767:6767"
+    restart: unless-stopped
+    networks:
+      - retreivr
+
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: retreivr-jellyfin
+    profiles: ["jellyfin"]
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./config/jellyfin:/config
+      - ${RETREIVR_MEDIA_ROOT:-./media}:/media
+      - ${RETREIVR_DOWNLOADS_ROOT:-./downloads}:/downloads
+    ports:
+      - "8096:8096"
+    restart: unless-stopped
+    networks:
+      - retreivr
+
+networks:
+  retreivr:
+    name: retreivr

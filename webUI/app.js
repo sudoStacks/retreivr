@@ -11,6 +11,7 @@ const state = {
   configNoticeTimer: null,
   configNoticeClearable: false,
   currentPage: "home",
+  lastMusicMode: "music",
   reviewItems: [],
   reviewSelectedIds: new Set(),
   reviewPreviewItemId: null,
@@ -101,6 +102,21 @@ const state = {
     sonarr: { configured: false, reachable: false, message: "Sonarr is not configured" },
   },
   arrStatusPollTimer: null,
+  setupStatus: null,
+  servicesHealth: null,
+  playerView: "library",
+  playerLibrary: [],
+  playerLibrarySummary: { artists: [], albums: [], tracks: [] },
+  playerLibraryMode: "artists",
+  playerSelectedArtistKey: "",
+  playerSelectedAlbumKey: "",
+  playerStations: [],
+  playerPlaylists: [],
+  playerSelectedPlaylistId: null,
+  playerSelectedPlaylistItems: [],
+  playerQueue: [],
+  playerHistory: [],
+  playerCurrent: null,
   settingsActiveSectionId: "settings-core",
   settingsLayoutObserver: null,
   logsStickToBottom: true,
@@ -1049,10 +1065,20 @@ async function refreshCommunityCacheSyncStatus() {
 
 function setPage(page) {
   const normalized = normalizePageName(page);
-  const allowed = new Set(["home", "movies-tv", "review", "config", "status", "info"]);
+  const allowed = new Set(["home", "music", "music-player", "movies-tv", "setup", "connections", "services", "review", "config", "status", "info"]);
   const target = allowed.has(normalized) ? normalized : "home";
   state.currentPage = target;
-  if (target === "home") {
+  if (target === "music") {
+    mountMusicPageNodes();
+  } else if (target === "home") {
+    mountHomePageNodes();
+  }
+  if (target === "home" || target === "music") {
+    if (target === "home") {
+      setHomeMediaMode("video", { persist: false, clearResultsOnDisable: false });
+    } else if ((state.homeMediaMode || "video") === "video") {
+      setHomeMediaMode(state.lastMusicMode || "music", { persist: false, clearResultsOnDisable: false });
+    }
     if (state.homeSearchRequestId) {
       startHomeResultPolling(state.homeSearchRequestId);
     }
@@ -1068,8 +1094,9 @@ function setPage(page) {
   }
   document.body.classList.remove("nav-open");
   // Home-only root class for scoping styles
-  document.body.classList.toggle("home-page", target === "home");
-  if (target !== "home") {
+  document.body.classList.toggle("home-page", target === "home" || target === "music");
+  document.body.classList.toggle("music-page", target === "music");
+  if (target !== "home" && target !== "music") {
     setHomeSearchActive(false);
     setHomeResultsState({ hasResults: false, terminal: false });
     stopHomeJobPolling();
@@ -1106,6 +1133,14 @@ function setPage(page) {
     loadArrGenres().catch(() => {});
     renderArrResults();
     startArrStatusPolling();
+  } else if (target === "setup") {
+    refreshSetupStatus().catch(() => {});
+  } else if (target === "connections") {
+    refreshConnectionsStatus().catch(() => {});
+  } else if (target === "services") {
+    refreshSetupStatus().catch(() => {});
+  } else if (target === "music-player") {
+    loadMusicPlayerView().catch(() => {});
   } else if (target === "config") {
     if (!state.config || !state.configDirty) {
       loadConfig().then(async () => {
@@ -1155,6 +1190,607 @@ function setPage(page) {
       })
       .catch(() => {});
   }
+}
+
+function mountMusicPageNodes() {
+  const modeSlot = $("#music-page-mode-slot");
+  const consoleSlot = $("#music-page-console-slot");
+  const resultsSlot = $("#music-page-results-slot");
+  const messageSlot = $("#music-page-message-slot");
+  const reviewSlot = $("#music-page-review-slot");
+  const modeRow = $("#shared-music-nodes .home-mode-toggle-shell") || $("#music-page-mode-slot .home-mode-toggle-shell") || $("#home-panel .home-mode-toggle-shell");
+  const consoleEl = $("#music-mode-console");
+  const resultsEl = $("#music-results-container");
+  const messageEl = $("#home-search-message");
+  const reviewEl = $("#home-review-alert");
+  if (modeSlot && modeRow && modeRow.parentElement !== modeSlot) modeSlot.appendChild(modeRow);
+  if (consoleSlot && consoleEl && consoleEl.parentElement !== consoleSlot) consoleSlot.appendChild(consoleEl);
+  if (resultsSlot && resultsEl && resultsEl.parentElement !== resultsSlot) resultsSlot.appendChild(resultsEl);
+  if (messageSlot && messageEl && messageEl.parentElement !== messageSlot) messageSlot.appendChild(messageEl);
+  if (reviewSlot && reviewEl && reviewEl.parentElement !== reviewSlot) reviewSlot.appendChild(reviewEl);
+}
+
+function mountHomePageNodes() {
+  const shell = $("#home-panel .home-search-shell");
+  const hiddenHost = $("#shared-music-nodes");
+  const messageEl = $("#home-search-message");
+  const reviewEl = $("#home-review-alert");
+  if (shell && messageEl && messageEl.parentElement !== shell) shell.appendChild(messageEl);
+  if (shell && reviewEl && reviewEl.parentElement !== shell) shell.appendChild(reviewEl);
+  if (hiddenHost) {
+    const modeRow = $("#music-page-mode-slot .home-mode-toggle-shell");
+    const consoleEl = $("#music-mode-console");
+    const resultsEl = $("#music-results-container");
+    if (modeRow && modeRow.parentElement !== hiddenHost) hiddenHost.appendChild(modeRow);
+    if (consoleEl && consoleEl.parentElement !== hiddenHost) hiddenHost.appendChild(consoleEl);
+    if (resultsEl && resultsEl.parentElement !== hiddenHost) hiddenHost.appendChild(resultsEl);
+  }
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll("`", "&#96;");
+}
+
+async function refreshSetupStatus() {
+  const modulesEl = $("#setup-modules");
+  const helperEl = $("#setup-command-helper");
+  const summaryEl = $("#setup-command-summary");
+  const servicesSummary = $("#services-profile-summary");
+  const servicesList = $("#services-list");
+  if (modulesEl) {
+    modulesEl.innerHTML = `<div class="home-results-empty">Loading setup status…</div>`;
+  }
+  try {
+    const payload = await fetchJson("/api/setup/status");
+    state.setupStatus = payload;
+    const modules = payload?.modules || {};
+    const stack = payload?.stack || {};
+    if ($("#setup-enable-arr-stack")) $("#setup-enable-arr-stack").checked = !!stack.enable_arr_stack;
+    if ($("#setup-enable-radarr")) $("#setup-enable-radarr").checked = !!stack.enable_radarr;
+    if ($("#setup-enable-sonarr")) $("#setup-enable-sonarr").checked = !!stack.enable_sonarr;
+    if ($("#setup-enable-readarr")) $("#setup-enable-readarr").checked = !!stack.enable_readarr;
+    if ($("#setup-enable-prowlarr")) $("#setup-enable-prowlarr").checked = !!stack.enable_prowlarr;
+    if ($("#setup-enable-bazarr")) $("#setup-enable-bazarr").checked = !!stack.enable_bazarr;
+    if ($("#setup-enable-qbittorrent")) $("#setup-enable-qbittorrent").checked = !!stack.enable_qbittorrent;
+    if ($("#setup-enable-vpn")) $("#setup-enable-vpn").checked = !!stack.enable_vpn;
+    if ($("#setup-enable-jellyfin")) $("#setup-enable-jellyfin").checked = !!stack.enable_jellyfin;
+    if ($("#setup-env-path")) $("#setup-env-path").value = stack.env_path || ".env";
+    if ($("#setup-media-root")) $("#setup-media-root").value = stack.media_root || "./media";
+    if ($("#setup-movies-root")) $("#setup-movies-root").value = stack.movies_root || "./media/movies";
+    if ($("#setup-tv-root")) $("#setup-tv-root").value = stack.tv_root || "./media/tv";
+    if ($("#setup-downloads-root")) $("#setup-downloads-root").value = stack.downloads_root || "./downloads";
+    if ($("#setup-books-root")) $("#setup-books-root").value = stack.books_root || "./media/books";
+    if (modulesEl) {
+      modulesEl.innerHTML = Object.entries(modules).map(([key, module]) => `
+        <div class="group setup-module-card">
+          <div class="group-title">${escapeHtml(module.title || key)}</div>
+          <div class="meta">Status: <strong>${escapeHtml(module.status || "pending")}</strong>${module.required ? " • Required" : " • Optional"}</div>
+        </div>
+      `).join("");
+    }
+    const profiles = Array.isArray(stack.compose_profiles) ? stack.compose_profiles : [];
+    const command = String(stack.compose_command || "").trim();
+    if (helperEl) {
+      setNotice(helperEl, command ? `Restart required after apply. Run: ${command}` : "Retreivr-only mode is active. Save stack choices, then apply when you are ready.", false);
+    }
+    if (summaryEl) {
+      const pathRows = [
+        ["Env file", stack.env_path || ".env"],
+        ["Media root", stack.media_root || "./media"],
+        ["Movies root", stack.movies_root || "./media/movies"],
+        ["TV root", stack.tv_root || "./media/tv"],
+        ["Downloads root", stack.downloads_root || "./downloads"],
+        ["Books root", stack.books_root || "./media/books"],
+      ];
+      const vpnPolicy = stack.vpn_policy || {};
+      const routeSummary = [
+        vpnPolicy.route_qbittorrent ? "qBittorrent" : null,
+        vpnPolicy.route_prowlarr ? "Prowlarr" : null,
+        vpnPolicy.route_retreivr ? "Retreivr" : null,
+      ].filter(Boolean).join(", ") || "No services selected";
+      summaryEl.innerHTML = `
+        <div class="group setup-command-card">
+          <div class="group-title">Apply Summary</div>
+          <div class="meta">${profiles.length ? `Profiles: ${escapeHtml(profiles.join(", "))}` : "Profiles: none (Retreivr-only mode)"}</div>
+          <div class="meta">Restart required after writing the managed env block.</div>
+          <div class="meta">VPN policy: ${vpnPolicy.enabled ? `enabled via ${escapeHtml(vpnPolicy.provider || "gluetun")}` : "disabled"} • Routes: ${escapeHtml(routeSummary)}</div>
+          <code class="setup-command-code">${escapeHtml(command || "docker compose up -d")}</code>
+        </div>
+        <div class="group setup-command-card">
+          <div class="group-title">Managed Paths</div>
+          <div class="setup-path-summary">
+            ${pathRows.map(([label, value]) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join("")}
+          </div>
+        </div>
+      `;
+    }
+    if (servicesSummary) {
+      servicesSummary.textContent = profiles.length
+        ? `Active optional profiles: ${profiles.join(", ")}`
+        : "No optional services enabled. Retreivr-only mode is active.";
+    }
+    if (servicesList) {
+      const serviceLabels = [
+        ["enable_radarr", "Radarr"],
+        ["enable_sonarr", "Sonarr"],
+        ["enable_readarr", "Readarr"],
+        ["enable_prowlarr", "Prowlarr"],
+        ["enable_bazarr", "Bazarr"],
+        ["enable_qbittorrent", "qBittorrent"],
+        ["enable_vpn", "VPN / Gluetun"],
+        ["enable_jellyfin", "Jellyfin"],
+      ];
+      servicesList.innerHTML = serviceLabels.map(([key, label]) => `
+        <div class="group setup-module-card">
+          <div class="group-title">${escapeHtml(label)}</div>
+          <div class="meta">${stack[key] ? "Enabled in managed stack" : "Disabled by default"}</div>
+        </div>
+      `).join("");
+    }
+  } catch (err) {
+    if (modulesEl) {
+      modulesEl.innerHTML = `<div class="home-results-empty">Setup status failed: ${escapeHtml(toUserErrorMessage(err))}</div>`;
+    }
+    if (helperEl) {
+      setNotice(helperEl, `Setup status failed: ${toUserErrorMessage(err)}`, true);
+    }
+  }
+}
+
+function collectSetupStackPayload() {
+  return {
+    enable_arr_stack: !!$("#setup-enable-arr-stack")?.checked,
+    enable_radarr: !!$("#setup-enable-radarr")?.checked,
+    enable_sonarr: !!$("#setup-enable-sonarr")?.checked,
+    enable_readarr: !!$("#setup-enable-readarr")?.checked,
+    enable_prowlarr: !!$("#setup-enable-prowlarr")?.checked,
+    enable_bazarr: !!$("#setup-enable-bazarr")?.checked,
+    enable_qbittorrent: !!$("#setup-enable-qbittorrent")?.checked,
+    enable_vpn: !!$("#setup-enable-vpn")?.checked,
+    enable_jellyfin: !!$("#setup-enable-jellyfin")?.checked,
+    env_path: String($("#setup-env-path")?.value || ".env").trim() || ".env",
+    media_root: String($("#setup-media-root")?.value || "./media").trim() || "./media",
+    movies_root: String($("#setup-movies-root")?.value || "./media/movies").trim() || "./media/movies",
+    tv_root: String($("#setup-tv-root")?.value || "./media/tv").trim() || "./media/tv",
+    downloads_root: String($("#setup-downloads-root")?.value || "./downloads").trim() || "./downloads",
+    books_root: String($("#setup-books-root")?.value || "./media/books").trim() || "./media/books",
+  };
+}
+
+async function saveSetupStack() {
+  const helperEl = $("#setup-command-helper");
+  setNotice(helperEl, "Saving stack choices…", false);
+  const payload = await fetchJson("/api/setup/stack", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(collectSetupStackPayload()),
+  });
+  state.setupStatus = payload;
+  await refreshSetupStatus();
+  setNotice(helperEl, `Saved. Restart is not required until you click "Write Managed Env". ${payload?.stack?.compose_command || ""}`.trim(), false);
+}
+
+async function applySetupStack() {
+  const helperEl = $("#setup-command-helper");
+  const summaryEl = $("#setup-command-summary");
+  setNotice(helperEl, "Writing managed env block…", false);
+  await saveSetupStack();
+  const payload = await fetchJson("/api/setup/apply-stack", { method: "POST" });
+  setNotice(helperEl, `Managed env written to ${payload.env_path}. Restart required: ${payload.compose_command}`, false);
+  if (summaryEl) {
+    const services = Array.isArray(payload.enabled_services) && payload.enabled_services.length
+      ? payload.enabled_services.join(", ")
+      : "Retreivr only";
+    summaryEl.innerHTML = `
+      <div class="group setup-command-card">
+        <div class="group-title">Apply Ready</div>
+        <div class="meta"><strong>Enabled services:</strong> ${escapeHtml(services)}</div>
+        <div class="meta"><strong>Profiles:</strong> ${escapeHtml((payload.profiles || []).join(", ") || "none")}</div>
+        <div class="meta"><strong>Managed env:</strong> ${escapeHtml(payload.env_path || ".env")}</div>
+        <code class="setup-command-code">${escapeHtml(payload.compose_command || "docker compose up -d")}</code>
+      </div>
+    `;
+  }
+}
+
+async function refreshConnectionsStatus() {
+  const grid = $("#connections-grid");
+  const messageEl = $("#connections-message");
+  if (grid) {
+    grid.innerHTML = `<div class="home-results-empty">Checking service connections…</div>`;
+  }
+  try {
+    const payload = await fetchJson("/api/services/health");
+    state.servicesHealth = payload?.services || {};
+    if (grid) {
+      grid.innerHTML = Object.entries(state.servicesHealth).map(([name, entry]) => `
+        <div class="group setup-module-card">
+          <div class="group-title">${escapeHtml(name)}</div>
+          <div class="meta">${entry.configured ? "Configured" : "Not configured"} • ${escapeHtml(entry.status || "unknown")}</div>
+          <div class="meta">${entry.reachable ? "Reachable" : "Unavailable"}</div>
+          ${entry.external_ip ? `<div class="meta">External IP: ${escapeHtml(entry.external_ip)}</div>` : ""}
+          ${entry.provider ? `<div class="meta">Provider: ${escapeHtml(entry.provider)}</div>` : ""}
+          ${entry.expected_routes ? `<div class="meta">Routes: ${escapeHtml(Object.entries(entry.expected_routes).filter(([, enabled]) => !!enabled).map(([service]) => service).join(", ") || "none")}</div>` : ""}
+          ${typeof entry.kill_switch_expected === "boolean" ? `<div class="meta">Kill switch expected: ${entry.kill_switch_expected ? "Yes" : "No"}</div>` : ""}
+        </div>
+      `).join("");
+    }
+    if (messageEl) {
+      setNotice(messageEl, "Connections refreshed.", false);
+    }
+  } catch (err) {
+    if (grid) {
+      grid.innerHTML = `<div class="home-results-empty">Connection check failed: ${escapeHtml(toUserErrorMessage(err))}</div>`;
+    }
+    if (messageEl) {
+      setNotice(messageEl, `Connection check failed: ${toUserErrorMessage(err)}`, true);
+    }
+  }
+}
+
+async function autoConfigureConnections() {
+  const messageEl = $("#connections-message");
+  setNotice(messageEl, "Applying best-effort ARR and qBittorrent configuration…", false);
+  try {
+    const payload = await fetchJson("/api/services/autoconfigure", { method: "POST" });
+    const services = payload?.services || {};
+    const configured = Object.entries(services).filter(([, item]) => item?.status === "configured" || item?.status === "updated" || item?.status === "created" || item?.status === "connected").length;
+    const attention = Object.entries(services).filter(([, item]) => item?.status === "needs_attention").length;
+    const summary = attention
+      ? `Configured ${configured} services. ${attention} service${attention === 1 ? "" : "s"} still need attention.`
+      : `Configured ${configured} services successfully.`;
+    setNotice(messageEl, summary, false);
+    await refreshConnectionsStatus();
+  } catch (err) {
+    setNotice(messageEl, `Auto configure failed: ${toUserErrorMessage(err)}`, true);
+  }
+}
+
+function setMusicPlayerView(view) {
+  state.playerView = view;
+  $$(".music-player-nav").forEach((button) => {
+    button.classList.toggle("active", button.dataset.playerView === view);
+  });
+  $$(".music-player-view").forEach((section) => {
+    section.classList.toggle("hidden", section.id !== `music-player-${view}`);
+  });
+}
+
+function getMusicPlayerSelectedArtist() {
+  const artists = Array.isArray(state.playerLibrarySummary?.artists) ? state.playerLibrarySummary.artists : [];
+  const selectedKey = String(state.playerSelectedArtistKey || "").trim().toLowerCase();
+  return artists.find((entry) => String(entry.artist_key || "").trim().toLowerCase() === selectedKey) || null;
+}
+
+function getMusicPlayerSelectedAlbum() {
+  const albums = Array.isArray(state.playerLibrarySummary?.albums) ? state.playerLibrarySummary.albums : [];
+  const selectedArtistKey = String(state.playerSelectedArtistKey || "").trim().toLowerCase();
+  const selectedAlbumKey = String(state.playerSelectedAlbumKey || "").trim().toLowerCase();
+  return albums.find((entry) =>
+    String(entry.artist_key || "").trim().toLowerCase() === selectedArtistKey &&
+    String(entry.album_key || "").trim().toLowerCase() === selectedAlbumKey
+  ) || null;
+}
+
+function getMusicPlayerFilteredTracks() {
+  const tracks = Array.isArray(state.playerLibrarySummary?.tracks) ? state.playerLibrarySummary.tracks : [];
+  const selectedArtistKey = String(state.playerSelectedArtistKey || "").trim().toLowerCase();
+  const selectedAlbumKey = String(state.playerSelectedAlbumKey || "").trim().toLowerCase();
+  return tracks.filter((entry) => {
+    if (selectedArtistKey && String(entry.artist_key || "").trim().toLowerCase() !== selectedArtistKey) {
+      return false;
+    }
+    if (selectedAlbumKey && String(entry.album_key || "").trim().toLowerCase() !== selectedAlbumKey) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function getMusicPlayerPlaylistSummary() {
+  const playlists = Array.isArray(state.playerPlaylists) ? state.playerPlaylists : [];
+  const selectedId = Number(state.playerSelectedPlaylistId || 0);
+  const selected = playlists.find((entry) => Number(entry.id || 0) === selectedId) || null;
+  const items = Array.isArray(state.playerSelectedPlaylistItems) ? state.playerSelectedPlaylistItems : [];
+  return { playlists, selected, items };
+}
+
+function renderMusicPlayerPlaylistsPanel() {
+  const { playlists, selected, items } = getMusicPlayerPlaylistSummary();
+  const playlistCards = playlists.length ? playlists.map((playlist) => `
+    <button
+      class="music-player-playlist-card${Number(playlist.id || 0) === Number(selected?.id || 0) ? " is-selected" : ""}"
+      type="button"
+      data-action="player-open-playlist"
+      data-playlist-id="${escapeAttr(playlist.id)}"
+    >
+      <span class="music-player-track-title">${escapeHtml(playlist.name || "Playlist")}</span>
+      <span class="music-player-track-meta">${escapeHtml(`${playlist.item_count || 0} tracks`)}</span>
+    </button>
+  `).join("") : `<div class="home-results-empty">No playlists yet.</div>`;
+  const selectedMarkup = selected ? `
+    <div class="group music-player-playlist-detail">
+      <div class="panel-header-row compact">
+        <div>
+          <div class="group-title">${escapeHtml(selected.name || "Playlist")}</div>
+          <div class="meta">${escapeHtml(`${items.length} saved track${items.length === 1 ? "" : "s"}`)}</div>
+        </div>
+        <button class="button ghost small" type="button" data-action="player-delete-playlist" data-playlist-id="${escapeAttr(selected.id)}">Delete Playlist</button>
+      </div>
+      <div class="music-player-playlist-items">
+        ${items.length ? items.map((item) => `
+          <div class="music-player-playlist-item">
+            <button
+              class="music-player-track"
+              type="button"
+              data-action="player-play"
+              data-stream-url="${escapeAttr(item.stream_url || "")}"
+              data-title="${escapeAttr(item.title || "")}"
+              data-artist="${escapeAttr(item.artist || "")}"
+              data-album="${escapeAttr(item.album || "")}"
+              data-local-path="${escapeAttr(item.local_path || "")}"
+              data-source-kind="${escapeAttr(item.source_kind || "local")}"
+            >
+              <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
+              <span class="music-player-track-meta">${escapeHtml([item.artist, item.album].filter(Boolean).join(" • "))}</span>
+            </button>
+            <button class="button ghost small" type="button" data-action="player-remove-playlist-item" data-playlist-id="${escapeAttr(selected.id)}" data-item-id="${escapeAttr(item.id)}">Remove</button>
+          </div>
+        `).join("") : `<div class="home-results-empty">Add tracks from the library to start this playlist.</div>`}
+      </div>
+    </div>
+  ` : `<div class="group music-player-playlist-detail"><div class="home-results-empty">Select a playlist to see its tracks.</div></div>`;
+  return `
+    <div class="group">
+      <div class="group-title">Playlists</div>
+      <div class="music-player-playlist-create">
+        <input id="music-player-playlist-name" type="text" placeholder="New playlist name">
+        <button id="music-player-create-playlist" class="button primary" type="button">Create Playlist</button>
+      </div>
+    </div>
+    <div class="music-player-playlist-list">${playlistCards}</div>
+    ${selectedMarkup}
+  `;
+}
+
+function renderMusicPlayerLibrary() {
+  const libraryEl = $("#music-player-library");
+  if (!libraryEl) return;
+  const summary = state.playerLibrarySummary || {};
+  const artists = Array.isArray(summary.artists) ? summary.artists : [];
+  const albums = Array.isArray(summary.albums) ? summary.albums : [];
+  const tracks = getMusicPlayerFilteredTracks();
+  const selectedArtist = getMusicPlayerSelectedArtist();
+  const selectedAlbum = getMusicPlayerSelectedAlbum();
+  const selectedPlaylistId = Number(state.playerSelectedPlaylistId || 0);
+  const libraryMode = String(state.playerLibraryMode || "artists");
+  let browserMarkup = `<div class="home-results-empty">No local library tracks found yet.</div>`;
+
+  if (artists.length) {
+    if (libraryMode === "artists") {
+      browserMarkup = `
+        <div class="music-player-browser-grid">
+          ${artists.map((artist) => `
+            <button class="music-player-browser-card" type="button" data-action="player-open-artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">
+              <span class="music-player-track-title">${escapeHtml(artist.artist || "Unknown Artist")}</span>
+              <span class="music-player-track-meta">${escapeHtml(`${artist.album_count || 0} albums • ${artist.track_count || 0} tracks`)}</span>
+            </button>
+          `).join("")}
+        </div>
+      `;
+    } else if (libraryMode === "albums") {
+      const filteredAlbums = albums.filter((album) => {
+        if (!selectedArtist) return true;
+        return String(album.artist_key || "").trim().toLowerCase() === String(selectedArtist.artist_key || "").trim().toLowerCase();
+      });
+      browserMarkup = filteredAlbums.length ? `
+        <div class="music-player-browser-grid">
+          ${filteredAlbums.map((album) => `
+            <button
+              class="music-player-browser-card${selectedAlbum && String(selectedAlbum.album_key || "") === String(album.album_key || "") && String(selectedAlbum.artist_key || "") === String(album.artist_key || "") ? " is-selected" : ""}"
+              type="button"
+              data-action="player-open-album"
+              data-artist-key="${escapeAttr(album.artist_key || "")}"
+              data-album-key="${escapeAttr(album.album_key || "")}"
+            >
+              <span class="music-player-track-title">${escapeHtml(album.album || "Unknown Album")}</span>
+              <span class="music-player-track-meta">${escapeHtml([album.artist, `${album.track_count || 0} tracks`].filter(Boolean).join(" • "))}</span>
+            </button>
+          `).join("")}
+        </div>
+      ` : `<div class="home-results-empty">No albums available for this artist.</div>`;
+    } else {
+      browserMarkup = tracks.length ? `
+        <div class="music-player-track-list">
+          ${tracks.map((item) => `
+            <div class="music-player-track-row">
+              <button
+                class="music-player-track"
+                type="button"
+                data-action="player-play"
+                data-stream-url="${escapeAttr(item.stream_url || "")}"
+                data-title="${escapeAttr(item.title || "")}"
+                data-artist="${escapeAttr(item.artist || "")}"
+                data-album="${escapeAttr(item.album || "")}"
+                data-local-path="${escapeAttr(item.local_path || "")}"
+                data-source-kind="${escapeAttr(item.kind || "local")}"
+              >
+                <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
+                <span class="music-player-track-meta">${escapeHtml([item.artist, item.album].filter(Boolean).join(" • "))}</span>
+              </button>
+              <button
+                class="button ghost small"
+                type="button"
+                data-action="player-add-to-playlist"
+                data-playlist-id="${escapeAttr(selectedPlaylistId || "")}"
+                data-stream-url="${escapeAttr(item.stream_url || "")}"
+                data-title="${escapeAttr(item.title || "")}"
+                data-artist="${escapeAttr(item.artist || "")}"
+                data-album="${escapeAttr(item.album || "")}"
+                data-local-path="${escapeAttr(item.local_path || "")}"
+                data-source-kind="${escapeAttr(item.kind || "local")}"
+                ${selectedPlaylistId ? "" : "disabled"}
+              >Add to Playlist</button>
+            </div>
+          `).join("")}
+        </div>
+      ` : `<div class="home-results-empty">No tracks available for this selection.</div>`;
+    }
+  }
+
+  const breadcrumbBits = [];
+  if (selectedArtist) {
+    breadcrumbBits.push(`<button class="button ghost small" type="button" data-action="player-library-mode" data-library-mode="albums">${escapeHtml(selectedArtist.artist || "Artist")}</button>`);
+  }
+  if (selectedAlbum) {
+    breadcrumbBits.push(`<button class="button ghost small" type="button" data-action="player-library-mode" data-library-mode="tracks">${escapeHtml(selectedAlbum.album || "Album")}</button>`);
+  }
+  libraryEl.innerHTML = `
+    <div class="music-player-library-layout">
+      <div class="music-player-library-browser">
+        <div class="panel-header-row compact">
+          <div>
+            <div class="group-title">Library</div>
+            <div class="meta">${escapeHtml(`${artists.length} artists • ${albums.length} albums • ${Array.isArray(summary.tracks) ? summary.tracks.length : 0} tracks`)}</div>
+          </div>
+          <div class="music-player-library-modes" role="tablist" aria-label="Music player library sections">
+            <button class="button ghost small${libraryMode === "artists" ? " active" : ""}" type="button" data-action="player-library-mode" data-library-mode="artists">Artists</button>
+            <button class="button ghost small${libraryMode === "albums" ? " active" : ""}" type="button" data-action="player-library-mode" data-library-mode="albums">Albums</button>
+            <button class="button ghost small${libraryMode === "tracks" ? " active" : ""}" type="button" data-action="player-library-mode" data-library-mode="tracks">Tracks</button>
+          </div>
+        </div>
+        <div class="music-player-library-breadcrumbs">
+          <button class="button ghost small" type="button" data-action="player-reset-library">All Library</button>
+          ${breadcrumbBits.join("")}
+        </div>
+        ${browserMarkup}
+      </div>
+      <aside class="music-player-library-sidepanel">
+        ${renderMusicPlayerPlaylistsPanel()}
+      </aside>
+    </div>
+  `;
+}
+
+function renderMusicPlayerStations() {
+  const stationsEl = $("#music-player-stations");
+  if (!stationsEl) return;
+  const stations = Array.isArray(state.playerStations) ? state.playerStations : [];
+  stationsEl.innerHTML = stations.length ? stations.map((station) => `
+    <div class="group music-player-station-card">
+      <div class="group-title">${escapeHtml(station.name || station.seed_value || "Station")}</div>
+      <div class="meta">${escapeHtml(station.seed_type || "artist")} • ${escapeHtml(station.seed_value || "")}</div>
+      <div class="row">
+        <button class="button primary small" type="button" data-action="player-load-station" data-station-id="${escapeAttr(station.id)}">Start Station</button>
+        <button class="button ghost small" type="button" data-action="player-delete-station" data-station-id="${escapeAttr(station.id)}">Delete</button>
+      </div>
+    </div>
+  `).join("") : `<div class="home-results-empty">Create a station to start local-first radio.</div>`;
+}
+
+function renderMusicPlayerQueue() {
+  const queueEl = $("#music-player-queue");
+  if (!queueEl) return;
+  const queue = Array.isArray(state.playerQueue) ? state.playerQueue : [];
+  queueEl.innerHTML = queue.length ? queue.map((item, index) => `
+    <button class="music-player-track" type="button" data-action="player-play" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.kind || "cached")}">
+      <span class="music-player-track-title">${index + 1}. ${escapeHtml(item.title || "Untitled")}</span>
+      <span class="music-player-track-meta">${escapeHtml([item.artist, item.album, item.kind].filter(Boolean).join(" • "))}</span>
+    </button>
+  `).join("") : `<div class="home-results-empty">Queue is empty. Start a station or pick a library track.</div>`;
+}
+
+function renderMusicPlayerHistory() {
+  const recentEl = $("#music-player-recent");
+  const favoritesEl = $("#music-player-favorites");
+  if (recentEl) {
+    recentEl.innerHTML = (state.playerHistory || []).length ? state.playerHistory.map((item) => `
+      <div class="music-player-history-item">
+        <div class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</div>
+        <div class="music-player-track-meta">${escapeHtml([item.artist, item.played_at].filter(Boolean).join(" • "))}</div>
+      </div>
+    `).join("") : `<div class="home-results-empty">No recent playback yet.</div>`;
+  }
+  if (favoritesEl) {
+    const favoriteArtists = Array.isArray(state.musicPreferences?.favorite_artists) ? state.musicPreferences.favorite_artists : [];
+    favoritesEl.innerHTML = favoriteArtists.length ? favoriteArtists.map((artist) => `
+      <div class="music-player-history-item">
+        <div class="music-player-track-title">${escapeHtml(artist.name || artist.artist_name || "Favorite Artist")}</div>
+        <div class="music-player-track-meta">${escapeHtml(artist.genre || "Artist favorite")}</div>
+      </div>
+    `).join("") : `<div class="home-results-empty">Favorite artists appear here for quick radio seeds.</div>`;
+  }
+}
+
+async function loadMusicPlayerView() {
+  const messageEl = $("#music-player-message");
+  if (messageEl) {
+    setNotice(messageEl, "Loading music player…", false);
+  }
+  try {
+    const [libraryPayload, librarySummaryPayload, stationsPayload, historyPayload, playlistsPayload] = await Promise.all([
+      fetchJson("/api/player/library"),
+      fetchJson("/api/player/library/summary"),
+      fetchJson("/api/player/stations"),
+      fetchJson("/api/player/history"),
+      fetchJson("/api/player/playlists"),
+    ]);
+    state.playerLibrary = Array.isArray(libraryPayload?.items) ? libraryPayload.items : [];
+    state.playerLibrarySummary = (librarySummaryPayload?.summary && typeof librarySummaryPayload.summary === "object")
+      ? librarySummaryPayload.summary
+      : { artists: [], albums: [], tracks: [] };
+    state.playerStations = Array.isArray(stationsPayload?.stations) ? stationsPayload.stations : [];
+    state.playerHistory = Array.isArray(historyPayload?.history) ? historyPayload.history : [];
+    state.playerPlaylists = Array.isArray(playlistsPayload?.playlists) ? playlistsPayload.playlists : [];
+    if (!state.playerSelectedPlaylistId && state.playerPlaylists[0]) {
+      state.playerSelectedPlaylistId = Number(state.playerPlaylists[0].id || 0) || null;
+    }
+    const selectedPlaylist = state.playerPlaylists.find((entry) => Number(entry.id || 0) === Number(state.playerSelectedPlaylistId || 0));
+    if (selectedPlaylist) {
+      const detailPayload = await fetchJson(`/api/player/playlists/${encodeURIComponent(selectedPlaylist.id)}`);
+      state.playerSelectedPlaylistItems = Array.isArray(detailPayload?.items) ? detailPayload.items : [];
+    } else {
+      state.playerSelectedPlaylistItems = [];
+    }
+    renderMusicPlayerLibrary();
+    renderMusicPlayerStations();
+    renderMusicPlayerQueue();
+    renderMusicPlayerHistory();
+    setMusicPlayerView(state.playerView || "library");
+    if (messageEl) {
+      setNotice(messageEl, "Player ready.", false);
+    }
+  } catch (err) {
+    if (messageEl) {
+      setNotice(messageEl, `Music player failed to load: ${toUserErrorMessage(err)}`, true);
+    }
+  }
+}
+
+async function playMusicPlayerItem(payload) {
+  const audio = $("#music-player-audio");
+  if (!audio || !payload?.stream_url) return;
+  audio.src = payload.stream_url;
+  try {
+    await audio.play();
+  } catch (_err) {
+    // user gesture/browser policy
+  }
+  state.playerCurrent = payload;
+  $("#music-player-now-title").textContent = payload.title || "Now Playing";
+  $("#music-player-now-meta").textContent = [payload.artist, payload.album, payload.kind].filter(Boolean).join(" • ") || "Playing";
+  await fetchJson("/api/player/history", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      item_id: payload.id || payload.local_path || payload.stream_url,
+      title: payload.title,
+      artist: payload.artist,
+      stream_url: payload.stream_url,
+      local_path: payload.local_path,
+      source_kind: payload.kind || "local",
+    }),
+  }).catch(() => {});
 }
 
 function consumeSpotifyConnectedHashFlag() {
@@ -3884,11 +4520,21 @@ function updateHomeMusicModeUI() {
   }
   const modeToggle = $("#home-media-mode-toggle");
   if (modeToggle) {
+    const page = state.currentPage || "home";
+    modeToggle.closest(".home-mode-toggle-shell")?.classList.toggle("hidden", page === "home");
     modeToggle.querySelectorAll("button[data-mode]").forEach((button) => {
-      const isActive = button.dataset.mode === (state.homeMediaMode || "video");
+      const buttonMode = String(button.dataset.mode || "").trim();
+      const isVideo = buttonMode === "video";
+      const shouldHide = page === "music" ? isVideo : !isVideo;
+      button.classList.toggle("hidden", shouldHide);
+      const isActive = buttonMode === (state.homeMediaMode || "video");
       button.classList.toggle("active", isActive);
       button.setAttribute("aria-checked", isActive ? "true" : "false");
     });
+    const label = modeToggle.closest(".home-media-mode-group")?.querySelector(".home-media-mode-label");
+    if (label) {
+      label.textContent = page === "music" ? "Music Mode" : "Mode";
+    }
   }
   const standardSearchContainer = $("#standard-search-container");
   if (standardSearchContainer) {
@@ -4188,6 +4834,9 @@ function setHomeMediaMode(mode, { persist = true, clearResultsOnDisable = true }
   const nextMode = normalizeHomeMediaMode(mode);
   const previous = !!state.homeMusicMode;
   state.homeMediaMode = nextMode;
+  if (nextMode !== "video") {
+    state.lastMusicMode = nextMode;
+  }
   state.homeMusicMode = nextMode !== "video";
   updateHomeMusicModeUI();
   updateHomeDeliveryModeUI();
@@ -4384,7 +5033,9 @@ function showHomeResults(visible) {
 }
 
 function setHomeSearchActive(active) {
-  const shell = document.querySelector(".home-search-shell");
+  const shell = state.currentPage === "music"
+    ? document.querySelector("#music-panel .music-page-shell")
+    : document.querySelector("#home-panel .home-search-shell");
   document.body.classList.toggle("search-active", !!active);
   if (shell) {
     shell.classList.toggle("search-active", !!active);
@@ -4462,7 +5113,36 @@ function findArrGenreMatch(query) {
   return exact || null;
 }
 
+function isTmdbConfigured() {
+  const tmdbApiKey = String(state.config?.arr?.tmdb_api_key || "").trim();
+  return !!tmdbApiKey;
+}
+
+function renderMoviesTvSetupGate() {
+  const landing = $("#movies-tv-setup-landing");
+  const shell = $("#movies-tv-panel .movies-tv-shell");
+  const genres = $("#movies-tv-genres");
+  const results = $("#movies-tv-results");
+  const configured = isTmdbConfigured();
+  if (landing) {
+    landing.classList.toggle("hidden", configured);
+  }
+  if (shell) {
+    shell.classList.toggle("hidden", !configured);
+  }
+  if (genres) {
+    genres.classList.toggle("hidden", !configured);
+  }
+  if (!configured && results) {
+    results.classList.add("hidden");
+  }
+  return configured;
+}
+
 async function loadArrGenres() {
+  if (!renderMoviesTvSetupGate()) {
+    return [];
+  }
   const kind = getArrGenreKind();
   if (Array.isArray(state.arrGenres[kind]) && state.arrGenres[kind].length) {
     renderArrGenreShelf();
@@ -4696,6 +5376,7 @@ function renderArrConnectionStatus() {
 }
 
 async function refreshArrConnectionStatus({ quiet = false } = {}) {
+  renderMoviesTvSetupGate();
   const [radarrResult, sonarrResult] = await Promise.allSettled([
     fetchJson("/api/arr/radarr/health"),
     fetchJson("/api/arr/sonarr/health"),
@@ -5196,6 +5877,10 @@ function startArrStatusPolling() {
 }
 
 async function performArrSearch() {
+  if (!renderMoviesTvSetupGate()) {
+    setNotice($("#movies-tv-setup-message"), "Add a TMDb API key to unlock Movies & TV discovery.", true);
+    return;
+  }
   const input = $("#movies-tv-search-input");
   const yearInput = $("#movies-tv-year-input");
   const messageEl = $("#movies-tv-message");
@@ -10211,11 +10896,35 @@ function renderConfig(cfg) {
   const arrCfg = (cfg && typeof cfg.arr === "object") ? cfg.arr : {};
   const arrRadarr = (arrCfg && typeof arrCfg.radarr === "object") ? arrCfg.radarr : {};
   const arrSonarr = (arrCfg && typeof arrCfg.sonarr === "object") ? arrCfg.sonarr : {};
+  const arrReadarr = (arrCfg && typeof arrCfg.readarr === "object") ? arrCfg.readarr : {};
+  const arrProwlarr = (arrCfg && typeof arrCfg.prowlarr === "object") ? arrCfg.prowlarr : {};
+  const arrBazarr = (arrCfg && typeof arrCfg.bazarr === "object") ? arrCfg.bazarr : {};
+  const arrQbit = (arrCfg && typeof arrCfg.qbittorrent === "object") ? arrCfg.qbittorrent : {};
+  const arrJellyfin = (arrCfg && typeof arrCfg.jellyfin === "object") ? arrCfg.jellyfin : {};
+  const arrVpn = (arrCfg && typeof arrCfg.vpn === "object") ? arrCfg.vpn : {};
   $("#cfg-arr-tmdb-api-key").value = arrCfg.tmdb_api_key ?? "";
   $("#cfg-arr-radarr-base-url").value = arrRadarr.base_url ?? "";
   $("#cfg-arr-radarr-api-key").value = arrRadarr.api_key ?? "";
   $("#cfg-arr-sonarr-base-url").value = arrSonarr.base_url ?? "";
   $("#cfg-arr-sonarr-api-key").value = arrSonarr.api_key ?? "";
+  $("#cfg-arr-readarr-base-url").value = arrReadarr.base_url ?? "";
+  $("#cfg-arr-readarr-api-key").value = arrReadarr.api_key ?? "";
+  $("#cfg-arr-prowlarr-base-url").value = arrProwlarr.base_url ?? "";
+  $("#cfg-arr-prowlarr-api-key").value = arrProwlarr.api_key ?? "";
+  $("#cfg-arr-bazarr-base-url").value = arrBazarr.base_url ?? "";
+  $("#cfg-arr-bazarr-api-key").value = arrBazarr.api_key ?? "";
+  $("#cfg-arr-qbittorrent-base-url").value = arrQbit.base_url ?? "";
+  $("#cfg-arr-qbittorrent-username").value = arrQbit.username ?? "";
+  $("#cfg-arr-qbittorrent-password").value = arrQbit.password ?? "";
+  $("#cfg-arr-qbittorrent-download-dir").value = arrQbit.download_dir ?? "";
+  $("#cfg-arr-jellyfin-base-url").value = arrJellyfin.base_url ?? "";
+  $("#cfg-arr-jellyfin-api-key").value = arrJellyfin.api_key ?? "";
+  $("#cfg-arr-vpn-enabled").checked = !!arrVpn.enabled;
+  $("#cfg-arr-vpn-provider").value = arrVpn.provider ?? "gluetun";
+  $("#cfg-arr-vpn-control-url").value = arrVpn.control_url ?? "";
+  $("#cfg-arr-vpn-route-qbittorrent").checked = arrVpn.route_qbittorrent !== false;
+  $("#cfg-arr-vpn-route-prowlarr").checked = !!arrVpn.route_prowlarr;
+  $("#cfg-arr-vpn-route-retreivr").checked = !!arrVpn.route_retreivr;
   $("#cfg-music-template").value = cfg.music_filename_template ?? "";
   $("#cfg-yt-dlp-cookies").value = cfg.yt_dlp_cookies ?? "";
   const musicMetaDefaults = {
@@ -11014,10 +11723,34 @@ function buildConfigFromForm() {
   arr.tmdb_api_key = $("#cfg-arr-tmdb-api-key").value.trim();
   arr.radarr = (arr.radarr && typeof arr.radarr === "object") ? { ...arr.radarr } : {};
   arr.sonarr = (arr.sonarr && typeof arr.sonarr === "object") ? { ...arr.sonarr } : {};
+  arr.readarr = (arr.readarr && typeof arr.readarr === "object") ? { ...arr.readarr } : {};
+  arr.prowlarr = (arr.prowlarr && typeof arr.prowlarr === "object") ? { ...arr.prowlarr } : {};
+  arr.bazarr = (arr.bazarr && typeof arr.bazarr === "object") ? { ...arr.bazarr } : {};
+  arr.qbittorrent = (arr.qbittorrent && typeof arr.qbittorrent === "object") ? { ...arr.qbittorrent } : {};
+  arr.jellyfin = (arr.jellyfin && typeof arr.jellyfin === "object") ? { ...arr.jellyfin } : {};
+  arr.vpn = (arr.vpn && typeof arr.vpn === "object") ? { ...arr.vpn } : {};
   arr.radarr.base_url = $("#cfg-arr-radarr-base-url").value.trim();
   arr.radarr.api_key = $("#cfg-arr-radarr-api-key").value.trim();
   arr.sonarr.base_url = $("#cfg-arr-sonarr-base-url").value.trim();
   arr.sonarr.api_key = $("#cfg-arr-sonarr-api-key").value.trim();
+  arr.readarr.base_url = $("#cfg-arr-readarr-base-url").value.trim();
+  arr.readarr.api_key = $("#cfg-arr-readarr-api-key").value.trim();
+  arr.prowlarr.base_url = $("#cfg-arr-prowlarr-base-url").value.trim();
+  arr.prowlarr.api_key = $("#cfg-arr-prowlarr-api-key").value.trim();
+  arr.bazarr.base_url = $("#cfg-arr-bazarr-base-url").value.trim();
+  arr.bazarr.api_key = $("#cfg-arr-bazarr-api-key").value.trim();
+  arr.qbittorrent.base_url = $("#cfg-arr-qbittorrent-base-url").value.trim();
+  arr.qbittorrent.username = $("#cfg-arr-qbittorrent-username").value.trim();
+  arr.qbittorrent.password = $("#cfg-arr-qbittorrent-password").value.trim();
+  arr.qbittorrent.download_dir = $("#cfg-arr-qbittorrent-download-dir").value.trim();
+  arr.jellyfin.base_url = $("#cfg-arr-jellyfin-base-url").value.trim();
+  arr.jellyfin.api_key = $("#cfg-arr-jellyfin-api-key").value.trim();
+  arr.vpn.enabled = !!$("#cfg-arr-vpn-enabled").checked;
+  arr.vpn.provider = $("#cfg-arr-vpn-provider").value.trim() || "gluetun";
+  arr.vpn.control_url = $("#cfg-arr-vpn-control-url").value.trim();
+  arr.vpn.route_qbittorrent = !!$("#cfg-arr-vpn-route-qbittorrent").checked;
+  arr.vpn.route_prowlarr = !!$("#cfg-arr-vpn-route-prowlarr").checked;
+  arr.vpn.route_retreivr = !!$("#cfg-arr-vpn-route-retreivr").checked;
   base.arr = arr;
 
   base.schedule = buildSchedulePayloadFromForm();
@@ -11219,6 +11952,7 @@ async function saveConfig() {
     applyHomeDefaultDestination({ force: false });
     applyHomeDefaultActiveFormat({ force: true });
     updateSearchDestinationDisplay();
+    renderMoviesTvSetupGate();
     await refreshSchedule();
     state.configDirty = false;
     updatePollingState();
@@ -12281,6 +13015,257 @@ function bindEvents() {
       await refreshArrConnectionStatus();
     });
   }
+  const setupRefresh = $("#setup-refresh");
+  if (setupRefresh) {
+    setupRefresh.addEventListener("click", () => {
+      refreshSetupStatus().catch(() => {});
+    });
+  }
+  const setupSaveStack = $("#setup-save-stack");
+  if (setupSaveStack) {
+    setupSaveStack.addEventListener("click", () => {
+      saveSetupStack().catch((err) => setNotice($("#setup-command-helper"), toUserErrorMessage(err), true));
+    });
+  }
+  const setupApplyStack = $("#setup-apply-stack");
+  if (setupApplyStack) {
+    setupApplyStack.addEventListener("click", () => {
+      applySetupStack().catch((err) => setNotice($("#setup-command-helper"), toUserErrorMessage(err), true));
+    });
+  }
+  const connectionsRefresh = $("#connections-refresh");
+  if (connectionsRefresh) {
+    connectionsRefresh.addEventListener("click", () => {
+      refreshConnectionsStatus().catch(() => {});
+    });
+  }
+  const connectionsAutoconfigure = $("#connections-autoconfigure");
+  if (connectionsAutoconfigure) {
+    connectionsAutoconfigure.addEventListener("click", () => {
+      autoConfigureConnections().catch(() => {});
+    });
+  }
+  const playerPanel = $("#music-player-panel");
+  if (playerPanel) {
+    playerPanel.addEventListener("click", async (event) => {
+      const navButton = event.target.closest(".music-player-nav");
+      if (navButton) {
+        setMusicPlayerView(navButton.dataset.playerView || "library");
+        return;
+      }
+      const createStationButton = event.target.closest("#music-player-create-station");
+      if (createStationButton) {
+        const name = String($("#music-player-station-name")?.value || "").trim();
+        const seedType = String($("#music-player-station-seed-type")?.value || "artist").trim();
+        const seedValue = String($("#music-player-station-seed-value")?.value || "").trim();
+        if (!seedValue && seedType !== "favorites") {
+          setNotice($("#music-player-message"), "Seed value is required for this station.", true);
+          return;
+        }
+        await fetchJson("/api/player/stations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, seed_type: seedType, seed_value: seedValue || "favorites" }),
+        });
+        await loadMusicPlayerView();
+        setMusicPlayerView("radio");
+        return;
+      }
+      const createPlaylistButton = event.target.closest("#music-player-create-playlist");
+      if (createPlaylistButton) {
+        const name = String($("#music-player-playlist-name")?.value || "").trim();
+        if (!name) {
+          setNotice($("#music-player-message"), "Playlist name is required.", true);
+          return;
+        }
+        const payload = await fetchJson("/api/player/playlists", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        state.playerSelectedPlaylistId = Number(payload?.playlist?.id || 0) || null;
+        await loadMusicPlayerView();
+        setMusicPlayerView("library");
+        setNotice($("#music-player-message"), "Playlist created.", false);
+        return;
+      }
+      const loadStationButton = event.target.closest('[data-action="player-load-station"]');
+      if (loadStationButton) {
+        const stationId = String(loadStationButton.dataset.stationId || "").trim();
+        const payload = await fetchJson(`/api/player/stations/${encodeURIComponent(stationId)}/queue`, { method: "POST" });
+        state.playerQueue = Array.isArray(payload?.queue) ? payload.queue : [];
+        renderMusicPlayerQueue();
+        setMusicPlayerView("queue");
+        if (state.playerQueue[0]) {
+          await playMusicPlayerItem(state.playerQueue[0]);
+        }
+        return;
+      }
+      const deleteStationButton = event.target.closest('[data-action="player-delete-station"]');
+      if (deleteStationButton) {
+        const stationId = String(deleteStationButton.dataset.stationId || "").trim();
+        await fetchJson(`/api/player/stations/${encodeURIComponent(stationId)}`, { method: "DELETE" });
+        await loadMusicPlayerView();
+        setMusicPlayerView("radio");
+        return;
+      }
+      const libraryModeButton = event.target.closest('[data-action="player-library-mode"]');
+      if (libraryModeButton) {
+        state.playerLibraryMode = String(libraryModeButton.dataset.libraryMode || "artists");
+        renderMusicPlayerLibrary();
+        return;
+      }
+      const resetLibraryButton = event.target.closest('[data-action="player-reset-library"]');
+      if (resetLibraryButton) {
+        state.playerSelectedArtistKey = "";
+        state.playerSelectedAlbumKey = "";
+        state.playerLibraryMode = "artists";
+        renderMusicPlayerLibrary();
+        return;
+      }
+      const openArtistButton = event.target.closest('[data-action="player-open-artist"]');
+      if (openArtistButton) {
+        state.playerSelectedArtistKey = String(openArtistButton.dataset.artistKey || "");
+        state.playerSelectedAlbumKey = "";
+        state.playerLibraryMode = "albums";
+        renderMusicPlayerLibrary();
+        return;
+      }
+      const openAlbumButton = event.target.closest('[data-action="player-open-album"]');
+      if (openAlbumButton) {
+        state.playerSelectedArtistKey = String(openAlbumButton.dataset.artistKey || state.playerSelectedArtistKey || "");
+        state.playerSelectedAlbumKey = String(openAlbumButton.dataset.albumKey || "");
+        state.playerLibraryMode = "tracks";
+        renderMusicPlayerLibrary();
+        return;
+      }
+      const openPlaylistButton = event.target.closest('[data-action="player-open-playlist"]');
+      if (openPlaylistButton) {
+        const playlistId = Number(openPlaylistButton.dataset.playlistId || 0) || null;
+        if (!playlistId) return;
+        state.playerSelectedPlaylistId = playlistId;
+        const detailPayload = await fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}`);
+        state.playerSelectedPlaylistItems = Array.isArray(detailPayload?.items) ? detailPayload.items : [];
+        renderMusicPlayerLibrary();
+        return;
+      }
+      const deletePlaylistButton = event.target.closest('[data-action="player-delete-playlist"]');
+      if (deletePlaylistButton) {
+        const playlistId = Number(deletePlaylistButton.dataset.playlistId || 0) || null;
+        if (!playlistId) return;
+        await fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}`, { method: "DELETE" });
+        if (Number(state.playerSelectedPlaylistId || 0) === playlistId) {
+          state.playerSelectedPlaylistId = null;
+          state.playerSelectedPlaylistItems = [];
+        }
+        await loadMusicPlayerView();
+        setMusicPlayerView("library");
+        return;
+      }
+      const removePlaylistItemButton = event.target.closest('[data-action="player-remove-playlist-item"]');
+      if (removePlaylistItemButton) {
+        const playlistId = Number(removePlaylistItemButton.dataset.playlistId || 0) || null;
+        const itemId = Number(removePlaylistItemButton.dataset.itemId || 0) || null;
+        if (!playlistId || !itemId) return;
+        await fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}/items/${encodeURIComponent(itemId)}`, { method: "DELETE" });
+        if (Number(state.playerSelectedPlaylistId || 0) === playlistId) {
+          const detailPayload = await fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}`);
+          state.playerSelectedPlaylistItems = Array.isArray(detailPayload?.items) ? detailPayload.items : [];
+        }
+        const playlistsPayload = await fetchJson("/api/player/playlists");
+        state.playerPlaylists = Array.isArray(playlistsPayload?.playlists) ? playlistsPayload.playlists : [];
+        renderMusicPlayerLibrary();
+        return;
+      }
+      const addToPlaylistButton = event.target.closest('[data-action="player-add-to-playlist"]');
+      if (addToPlaylistButton) {
+        const playlistId = Number(addToPlaylistButton.dataset.playlistId || state.playerSelectedPlaylistId || 0) || null;
+        if (!playlistId) {
+          setNotice($("#music-player-message"), "Select or create a playlist first.", true);
+          return;
+        }
+        await fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}/items`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: String(addToPlaylistButton.dataset.localPath || addToPlaylistButton.dataset.streamUrl || ""),
+            title: String(addToPlaylistButton.dataset.title || ""),
+            artist: String(addToPlaylistButton.dataset.artist || ""),
+            album: String(addToPlaylistButton.dataset.album || ""),
+            local_path: String(addToPlaylistButton.dataset.localPath || ""),
+            stream_url: String(addToPlaylistButton.dataset.streamUrl || ""),
+            kind: String(addToPlaylistButton.dataset.sourceKind || "local"),
+          }),
+        });
+        state.playerSelectedPlaylistId = playlistId;
+        const [detailPayload, playlistsPayload] = await Promise.all([
+          fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}`),
+          fetchJson("/api/player/playlists"),
+        ]);
+        state.playerSelectedPlaylistItems = Array.isArray(detailPayload?.items) ? detailPayload.items : [];
+        state.playerPlaylists = Array.isArray(playlistsPayload?.playlists) ? playlistsPayload.playlists : [];
+        renderMusicPlayerLibrary();
+        setNotice($("#music-player-message"), "Track added to playlist.", false);
+        return;
+      }
+      const playButton = event.target.closest('[data-action="player-play"]');
+      if (playButton) {
+        await playMusicPlayerItem({
+          id: String(playButton.dataset.localPath || playButton.dataset.streamUrl || ""),
+          title: String(playButton.dataset.title || ""),
+          artist: String(playButton.dataset.artist || ""),
+          album: String(playButton.dataset.album || ""),
+          local_path: String(playButton.dataset.localPath || ""),
+          stream_url: String(playButton.dataset.streamUrl || ""),
+          kind: String(playButton.dataset.sourceKind || "local"),
+        });
+      }
+    });
+  }
+  const playerAudio = $("#music-player-audio");
+  if (playerAudio) {
+    playerAudio.addEventListener("ended", async () => {
+      if (!Array.isArray(state.playerQueue) || state.playerQueue.length < 2) return;
+      const currentUrl = String(state.playerCurrent?.stream_url || "");
+      const currentIndex = state.playerQueue.findIndex((item) => String(item?.stream_url || "") === currentUrl);
+      const nextItem = currentIndex >= 0 ? state.playerQueue[currentIndex + 1] : state.playerQueue[1];
+      if (nextItem) {
+        await playMusicPlayerItem(nextItem);
+      }
+    });
+  }
+  const moviesTvInlineTmdbSave = $("#movies-tv-inline-tmdb-save");
+  if (moviesTvInlineTmdbSave) {
+    moviesTvInlineTmdbSave.addEventListener("click", async () => {
+      const key = String($("#movies-tv-inline-tmdb-key")?.value || "").trim();
+      if (!state.config) {
+        await loadConfig();
+      }
+      const payload = state.config ? JSON.parse(JSON.stringify(state.config)) : {};
+      payload.arr = (payload.arr && typeof payload.arr === "object") ? payload.arr : {};
+      payload.arr.tmdb_api_key = key;
+      try {
+        await fetchJson("/api/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        state.config = payload;
+        setNotice($("#movies-tv-setup-message"), "TMDb API key saved. Movies & TV is ready.", false);
+        renderMoviesTvSetupGate();
+        loadArrGenres().catch(() => {});
+      } catch (err) {
+        setNotice($("#movies-tv-setup-message"), `TMDb save failed: ${toUserErrorMessage(err)}`, true);
+      }
+    });
+  }
+  const moviesTvOpenSettings = $("#movies-tv-open-settings");
+  if (moviesTvOpenSettings) {
+    moviesTvOpenSettings.addEventListener("click", () => {
+      setPage("config");
+      window.location.hash = "settings-arr";
+    });
+  }
   // TODO(webUI/app.js::legacy-run): keep this marker while legacy-run removal rolls out across user docs.
   const homeBrowse = $("#home-destination-browse");
   if (homeBrowse) {
@@ -12742,6 +13727,7 @@ function bindEvents() {
 }
 
 async function init() {
+  mountHomePageNodes();
   window.addEventListener("spotify-oauth-complete", () => {
     setNotice(
       $("#home-results-detail"),
@@ -12758,6 +13744,7 @@ async function init() {
     state.config = cfg;
     syncMusicPreferencesFromConfig(cfg);
     updateSearchDestinationDisplay();
+    renderMoviesTvSetupGate();
   } catch (_err) {
     // keep boot non-fatal; settings page load path will surface config errors later
   }
@@ -12768,7 +13755,12 @@ async function init() {
   setHomeDeliveryMode(getHomeDeliveryMode());
   setupNavActions();
   await loadPaths();
-  const initialPage = (window.location.hash || "#home").replace("#", "");
+  let initialPage = (window.location.hash || "#home").replace("#", "");
+  const showSetupOnStartup = !!state.config?.setup?.show_on_startup;
+  const completedModules = Array.isArray(state.config?.setup?.completed_modules) ? state.config.setup.completed_modules : [];
+  if ((!initialPage || initialPage === "home") && showSetupOnStartup && completedModules.length === 0) {
+    initialPage = "setup";
+  }
   setPage(initialPage || "home");
   window.addEventListener("hashchange", () => {
     const next = (window.location.hash || "#home").replace("#", "");
@@ -12809,26 +13801,28 @@ document.addEventListener("DOMContentLoaded", () => {
 
 (function ensureHomeClass() {
   const homeSection = document.querySelector('section[data-page="home"]');
-  if (!homeSection) return;
+  const musicSection = document.querySelector('section[data-page="music"]');
+  if (!homeSection && !musicSection) return;
 
-  const observer = new MutationObserver(() => {
-    const visible = !homeSection.classList.contains("page-hidden");
-    document.body.classList.toggle("home-page", visible);
-    if (visible) {
+  const syncPageClass = () => {
+    const homeVisible = homeSection ? !homeSection.classList.contains("page-hidden") : false;
+    const musicVisible = musicSection ? !musicSection.classList.contains("page-hidden") : false;
+    const homeLike = homeVisible || musicVisible;
+    document.body.classList.toggle("home-page", homeLike);
+    document.body.classList.toggle("music-page", musicVisible);
+    if (homeVisible) {
       document.body.dataset.page = "home";
+    } else if (musicVisible) {
+      document.body.dataset.page = "music";
     } else if (state.currentPage) {
       document.body.dataset.page = state.currentPage;
     }
+  };
+
+  const observer = new MutationObserver(() => {
+    syncPageClass();
   });
-
-  observer.observe(homeSection, { attributes: true, attributeFilter: ["class"] });
-
-  // initial state
-  const visible = !homeSection.classList.contains("page-hidden");
-  document.body.classList.toggle("home-page", visible);
-  if (visible) {
-    document.body.dataset.page = "home";
-  } else if (state.currentPage) {
-    document.body.dataset.page = state.currentPage;
-  }
+  if (homeSection) observer.observe(homeSection, { attributes: true, attributeFilter: ["class"] });
+  if (musicSection) observer.observe(musicSection, { attributes: true, attributeFilter: ["class"] });
+  syncPageClass();
 })();

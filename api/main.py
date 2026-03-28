@@ -44,7 +44,7 @@ from typing import Any, Optional
 
 import anyio
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.errors import HttpError
@@ -144,6 +144,33 @@ from engine.arr_services import (
     get_tmdb_trailer,
     test_radarr_connection,
     test_sonarr_connection,
+)
+from engine.music_player import (
+    add_history_entry,
+    add_playlist_item,
+    build_station_queue,
+    create_playlist,
+    create_station,
+    delete_playlist,
+    delete_station,
+    ensure_music_player_tables,
+    list_history,
+    list_playlists,
+    list_stations,
+    playlist_items,
+    scan_local_library,
+    remove_playlist_item,
+    summarize_library,
+)
+from engine.stack_setup import (
+    auto_configure_services,
+    build_stack_apply_summary,
+    build_compose_command,
+    build_connections_status,
+    build_setup_status,
+    managed_env_values,
+    normalize_stack_config,
+    write_managed_env_block,
 )
 from input.intent_router import IntentType, detect_intent
 from api.intent_dispatcher import execute_intent as dispatch_intent
@@ -3036,6 +3063,7 @@ async def startup():
     with sqlite3.connect(app.state.paths.db_path) as _conn:
         _ensure_run_summary_dispatch_table(_conn)
         _ensure_music_artwork_cache_table(_conn)
+        ensure_music_player_tables(_conn)
     _ensure_watch_tables(app.state.paths.db_path)
     app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, startup_cfg)
     logging.info("Search DB path: %s", app.state.search_db_path)
@@ -10140,6 +10168,230 @@ async def api_put_config(payload: dict = Body(...)):
     return {"status": "updated"}
 
 
+@app.get("/api/setup/status")
+async def api_setup_status():
+    cfg = _current_loaded_config()
+    return safe_json(_build_stack_payload(cfg))
+
+
+@app.post("/api/setup/stack")
+async def api_setup_stack_update(payload: dict = Body(...)):
+    cfg = dict(_current_loaded_config())
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    stack_cfg = setup_cfg.get("stack") if isinstance(setup_cfg.get("stack"), dict) else {}
+    next_stack = dict(stack_cfg)
+    for key in (
+        "enable_arr_stack",
+        "enable_radarr",
+        "enable_sonarr",
+        "enable_readarr",
+        "enable_prowlarr",
+        "enable_bazarr",
+        "enable_qbittorrent",
+        "enable_vpn",
+        "enable_jellyfin",
+    ):
+        if key in payload:
+            next_stack[key] = bool(payload.get(key))
+    for key in ("env_path", "media_root", "movies_root", "tv_root", "downloads_root", "books_root"):
+        if key in payload:
+            next_stack[key] = str(payload.get(key) or "").strip()
+    next_stack["compose_profiles"] = normalize_stack_config({"setup": {"stack": next_stack}}).get("compose_profiles", [])
+    setup_cfg["stack"] = next_stack
+    cfg["setup"] = setup_cfg
+    _persist_config_payload(cfg)
+    return safe_json(_build_stack_payload(cfg))
+
+
+@app.get("/api/setup/command")
+async def api_setup_command():
+    cfg = _current_loaded_config()
+    stack = normalize_stack_config(cfg)
+    summary = build_stack_apply_summary(cfg, stack)
+    return safe_json({"env_path": str(_default_env_path(cfg)), **summary})
+
+
+@app.post("/api/setup/apply-stack")
+async def api_setup_apply_stack():
+    cfg = _current_loaded_config()
+    stack = normalize_stack_config(cfg)
+    env_path = _default_env_path(cfg)
+    written = write_managed_env_block(env_path, managed_env_values(cfg, stack))
+    summary = build_stack_apply_summary(cfg, stack)
+    return safe_json(
+        {
+            "status": "written",
+            "env_path": str(written),
+            **summary,
+            "next_steps": [
+                f"Run `{summary['compose_command']}` from the Retreivr project root.",
+                "Return to Retreivr after restart and refresh Connections/Setup status.",
+            ],
+        }
+    )
+
+
+@app.get("/api/services/health")
+async def api_services_health():
+    return safe_json({"services": _service_health_summary(_current_loaded_config())})
+
+
+@app.post("/api/services/autoconfigure")
+async def api_services_autoconfigure():
+    cfg = _current_loaded_config()
+    return safe_json({"status": "completed", "services": auto_configure_services(cfg)})
+
+
+@app.get("/api/player/library")
+async def api_player_library(limit: int = Query(250, ge=1, le=1000)):
+    cfg = _current_loaded_config()
+    return safe_json({"items": scan_local_library(cfg, limit=limit)})
+
+
+@app.get("/api/player/library/summary")
+async def api_player_library_summary(limit: int = Query(1000, ge=1, le=5000)):
+    cfg = _current_loaded_config()
+    items = scan_local_library(cfg, limit=limit)
+    return safe_json({"summary": summarize_library(items)})
+
+
+@app.get("/api/player/stations")
+async def api_player_stations():
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        stations = list_stations(conn)
+    return safe_json({"stations": stations})
+
+
+@app.post("/api/player/stations")
+async def api_player_create_station(payload: dict = Body(...)):
+    seed_type = str(payload.get("seed_type") or "artist").strip() or "artist"
+    seed_value = str(payload.get("seed_value") or "").strip()
+    if seed_type != "favorites" and not seed_value:
+        raise HTTPException(status_code=400, detail={"error": "seed_value is required"})
+    name = str(payload.get("name") or seed_value).strip() or seed_value
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        station = create_station(conn, name=name, seed_type=seed_type, seed_value=seed_value)
+    return safe_json({"station": station})
+
+
+@app.delete("/api/player/stations/{station_id}")
+async def api_player_delete_station(station_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        delete_station(conn, station_id)
+    return safe_json({"status": "deleted", "station_id": int(station_id)})
+
+
+@app.post("/api/player/stations/{station_id}/queue")
+async def api_player_station_queue(station_id: int, limit: int = Query(25, ge=1, le=100)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        stations = list_stations(conn)
+        station = next((entry for entry in stations if int(entry.get("id") or 0) == int(station_id)), None)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+        queue = build_station_queue(conn, cfg, station=station, limit=limit)
+    return safe_json({"station": station, "queue": queue})
+
+
+@app.get("/api/player/history")
+async def api_player_history(limit: int = Query(50, ge=1, le=200)):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        history_rows = list_history(conn, limit=limit)
+    return safe_json({"history": history_rows})
+
+
+@app.get("/api/player/playlists")
+async def api_player_playlists():
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        playlists = list_playlists(conn)
+    return safe_json({"playlists": playlists})
+
+
+@app.post("/api/player/playlists")
+async def api_player_create_playlist(payload: dict = Body(...)):
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"error": "name is required"})
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            playlist = create_playlist(conn, name=name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    return safe_json({"playlist": playlist})
+
+
+@app.get("/api/player/playlists/{playlist_id}")
+async def api_player_playlist_detail(playlist_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        playlists = list_playlists(conn)
+        playlist = next((entry for entry in playlists if int(entry.get("id") or 0) == int(playlist_id)), None)
+        if not playlist:
+            raise HTTPException(status_code=404, detail={"error": "playlist_not_found"})
+        items = playlist_items(conn, playlist_id)
+    return safe_json({"playlist": playlist, "items": items})
+
+
+@app.post("/api/player/playlists/{playlist_id}/items")
+async def api_player_playlist_add_item(playlist_id: int, payload: dict = Body(...)):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        playlists = list_playlists(conn)
+        playlist = next((entry for entry in playlists if int(entry.get("id") or 0) == int(playlist_id)), None)
+        if not playlist:
+            raise HTTPException(status_code=404, detail={"error": "playlist_not_found"})
+        item = add_playlist_item(conn, playlist_id, payload)
+    return safe_json({"item": item})
+
+
+@app.delete("/api/player/playlists/{playlist_id}/items/{item_id}")
+async def api_player_playlist_delete_item(playlist_id: int, item_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        remove_playlist_item(conn, playlist_id, item_id)
+    return safe_json({"status": "deleted", "playlist_id": int(playlist_id), "item_id": int(item_id)})
+
+
+@app.delete("/api/player/playlists/{playlist_id}")
+async def api_player_delete_playlist(playlist_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        delete_playlist(conn, playlist_id)
+    return safe_json({"status": "deleted", "playlist_id": int(playlist_id)})
+
+
+@app.post("/api/player/history")
+async def api_player_history_add(payload: dict = Body(...)):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        add_history_entry(conn, payload)
+    return safe_json({"status": "recorded"})
+
+
+@app.get("/api/player/stream/local")
+async def api_player_stream_local(path: str = Query(...)):
+    requested = Path(path).expanduser()
+    if not requested.exists() or not requested.is_file():
+        raise HTTPException(status_code=404, detail={"error": "file_not_found"})
+    music_roots = [root.resolve() for root in (Path(item) for item in [requested.parent] if item)]
+    allowed_roots = []
+    cfg = _current_loaded_config()
+    music_cfg = cfg.get("music") if isinstance(cfg.get("music"), dict) else {}
+    library_path = str(music_cfg.get("library_path") or "").strip()
+    if library_path:
+        allowed_roots.append(Path(library_path).expanduser().resolve())
+    allowed_roots.append((Path("/downloads") / str(cfg.get("home_music_download_folder") or cfg.get("music_download_folder") or "Music")).resolve())
+    resolved = requested.resolve()
+    if not any(str(resolved).startswith(str(root)) for root in allowed_roots if root):
+        raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
+    return FileResponse(resolved)
+
+
 def _persist_config_payload(payload: dict) -> dict:
     config_path = app.state.config_path
     config_dir = os.path.dirname(config_path) or "."
@@ -10179,6 +10431,31 @@ def _persist_config_payload(payload: dict) -> dict:
 def _current_loaded_config() -> dict:
     cfg = getattr(app.state, "loaded_config", None)
     return cfg if isinstance(cfg, dict) else {}
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_env_path(config: dict | None = None) -> Path:
+    cfg = config if isinstance(config, dict) else _current_loaded_config()
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    stack_cfg = setup_cfg.get("stack") if isinstance(setup_cfg.get("stack"), dict) else {}
+    configured = str(stack_cfg.get("env_path") or os.environ.get("RETREIVR_ENV_FILE") or ".env").strip() or ".env"
+    candidate = Path(configured)
+    if not candidate.is_absolute():
+        candidate = (_repo_root() / candidate).resolve()
+    return candidate
+
+
+def _build_stack_payload(config: dict | None = None) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else _current_loaded_config()
+    return build_setup_status(cfg)
+
+
+def _service_health_summary(config: dict | None = None) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else _current_loaded_config()
+    return build_connections_status(cfg)
 
 
 def _normalized_music_preferences(config: dict | None) -> dict:

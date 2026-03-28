@@ -5076,3 +5076,254 @@ body.home-page .home-search-actions {
   width: 100%;
   margin-top: 8px;
 }
+
+.setup-module-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.setup-module-card {
+  min-height: 110px;
+}
+
+.setup-stack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.setup-stack-paths {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.setup-command-summary {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.setup-command-card {
+  min-height: 100%;
+}
+
+.setup-command-code {
+  display: block;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(9, 12, 17, 0.82);
+  border: 1px solid rgba(107, 132, 170, 0.28);
+  color: #f4f7fb;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.setup-path-summary {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.movies-tv-setup-landing {
+  margin-top: 8px;
+}
+
+.movies-tv-setup-card {
+  max-width: 920px;
+  margin: 0 auto 12px;
+}
+
+.movies-tv-setup-steps {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.movies-tv-setup-step {
+  color: var(--muted);
+}
+
+.movies-tv-setup-form {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.movies-tv-setup-form input {
+  flex: 1 1 320px;
+}
+
+.music-player-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 18px;
+}
+
+.music-player-sidebar {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.music-player-main {
+  display: grid;
+  gap: 16px;
+}
+
+.music-player-now-playing {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+  background: rgba(15, 23, 42, 0.28);
+}
+
+.music-player-audio {
+  width: 100%;
+}
+
+.music-player-station-create {
+  display: grid;
+  grid-template-columns: 1.2fr 180px 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.music-player-library-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.95fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.music-player-library-browser,
+.music-player-library-sidepanel {
+  display: grid;
+  gap: 14px;
+}
+
+.music-player-library-modes,
+.music-player-library-breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.music-player-browser-grid,
+.music-player-playlist-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.music-player-browser-card,
+.music-player-playlist-card {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.18);
+  border-radius: 16px;
+  padding: 14px 15px;
+  display: grid;
+  gap: 6px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.music-player-browser-card:hover,
+.music-player-playlist-card:hover,
+.music-player-browser-card.is-selected,
+.music-player-playlist-card.is-selected {
+  border-color: rgba(96, 165, 250, 0.55);
+  background: rgba(15, 23, 42, 0.28);
+  transform: translateY(-1px);
+}
+
+.music-player-playlist-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.music-player-playlist-detail,
+.music-player-playlist-items,
+.music-player-track-list {
+  display: grid;
+  gap: 10px;
+}
+
+.music-player-track-row,
+.music-player-playlist-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.music-player-track,
+.music-player-history-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.18);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 4px;
+}
+
+.music-player-track {
+  cursor: pointer;
+}
+
+.music-player-track-title {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.music-player-track-meta {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.music-player-station-card {
+  display: grid;
+  gap: 10px;
+}
+
+body[data-page="music"] #music-panel .music-page-shell {
+  margin-top: 8px;
+}
+
+@media (max-width: 980px) {
+  .music-player-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .music-player-library-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .music-player-sidebar {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  }
+
+  .music-player-station-create {
+    grid-template-columns: 1fr;
+  }
+
+  .music-player-playlist-create,
+  .music-player-track-row,
+  .music-player-playlist-item {
+    grid-template-columns: 1fr;
+  }
+}

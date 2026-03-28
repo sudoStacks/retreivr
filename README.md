@@ -36,10 +36,10 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 0.9.20 Highlights
-- Community-cache publish branch resets now use the correct GitHub ref-update endpoint
-- Manual publish runs recover more reliably after branch cleanup or rejected PRs
-- The cache publish/validate/merge loop is closer to the final `v1.0.0` stability bar
+## 0.9.21 Highlights
+- Retreivr-only is now the documented default runtime, with ARR, downloader, VPN, and Jellyfin services positioned as opt-in stack modules
+- Guided Setup, Connections, Services, Movies & TV onboarding, and the Music Player now form a cleaner operator-facing control plane
+- The compose/env/docs story is aligned around one canonical stack with profile-based expansion instead of “shipping ARR by default”
 
 ## Product Tour
 
@@ -113,7 +113,7 @@ cp docker/docker-compose.yml.example docker/docker-compose.yml
 cp .env.example .env
 ```
 
-2. Start Retreivr:
+2. Start Retreivr-only first:
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
@@ -128,10 +128,21 @@ http://localhost:8090
 Default mapping is `8090:8000` (`host:container`).
 
 ### Initial Setup
-- Open `Config`
-- Add playlist, search, or music settings
-- Set destination folders under `/downloads`
-- Optionally configure Spotify OAuth and Telegram
+- Open `Setup` in the UI
+- Retreivr-only mode is the default
+- Enable ARR, downloader, VPN, or Jellyfin later from Retreivr when you actually want them
+- When optional stack services are enabled, Retreivr generates the exact `docker compose --profile ... up -d` command to run
+- Configure TMDb, YouTube, Telegram, storage paths, and connection health from guided setup cards or Settings
+
+Recommended operator flow:
+1. Start Retreivr only
+2. Open `Setup`
+3. Configure storage roots and required APIs
+4. Enable optional infrastructure only if needed
+5. Run the generated compose command
+6. Return to `Connections` for verification and auto-config
+
+For the full operator guide, see [docs/initial-setup.md](docs/initial-setup.md).
 
 ## Release Outputs
 - GitHub Container Registry image: `ghcr.io/sudostacks/retreivr:<tag>`
@@ -246,10 +257,11 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Docker runtime notes: [docker/README.md](docker/README.md)
 - Portainer deployment: [docs/portainer.md](docs/portainer.md)
 - Container/data path guidance: [docs/paths.md](docs/paths.md)
+- Initial setup guide: [docs/initial-setup.md](docs/initial-setup.md)
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `0.9.20`, pull the latest image and restart:
+If you are upgrading to `0.9.21`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull

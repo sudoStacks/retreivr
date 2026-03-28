@@ -86,6 +86,13 @@
     "favorite_genres": [],
     "favorite_artists": []
   },
+  "music_player": {
+    "stations": [],
+    "favorites": [],
+    "radio_history_limit": 100,
+    "local_library_first": true,
+    "cache_stream_fallback": true
+  },
   "settings_advanced_mode": false,
   "dry_run": false,
   "upload_date_format": "MM-YYYY",
@@ -133,6 +140,61 @@
     "sonarr": {
       "base_url": "",
       "api_key": ""
+    },
+    "readarr": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "prowlarr": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "bazarr": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "qbittorrent": {
+      "base_url": "",
+      "username": "",
+      "password": "",
+      "download_dir": "",
+      "category_movies": "movies",
+      "category_tv": "tv",
+      "category_books": "books"
+    },
+    "jellyfin": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "vpn": {
+      "provider": "gluetun",
+      "control_url": "",
+      "enabled": false,
+      "route_qbittorrent": true,
+      "route_prowlarr": false,
+      "route_retreivr": false
+    }
+  },
+  "setup": {
+    "show_on_startup": true,
+    "completed_modules": [],
+    "stack": {
+      "enable_arr_stack": false,
+      "enable_radarr": false,
+      "enable_sonarr": false,
+      "enable_readarr": false,
+      "enable_prowlarr": false,
+      "enable_bazarr": false,
+      "enable_qbittorrent": false,
+      "enable_vpn": false,
+      "enable_jellyfin": false,
+      "env_path": ".env",
+      "compose_profiles": [],
+      "media_root": "./media",
+      "movies_root": "./media/movies",
+      "tv_root": "./media/tv",
+      "downloads_root": "./downloads",
+      "books_root": "./media/books"
     }
   },
   "custom_search_adapters_file": "config/custom_search_adapters.yaml"

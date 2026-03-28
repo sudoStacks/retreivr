@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented here.
 
+## v0.9.21 — Retreivr-First Stack Setup + Music/Movie UX Expansion
+
+### High-Level
+This release turns Retreivr more clearly into a Retreivr-first media acquisition control plane. The canonical compose/runtime story now defaults to Retreivr only, while ARR, downloader, VPN, and Jellyfin services remain opt-in through Guided Setup and generated Compose profile commands. On the product side, Music and Movies & TV continue evolving into dedicated acquisition surfaces, and the new Music Player grows into a real local-first library/radio/playlists experience.
+
+### Added
+- Guided Setup, Connections, and Services surfaces for stack-aware onboarding and health visibility.
+- Managed stack apply summary and generated `docker compose --profile ... up -d` command helper for optional services.
+- Explicit stack path controls for media, movies, TV, downloads, and books roots.
+- Music Player library/playlists foundation:
+  - local library summary views for artists, albums, and tracks
+  - playlist create/select/delete flows
+  - add/remove playlist item flows
+- TMDb-gated landing state for `Movies & TV` so the page guides setup when no TMDb key is configured.
+- ARR/qBittorrent best-effort auto-configuration flow for first-pass provisioning from Retreivr.
+- VPN policy and health controls surfaced in the Retreivr UI.
+- Initial setup operator guide in `docs/initial-setup.md`.
+
+### Changed
+- Canonical runtime/docs/examples now frame Retreivr-only as the default startup mode rather than implying ARR ships or starts automatically.
+- `docker/docker-compose.yml.example` now documents profile-gated optional services directly in the file header and points the default image tag to `v0.9.21`.
+- Music was split into its own page surface while preserving existing discovery/acquisition behavior.
+- `Movies & TV` discovery/search UX was hardened around mainstream ranking, genre browse, cast browsing, and setup gating.
+- Release-facing docs, highlights, and quick-start guidance now point to `v0.9.21`.
+
+### Fixed
+- Startup page-state leakage that could briefly show non-Home sections above Home content during boot.
+- Review-nav visibility behavior when the review queue is empty.
+- Favorite heart toggles no longer trigger broad image-reload churn on the Music discovery surface.
+- Music and Movies/TV browse-card click handling was hardened after the newer discovery/card overlays were introduced.
+
 ## v0.9.20 — Community Cache Publish Reset Endpoint Fix
 
 ### High-Level

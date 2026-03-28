@@ -24,11 +24,16 @@
     </button>
     <nav class="top-nav" id="primary-nav" aria-label="Primary">
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
+      <button class="button ghost small nav-button" data-page="music" type="button">Music</button>
+      <button class="button ghost small nav-button" data-page="music-player" type="button">Music Player</button>
       <button class="button ghost small nav-button" data-page="movies-tv" type="button">Movies &amp; TV</button>
       <button class="button ghost small nav-button nav-button-with-count hidden" data-page="review" type="button">
         <span>Review</span>
         <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
       </button>
+      <button class="button ghost small nav-button" data-page="setup" type="button">Setup</button>
+      <button class="button ghost small nav-button" data-page="connections" type="button">Connections</button>
+      <button class="button ghost small nav-button" data-page="services" type="button">Services</button>
       <button class="button ghost small nav-button" data-page="info" type="button">Info</button>
       <button class="button ghost small nav-button" data-page="status" type="button">Status</button>
       <button class="button ghost small nav-button" data-page="config" data-hash="settings" type="button">Settings</button>
@@ -46,28 +51,13 @@
 
   <main class="layout">
     <section class="panel full page-full" id="home-panel" data-page="home">
-      <div class="music-mode-toggle-row home-mode-toggle-shell">
-        <div class="home-media-mode-group" role="group" aria-label="Search mode">
-          <span class="home-media-mode-label">Mode</span>
-          <div id="home-media-mode-toggle" class="home-media-mode-toggle" role="radiogroup" aria-label="Media mode">
-            <button type="button" class="home-media-mode-pill active" data-mode="video" role="radio" aria-checked="true">Video</button>
-            <button type="button" class="home-media-mode-pill" data-mode="music_video" role="radio" aria-checked="false">Music Video</button>
-            <button type="button" class="home-media-mode-pill" data-mode="music" role="radio" aria-checked="false">Music</button>
-          </div>
-          <select id="home-media-mode" class="hidden" aria-hidden="true" tabindex="-1">
-            <option value="video">Video Mode</option>
-            <option value="music_video">Music Video Mode</option>
-            <option value="music">Music Mode</option>
-          </select>
-        </div>
-      </div>
       <div class="home-search-shell">
         <div id="standard-search-container">
           <input
             id="home-search-input"
             class="home-search-input"
             type="text"
-            placeholder="Search YouTube, music, podcasts, archives…"
+            placeholder="Search YouTube, Rumble, podcasts, archives…"
             autocomplete="off"
           />
 
@@ -146,80 +136,6 @@
           </div>
         </div>
 
-        <div id="music-mode-console" class="music-search-console hidden">
-          <div class="music-search-header">
-            <div class="music-search-header-row">
-              <div class="panel-title">Music Search</div>
-              <button id="import-playlist-toggle" class="button ghost small music-import-toggle" type="button">Import Playlist</button>
-            </div>
-          </div>
-          <div class="music-search-grid">
-            <label class="field">
-              <span>Artist</span>
-              <input id="search-artist" type="text" placeholder="Artist name">
-            </label>
-            <label class="field">
-              <span>Album</span>
-              <input id="search-album" type="text" placeholder="Optional album">
-            </label>
-            <label class="field">
-              <span>Track</span>
-              <input id="search-track" type="text" placeholder="Optional track">
-            </label>
-          </div>
-          <div class="music-search-options">
-            <div class="music-search-options-row">
-            <label class="field music-search-mode-field">
-              <span>Mode</span>
-              <div id="music-mode-toggle" class="home-media-mode-toggle music-mode-toggle" role="radiogroup" aria-label="Music metadata mode">
-                <button type="button" class="home-media-mode-pill active" data-mode="auto" role="radio" aria-checked="true">Auto</button>
-                <button type="button" class="home-media-mode-pill" data-mode="album" role="radio" aria-checked="false">Album</button>
-                <button type="button" class="home-media-mode-pill" data-mode="track" role="radio" aria-checked="false">Track</button>
-              </div>
-              <select id="music-mode-select" class="hidden" aria-hidden="true" tabindex="-1">
-                <option value="auto">Auto</option>
-                <option value="artist">Artist</option>
-                <option value="album">Album</option>
-                <option value="track">Track</option>
-              </select>
-            </label>
-              <div id="home-delivery-music-slot"></div>
-              <label id="music-video-format-field" class="field tiny music-search-video-format hidden">
-                <span>Format</span>
-                <select id="music-video-final-format">
-                  <option value="mp4" selected>mp4</option>
-                  <option value="mkv">mkv</option>
-                  <option value="webm">webm</option>
-                </select>
-              </label>
-              <div id="home-destination-music-slot"></div>
-              <label class="field music-search-redownload-field" for="music-force-redownload">
-                <span>Redownload</span>
-                <input id="music-force-redownload" type="checkbox" class="hidden" aria-hidden="true" tabindex="-1">
-                <div id="music-force-toggle" class="home-media-mode-toggle music-force-pill-toggle" role="group" aria-label="Force re-download">
-                  <button type="button" class="home-media-mode-pill active" data-force="off" aria-pressed="true">Off</button>
-                  <button type="button" class="home-media-mode-pill" data-force="on" aria-pressed="false">On</button>
-                </div>
-              </label>
-            </div>
-          </div>
-          <div class="music-search-actions-row">
-            <button id="search-create-only" class="button primary">Search</button>
-            <div id="search-create-message" class="notice" role="status"></div>
-          </div>
-          <div id="import-playlist-panel" class="hidden">
-            <div class="home-advanced-row">
-              <label class="home-advanced-field">
-                <span>Import playlist file</span>
-                <input id="home-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
-              </label>
-              <button id="home-import-button" class="button ghost small" type="button">Import Playlist</button>
-            </div>
-            <div id="home-import-summary" class="meta"></div>
-          </div>
-        </div>
-        <div id="music-results-container"></div>
-
         <div id="home-search-message" class="notice" role="status">
           Press Enter or click Search to discover media
         </div>
@@ -251,6 +167,170 @@
         </span>
       </footer>
     </section>
+    <section class="panel full page-full page-hidden" id="music-panel" data-page="music">
+      <div class="panel-header-row">
+        <div>
+          <div class="panel-title">Music</div>
+          <div class="meta">Discovery-first music acquisition with favorites, genres, artist browse, and album download flows.</div>
+        </div>
+      </div>
+      <div id="music-page-mode-slot"></div>
+      <div class="home-search-shell music-page-shell">
+        <div id="music-page-console-slot"></div>
+        <div id="music-page-results-slot"></div>
+        <div id="music-page-message-slot"></div>
+        <div id="music-page-review-slot"></div>
+      </div>
+      <footer class="home-footer-links info-footer-links" aria-label="Project links">
+        <a href="https://github.com/sudoStacks/retreivr" target="_blank" rel="noopener">Retreivr Repository</a>
+        <a href="https://github.com/sudoStacks/" target="_blank" rel="noopener">SudoStacks GitHub</a>
+        <a href="https://x.com/sudoStacks" target="_blank" rel="noopener">
+          <span class="x-logo" aria-hidden="true">X</span>
+          <span>Follow us on X</span>
+        </a>
+        <span class="home-footer-brand">
+          <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
+        </span>
+      </footer>
+    </section>
+    <div id="shared-music-nodes" class="hidden" aria-hidden="true">
+      <div class="music-mode-toggle-row home-mode-toggle-shell">
+        <div class="home-media-mode-group" role="group" aria-label="Search mode">
+          <span class="home-media-mode-label">Mode</span>
+          <div id="home-media-mode-toggle" class="home-media-mode-toggle" role="radiogroup" aria-label="Media mode">
+            <button type="button" class="home-media-mode-pill active" data-mode="video" role="radio" aria-checked="true">Video</button>
+            <button type="button" class="home-media-mode-pill" data-mode="music_video" role="radio" aria-checked="false">Music Video</button>
+            <button type="button" class="home-media-mode-pill" data-mode="music" role="radio" aria-checked="false">Music</button>
+          </div>
+          <select id="home-media-mode" class="hidden" aria-hidden="true" tabindex="-1">
+            <option value="video">Video Mode</option>
+            <option value="music_video">Music Video Mode</option>
+            <option value="music">Music Mode</option>
+          </select>
+        </div>
+      </div>
+      <div id="music-mode-console" class="music-search-console hidden">
+        <div class="music-search-header">
+          <div class="music-search-header-row">
+            <div class="panel-title">Music Search</div>
+            <button id="import-playlist-toggle" class="button ghost small music-import-toggle" type="button">Import Playlist</button>
+          </div>
+        </div>
+        <div class="music-search-grid">
+          <label class="field">
+            <span>Artist</span>
+            <input id="search-artist" type="text" placeholder="Artist name">
+          </label>
+          <label class="field">
+            <span>Album</span>
+            <input id="search-album" type="text" placeholder="Optional album">
+          </label>
+          <label class="field">
+            <span>Track</span>
+            <input id="search-track" type="text" placeholder="Optional track">
+          </label>
+        </div>
+        <div class="music-search-options">
+          <div class="music-search-options-row">
+          <label class="field music-search-mode-field">
+            <span>Mode</span>
+            <div id="music-mode-toggle" class="home-media-mode-toggle music-mode-toggle" role="radiogroup" aria-label="Music metadata mode">
+              <button type="button" class="home-media-mode-pill active" data-mode="auto" role="radio" aria-checked="true">Auto</button>
+              <button type="button" class="home-media-mode-pill" data-mode="album" role="radio" aria-checked="false">Album</button>
+              <button type="button" class="home-media-mode-pill" data-mode="track" role="radio" aria-checked="false">Track</button>
+            </div>
+            <select id="music-mode-select" class="hidden" aria-hidden="true" tabindex="-1">
+              <option value="auto">Auto</option>
+              <option value="artist">Artist</option>
+              <option value="album">Album</option>
+              <option value="track">Track</option>
+            </select>
+          </label>
+            <div id="home-delivery-music-slot"></div>
+            <label id="music-video-format-field" class="field tiny music-search-video-format hidden">
+              <span>Format</span>
+              <select id="music-video-final-format">
+                <option value="mp4" selected>mp4</option>
+                <option value="mkv">mkv</option>
+                <option value="webm">webm</option>
+              </select>
+            </label>
+            <div id="home-destination-music-slot"></div>
+            <label class="field music-search-redownload-field" for="music-force-redownload">
+              <span>Redownload</span>
+              <input id="music-force-redownload" type="checkbox" class="hidden" aria-hidden="true" tabindex="-1">
+              <div id="music-force-toggle" class="home-media-mode-toggle music-force-pill-toggle" role="group" aria-label="Force re-download">
+                <button type="button" class="home-media-mode-pill active" data-force="off" aria-pressed="true">Off</button>
+                <button type="button" class="home-media-mode-pill" data-force="on" aria-pressed="false">On</button>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div class="music-search-actions-row">
+          <button id="search-create-only" class="button primary">Search</button>
+          <div id="search-create-message" class="notice" role="status"></div>
+        </div>
+        <div id="import-playlist-panel" class="hidden">
+          <div class="home-advanced-row">
+            <label class="home-advanced-field">
+              <span>Import playlist file</span>
+              <input id="home-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
+            </label>
+            <button id="home-import-button" class="button ghost small" type="button">Import Playlist</button>
+          </div>
+          <div id="home-import-summary" class="meta"></div>
+        </div>
+      </div>
+      <div id="music-results-container"></div>
+    </div>
+    <section class="panel full page-full page-hidden" id="music-player-panel" data-page="music-player">
+      <div class="panel-header-row">
+        <div>
+          <div class="panel-title">Music Player</div>
+          <div class="meta">Local-first playback with queue, favorites, and Pandora-style radio stations built from your library and cached matches.</div>
+        </div>
+      </div>
+      <div class="music-player-layout">
+        <aside class="music-player-sidebar">
+          <button class="button ghost small music-player-nav active" data-player-view="library" type="button">Library</button>
+          <button class="button ghost small music-player-nav" data-player-view="radio" type="button">Radio</button>
+          <button class="button ghost small music-player-nav" data-player-view="queue" type="button">Queue</button>
+          <button class="button ghost small music-player-nav" data-player-view="recent" type="button">Recently Played</button>
+          <button class="button ghost small music-player-nav" data-player-view="favorites" type="button">Favorites</button>
+        </aside>
+        <div class="music-player-main">
+          <div class="music-player-now-playing">
+            <div class="music-player-now-copy">
+              <div id="music-player-now-title" class="panel-title">Nothing playing</div>
+              <div id="music-player-now-meta" class="meta">Choose a track from your library or start a radio station.</div>
+            </div>
+            <audio id="music-player-audio" class="music-player-audio" controls preload="metadata"></audio>
+          </div>
+          <div id="music-player-message" class="notice" role="status">Loading player…</div>
+          <div id="music-player-library" class="music-player-view"></div>
+          <div id="music-player-radio" class="music-player-view hidden">
+            <div class="group">
+              <div class="group-title">Stations</div>
+              <div class="music-player-station-create">
+                <input id="music-player-station-name" type="text" placeholder="Station name">
+                <select id="music-player-station-seed-type">
+                  <option value="artist">Artist</option>
+                  <option value="genre">Genre</option>
+                  <option value="album">Album</option>
+                  <option value="favorites">Favorites Mix</option>
+                </select>
+                <input id="music-player-station-seed-value" type="text" placeholder="Seed value">
+                <button id="music-player-create-station" class="button primary" type="button">Create Station</button>
+              </div>
+            </div>
+            <div id="music-player-stations"></div>
+          </div>
+          <div id="music-player-queue" class="music-player-view hidden"></div>
+          <div id="music-player-recent" class="music-player-view hidden"></div>
+          <div id="music-player-favorites" class="music-player-view hidden"></div>
+        </div>
+      </div>
+    </section>
     <section class="panel full page-full page-hidden" id="movies-tv-panel" data-page="movies-tv">
       <div class="movies-tv-page-header">
         <div class="panel-title movies-tv-page-title">Movies &amp; TV</div>
@@ -263,6 +343,23 @@
             <button type="button" class="home-media-mode-pill active" data-mode="movies" role="radio" aria-checked="true">Movies</button>
             <button type="button" class="home-media-mode-pill" data-mode="tv" role="radio" aria-checked="false">TV</button>
           </div>
+        </div>
+      </div>
+      <div id="movies-tv-setup-landing" class="movies-tv-setup-landing hidden">
+        <div class="group movies-tv-setup-card">
+          <div class="group-title">Unlock Movies &amp; TV Discovery</div>
+          <div class="meta">Retreivr uses TMDb for native title, cast, trailer, and genre discovery before handing add actions to Radarr and Sonarr.</div>
+          <div class="movies-tv-setup-steps">
+            <div class="movies-tv-setup-step">1. Create a free TMDb API key.</div>
+            <div class="movies-tv-setup-step">2. Paste it here or in Settings → ARR Integration.</div>
+            <div class="movies-tv-setup-step">3. Verify it and start browsing titles, people, genres, and trailers.</div>
+          </div>
+          <div class="movies-tv-setup-form">
+            <input id="movies-tv-inline-tmdb-key" type="password" placeholder="Paste TMDb API key">
+            <button id="movies-tv-inline-tmdb-save" class="button primary" type="button">Save &amp; Verify</button>
+            <button id="movies-tv-open-settings" class="button ghost" type="button">Open Settings</button>
+          </div>
+          <div id="movies-tv-setup-message" class="notice" role="status">TMDb setup is required for native Movies &amp; TV discovery.</div>
         </div>
       </div>
       <div class="home-search-shell movies-tv-shell">
@@ -342,6 +439,73 @@
           <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
         </span>
       </footer>
+    </section>
+    <section class="panel full page-full page-hidden" id="setup-panel" data-page="setup">
+      <div class="panel-header-row">
+        <div>
+          <div class="panel-title">Guided Setup</div>
+          <div class="meta">Retreivr-only is the default. Enable ARR, VPN, Jellyfin, and related services only when you want them.</div>
+        </div>
+        <div class="settings-header-actions">
+          <button id="setup-refresh" class="button ghost small" type="button">Refresh Status</button>
+        </div>
+      </div>
+      <div id="setup-modules" class="setup-module-grid"></div>
+      <div class="group">
+        <div class="group-title">Optional Stack</div>
+        <div class="setup-stack-grid">
+          <label class="field checkbox"><input id="setup-enable-arr-stack" type="checkbox"><span>Enable ARR stack</span></label>
+          <label class="field checkbox"><input id="setup-enable-radarr" type="checkbox"><span>Radarr</span></label>
+          <label class="field checkbox"><input id="setup-enable-sonarr" type="checkbox"><span>Sonarr</span></label>
+          <label class="field checkbox"><input id="setup-enable-readarr" type="checkbox"><span>Readarr</span></label>
+          <label class="field checkbox"><input id="setup-enable-prowlarr" type="checkbox"><span>Prowlarr</span></label>
+          <label class="field checkbox"><input id="setup-enable-bazarr" type="checkbox"><span>Bazarr</span></label>
+          <label class="field checkbox"><input id="setup-enable-qbittorrent" type="checkbox"><span>qBittorrent</span></label>
+          <label class="field checkbox"><input id="setup-enable-vpn" type="checkbox"><span>VPN / Gluetun</span></label>
+          <label class="field checkbox"><input id="setup-enable-jellyfin" type="checkbox"><span>Jellyfin</span></label>
+        </div>
+        <div class="setup-stack-paths">
+          <input id="setup-env-path" type="text" placeholder=".env">
+          <input id="setup-media-root" type="text" placeholder="./media">
+          <input id="setup-movies-root" type="text" placeholder="./media/movies">
+          <input id="setup-tv-root" type="text" placeholder="./media/tv">
+          <input id="setup-downloads-root" type="text" placeholder="./downloads">
+          <input id="setup-books-root" type="text" placeholder="./media/books">
+        </div>
+        <div class="row">
+          <button id="setup-save-stack" class="button primary" type="button">Save Stack Choices</button>
+          <button id="setup-apply-stack" class="button ghost" type="button">Write Managed Env</button>
+        </div>
+        <div id="setup-command-helper" class="notice" role="status">Run the generated docker compose command after saving stack choices.</div>
+        <div id="setup-command-summary" class="setup-command-summary"></div>
+      </div>
+    </section>
+    <section class="panel full page-full page-hidden" id="connections-panel" data-page="connections">
+      <div class="panel-header-row">
+        <div>
+          <div class="panel-title">Connections</div>
+          <div class="meta">Verify the services Retreivr can see and configure after restart.</div>
+        </div>
+        <div class="settings-header-actions">
+          <button id="connections-refresh" class="button ghost small" type="button">Refresh Connections</button>
+          <button id="connections-autoconfigure" class="button ghost small" type="button">Auto Configure Reachable</button>
+        </div>
+      </div>
+      <div id="connections-message" class="notice" role="status">Connection status unavailable.</div>
+      <div id="connections-grid" class="setup-module-grid"></div>
+    </section>
+    <section class="panel full page-full page-hidden" id="services-panel" data-page="services">
+      <div class="panel-header-row">
+        <div>
+          <div class="panel-title">Services</div>
+          <div class="meta">Service activation is managed through Retreivr’s stack settings and applied through generated compose commands.</div>
+        </div>
+      </div>
+      <div class="group">
+        <div class="group-title">Managed Compose Profiles</div>
+        <div id="services-profile-summary" class="notice">No optional services enabled.</div>
+        <div id="services-list" class="setup-module-grid"></div>
+      </div>
     </section>
     <section class="panel full page-hidden" id="review-panel" data-page="review">
       <div class="panel-header-row">
@@ -1056,6 +1220,109 @@
                   <button id="arr-test-sonarr" class="button ghost small" type="button">Test Sonarr</button>
                   <span id="arr-test-sonarr-status" class="meta">Status unknown</span>
                 </div>
+              </div>
+              <div class="group">
+                <div class="group-title">Readarr / Books</div>
+                <div class="grid two">
+                  <label class="field full">
+                    <span>Readarr base URL</span>
+                    <input id="cfg-arr-readarr-base-url" type="text" placeholder="http://readarr.local:8787">
+                  </label>
+                  <label class="field full">
+                    <span>Readarr API key</span>
+                    <input id="cfg-arr-readarr-api-key" type="password" placeholder="API key">
+                  </label>
+                </div>
+              </div>
+              <div class="group">
+                <div class="group-title">Prowlarr</div>
+                <div class="grid two">
+                  <label class="field full">
+                    <span>Prowlarr base URL</span>
+                    <input id="cfg-arr-prowlarr-base-url" type="text" placeholder="http://prowlarr.local:9696">
+                  </label>
+                  <label class="field full">
+                    <span>Prowlarr API key</span>
+                    <input id="cfg-arr-prowlarr-api-key" type="password" placeholder="API key">
+                  </label>
+                </div>
+              </div>
+              <div class="group">
+                <div class="group-title">Bazarr</div>
+                <div class="grid two">
+                  <label class="field full">
+                    <span>Bazarr base URL</span>
+                    <input id="cfg-arr-bazarr-base-url" type="text" placeholder="http://bazarr.local:6767">
+                  </label>
+                  <label class="field full">
+                    <span>Bazarr API key</span>
+                    <input id="cfg-arr-bazarr-api-key" type="password" placeholder="API key">
+                  </label>
+                </div>
+              </div>
+              <div class="group">
+                <div class="group-title">qBittorrent</div>
+                <div class="grid two">
+                  <label class="field full">
+                    <span>qBittorrent base URL</span>
+                    <input id="cfg-arr-qbittorrent-base-url" type="text" placeholder="http://qbittorrent.local:8080">
+                  </label>
+                  <label class="field full">
+                    <span>qBittorrent username</span>
+                    <input id="cfg-arr-qbittorrent-username" type="text" placeholder="admin">
+                  </label>
+                  <label class="field full">
+                    <span>qBittorrent password</span>
+                    <input id="cfg-arr-qbittorrent-password" type="password" placeholder="password">
+                  </label>
+                  <label class="field full">
+                    <span>Download directory</span>
+                    <input id="cfg-arr-qbittorrent-download-dir" type="text" placeholder="/downloads/torrents">
+                  </label>
+                </div>
+              </div>
+              <div class="group">
+                <div class="group-title">Jellyfin</div>
+                <div class="grid two">
+                  <label class="field full">
+                    <span>Jellyfin base URL</span>
+                    <input id="cfg-arr-jellyfin-base-url" type="text" placeholder="http://jellyfin.local:8096">
+                  </label>
+                  <label class="field full">
+                    <span>Jellyfin API key</span>
+                    <input id="cfg-arr-jellyfin-api-key" type="password" placeholder="API key">
+                  </label>
+                </div>
+              </div>
+              <div class="group">
+                <div class="group-title">VPN / Gluetun</div>
+                <div class="grid two">
+                  <label class="field inline short">
+                    <span>Enabled</span>
+                    <input id="cfg-arr-vpn-enabled" type="checkbox">
+                  </label>
+                  <label class="field short">
+                    <span>Provider</span>
+                    <input id="cfg-arr-vpn-provider" type="text" placeholder="gluetun">
+                  </label>
+                  <label class="field full">
+                    <span>Control URL</span>
+                    <input id="cfg-arr-vpn-control-url" type="text" placeholder="http://gluetun:8000/v1/publicip/ip">
+                  </label>
+                  <label class="field inline short">
+                    <span>Route qBittorrent</span>
+                    <input id="cfg-arr-vpn-route-qbittorrent" type="checkbox">
+                  </label>
+                  <label class="field inline short">
+                    <span>Route Prowlarr</span>
+                    <input id="cfg-arr-vpn-route-prowlarr" type="checkbox">
+                  </label>
+                  <label class="field inline short">
+                    <span>Route Retreivr</span>
+                    <input id="cfg-arr-vpn-route-retreivr" type="checkbox">
+                  </label>
+                </div>
+                <div class="notice">Current compose enforces qBittorrent through VPN. Prowlarr and Retreivr routing are policy settings surfaced in Retreivr health/setup so the routing plan stays explicit.</div>
               </div>
             </section>
 

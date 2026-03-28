@@ -3,6 +3,7 @@ Docker assets for Retreivr.
 Quick start
 - Build: `docker build -f docker/Dockerfile -t retreivr:latest .`
 - Compose: use `docker/docker-compose.yml.example` as your base.
+- Default runtime is Retreivr-only. Optional ARR/Jellyfin/VPN services are enabled later through compose profiles.
 - Release asset: each tagged release also publishes `retreivr-docker-starter-<tag>.zip` with compose, env, config example, and runtime README.
 
 Ports
@@ -29,6 +30,7 @@ docker build -f docker/Dockerfile --build-arg RETREIVR_VERSION=0.9.20 -t retreiv
 Notes
 - Bind to all interfaces in containers with `RETREIVR_HOST=0.0.0.0` if needed.
 - Consider running as a non-root user with a fixed UID/GID to match volume permissions.
+- Optional services are designed to be enabled from Retreivr's `Setup` UI, which writes a managed env block and generates the exact `docker compose --profile ... up -d` command to run.
 - `resolution_api.upstream_base_url` is optional. Leave local cache sync off unless this node should mirror another Retreivr Resolution API node.
 - If you do enable local cache sync, set:
   - `resolution_api.upstream_base_url`
