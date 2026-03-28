@@ -10176,6 +10176,36 @@ async def api_put_config(request: Request, payload: dict = Body(...)):
     return {"status": "updated"}
 
 
+@app.get("/api/config/ui-preferences")
+async def api_get_ui_preferences():
+    cfg = _current_loaded_config()
+    prefs = cfg.get("ui_preferences") if isinstance(cfg.get("ui_preferences"), dict) else {}
+    return safe_json(prefs)
+
+
+@app.put("/api/config/ui-preferences")
+async def api_put_ui_preferences(payload: dict = Body(...)):
+    current = dict(_current_loaded_config() or _read_config_or_404())
+    existing = current.get("ui_preferences") if isinstance(current.get("ui_preferences"), dict) else {}
+    next_prefs = {**existing}
+    for key in (
+        "home_video_card_size",
+        "home_video_sort",
+        "music_card_size",
+        "music_sort",
+        "movies_tv_card_size",
+        "movies_tv_sort",
+    ):
+        if key in payload:
+            next_prefs[key] = payload.get(key)
+    current["ui_preferences"] = next_prefs
+    errors = validate_config(current)
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+    _persist_config_payload(current)
+    return safe_json(current["ui_preferences"])
+
+
 @app.get("/api/admin/security/status")
 async def api_admin_security_status(request: Request):
     cfg = _current_loaded_config()
@@ -10314,14 +10344,28 @@ async def api_services_autoconfigure(request: Request):
 @app.get("/api/player/library")
 async def api_player_library(limit: int = Query(250, ge=1, le=1000)):
     cfg = _current_loaded_config()
-    return safe_json({"items": scan_local_library(cfg, limit=limit)})
+    items = scan_local_library(cfg, limit=limit)
+    for item in items:
+        artwork_local_path = str(item.get("artwork_local_path") or "").strip()
+        if artwork_local_path:
+            item["artwork_url"] = f"/api/player/art/local?path={quote(artwork_local_path, safe='')}"
+    return safe_json({"items": items})
 
 
 @app.get("/api/player/library/summary")
 async def api_player_library_summary(limit: int = Query(1000, ge=1, le=5000)):
     cfg = _current_loaded_config()
     items = scan_local_library(cfg, limit=limit)
-    return safe_json({"summary": summarize_library(items)})
+    summary = summarize_library(items)
+    for bucket in ("artists", "albums", "tracks"):
+        values = summary.get(bucket)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            artwork_local_path = str(item.get("artwork_local_path") or "").strip()
+            if artwork_local_path:
+                item["artwork_url"] = f"/api/player/art/local?path={quote(artwork_local_path, safe='')}"
+    return safe_json({"summary": summary})
 
 
 @app.get("/api/player/stations")
@@ -10459,6 +10503,28 @@ async def api_player_stream_local(path: str = Query(...)):
     if not any(str(resolved).startswith(str(root)) for root in allowed_roots if root):
         raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
     return FileResponse(resolved)
+
+
+@app.get("/api/player/art/local")
+async def api_player_art_local(path: str = Query(...)):
+    requested = Path(path).expanduser()
+    if not requested.exists() or not requested.is_file():
+        raise HTTPException(status_code=404, detail={"error": "file_not_found"})
+    cfg = _current_loaded_config()
+    allowed_roots = []
+    music_cfg = cfg.get("music") if isinstance(cfg.get("music"), dict) else {}
+    library_path = str(music_cfg.get("library_path") or "").strip()
+    if library_path:
+        allowed_roots.append(Path(library_path).expanduser().resolve())
+    allowed_roots.append((Path("/downloads") / str(cfg.get("home_music_download_folder") or cfg.get("music_download_folder") or "Music")).resolve())
+    resolved = requested.resolve()
+    if not any(str(resolved).startswith(str(root)) for root in allowed_roots if root):
+        raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
+    return FileResponse(
+        resolved,
+        media_type=mimetypes.guess_type(str(resolved))[0] or "image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 def _persist_config_payload(payload: dict) -> dict:
@@ -10925,6 +10991,97 @@ async def api_reconcile_library():
     return safe_json({"status": "completed", **summary})
 
 
+_VIDEO_LIBRARY_EXTENSIONS = {
+    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", ".wmv", ".flv",
+}
+
+
+def _archive_identifier_from_url(url: str | None) -> str | None:
+    value = str(url or "").strip()
+    if not value:
+        return None
+    match = re.search(r"archive\.org/(?:details|download)/([^/?#]+)", value)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _build_video_library_thumbnail(row: dict[str, Any]) -> str | None:
+    source = str(row.get("source") or "").strip().lower()
+    external_id = str(row.get("external_id") or "").strip()
+    canonical_url = str(row.get("canonical_url") or "").strip()
+    input_url = str(row.get("input_url") or "").strip()
+    if source in {"youtube", "youtube_music"} and external_id:
+        return f"https://i.ytimg.com/vi/{external_id}/hqdefault.jpg"
+    if source == "archive_org":
+        identifier = _archive_identifier_from_url(canonical_url) or _archive_identifier_from_url(input_url)
+        if identifier:
+            return f"https://archive.org/services/img/{identifier}"
+    return None
+
+
+def _list_video_library_items(db_path: str, *, limit: int = 24) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT title, filename, destination, source, completed_at, file_size_bytes,
+                       input_url, canonical_url, external_id
+                FROM download_history
+                WHERE status='completed'
+                ORDER BY COALESCE(completed_at, created_at, id) DESC
+                LIMIT ?
+                """,
+                (max(int(limit) * 8, 150),),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+    except sqlite3.OperationalError:
+        return []
+    for row in rows:
+        filename = str(row.get("filename") or "").strip()
+        destination = str(row.get("destination") or "").strip()
+        if not filename:
+            continue
+        filepath = os.path.abspath(os.path.join(destination or DOWNLOADS_DIR, filename))
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in _VIDEO_LIBRARY_EXTENSIONS:
+            continue
+        if not os.path.isfile(filepath):
+            continue
+        if filepath in seen:
+            continue
+        seen.add(filepath)
+        title = str(row.get("title") or "").strip() or os.path.splitext(filename)[0]
+        file_id = _file_id_from_path(filepath)
+        source = str(row.get("source") or "").strip() or "local"
+        thumbnail_url = _build_video_library_thumbnail(row)
+        items.append(
+            {
+                "title": title,
+                "filename": filename,
+                "filepath": filepath,
+                "file_id": file_id,
+                "thumbnail_url": thumbnail_url,
+                "downloaded_at": row.get("completed_at"),
+                "size_bytes": row.get("file_size_bytes"),
+                "source": source,
+                "file_ext": ext or None,
+                "media_type": str(mimetypes.guess_type(filepath)[0] or "").strip() or None,
+                "video_id": external_id or None,
+                "source_url": str(row.get("canonical_url") or "").strip() or str(row.get("input_url") or "").strip() or None,
+                "canonical_url": str(row.get("canonical_url") or "").strip() or None,
+                "input_url": str(row.get("input_url") or "").strip() or None,
+            }
+        )
+        if len(items) >= int(limit):
+            break
+    return items
+
+
 @app.get("/api/history")
 async def api_history(
     limit: int = Query(200, ge=1, le=5000),
@@ -10965,6 +11122,11 @@ async def api_history(
     ]
 
 
+@app.get("/api/library/videos")
+async def api_video_library(limit: int = Query(24, ge=1, le=200)):
+    return safe_json({"items": _list_video_library_items(app.state.paths.db_path, limit=limit)})
+
+
 @app.get("/api/files")
 async def api_files():
     return _list_download_files(DOWNLOADS_DIR)
@@ -10987,6 +11149,27 @@ async def api_file_download(file_id: str):
     content_type, _ = mimetypes.guess_type(candidate)
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return StreamingResponse(_iter_file(candidate), media_type=content_type or "application/octet-stream", headers=headers)
+
+
+@app.get("/api/files/{file_id}/stream")
+async def api_file_stream(file_id: str, request: Request):
+    try:
+        rel = _decode_file_id(file_id)
+    except (ValueError, UnicodeDecodeError, binascii.Error):
+        raise HTTPException(status_code=400, detail="Invalid file id")
+
+    candidate = os.path.abspath(os.path.join(DOWNLOADS_DIR, rel))
+    if not _path_allowed(candidate, [DOWNLOADS_DIR]):
+        raise HTTPException(status_code=403, detail="File not allowed")
+    if not os.path.isfile(candidate):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return build_media_file_response(
+        request,
+        candidate,
+        media_type=guess_browser_media_type(candidate, mimetypes.guess_type(candidate)[0]),
+        content_disposition="inline",
+    )
 
 
 @app.get("/api/deliveries/{delivery_id}/download")

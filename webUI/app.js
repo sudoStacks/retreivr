@@ -10,6 +10,7 @@ const state = {
   lastFilesKey: null,
   configNoticeTimer: null,
   configNoticeClearable: false,
+  appSidebarCollapsed: false,
   currentPage: "home",
   lastMusicMode: "music",
   reviewItems: [],
@@ -41,7 +42,7 @@ const state = {
   homeMusicCurrentView: null,
   homeMusicViewStack: [],
   musicResultsSort: "recommended",
-  musicCardSize: 210,
+  musicCardSize: 180,
   musicGenreBrowseCache: {},
   musicArtistAlbumsCache: {},
   musicPreferences: {
@@ -49,11 +50,15 @@ const state = {
     favorite_artists: [],
   },
   homeRequestContext: {},
+  homeVideoSort: "best_match",
+  homeVideoCardSize: 220,
   homeBestScores: {},
   homeCandidateCache: {},
+  homeCandidatesByItem: {},
   homeCandidatesLoading: {},
   homeCandidateRefreshPending: {},
   homeCandidateData: {},
+  homeResultItems: [],
   homeSearchPollStart: null,
   homeResultPollInFlight: false,
   homeSearchControlsEnabled: true,
@@ -79,9 +84,10 @@ const state = {
   arrResults: [],
   arrSearchQuery: "",
   arrSearchYear: "",
+  arrFiltersOpen: false,
   arrSearchContext: "search",
   arrSort: "best_match",
-  arrCardSize: 280,
+  arrCardSize: 260,
   arrExpandedIds: new Set(),
   arrDetailsItemId: null,
   arrCastCache: {},
@@ -103,6 +109,7 @@ const state = {
   },
   arrStatusPollTimer: null,
   setupStatus: null,
+  setupWizard: null,
   servicesHealth: null,
   lastAutoConfigureResults: {},
   adminSecurity: {
@@ -114,7 +121,7 @@ const state = {
   playerView: "library",
   playerLibrary: [],
   playerLibrarySummary: { artists: [], albums: [], tracks: [] },
-  playerLibraryMode: "artists",
+  playerLibraryMode: "albums",
   playerSelectedArtistKey: "",
   playerSelectedAlbumKey: "",
   playerStations: [],
@@ -124,9 +131,23 @@ const state = {
   playerQueue: [],
   playerHistory: [],
   playerCurrent: null,
+  playerShuffle: false,
+  playerRepeatMode: "off",
+  playerProgressDragging: false,
+  musicSection: "search",
+  homeSection: "search",
+  moviesTvSection: "search",
+  musicPlayerExpanded: false,
+  musicLibraryMode: "albums",
+  musicLibraryLoaded: false,
+  videoLibraryItems: [],
+  videoLibraryLoaded: false,
+  libraryModalPayload: null,
   settingsActiveSectionId: "settings-core",
   settingsLayoutObserver: null,
   logsStickToBottom: true,
+  startupSetupPromptPending: false,
+  startupSetupPromptDismissedForSession: false,
 };
 const browserState = {
   open: false,
@@ -168,6 +189,7 @@ const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at_v2";
 const RELEASE_CACHE_KEY = "yt_archiver_release_cache_v2";
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version_v2";
 const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
+const APP_SIDEBAR_COLLAPSED_KEY = "retreivr.app.sidebar_collapsed";
 const ADMIN_PIN_TOKEN_KEY = "retreivr.admin.pin.token";
 const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
 const HOME_ALBUM_COVER_CACHE_KEY = "retreivr.home.album_cover_cache.v1";
@@ -220,6 +242,16 @@ const MUSIC_GENRE_INTENT_MAP = {
   indie: { label: "Indie", aliases: ["indie", "indie pop", "indie rock", "alternative", "lo-fi", "dream pop"] },
 };
 const ARR_POPULARITY_FRESH_THRESHOLD = 25;
+const UI_CARD_SIZE_MIN = 120;
+const UI_CARD_SIZE_MAX = 320;
+const UI_DEFAULTS = {
+  home_video_card_size: 220,
+  home_video_sort: "best_match",
+  music_card_size: 180,
+  music_sort: "recommended",
+  movies_tv_card_size: 260,
+  movies_tv_sort: "best_match",
+};
 const HOME_VIDEO_SOURCE_PRIORITY = [
   "youtube",
   "youtube_music",
@@ -342,7 +374,13 @@ function normalizePageName(page) {
     return "home";
   }
   const cleanPage = String(page).split("?")[0] || page;
+  if (cleanPage === "music-player") {
+    return "music";
+  }
   if (cleanPage === "settings" || String(cleanPage).startsWith("settings-")) {
+    return "config";
+  }
+  if (["setup", "connections", "services", "status", "info"].includes(cleanPage)) {
     return "config";
   }
   if (cleanPage === "search" || cleanPage === "advanced") {
@@ -1073,7 +1111,8 @@ async function refreshCommunityCacheSyncStatus() {
 
 function setPage(page) {
   const normalized = normalizePageName(page);
-  const allowed = new Set(["home", "music", "music-player", "movies-tv", "setup", "connections", "services", "review", "config", "status", "info"]);
+  const requested = String(page || "").split("?")[0] || page;
+  const allowed = new Set(["home", "music", "movies-tv", "review", "config"]);
   const target = allowed.has(normalized) ? normalized : "home";
   state.currentPage = target;
   if (target === "music") {
@@ -1084,8 +1123,14 @@ function setPage(page) {
   if (target === "home" || target === "music") {
     if (target === "home") {
       setHomeMediaMode("video", { persist: false, clearResultsOnDisable: false });
+      loadVideoLibrarySection().catch(() => {});
+      setHomeSection(state.homeSection || "search");
     } else if ((state.homeMediaMode || "video") === "video") {
       setHomeMediaMode(state.lastMusicMode || "music", { persist: false, clearResultsOnDisable: false });
+    }
+    if (target === "music") {
+      loadMusicLibrarySection().catch(() => {});
+      setMusicSection(state.musicSection || "search");
     }
     if (state.homeSearchRequestId) {
       startHomeResultPolling(state.homeSearchRequestId);
@@ -1096,6 +1141,7 @@ function setPage(page) {
   } else {
     stopHomeResultPolling();
     updateHomeViewAdvancedLink();
+    closeMusicPlayerModal();
   }
   if (target !== "movies-tv") {
     stopArrStatusPolling();
@@ -1140,15 +1186,8 @@ function setPage(page) {
     refreshArrConnectionStatus({ quiet: true }).catch(() => {});
     loadArrGenres().catch(() => {});
     renderArrResults();
+    setMoviesTvSection(state.moviesTvSection || "search");
     startArrStatusPolling();
-  } else if (target === "setup") {
-    refreshSetupStatus().catch(() => {});
-  } else if (target === "connections") {
-    refreshConnectionsStatus().catch(() => {});
-  } else if (target === "services") {
-    refreshSetupStatus().catch(() => {});
-  } else if (target === "music-player") {
-    loadMusicPlayerView().catch(() => {});
   } else if (target === "config") {
     if (!state.config || !state.configDirty) {
       loadConfig().then(async () => {
@@ -1169,34 +1208,30 @@ function setPage(page) {
     }
     refreshSchedule();
     const sectionHash = String(window.location.hash || "").replace("#", "");
-    if (sectionHash.startsWith("settings-")) {
-      requestAnimationFrame(() => setActiveSettingsSection(sectionHash, { jump: false, smooth: false }));
-    } else {
-      requestAnimationFrame(() => setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false }));
-    }
-  } else if (target === "info") {
+    const sectionFromPage = ({
+      setup: "settings-guided-setup",
+      connections: "settings-connections-hub",
+      services: "settings-services-hub",
+      status: "settings-status-hub",
+      logs: "settings-logs-hub",
+      info: "settings-info-hub",
+    })[requested];
+    const nextSettingsSection = sectionHash.startsWith("settings-")
+      ? sectionHash
+      : (sectionFromPage || state.settingsActiveSectionId || "settings-core");
+    requestAnimationFrame(() => setActiveSettingsSection(nextSettingsSection, { jump: false, smooth: false }));
+    refreshSetupStatus().catch(() => {});
+    refreshConnectionsStatus().catch(() => {});
+    refreshStatus();
     refreshMetrics();
     refreshVersion();
-    if (!state.config) {
-      fetchJson("/api/config")
-        .then((cfg) => {
-          state.config = cfg;
-          updateSearchDestinationDisplay();
-        })
-        .catch(() => {});
-    } else {
-      updateSearchDestinationDisplay();
-    }
-    const handoffRequestId = state.pendingAdvancedRequestId;
-    state.pendingAdvancedRequestId = null;
-    refreshSearchRequests(handoffRequestId)
-      .then(() => {
-        const requestIdToLoad = handoffRequestId || state.searchSelectedRequestId;
-        if (requestIdToLoad) {
-          return refreshSearchRequestDetails(requestIdToLoad);
-        }
-      })
-      .catch(() => {});
+    refreshSearchQueue();
+    refreshDownloads();
+    refreshHistory();
+    refreshLogs();
+  }
+  if (target === "home") {
+    requestAnimationFrame(() => maybeShowStartupSetupPrompt());
   }
 }
 
@@ -1211,11 +1246,16 @@ function mountMusicPageNodes() {
   const resultsEl = $("#music-results-container");
   const messageEl = $("#home-search-message");
   const reviewEl = $("#home-review-alert");
+  const playerInlineSlot = $("#music-player-inline-slot");
+  const playerMain = $("#music-player-panel .music-player-main") || $("#music-player-inline-slot .music-player-main") || $("#music-player-modal-slot .music-player-main");
   if (modeSlot && modeRow && modeRow.parentElement !== modeSlot) modeSlot.appendChild(modeRow);
   if (consoleSlot && consoleEl && consoleEl.parentElement !== consoleSlot) consoleSlot.appendChild(consoleEl);
   if (resultsSlot && resultsEl && resultsEl.parentElement !== resultsSlot) resultsSlot.appendChild(resultsEl);
   if (messageSlot && messageEl && messageEl.parentElement !== messageSlot) messageSlot.appendChild(messageEl);
   if (reviewSlot && reviewEl && reviewEl.parentElement !== reviewSlot) reviewSlot.appendChild(reviewEl);
+  if (playerInlineSlot && playerMain && !state.musicPlayerExpanded && playerMain.parentElement !== playerInlineSlot) {
+    playerInlineSlot.appendChild(playerMain);
+  }
 }
 
 function mountHomePageNodes() {
@@ -1235,8 +1275,619 @@ function mountHomePageNodes() {
   }
 }
 
+function setHomeSection(section) {
+  const normalized = String(section || "search").trim() || "search";
+  state.homeSection = normalized;
+  $$("[data-home-section]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.homeSection === normalized);
+  });
+  const searchSurface = $("#home-search-surface");
+  const librarySurface = $("#home-library-surface");
+  const showSearch = normalized === "search";
+  if (searchSurface) {
+    searchSurface.classList.toggle("hidden", !showSearch);
+    searchSurface.classList.toggle("active", showSearch);
+  }
+  if (librarySurface) {
+    librarySurface.classList.toggle("hidden", showSearch);
+    librarySurface.classList.toggle("active", !showSearch);
+  }
+}
+
+function setMoviesTvSection(section) {
+  const normalized = String(section || "search").trim() || "search";
+  state.moviesTvSection = normalized;
+  $$("[data-movies-tv-section]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.moviesTvSection === normalized);
+  });
+  const genres = $("#movies-tv-genres");
+  const results = $("#movies-tv-results");
+  const showGenres = normalized === "genres";
+  const hasResults = Array.isArray(state.arrResults) && state.arrResults.length > 0;
+  if (genres) {
+    genres.classList.toggle("hidden", !(showGenres || !hasResults));
+  }
+  if (results) {
+    results.classList.toggle("hidden", showGenres || !hasResults);
+  }
+}
+
+function getMoviesTvRecentYears() {
+  const currentYear = new Date().getFullYear();
+  return Array.from({ length: 6 }, (_, index) => String(currentYear - index));
+}
+
+function renderMoviesTvYearChips() {
+  const container = $("#movies-tv-year-chips");
+  if (!container) return;
+  const selectedYear = String(state.arrSearchYear || "").trim();
+  const years = ["", ...getMoviesTvRecentYears()];
+  container.innerHTML = years.map((year) => {
+    const label = year || "Any year";
+    const active = selectedYear === year;
+    return `
+      <button
+        type="button"
+        class="button ghost small movies-tv-year-chip ${active ? "active" : ""}"
+        data-arr-year="${escapeAttr(year)}"
+        aria-pressed="${active ? "true" : "false"}"
+      >${escapeHtml(label)}</button>
+    `;
+  }).join("");
+}
+
+function setMoviesTvFiltersOpen(open) {
+  state.arrFiltersOpen = !!open;
+  const panel = $("#movies-tv-filters-panel");
+  const toggle = $("#movies-tv-filters-toggle");
+  if (panel) {
+    panel.classList.toggle("hidden", !state.arrFiltersOpen);
+  }
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", state.arrFiltersOpen ? "true" : "false");
+  }
+}
+
+function setMoviesTvSearchYear(year) {
+  const normalized = /^\d{4}$/.test(String(year || "").trim()) ? String(year).trim() : "";
+  state.arrSearchYear = normalized;
+  renderMoviesTvYearChips();
+}
+
+function movePanelChildren(panelId, slotId) {
+  const panel = document.getElementById(panelId);
+  const slot = document.getElementById(slotId);
+  if (!panel || !slot) return;
+  if (slot.dataset.mounted === "1") return;
+  const children = Array.from(panel.children);
+  children.forEach((child) => {
+    slot.appendChild(child);
+  });
+  panel.classList.add("hidden");
+  slot.dataset.mounted = "1";
+}
+
+function mountSettingsSubpages() {
+  movePanelChildren("setup-panel", "settings-setup-slot");
+  movePanelChildren("connections-panel", "settings-connections-slot");
+  movePanelChildren("services-panel", "settings-services-slot");
+  ["status-panel", "search-queue-panel", "downloads-panel"].forEach((id) => {
+    movePanelChildren(id, "settings-status-slot");
+  });
+  movePanelChildren("logs-panel", "settings-logs-slot");
+  ["metrics-panel", "search-items-panel", "search-requests-panel"].forEach((id) => {
+    movePanelChildren(id, "settings-info-slot");
+  });
+}
+
+function setMusicSection(section) {
+  const normalized = String(section || "search").trim() || "search";
+  state.musicSection = normalized;
+  $$(".music-app-nav").forEach((button) => {
+    button.classList.toggle("active", button.dataset.musicSection === normalized);
+  });
+  const discovery = $("#music-discovery-surface");
+  const playerSurface = $("#music-player-surface");
+  const showDiscovery = normalized === "search";
+  if (discovery) {
+    discovery.classList.toggle("hidden", !showDiscovery);
+    discovery.classList.toggle("active", showDiscovery);
+  }
+  if (playerSurface) {
+    playerSurface.classList.toggle("hidden", showDiscovery);
+    playerSurface.classList.toggle("active", !showDiscovery);
+  }
+  const playerViewMap = {
+    library: "library",
+    radio: "radio",
+    playlists: "library",
+    queue: "queue",
+    recent: "recent",
+    favorites: "favorites",
+  };
+  if (!showDiscovery) {
+    if (normalized === "library" && !state.playerSelectedArtistKey && !state.playerSelectedAlbumKey) {
+      state.playerLibraryMode = "albums";
+    }
+    const nextPlayerView = playerViewMap[normalized] || "library";
+    setMusicPlayerView(nextPlayerView);
+    loadMusicPlayerView().catch(() => {});
+  }
+}
+
+function syncBottomPlayerShell() {
+  const shell = $("#music-bottom-player");
+  const titleEl = $("#music-bottom-player-title");
+  const metaEl = $("#music-bottom-player-meta");
+  const artEl = $("#music-bottom-player-art");
+  const toggleButton = $("#music-bottom-player-toggle");
+  const prevButton = $("#music-bottom-player-prev");
+  const nextButton = $("#music-bottom-player-next");
+  const audio = $("#music-player-audio");
+  if (!shell || !titleEl || !metaEl || !artEl || !toggleButton) return;
+  const current = state.playerCurrent || {};
+  const audioHasSource = !!(audio && (audio.currentSrc || audio.src));
+  const hasTrack = !!current.stream_url && audioHasSource;
+  shell.classList.toggle("hidden", !hasTrack);
+  titleEl.textContent = String(current.title || "Nothing playing");
+  metaEl.textContent = [current.artist, current.album, current.kind].filter(Boolean).join(" • ") || "Choose a track from your library or start a station.";
+  artEl.src = getMusicLibraryArtworkUrl(current);
+  toggleButton.textContent = audio && !audio.paused ? "Pause" : "Play";
+  if (prevButton) prevButton.disabled = !hasTrack;
+  if (nextButton) nextButton.disabled = !hasTrack;
+}
+
+function openMusicPlayerModal() {
+  const modal = $("#music-player-modal");
+  const slot = $("#music-player-modal-slot");
+  const playerMain = $("#music-player-inline-slot .music-player-main") || $("#music-player-panel .music-player-main");
+  if (modal && slot && playerMain) {
+    slot.appendChild(playerMain);
+    modal.classList.remove("hidden");
+    state.musicPlayerExpanded = true;
+  }
+}
+
+function closeMusicPlayerModal() {
+  const modal = $("#music-player-modal");
+  const inlineSlot = $("#music-player-inline-slot");
+  const playerMain = $("#music-player-modal-slot .music-player-main");
+  if (inlineSlot && playerMain) {
+    inlineSlot.appendChild(playerMain);
+  }
+  if (modal) {
+    modal.classList.add("hidden");
+  }
+  state.musicPlayerExpanded = false;
+}
+
 function escapeAttr(value) {
   return escapeHtml(value).replaceAll("`", "&#96;");
+}
+
+function buildSetupWizardDraft() {
+  const cfg = state.config && typeof state.config === "object" ? state.config : {};
+  const stack = state.setupStatus?.stack || cfg?.setup?.stack || {};
+  const arr = cfg.arr && typeof cfg.arr === "object" ? cfg.arr : {};
+  const vpn = arr.vpn && typeof arr.vpn === "object" ? arr.vpn : {};
+  const jellyfin = arr.jellyfin && typeof arr.jellyfin === "object" ? arr.jellyfin : {};
+  const telegram = cfg.telegram && typeof cfg.telegram === "object" ? cfg.telegram : {};
+  return {
+    enable_arr_stack: !!stack.enable_arr_stack,
+    enable_radarr: !!stack.enable_radarr,
+    enable_sonarr: !!stack.enable_sonarr,
+    enable_readarr: !!stack.enable_readarr,
+    enable_prowlarr: !!stack.enable_prowlarr,
+    enable_bazarr: !!stack.enable_bazarr,
+    enable_qbittorrent: !!stack.enable_qbittorrent,
+    enable_vpn: !!stack.enable_vpn,
+    enable_jellyfin: !!stack.enable_jellyfin,
+    wants_tmdb: !!arr.tmdb_api_key,
+    wants_youtube: !!cfg.yt_dlp_cookies,
+    wants_telegram: !!(telegram.bot_token || telegram.chat_id),
+    env_path: String(stack.env_path || ".env"),
+    media_root: String(stack.media_root || "./media"),
+    movies_root: String(stack.movies_root || "./media/movies"),
+    tv_root: String(stack.tv_root || "./media/tv"),
+    downloads_root: String(stack.downloads_root || "./downloads"),
+    books_root: String(stack.books_root || "./media/books"),
+    tmdb_api_key: String(arr.tmdb_api_key || ""),
+    yt_dlp_cookies: String(cfg.yt_dlp_cookies || ""),
+    telegram_bot_token: String(telegram.bot_token || ""),
+    telegram_chat_id: String(telegram.chat_id || ""),
+    vpn_provider: String(vpn.provider || "gluetun"),
+    vpn_control_url: String(vpn.control_url || ""),
+    vpn_route_qbittorrent: vpn.route_qbittorrent !== false,
+    vpn_route_prowlarr: !!vpn.route_prowlarr,
+    vpn_route_retreivr: !!vpn.route_retreivr,
+    jellyfin_base_url: String(jellyfin.base_url || ""),
+    jellyfin_api_key: String(jellyfin.api_key || ""),
+  };
+}
+
+function ensureSetupWizardState() {
+  if (!state.setupWizard || typeof state.setupWizard !== "object") {
+    state.setupWizard = {
+      stepIndex: 0,
+      draft: buildSetupWizardDraft(),
+    };
+    return;
+  }
+  if (!state.setupWizard.draft) {
+    state.setupWizard.draft = buildSetupWizardDraft();
+  }
+  if (!Number.isInteger(state.setupWizard.stepIndex) || state.setupWizard.stepIndex < 0) {
+    state.setupWizard.stepIndex = 0;
+  }
+}
+
+function getSetupWizardSteps() {
+  const draft = state.setupWizard?.draft || buildSetupWizardDraft();
+  const steps = [
+    {
+      id: "arr-intro",
+      title: "Do you want to set up ARR?",
+      subtitle: "Retreivr stays usable on its own. ARR is optional and best when you want movies, TV, books, torrents, or Usenet automation behind one guided workflow.",
+      required: false,
+    },
+  ];
+  if (draft.enable_arr_stack) {
+    steps.push({
+      id: "arr-services",
+      title: "Choose the ARR services you want",
+      subtitle: "Enable only the pieces you actually want Retreivr to manage. qBittorrent is recommended for ARR-backed downloads.",
+      required: false,
+    });
+  }
+  steps.push(
+    {
+      id: "tmdb",
+      title: "Connect TMDb for Movies & TV discovery",
+      subtitle: "TMDb unlocks native title, cast, genre, and trailer browsing in Retreivr before ARR is even configured.",
+      required: false,
+    },
+    {
+      id: "vpn",
+      title: "Configure VPN policy",
+      subtitle: "VPN is optional overall, but strongly recommended for qBittorrent flows. Retreivr will show exactly which services you intend to route through it.",
+      required: false,
+    },
+    {
+      id: "youtube",
+      title: "Set up YouTube access",
+      subtitle: "If you use authenticated or more restrictive sources, add your cookie file path here so Retreivr can work reliably.",
+      required: false,
+    },
+    {
+      id: "telegram",
+      title: "Do you want Telegram notifications?",
+      subtitle: "Telegram is optional. Add it if you want run summaries, queue events, or delivery notices pushed out of band.",
+      required: false,
+    },
+    {
+      id: "jellyfin",
+      title: "Will you connect Jellyfin too?",
+      subtitle: "Jellyfin remains optional. Retreivr can still acquire and organize media without it, but this keeps playback server setup in the same guided flow.",
+      required: false,
+    },
+    {
+      id: "paths",
+      title: "Confirm your managed stack paths",
+      subtitle: "These become the shared roots Retreivr and the optional ARR stack will use for media, downloads, and books.",
+      required: true,
+    },
+    {
+      id: "review",
+      title: "Review and apply your setup",
+      subtitle: "Retreivr will save your choices, write the managed env block when requested, and show the exact restart command you should run.",
+      required: true,
+    }
+  );
+  return steps;
+}
+
+function syncSetupWizardToLegacyFields() {
+  const draft = state.setupWizard?.draft;
+  if (!draft) return;
+  const mappings = [
+    ["setup-enable-arr-stack", !!draft.enable_arr_stack, "checked"],
+    ["setup-enable-radarr", !!draft.enable_radarr, "checked"],
+    ["setup-enable-sonarr", !!draft.enable_sonarr, "checked"],
+    ["setup-enable-readarr", !!draft.enable_readarr, "checked"],
+    ["setup-enable-prowlarr", !!draft.enable_prowlarr, "checked"],
+    ["setup-enable-bazarr", !!draft.enable_bazarr, "checked"],
+    ["setup-enable-qbittorrent", !!draft.enable_qbittorrent, "checked"],
+    ["setup-enable-vpn", !!draft.enable_vpn, "checked"],
+    ["setup-enable-jellyfin", !!draft.enable_jellyfin, "checked"],
+    ["setup-env-path", draft.env_path || ".env", "value"],
+    ["setup-media-root", draft.media_root || "./media", "value"],
+    ["setup-movies-root", draft.movies_root || "./media/movies", "value"],
+    ["setup-tv-root", draft.tv_root || "./media/tv", "value"],
+    ["setup-downloads-root", draft.downloads_root || "./downloads", "value"],
+    ["setup-books-root", draft.books_root || "./media/books", "value"],
+  ];
+  mappings.forEach(([id, value, mode]) => {
+    const el = $(`#${id}`);
+    if (!el) return;
+    if (mode === "checked") {
+      el.checked = !!value;
+    } else {
+      el.value = String(value || "");
+    }
+  });
+}
+
+async function saveSetupWizardConfig() {
+  const draft = state.setupWizard?.draft;
+  if (!draft) return;
+  if (!(await ensureAdminPinSession())) {
+    throw new Error("Admin PIN unlock is required before saving guided setup.");
+  }
+  const base = state.config ? JSON.parse(JSON.stringify(state.config)) : {};
+  base.arr = (base.arr && typeof base.arr === "object") ? { ...base.arr } : {};
+  base.arr.vpn = (base.arr.vpn && typeof base.arr.vpn === "object") ? { ...base.arr.vpn } : {};
+  base.arr.jellyfin = (base.arr.jellyfin && typeof base.arr.jellyfin === "object") ? { ...base.arr.jellyfin } : {};
+  base.telegram = (base.telegram && typeof base.telegram === "object") ? { ...base.telegram } : {};
+  base.arr.tmdb_api_key = String(draft.tmdb_api_key || "").trim();
+  base.yt_dlp_cookies = String(draft.yt_dlp_cookies || "").trim();
+  base.telegram.bot_token = String(draft.telegram_bot_token || "").trim();
+  base.telegram.chat_id = String(draft.telegram_chat_id || "").trim();
+  base.arr.vpn.enabled = !!draft.enable_vpn;
+  base.arr.vpn.provider = String(draft.vpn_provider || "gluetun").trim() || "gluetun";
+  base.arr.vpn.control_url = String(draft.vpn_control_url || "").trim();
+  base.arr.vpn.route_qbittorrent = !!draft.vpn_route_qbittorrent;
+  base.arr.vpn.route_prowlarr = !!draft.vpn_route_prowlarr;
+  base.arr.vpn.route_retreivr = !!draft.vpn_route_retreivr;
+  base.arr.jellyfin.base_url = String(draft.jellyfin_base_url || "").trim();
+  base.arr.jellyfin.api_key = String(draft.jellyfin_api_key || "").trim();
+  await fetchJson("/api/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(base),
+  });
+  state.config = base;
+}
+
+function buildSetupWizardSummaryRows() {
+  const draft = state.setupWizard?.draft || buildSetupWizardDraft();
+  const enabledServices = [
+    draft.enable_radarr ? "Radarr" : null,
+    draft.enable_sonarr ? "Sonarr" : null,
+    draft.enable_readarr ? "Readarr" : null,
+    draft.enable_prowlarr ? "Prowlarr" : null,
+    draft.enable_bazarr ? "Bazarr" : null,
+    draft.enable_qbittorrent ? "qBittorrent" : null,
+    draft.enable_vpn ? "VPN" : null,
+    draft.enable_jellyfin ? "Jellyfin" : null,
+  ].filter(Boolean).join(", ") || "Retreivr only";
+  return [
+    ["Mode", draft.enable_arr_stack ? "Retreivr + ARR stack" : "Retreivr only"],
+    ["Services", enabledServices],
+    ["TMDb", draft.tmdb_api_key ? "Configured" : "Not configured"],
+    ["YouTube", draft.yt_dlp_cookies ? "Cookie path added" : "No cookie path"],
+    ["Telegram", draft.telegram_bot_token && draft.telegram_chat_id ? "Configured" : "Not configured"],
+    ["Media root", draft.media_root || "./media"],
+    ["Movies root", draft.movies_root || "./media/movies"],
+    ["TV root", draft.tv_root || "./media/tv"],
+    ["Downloads root", draft.downloads_root || "./downloads"],
+    ["Books root", draft.books_root || "./media/books"],
+  ];
+}
+
+function renderSetupWizard() {
+  const wizardEl = $("#setup-wizard");
+  if (!wizardEl) return;
+  ensureSetupWizardState();
+  const steps = getSetupWizardSteps();
+  const stepIndex = Math.max(0, Math.min(steps.length - 1, Number(state.setupWizard.stepIndex || 0)));
+  state.setupWizard.stepIndex = stepIndex;
+  const step = steps[stepIndex];
+  const draft = state.setupWizard.draft;
+  const modules = state.setupStatus?.modules || {};
+  const progressPct = steps.length > 1 ? Math.round(((stepIndex + 1) / steps.length) * 100) : 100;
+  const moduleEntries = Object.entries(modules).slice(0, 5);
+
+  let body = "";
+  if (step.id === "arr-intro") {
+    body = `
+      <div class="setup-wizard-note">
+        ARR is not part of Retreivr itself. Retreivr acts as the frontend and control plane so people can use Radarr, Sonarr, Readarr, qBittorrent, VPN, and related services with far less friction.
+      </div>
+      <div class="setup-wizard-choice-row">
+        <button type="button" class="button setup-wizard-choice ${draft.enable_arr_stack ? "active" : ""}" data-setup-choice="enable_arr_stack" data-value="true">Yes, enable ARR setup</button>
+        <button type="button" class="button ghost setup-wizard-choice ${!draft.enable_arr_stack ? "active" : ""}" data-setup-choice="enable_arr_stack" data-value="false">No, keep Retreivr only</button>
+      </div>
+      <div class="setup-wizard-step-list">
+        <div>Retreivr-only stays the default unless you explicitly enable the ARR stack.</div>
+        <div>If enabled, Retreivr will guide you through service selection, paths, VPN policy, and post-restart validation.</div>
+        <div>You can still browse Movies & TV with only a TMDb key, even before ARR is configured.</div>
+      </div>
+    `;
+  } else if (step.id === "arr-services") {
+    body = `
+      <div class="setup-wizard-fields two">
+        <label class="field checkbox"><input data-setup-toggle="enable_radarr" type="checkbox" ${draft.enable_radarr ? "checked" : ""}><span>Radarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="enable_sonarr" type="checkbox" ${draft.enable_sonarr ? "checked" : ""}><span>Sonarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="enable_readarr" type="checkbox" ${draft.enable_readarr ? "checked" : ""}><span>Readarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="enable_prowlarr" type="checkbox" ${draft.enable_prowlarr ? "checked" : ""}><span>Prowlarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="enable_bazarr" type="checkbox" ${draft.enable_bazarr ? "checked" : ""}><span>Bazarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="enable_qbittorrent" type="checkbox" ${draft.enable_qbittorrent ? "checked" : ""}><span>qBittorrent</span></label>
+      </div>
+      <div class="setup-wizard-note">Recommended starter setup: Radarr, Sonarr, Prowlarr, and qBittorrent. Readarr and Bazarr are optional depending on whether you want books and subtitle automation.</div>
+    `;
+  } else if (step.id === "tmdb") {
+    body = `
+      <div class="setup-wizard-choice-row">
+        <button type="button" class="button setup-wizard-choice ${draft.wants_tmdb ? "active" : ""}" data-setup-choice="wants_tmdb" data-value="true">Yes, set up TMDb</button>
+        <button type="button" class="button ghost setup-wizard-choice ${!draft.wants_tmdb ? "active" : ""}" data-setup-choice="wants_tmdb" data-value="false">No, skip for now</button>
+      </div>
+      ${draft.wants_tmdb ? `
+        <div class="setup-wizard-fields">
+          <label class="field full">
+            <span>TMDb API key</span>
+            <input data-setup-input="tmdb_api_key" type="password" value="${escapeAttr(draft.tmdb_api_key || "")}" placeholder="Paste your TMDb API key">
+          </label>
+        </div>
+        <div class="setup-wizard-step-list">
+          <div>1. Create a free TMDb API key from your TMDb account settings.</div>
+          <div>2. Paste it here.</div>
+          <div>3. Movies & TV discovery, genres, cast, trailers, and title search will unlock immediately.</div>
+        </div>
+      ` : ""}
+    `;
+  } else if (step.id === "vpn") {
+    body = `
+      <div class="setup-wizard-choice-row">
+        <button type="button" class="button setup-wizard-choice ${draft.enable_vpn ? "active" : ""}" data-setup-choice="enable_vpn" data-value="true">Yes, enable VPN guidance</button>
+        <button type="button" class="button ghost setup-wizard-choice ${!draft.enable_vpn ? "active" : ""}" data-setup-choice="enable_vpn" data-value="false">No VPN for now</button>
+      </div>
+      ${draft.enable_vpn ? `
+        <div class="setup-wizard-fields two">
+          <label class="field full">
+            <span>Provider</span>
+            <input data-setup-input="vpn_provider" type="text" value="${escapeAttr(draft.vpn_provider || "gluetun")}" placeholder="gluetun">
+          </label>
+          <label class="field full">
+            <span>Control URL</span>
+            <input data-setup-input="vpn_control_url" type="text" value="${escapeAttr(draft.vpn_control_url || "")}" placeholder="http://gluetun:8000/v1/publicip/ip">
+          </label>
+        </div>
+        <div class="setup-wizard-fields">
+          <label class="field checkbox"><input data-setup-toggle="vpn_route_qbittorrent" type="checkbox" ${draft.vpn_route_qbittorrent ? "checked" : ""}><span>Route qBittorrent through VPN</span></label>
+          <label class="field checkbox"><input data-setup-toggle="vpn_route_prowlarr" type="checkbox" ${draft.vpn_route_prowlarr ? "checked" : ""}><span>Route Prowlarr through VPN</span></label>
+          <label class="field checkbox"><input data-setup-toggle="vpn_route_retreivr" type="checkbox" ${draft.vpn_route_retreivr ? "checked" : ""}><span>Route Retreivr through VPN</span></label>
+        </div>
+      ` : ""}
+    `;
+  } else if (step.id === "youtube") {
+    body = `
+      <div class="setup-wizard-choice-row">
+        <button type="button" class="button setup-wizard-choice ${draft.wants_youtube ? "active" : ""}" data-setup-choice="wants_youtube" data-value="true">Yes, set up YouTube access</button>
+        <button type="button" class="button ghost setup-wizard-choice ${!draft.wants_youtube ? "active" : ""}" data-setup-choice="wants_youtube" data-value="false">No, skip for now</button>
+      </div>
+      ${draft.wants_youtube ? `
+        <div class="setup-wizard-fields">
+          <label class="field full">
+            <span>YouTube cookies file path</span>
+            <div class="row path-picker">
+              <input data-setup-input="yt_dlp_cookies" type="text" value="${escapeAttr(draft.yt_dlp_cookies || "")}" placeholder="tokens/youtube_cookies.txt">
+              <button type="button" class="button ghost small" data-setup-browse="yt_dlp_cookies">Browse</button>
+            </div>
+          </label>
+        </div>
+        <div class="setup-wizard-note">If your normal searches/downloads already work, you can skip this for now. Add a cookies file when you need more reliable authenticated YouTube access.</div>
+      ` : ""}
+    `;
+  } else if (step.id === "telegram") {
+    body = `
+      <div class="setup-wizard-choice-row">
+        <button type="button" class="button setup-wizard-choice ${draft.wants_telegram ? "active" : ""}" data-setup-choice="wants_telegram" data-value="true">Yes, set up Telegram</button>
+        <button type="button" class="button ghost setup-wizard-choice ${!draft.wants_telegram ? "active" : ""}" data-setup-choice="wants_telegram" data-value="false">No, skip for now</button>
+      </div>
+      ${draft.wants_telegram ? `
+        <div class="setup-wizard-fields two">
+          <label class="field full">
+            <span>Bot token</span>
+            <input data-setup-input="telegram_bot_token" type="password" value="${escapeAttr(draft.telegram_bot_token || "")}" placeholder="Telegram bot token">
+          </label>
+          <label class="field full">
+            <span>Chat ID</span>
+            <input data-setup-input="telegram_chat_id" type="text" value="${escapeAttr(draft.telegram_chat_id || "")}" placeholder="Telegram chat ID">
+          </label>
+        </div>
+        <div class="setup-wizard-note">Skip this if you do not want notifications. You can always add it later without affecting core acquisition behavior.</div>
+      ` : ""}
+    `;
+  } else if (step.id === "jellyfin") {
+    body = `
+      <div class="setup-wizard-choice-row">
+        <button type="button" class="button setup-wizard-choice ${draft.enable_jellyfin ? "active" : ""}" data-setup-choice="enable_jellyfin" data-value="true">Yes, include Jellyfin</button>
+        <button type="button" class="button ghost setup-wizard-choice ${!draft.enable_jellyfin ? "active" : ""}" data-setup-choice="enable_jellyfin" data-value="false">No, not now</button>
+      </div>
+      ${draft.enable_jellyfin ? `
+        <div class="setup-wizard-fields two">
+          <label class="field full">
+            <span>Jellyfin URL</span>
+            <input data-setup-input="jellyfin_base_url" type="text" value="${escapeAttr(draft.jellyfin_base_url || "")}" placeholder="http://jellyfin:8096">
+          </label>
+          <label class="field full">
+            <span>Jellyfin API key</span>
+            <input data-setup-input="jellyfin_api_key" type="password" value="${escapeAttr(draft.jellyfin_api_key || "")}" placeholder="Optional for later validation">
+          </label>
+        </div>
+      ` : ""}
+    `;
+  } else if (step.id === "paths") {
+    body = `
+      <div class="setup-wizard-fields two">
+        <label class="field full"><span>Env file</span><input data-setup-input="env_path" type="text" value="${escapeAttr(draft.env_path || ".env")}"></label>
+        <label class="field full"><span>Media root</span><input data-setup-input="media_root" type="text" value="${escapeAttr(draft.media_root || "./media")}"></label>
+        <label class="field full"><span>Movies root</span><input data-setup-input="movies_root" type="text" value="${escapeAttr(draft.movies_root || "./media/movies")}"></label>
+        <label class="field full"><span>TV root</span><input data-setup-input="tv_root" type="text" value="${escapeAttr(draft.tv_root || "./media/tv")}"></label>
+        <label class="field full"><span>Downloads root</span><input data-setup-input="downloads_root" type="text" value="${escapeAttr(draft.downloads_root || "./downloads")}"></label>
+        <label class="field full"><span>Books root</span><input data-setup-input="books_root" type="text" value="${escapeAttr(draft.books_root || "./media/books")}"></label>
+      </div>
+    `;
+  } else if (step.id === "review") {
+    body = `
+      <div class="setup-wizard-summary-grid">
+        ${buildSetupWizardSummaryRows().map(([label, value]) => `
+          <div class="setup-wizard-summary-row">
+            <strong>${escapeHtml(label)}</strong>
+            <span class="meta">${escapeHtml(String(value || ""))}</span>
+          </div>
+        `).join("")}
+      </div>
+      <div class="setup-wizard-note">Save progress stores your settings in Retreivr. Write managed env updates the managed .env block Retreivr owns and gives you the exact docker compose restart command to run next.</div>
+    `;
+  }
+
+  wizardEl.innerHTML = `
+    <div class="setup-wizard-progress">
+      <div class="setup-wizard-progress-copy">
+        <div class="setup-wizard-kicker">Guided setup</div>
+        <div class="meta">Step ${stepIndex + 1} of ${steps.length}</div>
+      </div>
+      <div class="setup-wizard-progress-bar"><span style="width:${progressPct}%"></span></div>
+    </div>
+    <div class="setup-wizard-stage">
+      <div class="setup-wizard-card">
+        <div class="setup-wizard-kicker">${escapeHtml(step.required ? "Required step" : "Optional step")}</div>
+        <h2 class="setup-wizard-title">${escapeHtml(step.title)}</h2>
+        <div class="setup-wizard-lead">${escapeHtml(step.subtitle)}</div>
+        ${body}
+        <div id="setup-wizard-message" class="notice" role="status">${escapeHtml(step.id === "review" ? "Ready to save and apply your setup." : "Work through one setup topic at a time. You can change any of this later.")}</div>
+        <div class="setup-wizard-actions">
+          <div class="setup-wizard-actions-group">
+            <button type="button" class="button ghost" data-setup-nav="back" ${stepIndex === 0 ? "disabled" : ""}>Back</button>
+            <button type="button" class="button ${stepIndex === steps.length - 1 ? "ghost" : "primary"}" data-setup-nav="next">${stepIndex === steps.length - 1 ? "Stay on Review" : "Next"}</button>
+          </div>
+          <div class="setup-wizard-actions-group">
+            <button type="button" class="button ghost" data-setup-action="start-over">Start Over</button>
+            <button type="button" class="button ghost" data-setup-action="save-progress">Save Progress</button>
+            <button type="button" class="button primary" data-setup-action="apply-env">Write Managed Env</button>
+          </div>
+        </div>
+      </div>
+      <div class="setup-wizard-sidecard">
+        <div class="group-title">Current Setup Status</div>
+        <div class="setup-wizard-status-list">
+          ${moduleEntries.map(([key, module]) => `
+            <div class="setup-wizard-status-item">
+              <div class="setup-wizard-status-top">
+                <strong>${escapeHtml(module.title || key)}</strong>
+                <span class="setup-status-chip is-${escapeAttr(String(module.status || "pending").replace(/[^a-z_]/gi, "_").toLowerCase())}">${escapeHtml(module.status || "pending")}</span>
+              </div>
+              <div class="meta">${escapeHtml(module.summary || "")}</div>
+            </div>
+          `).join("")}
+        </div>
+        <div class="setup-wizard-note">
+          Retreivr-only stays the default until you explicitly save stack choices and write the managed env block.
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 async function refreshSetupStatus() {
@@ -1252,6 +1903,7 @@ async function refreshSetupStatus() {
     const payload = await fetchJson("/api/setup/status");
     state.setupStatus = payload;
     state.adminSecurity = payload?.security || state.adminSecurity;
+    ensureSetupWizardState();
     const modules = payload?.modules || {};
     const stack = payload?.stack || {};
     if ($("#setup-enable-arr-stack")) $("#setup-enable-arr-stack").checked = !!stack.enable_arr_stack;
@@ -1269,6 +1921,16 @@ async function refreshSetupStatus() {
     if ($("#setup-tv-root")) $("#setup-tv-root").value = stack.tv_root || "./media/tv";
     if ($("#setup-downloads-root")) $("#setup-downloads-root").value = stack.downloads_root || "./downloads";
     if ($("#setup-books-root")) $("#setup-books-root").value = stack.books_root || "./media/books";
+    if (!state.setupWizard?.draft || !state.setupWizard?.draft.__hydrated) {
+      state.setupWizard = {
+        stepIndex: state.setupWizard?.stepIndex || 0,
+        draft: {
+          ...buildSetupWizardDraft(),
+          __hydrated: true,
+        },
+      };
+    }
+    renderSetupWizard();
     if (modulesEl) {
       modulesEl.innerHTML = Object.entries(modules).map(([key, module]) => `
         <div class="group setup-module-card">
@@ -1413,6 +2075,53 @@ async function applySetupStack() {
   }
 }
 
+function updateSetupWizardDraftField(key, value) {
+  ensureSetupWizardState();
+  state.setupWizard.draft[key] = value;
+  if (key === "enable_arr_stack" && !value) {
+    state.setupWizard.draft.enable_radarr = false;
+    state.setupWizard.draft.enable_sonarr = false;
+    state.setupWizard.draft.enable_readarr = false;
+    state.setupWizard.draft.enable_prowlarr = false;
+    state.setupWizard.draft.enable_bazarr = false;
+    state.setupWizard.draft.enable_qbittorrent = false;
+  }
+}
+
+function advanceSetupWizardStep(direction = 1) {
+  ensureSetupWizardState();
+  const steps = getSetupWizardSteps();
+  const currentIndex = Math.max(0, Number(state.setupWizard.stepIndex || 0));
+  const delta = Number.isFinite(Number(direction)) ? Number(direction) : 1;
+  state.setupWizard.stepIndex = Math.max(0, Math.min(steps.length - 1, currentIndex + delta));
+}
+
+function resetSetupWizardDraft() {
+  state.setupWizard = {
+    stepIndex: 0,
+    draft: buildSetupWizardDraft(),
+  };
+  syncSetupWizardToLegacyFields();
+}
+
+async function saveSetupWizardProgress() {
+  syncSetupWizardToLegacyFields();
+  await saveSetupWizardConfig();
+  await saveSetupStack();
+  if (state.setupWizard?.draft) {
+    state.setupWizard.draft.__hydrated = true;
+  }
+}
+
+async function applySetupWizardEnv() {
+  syncSetupWizardToLegacyFields();
+  await saveSetupWizardConfig();
+  await applySetupStack();
+  if (state.setupWizard?.draft) {
+    state.setupWizard.draft.__hydrated = true;
+  }
+}
+
 async function saveAdminPinSettings() {
   const enabled = !!$("#cfg-security-admin-pin-enabled")?.checked;
   const currentPin = String($("#cfg-security-admin-pin-current")?.value || "").trim();
@@ -1420,15 +2129,39 @@ async function saveAdminPinSettings() {
   const confirmPin = String($("#cfg-security-admin-pin-confirm")?.value || "").trim();
   const sessionMinutes = Number.parseInt(String($("#cfg-security-admin-pin-session-minutes")?.value || "30").trim(), 10) || 30;
   const statusEl = $("#security-admin-pin-status");
-  if (enabled && !state.adminSecurity?.admin_pin_enabled && !newPin) {
-    if (statusEl) statusEl.textContent = "Set a new PIN to enable admin protection.";
+  const existingEnabled = !!state.adminSecurity?.admin_pin_enabled;
+  if (enabled && !existingEnabled && !newPin) {
+    if (statusEl) {
+      statusEl.textContent = "Set a new PIN to enable admin protection.";
+      statusEl.classList.add("warning");
+    }
+    return;
+  }
+  if (newPin && newPin.length < 4) {
+    if (statusEl) {
+      statusEl.textContent = "PIN should be at least 4 digits or characters.";
+      statusEl.classList.add("warning");
+    }
     return;
   }
   if (newPin && newPin !== confirmPin) {
-    if (statusEl) statusEl.textContent = "New PIN and confirmation do not match.";
+    if (statusEl) {
+      statusEl.textContent = "New PIN and confirmation do not match.";
+      statusEl.classList.add("warning");
+    }
     return;
   }
-  if (statusEl) statusEl.textContent = "Saving admin PIN settings…";
+  if (!enabled && !existingEnabled) {
+    if (statusEl) {
+      statusEl.textContent = "Admin PIN is already disabled.";
+      statusEl.classList.remove("warning");
+    }
+    return;
+  }
+  if (statusEl) {
+    statusEl.textContent = "Saving admin PIN settings…";
+    statusEl.classList.remove("warning");
+  }
   try {
     const payload = await fetchJson("/api/admin/pin/configure", {
       method: "POST",
@@ -1450,9 +2183,15 @@ async function saveAdminPinSettings() {
     if ($("#cfg-security-admin-pin-current")) $("#cfg-security-admin-pin-current").value = "";
     if ($("#cfg-security-admin-pin-new")) $("#cfg-security-admin-pin-new").value = "";
     if ($("#cfg-security-admin-pin-confirm")) $("#cfg-security-admin-pin-confirm").value = "";
-    if (statusEl) statusEl.textContent = enabled ? "Admin PIN settings saved." : "Admin PIN disabled.";
+    if (statusEl) {
+      statusEl.textContent = enabled ? "Admin PIN settings saved." : "Admin PIN disabled.";
+      statusEl.classList.remove("warning");
+    }
   } catch (err) {
-    if (statusEl) statusEl.textContent = toUserErrorMessage(err);
+    if (statusEl) {
+      statusEl.textContent = `Could not save admin PIN settings: ${toUserErrorMessage(err)}`;
+      statusEl.classList.add("warning");
+    }
   }
 }
 
@@ -1637,6 +2376,7 @@ function renderMusicPlayerLibrary() {
   const selectedAlbum = getMusicPlayerSelectedAlbum();
   const selectedPlaylistId = Number(state.playerSelectedPlaylistId || 0);
   const libraryMode = String(state.playerLibraryMode || "artists");
+  const rootsLabel = getMusicLibraryRootsLabel();
   let browserMarkup = `<div class="home-results-empty">No local library tracks found yet.</div>`;
 
   if (artists.length) {
@@ -1644,10 +2384,19 @@ function renderMusicPlayerLibrary() {
       browserMarkup = `
         <div class="music-player-browser-grid">
           ${artists.map((artist) => `
-            <button class="music-player-browser-card" type="button" data-action="player-open-artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">
-              <span class="music-player-track-title">${escapeHtml(artist.artist || "Unknown Artist")}</span>
-              <span class="music-player-track-meta">${escapeHtml(`${artist.album_count || 0} albums • ${artist.track_count || 0} tracks`)}</span>
-            </button>
+            <article class="music-player-browser-card music-player-browser-card-rich" data-artist-key="${escapeAttr(artist.artist_key || "")}">
+              <div class="music-player-browser-card-art">
+                <img src="${escapeAttr(getMusicLibraryArtworkUrl(artist))}" alt="${escapeAttr(artist.artist || "Artist")}" loading="lazy">
+              </div>
+              <div class="music-player-browser-card-copy">
+                <span class="music-player-track-title">${escapeHtml(artist.artist || "Unknown Artist")}</span>
+                <span class="music-player-track-meta">${escapeHtml(`${artist.album_count || 0} albums • ${artist.track_count || 0} tracks`)}</span>
+              </div>
+              <div class="music-player-browser-card-actions">
+                <button class="button ghost small" type="button" data-action="player-open-artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">Browse Albums</button>
+                <button class="button ghost small" type="button" data-action="player-library-mode" data-library-mode="tracks">Tracks</button>
+              </div>
+            </article>
           `).join("")}
         </div>
       `;
@@ -1659,16 +2408,28 @@ function renderMusicPlayerLibrary() {
       browserMarkup = filteredAlbums.length ? `
         <div class="music-player-browser-grid">
           ${filteredAlbums.map((album) => `
-            <button
-              class="music-player-browser-card${selectedAlbum && String(selectedAlbum.album_key || "") === String(album.album_key || "") && String(selectedAlbum.artist_key || "") === String(album.artist_key || "") ? " is-selected" : ""}"
-              type="button"
-              data-action="player-open-album"
+            <article
+              class="music-player-browser-card music-player-browser-card-rich${selectedAlbum && String(selectedAlbum.album_key || "") === String(album.album_key || "") && String(selectedAlbum.artist_key || "") === String(album.artist_key || "") ? " is-selected" : ""}"
               data-artist-key="${escapeAttr(album.artist_key || "")}"
               data-album-key="${escapeAttr(album.album_key || "")}"
             >
-              <span class="music-player-track-title">${escapeHtml(album.album || "Unknown Album")}</span>
-              <span class="music-player-track-meta">${escapeHtml([album.artist, `${album.track_count || 0} tracks`].filter(Boolean).join(" • "))}</span>
-            </button>
+              <div class="music-player-browser-card-art">
+                <img src="${escapeAttr(getMusicLibraryArtworkUrl(album))}" alt="${escapeAttr(album.album || "Album")}" loading="lazy">
+              </div>
+              <div class="music-player-browser-card-copy">
+                <span class="music-player-track-title">${escapeHtml(album.album || "Unknown Album")}</span>
+                <span class="music-player-track-meta">${escapeHtml([album.artist, `${album.track_count || 0} tracks`].filter(Boolean).join(" • "))}</span>
+              </div>
+              <div class="music-player-browser-card-actions">
+                <button
+                  class="button ghost small"
+                  type="button"
+                  data-action="player-open-album"
+                  data-artist-key="${escapeAttr(album.artist_key || "")}"
+                  data-album-key="${escapeAttr(album.album_key || "")}"
+                >View Tracks</button>
+              </div>
+            </article>
           `).join("")}
         </div>
       ` : `<div class="home-results-empty">No albums available for this artist.</div>`;
@@ -1676,7 +2437,10 @@ function renderMusicPlayerLibrary() {
       browserMarkup = tracks.length ? `
         <div class="music-player-track-list">
           ${tracks.map((item) => `
-            <div class="music-player-track-row">
+            <article class="music-player-track-row music-player-track-row-rich">
+              <div class="music-player-browser-card-art music-player-track-art">
+                <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Track")}" loading="lazy">
+              </div>
               <button
                 class="music-player-track"
                 type="button"
@@ -1704,7 +2468,7 @@ function renderMusicPlayerLibrary() {
                 data-source-kind="${escapeAttr(item.kind || "local")}"
                 ${selectedPlaylistId ? "" : "disabled"}
               >Add to Playlist</button>
-            </div>
+            </article>
           `).join("")}
         </div>
       ` : `<div class="home-results-empty">No tracks available for this selection.</div>`;
@@ -1723,8 +2487,9 @@ function renderMusicPlayerLibrary() {
       <div class="music-player-library-browser">
         <div class="panel-header-row compact">
           <div>
-            <div class="group-title">Library</div>
+            <div class="group-title">Downloaded Library</div>
             <div class="meta">${escapeHtml(`${artists.length} artists • ${albums.length} albums • ${Array.isArray(summary.tracks) ? summary.tracks.length : 0} tracks`)}</div>
+            <div class="meta">Showing downloaded/local files only${rootsLabel ? ` • ${escapeHtml(rootsLabel)}` : ""}</div>
           </div>
           <div class="music-player-library-modes" role="tablist" aria-label="Music player library sections">
             <button class="button ghost small${libraryMode === "artists" ? " active" : ""}" type="button" data-action="player-library-mode" data-library-mode="artists">Artists</button>
@@ -1795,6 +2560,155 @@ function renderMusicPlayerHistory() {
   }
 }
 
+function formatPlayerTime(seconds) {
+  const total = Number.isFinite(Number(seconds)) ? Math.max(0, Math.floor(Number(seconds))) : 0;
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+function updateMusicPlayerTransportUI() {
+  const audio = $("#music-player-audio");
+  const playPause = $("#music-player-playpause");
+  const shuffle = $("#music-player-shuffle");
+  const repeat = $("#music-player-repeat");
+  const progress = $("#music-player-progress");
+  const currentTimeEl = $("#music-player-current-time");
+  const durationEl = $("#music-player-duration");
+  if (playPause) {
+    const isPlaying = !!audio && !audio.paused && !audio.ended && !!audio.src;
+    playPause.textContent = isPlaying ? "Pause" : "Play";
+  }
+  if (shuffle) {
+    shuffle.classList.toggle("active", !!state.playerShuffle);
+    shuffle.setAttribute("aria-pressed", state.playerShuffle ? "true" : "false");
+  }
+  if (repeat) {
+    const mode = String(state.playerRepeatMode || "off");
+    repeat.textContent = `Repeat: ${mode === "one" ? "One" : mode === "all" ? "All" : "Off"}`;
+    repeat.classList.toggle("active", mode !== "off");
+    repeat.setAttribute("aria-pressed", mode !== "off" ? "true" : "false");
+  }
+  if (audio) {
+    const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+    const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    if (currentTimeEl) currentTimeEl.textContent = formatPlayerTime(currentTime);
+    if (durationEl) durationEl.textContent = formatPlayerTime(duration);
+    if (progress && !state.playerProgressDragging) {
+      progress.value = duration > 0 ? String(Math.round((currentTime / duration) * 1000)) : "0";
+    }
+  }
+}
+
+function getCurrentQueueIndex() {
+  if (!Array.isArray(state.playerQueue) || !state.playerQueue.length || !state.playerCurrent) {
+    return -1;
+  }
+  const currentUrl = String(state.playerCurrent.stream_url || "");
+  return state.playerQueue.findIndex((item) => String(item?.stream_url || "") === currentUrl);
+}
+
+function setPlayerQueue(items = [], { preserveCurrent = false } = {}) {
+  state.playerQueue = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!preserveCurrent && state.playerQueue.length && state.playerCurrent?.stream_url) {
+    const index = getCurrentQueueIndex();
+    if (index < 0) {
+      state.playerCurrent = null;
+    }
+  }
+  renderMusicPlayerQueue();
+}
+
+async function playPlayerQueueIndex(index) {
+  if (!Array.isArray(state.playerQueue) || !state.playerQueue.length) return;
+  const targetIndex = Number.parseInt(String(index), 10);
+  if (!Number.isFinite(targetIndex) || targetIndex < 0 || targetIndex >= state.playerQueue.length) return;
+  await playMusicPlayerItem(state.playerQueue[targetIndex]);
+}
+
+async function playNextPlayerItem({ autoAdvance = false } = {}) {
+  if (!Array.isArray(state.playerQueue) || !state.playerQueue.length) return;
+  const currentIndex = getCurrentQueueIndex();
+  if (state.playerRepeatMode === "one" && autoAdvance && currentIndex >= 0) {
+    await playPlayerQueueIndex(currentIndex);
+    return;
+  }
+  if (state.playerShuffle) {
+    if (state.playerQueue.length === 1) {
+      await playPlayerQueueIndex(0);
+      return;
+    }
+    let nextIndex = currentIndex;
+    while (nextIndex === currentIndex) {
+      nextIndex = Math.floor(Math.random() * state.playerQueue.length);
+    }
+    await playPlayerQueueIndex(nextIndex);
+    return;
+  }
+  if (currentIndex < 0) {
+    await playPlayerQueueIndex(0);
+    return;
+  }
+  const nextIndex = currentIndex + 1;
+  if (nextIndex < state.playerQueue.length) {
+    await playPlayerQueueIndex(nextIndex);
+    return;
+  }
+  if (state.playerRepeatMode === "all") {
+    await playPlayerQueueIndex(0);
+    return;
+  }
+  if (autoAdvance) {
+    clearMusicPlayerCurrentState();
+  }
+}
+
+async function playPreviousPlayerItem() {
+  if (!Array.isArray(state.playerQueue) || !state.playerQueue.length) return;
+  const audio = $("#music-player-audio");
+  if (audio && Number(audio.currentTime || 0) > 4) {
+    audio.currentTime = 0;
+    updateMusicPlayerTransportUI();
+    return;
+  }
+  const currentIndex = getCurrentQueueIndex();
+  if (state.playerShuffle && state.playerQueue.length > 1) {
+    let nextIndex = currentIndex;
+    while (nextIndex === currentIndex) {
+      nextIndex = Math.floor(Math.random() * state.playerQueue.length);
+    }
+    await playPlayerQueueIndex(nextIndex);
+    return;
+  }
+  if (currentIndex > 0) {
+    await playPlayerQueueIndex(currentIndex - 1);
+    return;
+  }
+  if (state.playerRepeatMode === "all" && state.playerQueue.length) {
+    await playPlayerQueueIndex(state.playerQueue.length - 1);
+  }
+}
+
+function togglePlayerShuffle() {
+  state.playerShuffle = !state.playerShuffle;
+  updateMusicPlayerTransportUI();
+}
+
+function cyclePlayerRepeatMode() {
+  const current = String(state.playerRepeatMode || "off");
+  state.playerRepeatMode = current === "off" ? "all" : current === "all" ? "one" : "off";
+  updateMusicPlayerTransportUI();
+}
+
+function buildQueueFromTracks(tracks, currentItem) {
+  const items = Array.isArray(tracks) ? tracks.filter((entry) => entry?.stream_url) : [];
+  if (!items.length) return [];
+  const currentUrl = String(currentItem?.stream_url || "");
+  const currentIndex = items.findIndex((entry) => String(entry.stream_url || "") === currentUrl);
+  if (currentIndex <= 0) return items;
+  return [...items.slice(currentIndex), ...items.slice(0, currentIndex)];
+}
+
 async function loadMusicPlayerView() {
   const messageEl = $("#music-player-message");
   if (messageEl) {
@@ -1830,6 +2744,7 @@ async function loadMusicPlayerView() {
     renderMusicPlayerQueue();
     renderMusicPlayerHistory();
     setMusicPlayerView(state.playerView || "library");
+    syncBottomPlayerShell();
     if (messageEl) {
       setNotice(messageEl, "Player ready.", false);
     }
@@ -1852,6 +2767,17 @@ async function playMusicPlayerItem(payload) {
   state.playerCurrent = payload;
   $("#music-player-now-title").textContent = payload.title || "Now Playing";
   $("#music-player-now-meta").textContent = [payload.artist, payload.album, payload.kind].filter(Boolean).join(" • ") || "Playing";
+  const contextEl = $("#music-player-now-context");
+  if (contextEl) {
+    const kindLabel = payload.kind === "local" ? "Playing from your library" : payload.kind === "cached" ? "Streaming from cached match" : "Playing from Retreivr";
+    contextEl.textContent = [kindLabel, payload.source || payload.provider || ""].filter(Boolean).join(" • ");
+  }
+  const nowArt = $("#music-player-now-art");
+  if (nowArt) {
+    nowArt.src = getMusicLibraryArtworkUrl(payload);
+  }
+  syncBottomPlayerShell();
+  updateMusicPlayerTransportUI();
   await fetchJson("/api/player/history", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1864,6 +2790,51 @@ async function playMusicPlayerItem(payload) {
       source_kind: payload.kind || "local",
     }),
   }).catch(() => {});
+}
+
+function clearMusicPlayerCurrentState() {
+  const audio = $("#music-player-audio");
+  if (audio) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+  }
+  state.playerCurrent = null;
+  const nowTitle = $("#music-player-now-title");
+  const nowMeta = $("#music-player-now-meta");
+  const nowContext = $("#music-player-now-context");
+  const nowArt = $("#music-player-now-art");
+  if (nowTitle) nowTitle.textContent = "Now Playing";
+  if (nowMeta) nowMeta.textContent = "Choose a track from your library or start a station.";
+  if (nowContext) nowContext.textContent = "";
+  if (nowArt) nowArt.src = "assets/no_artwork.png";
+  updateMusicPlayerTransportUI();
+  syncBottomPlayerShell();
+}
+
+function setupHeaderScrollVisibility() {
+  const topbar = $(".topbar");
+  if (!topbar) return;
+  let lastY = window.scrollY || 0;
+  let ticking = false;
+  const onScroll = () => {
+    const currentY = Math.max(0, window.scrollY || 0);
+    const delta = currentY - lastY;
+    if (currentY <= 24) {
+      document.body.classList.remove("topbar-hidden");
+    } else if (delta > 8) {
+      document.body.classList.add("topbar-hidden");
+    } else if (delta < -8) {
+      document.body.classList.remove("topbar-hidden");
+    }
+    lastY = currentY;
+    ticking = false;
+  };
+  window.addEventListener("scroll", () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(onScroll);
+  }, { passive: true });
 }
 
 function consumeSpotifyConnectedHashFlag() {
@@ -2297,6 +3268,25 @@ function updateSettingsSectionNavState(activeSectionId = "") {
     link.classList.toggle("hidden", isAdvanced && !advancedEnabled);
     link.classList.toggle("active", normalizedActive && sectionId === normalizedActive);
   });
+  const moreToggle = $("#settings-more-toggle");
+  const morePopover = $("#settings-more-popover");
+  if (moreToggle && morePopover) {
+    const moreLinks = Array.from(morePopover.querySelectorAll(".settings-more-link"));
+    let hasActiveMoreLink = false;
+    moreLinks.forEach((link) => {
+      const href = String(link.getAttribute("href") || "");
+      const sectionId = href.startsWith("#") ? href.slice(1) : href;
+      const isAdvanced = String(link.dataset.settingsLevel || "").trim().toLowerCase() === "advanced";
+      const shouldHide = isAdvanced && !advancedEnabled;
+      const isActive = normalizedActive && sectionId === normalizedActive;
+      link.classList.toggle("hidden", shouldHide);
+      link.classList.toggle("active", !!isActive);
+      if (!shouldHide && isActive) {
+        hasActiveMoreLink = true;
+      }
+    });
+    moreToggle.classList.toggle("active", hasActiveMoreLink);
+  }
   const select = $("#settings-section-select");
   if (select) {
     Array.from(select.options).forEach((option) => {
@@ -2749,6 +3739,43 @@ function downloadUrl(fileId) {
   return `/api/files/${encodeURIComponent(fileId)}/download`;
 }
 
+function streamUrl(fileId) {
+  return `/api/files/${encodeURIComponent(fileId)}/stream`;
+}
+
+const PLAYBACK_PRESETS = {
+  none: {
+    mode: "none",
+    label: "",
+    template: "",
+  },
+  jellyfin: {
+    mode: "jellyfin",
+    label: "Watch in Jellyfin",
+    template: "",
+  },
+  plex: {
+    mode: "plex",
+    label: "Watch in Plex",
+    template: "",
+  },
+  vlc: {
+    mode: "custom",
+    label: "Open in VLC",
+    template: "vlc://{stream_url}",
+  },
+  mpv: {
+    mode: "custom",
+    label: "Open in MPV",
+    template: "mpv://{stream_url}",
+  },
+  iina: {
+    mode: "custom",
+    label: "Open in IINA",
+    template: "iina://weblink?url={encoded_stream_url}",
+  },
+};
+
 function resolveTheme() {
   const saved = localStorage.getItem("yt_archiver_theme");
   if (saved === "light" || saved === "dark") {
@@ -2995,14 +4022,26 @@ async function refreshAdminSecurityStatus() {
       localStorage.removeItem(ADMIN_PIN_TOKEN_KEY);
     }
     const statusEl = $("#security-admin-pin-status");
+    const currentInput = $("#cfg-security-admin-pin-current");
     if ($("#cfg-security-admin-pin-enabled")) $("#cfg-security-admin-pin-enabled").checked = !!payload?.admin_pin_enabled;
     if ($("#cfg-security-admin-pin-session-minutes")) {
       $("#cfg-security-admin-pin-session-minutes").value = Number(payload?.admin_pin_session_minutes || 30);
+    }
+    if (currentInput) {
+      const hasExistingPin = !!payload?.admin_pin_enabled;
+      currentInput.disabled = !hasExistingPin;
+      currentInput.placeholder = hasExistingPin
+        ? "Required to change or disable an existing PIN"
+        : "No current PIN yet";
+      if (!hasExistingPin) {
+        currentInput.value = "";
+      }
     }
     if (statusEl) {
       statusEl.textContent = payload?.admin_pin_enabled
         ? (payload.session_valid ? `Admin PIN enabled • unlocked for ${payload.admin_pin_session_minutes || 30} min` : "Admin PIN enabled • locked")
         : "Admin PIN is disabled.";
+      statusEl.classList.remove("warning");
     }
   } catch (_err) {
     // ignore
@@ -3022,6 +4061,46 @@ function setAdminPinModalOpen(open) {
       setTimeout(() => input.focus(), 0);
     }
   }
+}
+
+function setStartupSetupModalOpen(open) {
+  const modal = $("#startup-setup-modal");
+  if (!modal) return;
+  modal.classList.toggle("hidden", !open);
+  if (open) {
+    const message = $("#startup-setup-message");
+    if (message) message.textContent = "";
+  }
+  updatePollingState();
+}
+
+function shouldShowStartupSetupPrompt() {
+  const showOnStartup = !!state.config?.setup?.show_on_startup;
+  const completedModules = Array.isArray(state.config?.setup?.completed_modules)
+    ? state.config.setup.completed_modules
+    : [];
+  return showOnStartup && completedModules.length === 0;
+}
+
+function maybeShowStartupSetupPrompt() {
+  if (state.currentPage !== "home") return;
+  if (!state.startupSetupPromptPending || state.startupSetupPromptDismissedForSession) return;
+  setStartupSetupModalOpen(true);
+}
+
+async function persistSetupStartupPreference(showOnStartup) {
+  const nextConfig = state.config && typeof state.config === "object"
+    ? JSON.parse(JSON.stringify(state.config))
+    : {};
+  const setup = (nextConfig.setup && typeof nextConfig.setup === "object") ? { ...nextConfig.setup } : {};
+  setup.show_on_startup = !!showOnStartup;
+  nextConfig.setup = setup;
+  await fetchJson("/api/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(nextConfig),
+  });
+  state.config = nextConfig;
 }
 
 async function ensureAdminPinSession() {
@@ -3071,6 +4150,577 @@ async function cancelJob(jobId) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reason: "User cancelled" }),
   });
+}
+
+function setMediaLibraryNotice(element, message, isError = false) {
+  if (!element) return;
+  if (!message) {
+    element.textContent = "";
+    element.classList.add("hidden");
+    element.classList.remove("warning");
+    return;
+  }
+  element.textContent = message;
+  element.classList.remove("hidden");
+  element.classList.toggle("warning", !!isError);
+}
+
+function getMusicLibrarySelectedArtist() {
+  const artists = Array.isArray(state.playerLibrarySummary?.artists) ? state.playerLibrarySummary.artists : [];
+  const selectedKey = String(state.playerSelectedArtistKey || "").trim().toLowerCase();
+  return artists.find((entry) => String(entry.artist_key || "").trim().toLowerCase() === selectedKey) || null;
+}
+
+function getMusicLibrarySelectedAlbum() {
+  const albums = Array.isArray(state.playerLibrarySummary?.albums) ? state.playerLibrarySummary.albums : [];
+  const selectedArtistKey = String(state.playerSelectedArtistKey || "").trim().toLowerCase();
+  const selectedAlbumKey = String(state.playerSelectedAlbumKey || "").trim().toLowerCase();
+  return albums.find((entry) =>
+    String(entry.artist_key || "").trim().toLowerCase() === selectedArtistKey &&
+    String(entry.album_key || "").trim().toLowerCase() === selectedAlbumKey
+  ) || null;
+}
+
+function getMusicLibraryFilteredAlbums() {
+  const albums = Array.isArray(state.playerLibrarySummary?.albums) ? state.playerLibrarySummary.albums : [];
+  const selectedArtistKey = String(state.playerSelectedArtistKey || "").trim().toLowerCase();
+  if (!selectedArtistKey) {
+    return albums;
+  }
+  return albums.filter((album) => String(album.artist_key || "").trim().toLowerCase() === selectedArtistKey);
+}
+
+function getMusicLibraryFilteredTracks() {
+  const tracks = Array.isArray(state.playerLibrarySummary?.tracks) ? state.playerLibrarySummary.tracks : [];
+  const selectedArtistKey = String(state.playerSelectedArtistKey || "").trim().toLowerCase();
+  const selectedAlbumKey = String(state.playerSelectedAlbumKey || "").trim().toLowerCase();
+  return tracks.filter((entry) => {
+    if (selectedArtistKey && String(entry.artist_key || "").trim().toLowerCase() !== selectedArtistKey) {
+      return false;
+    }
+    if (selectedAlbumKey && String(entry.album_key || "").trim().toLowerCase() !== selectedAlbumKey) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function getVideoLibrarySourceBadge(item) {
+  const source = String(item?.source || "").trim();
+  if (!source) return "Video";
+  if (source === "youtube_music") return "YouTube Music";
+  if (source === "archive_org") return "Archive";
+  return formatSourceLabel(source);
+}
+
+function getMusicLibraryRootsLabel() {
+  const cfg = state.config || {};
+  const roots = [];
+  const libraryPath = String(cfg?.music?.library_path || "").trim();
+  if (libraryPath) {
+    roots.push(libraryPath);
+  }
+  const downloadsMusicRoot = `/downloads/${String(cfg.home_music_download_folder || cfg.music_download_folder || "Music").trim() || "Music"}`;
+  roots.push(downloadsMusicRoot);
+  return roots.join(" • ");
+}
+
+function getMusicLibraryArtworkUrl(item) {
+  const localArtwork = String(item?.artwork_url || "").trim();
+  if (localArtwork) return localArtwork;
+  const albumKey = String(item?.album_key || "").trim().toLowerCase();
+  if (albumKey) {
+    const tracks = Array.isArray(state.playerLibrarySummary?.tracks) ? state.playerLibrarySummary.tracks : [];
+    const matchingTrack = tracks.find((entry) => String(entry?.album_key || "").trim().toLowerCase() === albumKey && String(entry?.artwork_url || "").trim());
+    if (matchingTrack?.artwork_url) return String(matchingTrack.artwork_url).trim();
+  }
+  const artistKey = String(item?.artist_key || "").trim().toLowerCase();
+  if (artistKey) {
+    const albums = Array.isArray(state.playerLibrarySummary?.albums) ? state.playerLibrarySummary.albums : [];
+    const matchingAlbum = albums.find((entry) => String(entry?.artist_key || "").trim().toLowerCase() === artistKey && String(entry?.artwork_url || "").trim());
+    if (matchingAlbum?.artwork_url) return String(matchingAlbum.artwork_url).trim();
+  }
+  return "assets/no_artwork.png";
+}
+
+function openLibraryDetailsModal(payload) {
+  const modal = $("#library-details-modal");
+  if (!modal || !payload) return;
+  state.libraryModalPayload = payload;
+  $("#library-details-title").textContent = String(payload.title || "Library Item");
+  $("#library-details-subtitle").textContent = String(payload.subtitle || "").trim();
+  $("#library-details-poster").src = String(payload.poster_url || "").trim() || "assets/no_artwork.png";
+  $("#library-details-poster").alt = `${String(payload.title || "Artwork")} artwork`;
+  $("#library-details-meta").innerHTML = Array.isArray(payload.metaChips) ? payload.metaChips.join("") : "";
+  $("#library-details-status").textContent = String(payload.statusText || "").trim();
+  $("#library-details-overview").textContent = String(payload.overview || "").trim();
+  $("#library-details-extra").innerHTML = String(payload.extraHtml || "").trim();
+  const primary = $("#library-details-primary");
+  const secondary = $("#library-details-secondary");
+  const tertiary = $("#library-details-tertiary");
+  if (primary) {
+    primary.textContent = String(payload.primaryLabel || "Open");
+    primary.dataset.action = String(payload.primaryAction || "");
+    primary.dataset.payload = JSON.stringify(payload.primaryPayload || {});
+    primary.classList.toggle("hidden", !payload.primaryAction);
+  }
+  if (secondary) {
+    secondary.textContent = String(payload.secondaryLabel || "More");
+    secondary.dataset.action = String(payload.secondaryAction || "");
+    secondary.dataset.payload = JSON.stringify(payload.secondaryPayload || {});
+    secondary.classList.toggle("hidden", !payload.secondaryAction);
+  }
+  if (tertiary) {
+    tertiary.textContent = String(payload.tertiaryLabel || "Download");
+    tertiary.dataset.action = String(payload.tertiaryAction || "");
+    tertiary.dataset.payload = JSON.stringify(payload.tertiaryPayload || {});
+    tertiary.classList.toggle("hidden", !payload.tertiaryAction);
+  }
+  modal.classList.remove("hidden");
+}
+
+function closeLibraryDetailsModal() {
+  const modal = $("#library-details-modal");
+  if (modal) {
+    modal.classList.add("hidden");
+  }
+  state.libraryModalPayload = null;
+}
+
+function openLibraryVideoModal(payload) {
+  const modal = $("#library-video-modal");
+  const player = $("#library-video-player");
+  if (!modal || !player || !payload?.file_id) return;
+  $("#library-video-title").textContent = String(payload.title || "Watch Video");
+  $("#library-video-subtitle").textContent = [payload.source || payload.media_type, payload.file_ext].filter(Boolean).join(" • ");
+  player.poster = String(payload.thumbnail_url || "").trim() || "assets/no_artwork.png";
+  player.src = streamUrl(payload.file_id);
+  modal.classList.remove("hidden");
+}
+
+function closeLibraryVideoModal() {
+  const modal = $("#library-video-modal");
+  const player = $("#library-video-player");
+  if (player) {
+    player.pause();
+    player.removeAttribute("src");
+    player.load();
+  }
+  if (modal) {
+    modal.classList.add("hidden");
+  }
+}
+
+function buildExternalPlayerTarget(item) {
+  const cfg = state.config && typeof state.config === "object" ? state.config : {};
+  const playback = (cfg.playback && typeof cfg.playback === "object") ? cfg.playback : {};
+  const arr = (cfg.arr && typeof cfg.arr === "object") ? cfg.arr : {};
+  const jellyfin = (arr.jellyfin && typeof arr.jellyfin === "object") ? arr.jellyfin : {};
+  const mode = String(playback.external_player_mode || "none").trim().toLowerCase();
+  const title = String(item?.title || "").trim();
+  const sourceUrl = String(item?.source_url || item?.canonical_url || item?.input_url || "").trim();
+  const payload = {
+    title,
+    file_id: String(item?.file_id || "").trim(),
+    filepath: String(item?.filepath || "").trim(),
+    source_url: sourceUrl,
+    stream_url: item?.file_id ? `${window.location.origin}${streamUrl(item.file_id)}` : "",
+    download_url: item?.file_id ? `${window.location.origin}${downloadUrl(item.file_id)}` : "",
+  };
+  if (mode === "jellyfin") {
+    const baseUrl = String(jellyfin.base_url || "").trim().replace(/\/+$/, "");
+    if (!baseUrl) return null;
+    return {
+      label: String(playback.external_player_label || "").trim() || "Watch in Jellyfin",
+      url: `${baseUrl}/web/index.html#!/search.html?query=${encodeURIComponent(title)}`,
+    };
+  }
+  if (mode === "plex") {
+    const baseUrl = String(playback.plex_base_url || "").trim().replace(/\/+$/, "");
+    if (!baseUrl) return null;
+    return {
+      label: String(playback.external_player_label || "").trim() || "Watch in Plex",
+      url: `${baseUrl}/web/index.html#!/search?query=${encodeURIComponent(title)}`,
+    };
+  }
+  if (mode === "custom") {
+    const template = String(playback.external_player_url_template || "").trim();
+    if (!template) return null;
+    const expanded = {
+      ...payload,
+      encoded_title: encodeURIComponent(String(payload.title || "")),
+      encoded_file_id: encodeURIComponent(String(payload.file_id || "")),
+      encoded_filepath: encodeURIComponent(String(payload.filepath || "")),
+      encoded_source_url: encodeURIComponent(String(payload.source_url || "")),
+      encoded_stream_url: encodeURIComponent(String(payload.stream_url || "")),
+      encoded_download_url: encodeURIComponent(String(payload.download_url || "")),
+    };
+    const url = template.replace(/\{(title|file_id|filepath|source_url|stream_url|download_url|encoded_title|encoded_file_id|encoded_filepath|encoded_source_url|encoded_stream_url|encoded_download_url)\}/g, (_match, key) => String(expanded[key] || ""));
+    return {
+      label: String(playback.external_player_label || "").trim() || "Open in External Player",
+      url,
+    };
+  }
+  return null;
+}
+
+function updatePlaybackIntegrationPreview() {
+  const mode = String($("#cfg-playback-external-mode")?.value || "none").trim().toLowerCase();
+  const label = String($("#cfg-playback-external-label")?.value || "").trim();
+  const template = String($("#cfg-playback-external-template")?.value || "").trim();
+  const plexBaseUrl = String($("#cfg-playback-plex-base-url")?.value || "").trim().replace(/\/+$/, "");
+  const jellyfinBaseUrl = String($("#cfg-arr-jellyfin-base-url")?.value || "").trim().replace(/\/+$/, "");
+  const previewLabelEl = $("#cfg-playback-preview-label");
+  const previewUrlEl = $("#cfg-playback-preview-url");
+  const sample = {
+    title: "Example Movie",
+    file_id: "abc123",
+    filepath: "/media/movies/Example Movie (2025).mkv",
+    source_url: "https://www.youtube.com/watch?v=example123",
+    stream_url: `${window.location.origin}/api/files/abc123/stream`,
+    download_url: `${window.location.origin}/api/files/abc123/download`,
+  };
+  const expanded = {
+    ...sample,
+    encoded_title: encodeURIComponent(sample.title),
+    encoded_file_id: encodeURIComponent(sample.file_id),
+    encoded_filepath: encodeURIComponent(sample.filepath),
+    encoded_source_url: encodeURIComponent(sample.source_url),
+    encoded_stream_url: encodeURIComponent(sample.stream_url),
+    encoded_download_url: encodeURIComponent(sample.download_url),
+  };
+  let previewLabel = "No external player button";
+  let previewUrl = "Launch URL preview appears here.";
+  if (mode === "jellyfin") {
+    previewLabel = label || "Watch in Jellyfin";
+    previewUrl = jellyfinBaseUrl ? `${jellyfinBaseUrl}/web/index.html#!/search.html?query=${encodeURIComponent(sample.title)}` : "Enter your Jellyfin base URL in ARR Integration.";
+  } else if (mode === "plex") {
+    previewLabel = label || "Watch in Plex";
+    previewUrl = plexBaseUrl ? `${plexBaseUrl}/web/index.html#!/search?query=${encodeURIComponent(sample.title)}` : "Enter your Plex base URL.";
+  } else if (mode === "custom") {
+    previewLabel = label || "Open in External Player";
+    previewUrl = template
+      ? template.replace(/\{(title|file_id|filepath|source_url|stream_url|download_url|encoded_title|encoded_file_id|encoded_filepath|encoded_source_url|encoded_stream_url|encoded_download_url)\}/g, (_match, key) => String(expanded[key] || ""))
+      : "Enter a custom player URL template.";
+  }
+  if (previewLabelEl) previewLabelEl.textContent = `Button preview: ${previewLabel}`;
+  if (previewUrlEl) previewUrlEl.textContent = `Launch URL: ${previewUrl}`;
+}
+
+function applyPlaybackPreset(presetId) {
+  const preset = PLAYBACK_PRESETS[String(presetId || "").trim().toLowerCase()] || null;
+  if (!preset) return;
+  const modeEl = $("#cfg-playback-external-mode");
+  const labelEl = $("#cfg-playback-external-label");
+  const templateEl = $("#cfg-playback-external-template");
+  if (modeEl) modeEl.value = preset.mode;
+  if (labelEl) labelEl.value = preset.label;
+  if (templateEl) templateEl.value = preset.template;
+  updatePlaybackIntegrationPreview();
+}
+
+function parseLibraryActionPayload(raw) {
+  try {
+    return JSON.parse(String(raw || ""));
+  } catch {
+    return {};
+  }
+}
+
+function buildMusicLibraryArtistModalPayload(artist) {
+  const artistKey = String(artist?.artist_key || "").trim();
+  const albums = getMusicLibraryFilteredAlbums().filter((entry) => String(entry.artist_key || "").trim() === artistKey).slice(0, 8);
+  return {
+    title: artist?.artist || "Artist",
+    subtitle: "Music Library • Artist",
+    poster_url: getMusicLibraryArtworkUrl(artist),
+    statusText: `${artist?.album_count || 0} albums • ${artist?.track_count || 0} tracks`,
+    overview: "Local library artist view. Browse albums or jump into the player for playback.",
+    metaChips: [
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Albums</span><span class="arr-details-chip-value">${escapeHtml(String(artist?.album_count || 0))}</span></span>`,
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Tracks</span><span class="arr-details-chip-value">${escapeHtml(String(artist?.track_count || 0))}</span></span>`,
+    ],
+    extraHtml: albums.length
+      ? `<div class="arr-details-cast-heading">Albums</div><div class="arr-details-cast-list">${albums.map((album) => `<span class="chip">${escapeHtml(String(album.album || "Album"))}</span>`).join("")}</div>`
+      : `<div class="meta">No albums found for this artist yet.</div>`,
+    primaryLabel: "Browse Albums",
+    primaryAction: "music-library-open-artist",
+    primaryPayload: { artist_key: artistKey },
+    secondaryLabel: "Open Player",
+    secondaryAction: "music-library-open-player",
+    secondaryPayload: { artist_key: artistKey },
+  };
+}
+
+function buildMusicLibraryAlbumModalPayload(album) {
+  const artistKey = String(album?.artist_key || "").trim();
+  const albumKey = String(album?.album_key || "").trim();
+  const tracks = getMusicLibraryFilteredTracks()
+    .filter((entry) => String(entry.artist_key || "").trim() === artistKey && String(entry.album_key || "").trim() === albumKey)
+    .slice(0, 10);
+  return {
+    title: album?.album || "Album",
+    subtitle: [album?.artist, "Music Library • Album"].filter(Boolean).join(" • "),
+    poster_url: getMusicLibraryArtworkUrl(album),
+    statusText: `${album?.track_count || 0} tracks`,
+    overview: "Album view from your local library. Open tracks here or jump into the player for playback.",
+    metaChips: [
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Artist</span><span class="arr-details-chip-value">${escapeHtml(String(album?.artist || "Unknown Artist"))}</span></span>`,
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Tracks</span><span class="arr-details-chip-value">${escapeHtml(String(album?.track_count || 0))}</span></span>`,
+    ],
+    extraHtml: tracks.length
+      ? `<div class="arr-details-cast-heading">Track Preview</div><div class="arr-details-cast-list">${tracks.map((track) => `<span class="chip">${escapeHtml(String(track.title || "Track"))}</span>`).join("")}</div>`
+      : `<div class="meta">No tracks found for this album yet.</div>`,
+    primaryLabel: "View Tracks",
+    primaryAction: "music-library-open-album",
+    primaryPayload: { artist_key: artistKey, album_key: albumKey },
+    secondaryLabel: "Open Player",
+    secondaryAction: "music-library-open-player",
+    secondaryPayload: { artist_key: artistKey, album_key: albumKey },
+  };
+}
+
+function buildMusicLibraryTrackModalPayload(track) {
+  const details = [
+    ["Downloaded", formatTimestamp(track?.downloaded_at)],
+    ["File", track?.local_path],
+    ["Type", track?.file_ext],
+    ["Media", track?.media_type],
+    ["Size", formatBytes(track?.size_bytes)],
+  ].filter((entry) => String(entry[1] || "").trim());
+  return {
+    title: track?.title || "Track",
+    subtitle: [track?.artist, track?.album, "Music Library • Track"].filter(Boolean).join(" • "),
+    poster_url: getMusicLibraryArtworkUrl(track),
+    statusText: [formatTimestamp(track?.downloaded_at), formatBytes(track?.size_bytes), track?.file_ext].filter(Boolean).join(" • "),
+    overview: String(track?.local_path || "").trim() || "Local library track ready for playback or playlist actions.",
+    metaChips: [
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Artist</span><span class="arr-details-chip-value">${escapeHtml(String(track?.artist || "Unknown Artist"))}</span></span>`,
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Album</span><span class="arr-details-chip-value">${escapeHtml(String(track?.album || "Unknown Album"))}</span></span>`,
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Type</span><span class="arr-details-chip-value">${escapeHtml(String(track?.file_ext || "audio"))}</span></span>`,
+    ],
+    extraHtml: details.length
+      ? `<div class="arr-details-cast-heading">File Details</div><div class="arr-details-cast-list">${details.map(([label, value]) => `<span class="chip">${escapeHtml(`${label}: ${String(value)}`)}</span>`).join("")}</div>`
+      : "",
+    primaryLabel: "Play Track",
+    primaryAction: "music-library-play-track",
+    primaryPayload: track,
+    secondaryLabel: "Open Player",
+    secondaryAction: "music-library-open-player",
+    secondaryPayload: { artist_key: track?.artist_key || "", album_key: track?.album_key || "" },
+  };
+}
+
+function buildVideoLibraryModalPayload(item) {
+  const externalPlayer = buildExternalPlayerTarget(item);
+  const detailRows = [
+    ["Downloaded", formatTimestamp(item?.downloaded_at)],
+    ["Size", formatBytes(item?.size_bytes)],
+    ["File Type", item?.file_ext],
+    ["Media Type", item?.media_type],
+    ["Video ID", item?.video_id],
+    ["File", item?.filepath],
+    ["Source URL", item?.source_url || item?.canonical_url || item?.input_url],
+  ].filter((entry) => String(entry[1] || "").trim());
+  return {
+    title: item?.title || "Video",
+    subtitle: `${getVideoLibrarySourceBadge(item)} • Home Library`,
+    poster_url: item?.thumbnail_url || "assets/no_artwork.png",
+    statusText: [formatTimestamp(item?.downloaded_at), formatBytes(item?.size_bytes)].filter(Boolean).join(" • "),
+    overview: String(item?.source_url || item?.canonical_url || item?.input_url || item?.filepath || "").trim(),
+    metaChips: [
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Source</span><span class="arr-details-chip-value">${escapeHtml(getVideoLibrarySourceBadge(item))}</span></span>`,
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Downloaded</span><span class="arr-details-chip-value">${escapeHtml(formatTimestamp(item?.downloaded_at) || "Unknown")}</span></span>`,
+      `<span class="arr-details-chip"><span class="arr-details-chip-label">Type</span><span class="arr-details-chip-value">${escapeHtml(String(item?.file_ext || "video"))}</span></span>`,
+    ],
+    extraHtml: detailRows.length
+      ? `<div class="arr-details-cast-heading">File Details</div><div class="arr-details-cast-list">${detailRows.map(([label, value]) => `<span class="chip">${escapeHtml(`${label}: ${String(value)}`)}</span>`).join("")}</div>`
+      : "",
+    primaryLabel: "Watch Here",
+    primaryAction: "video-library-watch-here",
+    primaryPayload: item,
+    secondaryLabel: externalPlayer?.label || "",
+    secondaryAction: externalPlayer?.url ? "video-library-open-external" : "",
+    secondaryPayload: externalPlayer?.url ? { ...item, external_url: externalPlayer.url } : {},
+    tertiaryLabel: "Download File",
+    tertiaryAction: "video-library-download",
+    tertiaryPayload: item,
+  };
+}
+
+function renderMusicLibrarySection() {
+  const section = $("#music-library-section");
+  const grid = $("#music-library-grid");
+  const breadcrumbs = $("#music-library-breadcrumbs");
+  if (!section || !grid || !breadcrumbs) return;
+  const summary = state.playerLibrarySummary || { artists: [], albums: [], tracks: [] };
+  const artists = Array.isArray(summary.artists) ? summary.artists : [];
+  const albums = Array.isArray(summary.albums) ? summary.albums : [];
+  const tracks = Array.isArray(summary.tracks) ? summary.tracks : [];
+  const total = artists.length + albums.length + tracks.length;
+  section.classList.toggle("hidden", total === 0);
+  if (!total) {
+    grid.innerHTML = `<div class="home-results-empty">No local music library files found yet.</div>`;
+    breadcrumbs.innerHTML = "";
+    return;
+  }
+  const mode = String(state.musicLibraryMode || "artists");
+  const selectedArtist = getMusicLibrarySelectedArtist();
+  const selectedAlbum = getMusicLibrarySelectedAlbum();
+  const breadcrumbBits = [`<button class="button ghost small" type="button" data-action="music-library-reset">All Library</button>`];
+  if (selectedArtist) {
+    breadcrumbBits.push(`<button class="button ghost small" type="button" data-action="music-library-open-artist" data-artist-key="${escapeAttr(selectedArtist.artist_key || "")}">${escapeHtml(selectedArtist.artist || "Artist")}</button>`);
+  }
+  if (selectedAlbum) {
+    breadcrumbBits.push(`<button class="button ghost small" type="button" data-action="music-library-open-album" data-artist-key="${escapeAttr(selectedAlbum.artist_key || "")}" data-album-key="${escapeAttr(selectedAlbum.album_key || "")}">${escapeHtml(selectedAlbum.album || "Album")}</button>`);
+  }
+  breadcrumbs.innerHTML = breadcrumbBits.join("");
+  $$("[data-music-library-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.musicLibraryMode === mode);
+  });
+  if (mode === "artists") {
+    grid.innerHTML = artists.slice(0, 24).map((artist) => `
+          <article class="home-result-card music-meta-card music-grid-card media-library-card" data-library-type="artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">
+        <div class="music-card-thumb-shell media-library-thumb-shell">
+          <img class="media-library-thumb" src="${escapeAttr(getMusicLibraryArtworkUrl(artist))}" alt="${escapeAttr(artist.artist || "Artist")}" loading="lazy">
+        </div>
+        <div class="music-meta-main">
+          <div class="home-result-header">
+            <div class="panel-title">${escapeHtml(artist.artist || "Unknown Artist")}</div>
+          </div>
+          <div class="meta">${escapeHtml(`${artist.album_count || 0} albums • ${artist.track_count || 0} tracks`)}</div>
+        </div>
+        <div class="home-candidate-action home-candidate-action-primary-stack">
+          <button class="button ghost small" type="button" data-action="music-library-open-artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">Browse Albums</button>
+          <button class="button ghost small" type="button" data-action="music-library-info" data-library-type="artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">More Info</button>
+        </div>
+      </article>
+    `).join("");
+  } else if (mode === "albums") {
+    const filteredAlbums = getMusicLibraryFilteredAlbums();
+    grid.innerHTML = filteredAlbums.slice(0, 24).map((album) => `
+      <article class="home-result-card music-meta-card music-grid-card media-library-card" data-library-type="album" data-artist-key="${escapeAttr(album.artist_key || "")}" data-album-key="${escapeAttr(album.album_key || "")}">
+        <div class="music-card-thumb-shell media-library-thumb-shell">
+          <img class="media-library-thumb" src="${escapeAttr(getMusicLibraryArtworkUrl(album))}" alt="${escapeAttr(album.album || "Album")}" loading="lazy">
+        </div>
+        <div class="music-meta-main">
+          <div class="home-result-header">
+            <div class="panel-title">${escapeHtml(album.album || "Unknown Album")}</div>
+          </div>
+          <div class="meta">${escapeHtml([album.artist, `${album.track_count || 0} tracks`].filter(Boolean).join(" • "))}</div>
+        </div>
+        <div class="home-candidate-action home-candidate-action-primary-stack">
+          <button class="button ghost small" type="button" data-action="music-library-open-album" data-artist-key="${escapeAttr(album.artist_key || "")}" data-album-key="${escapeAttr(album.album_key || "")}">View Tracks</button>
+          <button class="button ghost small" type="button" data-action="music-library-info" data-library-type="album" data-artist-key="${escapeAttr(album.artist_key || "")}" data-album-key="${escapeAttr(album.album_key || "")}">More Info</button>
+        </div>
+      </article>
+    `).join("") || `<div class="home-results-empty">No albums available for this selection.</div>`;
+  } else {
+    const filteredTracks = getMusicLibraryFilteredTracks();
+    grid.innerHTML = filteredTracks.slice(0, 24).map((track) => `
+      <article class="home-result-card music-meta-card music-grid-card media-library-card media-library-track-card" data-library-type="track" data-track-id="${escapeAttr(track.id || "")}">
+        <div class="music-card-thumb-shell media-library-thumb-shell">
+          <img class="media-library-thumb" src="${escapeAttr(getMusicLibraryArtworkUrl(track))}" alt="${escapeAttr(track.title || "Track")}" loading="lazy">
+        </div>
+        <div class="music-meta-main">
+          <div class="home-result-header">
+            <div class="panel-title">${escapeHtml(track.title || "Untitled")}</div>
+          </div>
+          <div class="meta">${escapeHtml([track.artist, track.album].filter(Boolean).join(" • "))}</div>
+        </div>
+        <div class="home-candidate-action home-candidate-action-primary-stack">
+          <button class="button ghost small" type="button" data-action="music-library-play-track" data-track-id="${escapeAttr(track.id || "")}">Play</button>
+          <button class="button ghost small" type="button" data-action="music-library-info" data-library-type="track" data-track-id="${escapeAttr(track.id || "")}">More Info</button>
+        </div>
+      </article>
+    `).join("") || `<div class="home-results-empty">No tracks available for this selection.</div>`;
+  }
+}
+
+function renderVideoLibrarySection() {
+  const section = $("#home-video-library-section");
+  const grid = $("#home-video-library-grid");
+  if (!section || !grid) return;
+  const items = Array.isArray(state.videoLibraryItems) ? state.videoLibraryItems : [];
+  section.classList.toggle("hidden", !items.length);
+  if (!items.length) {
+    grid.innerHTML = `<div class="home-results-empty">No local video downloads found yet.</div>`;
+    return;
+  }
+  grid.innerHTML = items.map((item) => {
+    const thumbnail = String(item.thumbnail_url || "").trim() || "assets/no_artwork.png";
+    const sourceLabel = getVideoLibrarySourceBadge(item);
+    const downloadHref = item.file_id ? downloadUrl(item.file_id) : "#";
+    return `
+      <article class="home-candidate-row media-library-card media-library-video-card" data-library-type="video" data-file-id="${escapeAttr(item.file_id || "")}">
+        <div class="home-candidate-artwork media-library-video-artwork">
+          <img src="${escapeAttr(thumbnail)}" alt="${escapeAttr(item.title || "Video")}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
+        </div>
+        <div class="home-candidate-info">
+          <div class="home-candidate-title-row">
+            <div class="home-candidate-title">${escapeHtml(item.title || item.filename || "Video")}</div>
+            <span class="home-candidate-source">${escapeHtml(sourceLabel)}</span>
+          </div>
+          <div class="home-candidate-meta">${escapeHtml([formatTimestamp(item.downloaded_at), formatBytes(item.size_bytes)].filter(Boolean).join(" • "))}</div>
+        </div>
+        <div class="home-candidate-action home-candidate-action-primary-stack">
+          <a class="button ghost small home-candidate-download-primary" href="${downloadHref}">Download File</a>
+          <button class="button ghost small" type="button" data-action="video-library-info" data-file-id="${escapeAttr(item.file_id || "")}">More Info</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+async function hydrateMusicLibraryArtistCovers() {
+  const artists = Array.isArray(state.playerLibrarySummary?.artists) ? state.playerLibrarySummary.artists.slice(0, 24) : [];
+  await Promise.all(artists.map(async (artist) => {
+    const key = String(artist.artist_key || "").trim();
+    if (!key || getCachedArtistCoverUrl(key)) return;
+    const persistent = await fetchPersistentArtistCoverEntry(key);
+    if (persistent?.coverUrl) {
+      setCachedArtistCoverUrl(key, persistent.coverUrl);
+    }
+  }));
+  renderMusicLibrarySection();
+}
+
+async function loadMusicLibrarySection({ force = false } = {}) {
+  const messageEl = $("#music-library-message");
+  if (state.musicLibraryLoaded && !force && Array.isArray(state.playerLibrarySummary?.artists)) {
+    renderMusicLibrarySection();
+    return;
+  }
+  setMediaLibraryNotice(messageEl, "Loading music library…", false);
+  try {
+    const data = await fetchJson("/api/player/library/summary?limit=2000");
+    state.playerLibrarySummary = (data?.summary && typeof data.summary === "object")
+      ? data.summary
+      : { artists: [], albums: [], tracks: [] };
+    state.musicLibraryLoaded = true;
+    renderMusicLibrarySection();
+    setMediaLibraryNotice(messageEl, "", false);
+  } catch (err) {
+    setMediaLibraryNotice(messageEl, `Music library failed to load: ${toUserErrorMessage(err)}`, true);
+  }
+}
+
+async function loadVideoLibrarySection({ force = false } = {}) {
+  const messageEl = $("#home-video-library-message");
+  if (state.videoLibraryLoaded && !force) {
+    renderVideoLibrarySection();
+    return;
+  }
+  setMediaLibraryNotice(messageEl, "Loading video library…", false);
+  try {
+    const data = await fetchJson("/api/library/videos?limit=24");
+    state.videoLibraryItems = Array.isArray(data?.items) ? data.items : [];
+    state.videoLibraryLoaded = true;
+    renderVideoLibrarySection();
+    setMediaLibraryNotice(messageEl, "", false);
+  } catch (err) {
+    setMediaLibraryNotice(messageEl, `Video library failed to load: ${toUserErrorMessage(err)}`, true);
+  }
 }
 
 function updateVersionDisplay(info) {
@@ -4748,7 +6398,9 @@ function updateMusicModeToggleUI(mode) {
 
 function applyMusicCardSize(size) {
   const numeric = Number.parseInt(size, 10);
-  const nextSize = Number.isFinite(numeric) ? Math.max(180, Math.min(280, numeric)) : 210;
+  const nextSize = Number.isFinite(numeric)
+    ? Math.max(UI_CARD_SIZE_MIN, Math.min(UI_CARD_SIZE_MAX, numeric))
+    : UI_DEFAULTS.music_card_size;
   state.musicCardSize = nextSize;
   const container = $("#music-results-container");
   if (container) {
@@ -4760,8 +6412,102 @@ function applyMusicCardSize(size) {
   }
   const valueLabel = $("#music-card-size-value");
   if (valueLabel) {
-    valueLabel.textContent = nextSize === 210 ? "Default" : `${nextSize}px`;
+    valueLabel.textContent = nextSize === UI_DEFAULTS.music_card_size ? "Default" : `${nextSize}px`;
   }
+}
+
+function applyHomeVideoCardSize(size) {
+  const numeric = Number.parseInt(size, 10);
+  const nextSize = Number.isFinite(numeric)
+    ? Math.max(UI_CARD_SIZE_MIN, Math.min(UI_CARD_SIZE_MAX, numeric))
+    : UI_DEFAULTS.home_video_card_size;
+  state.homeVideoCardSize = nextSize;
+  const panel = $("#home-results");
+  if (panel) {
+    panel.style.setProperty("--home-video-card-min", `${nextSize}px`);
+  }
+  const list = $("#home-results-list");
+  if (list) {
+    list.style.setProperty("--home-video-card-min", `${nextSize}px`);
+  }
+  const input = $("#home-video-card-size");
+  if (input && String(input.value) !== String(nextSize)) {
+    input.value = String(nextSize);
+  }
+  const valueLabel = $("#home-video-card-size-value");
+  if (valueLabel) {
+    valueLabel.textContent = nextSize === UI_DEFAULTS.home_video_card_size ? "Default" : `${nextSize}px`;
+  }
+}
+
+function getHomeCandidatePostedValue(candidate) {
+  if (!candidate || typeof candidate !== "object") return 0;
+  const direct = [
+    candidate.posted_at,
+    candidate.published_at,
+    candidate.publish_date,
+    candidate.upload_date,
+  ];
+  for (const value of direct) {
+    const text = String(value || "").trim();
+    if (!text) continue;
+    const timestamp = Date.parse(text);
+    if (Number.isFinite(timestamp)) {
+      return timestamp;
+    }
+    if (/^\d{8}$/.test(text)) {
+      const year = Number(text.slice(0, 4));
+      const month = Number(text.slice(4, 6));
+      const day = Number(text.slice(6, 8));
+      const parsed = Date.UTC(year, month - 1, day);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return 0;
+}
+
+function getHomeCandidateSourcePriority(candidate) {
+  const source = String(candidate?.source || "").trim().toLowerCase();
+  const index = HOME_VIDEO_SOURCE_PRIORITY.indexOf(source);
+  return index >= 0 ? index : HOME_VIDEO_SOURCE_PRIORITY.length;
+}
+
+function getSortedHomeCandidates(candidates = []) {
+  const results = Array.isArray(candidates) ? [...candidates] : [];
+  const sortMode = String(state.homeVideoSort || UI_DEFAULTS.home_video_sort);
+  const byBestMatch = (a, b) => {
+    const scoreDiff = Number(b?.final_score || 0) - Number(a?.final_score || 0);
+    if (scoreDiff !== 0) return scoreDiff;
+    const sourceDiff = getHomeCandidateSourcePriority(a) - getHomeCandidateSourcePriority(b);
+    if (sourceDiff !== 0) return sourceDiff;
+    const postedDiff = getHomeCandidatePostedValue(b) - getHomeCandidatePostedValue(a);
+    if (postedDiff !== 0) return postedDiff;
+    return String(a?.title || "").localeCompare(String(b?.title || ""));
+  };
+  if (sortMode === "newest") {
+    return results.sort((a, b) => {
+      const postedDiff = getHomeCandidatePostedValue(b) - getHomeCandidatePostedValue(a);
+      if (postedDiff !== 0) return postedDiff;
+      return byBestMatch(a, b);
+    });
+  }
+  if (sortMode === "source_priority") {
+    return results.sort((a, b) => {
+      const sourceDiff = getHomeCandidateSourcePriority(a) - getHomeCandidateSourcePriority(b);
+      if (sourceDiff !== 0) return sourceDiff;
+      return byBestMatch(a, b);
+    });
+  }
+  if (sortMode === "title_asc") {
+    return results.sort((a, b) => {
+      const titleDiff = String(a?.title || "").localeCompare(String(b?.title || ""));
+      if (titleDiff !== 0) return titleDiff;
+      return byBestMatch(a, b);
+    });
+  }
+  return results.sort(byBestMatch);
 }
 
 function getMusicItemYearValue(item) {
@@ -4835,7 +6581,7 @@ function getSortedMusicAlbums(albums = []) {
 function renderMusicResultsControls({ artists = [], albums = [], tracks = [] } = {}) {
   const container = $("#music-results-container");
   if (!container) return;
-  container.style.setProperty("--music-card-min", `${state.musicCardSize || 210}px`);
+  container.style.setProperty("--music-card-min", `${state.musicCardSize || UI_DEFAULTS.music_card_size}px`);
   container.querySelector(".music-results-toolbar")?.remove();
   const hasArtists = Array.isArray(artists) && artists.length > 0;
   const hasAlbums = Array.isArray(albums) && albums.length > 0;
@@ -4855,8 +6601,8 @@ function renderMusicResultsControls({ artists = [], albums = [], tracks = [] } =
     sizeLabel.setAttribute("for", "music-card-size");
     sizeLabel.innerHTML = `
       <span class="meta">Card Size</span>
-      <input id="music-card-size" type="range" min="180" max="280" step="10" value="${state.musicCardSize || 210}">
-      <span id="music-card-size-value" class="meta">${(state.musicCardSize || 210) === 210 ? "Default" : `${state.musicCardSize}px`}</span>
+      <input id="music-card-size" type="range" min="${UI_CARD_SIZE_MIN}" max="${UI_CARD_SIZE_MAX}" step="10" value="${state.musicCardSize || UI_DEFAULTS.music_card_size}">
+      <span id="music-card-size-value" class="meta">${(state.musicCardSize || UI_DEFAULTS.music_card_size) === UI_DEFAULTS.music_card_size ? "Default" : `${state.musicCardSize}px`}</span>
     `;
     actions.appendChild(sizeLabel);
   }
@@ -4890,6 +6636,9 @@ function renderMusicResultsControls({ artists = [], albums = [], tracks = [] } =
   const sizeInput = $("#music-card-size");
   if (sizeInput) {
     sizeInput.addEventListener("input", () => applyMusicCardSize(sizeInput.value));
+    sizeInput.addEventListener("change", () => persistUiPreferences({
+      music_card_size: Number.parseInt(sizeInput.value, 10) || UI_DEFAULTS.music_card_size,
+    }));
     applyMusicCardSize(sizeInput.value);
   }
   const sortSelect = $("#music-results-sort");
@@ -4901,6 +6650,7 @@ function renderMusicResultsControls({ artists = [], albums = [], tracks = [] } =
     sortSelect.value = String(state.musicResultsSort || "recommended");
     sortSelect.addEventListener("change", () => {
       state.musicResultsSort = String(sortSelect.value || "recommended");
+      persistUiPreferences({ music_sort: state.musicResultsSort });
       if (state.homeMusicCurrentView?.response) {
         renderMusicModeResults(state.homeMusicCurrentView.response, state.homeMusicCurrentView.query, { pushHistory: false });
       }
@@ -5444,6 +7194,10 @@ function renderArrGenreShelf() {
     listEl.appendChild(createArrGenreCard(genre, renderToken));
   });
   statusTextEl.textContent = `${Math.min(genres.length, 10)} genres ready`;
+  if ((state.moviesTvSection || "search") === "genres") {
+    const section = $("#movies-tv-genres");
+    if (section) section.classList.remove("hidden");
+  }
 }
 
 async function browseArrGenre(genre, { year = "" } = {}) {
@@ -5459,11 +7213,12 @@ async function browseArrGenre(genre, { year = "" } = {}) {
     state.arrActiveGenre = { id: genreId, name: genreName };
     state.arrSearchContext = "genre";
     state.arrSearchQuery = genreName;
-    state.arrSearchYear = yearValue;
+    setMoviesTvSearchYear(yearValue);
     state.arrResults = cached.results.map((item, index) => ({ ...item, _search_rank: index }));
     state.arrConnectionStatus[getArrServiceKey()] = cached.connection || state.arrConnectionStatus[getArrServiceKey()];
     renderArrConnectionStatus();
     renderArrResults();
+    setMoviesTvSection("search");
     focusMoviesTvResults();
     startArrStatusPolling();
     setNotice(messageEl, `Loaded top ${genreName} titles.`, false);
@@ -5487,13 +7242,14 @@ async function browseArrGenre(genre, { year = "" } = {}) {
     state.arrActiveGenre = { id: genreId, name: genreName };
     state.arrSearchContext = "genre";
     state.arrSearchQuery = genreName;
-    state.arrSearchYear = yearValue;
+    setMoviesTvSearchYear(yearValue);
     state.arrResults = Array.isArray(data?.results)
       ? data.results.map((item, index) => ({ ...item, _search_rank: index }))
       : [];
     state.arrConnectionStatus[getArrServiceKey()] = data?.connection || state.arrConnectionStatus[getArrServiceKey()];
     renderArrConnectionStatus();
     renderArrResults();
+    setMoviesTvSection("search");
     focusMoviesTvResults();
     startArrStatusPolling();
     setNotice(messageEl, state.arrResults.length ? `Loaded top ${genreName} titles.` : `No ${genreName} titles found.`, false);
@@ -5704,10 +7460,11 @@ async function openArrPersonTitles(personId) {
     state.arrActiveGenre = null;
     state.arrSearchContext = "person";
     state.arrSearchQuery = personName;
-    state.arrSearchYear = "";
+    setMoviesTvSearchYear("");
     state.arrResults = cached.results.map((item, index) => ({ ...item, _search_rank: index }));
     closeArrDetailsModal();
     renderArrResults();
+    setMoviesTvSection("search");
     focusMoviesTvResults();
     startArrStatusPolling();
     setNotice(messageEl, state.arrResults.length ? `Loaded titles for ${personName}.` : `No titles found for ${personName}.`, false);
@@ -5727,12 +7484,13 @@ async function openArrPersonTitles(personId) {
     state.arrActiveGenre = null;
     state.arrSearchContext = "person";
     state.arrSearchQuery = personName;
-    state.arrSearchYear = "";
+    setMoviesTvSearchYear("");
     state.arrResults = Array.isArray(data?.results)
       ? data.results.map((item, index) => ({ ...item, _search_rank: index }))
       : [];
     closeArrDetailsModal();
     renderArrResults();
+    setMoviesTvSection("search");
     focusMoviesTvResults();
     startArrStatusPolling();
     setNotice(messageEl, state.arrResults.length ? `Loaded titles for ${personName}.` : `No titles found for ${personName}.`, false);
@@ -5743,7 +7501,9 @@ async function openArrPersonTitles(personId) {
 
 function applyArrCardSize(size) {
   const numeric = Number.parseInt(size, 10);
-  const nextSize = Number.isFinite(numeric) ? Math.max(220, Math.min(340, numeric)) : 280;
+  const nextSize = Number.isFinite(numeric)
+    ? Math.max(UI_CARD_SIZE_MIN, Math.min(UI_CARD_SIZE_MAX, numeric))
+    : UI_DEFAULTS.movies_tv_card_size;
   state.arrCardSize = nextSize;
   const panel = $("#movies-tv-panel");
   if (panel) {
@@ -5755,7 +7515,7 @@ function applyArrCardSize(size) {
   }
   const valueLabel = $("#movies-tv-card-size-value");
   if (valueLabel) {
-    valueLabel.textContent = nextSize === 280 ? "Default" : `${nextSize}px`;
+    valueLabel.textContent = nextSize === UI_DEFAULTS.movies_tv_card_size ? "Default" : `${nextSize}px`;
   }
 }
 
@@ -5816,6 +7576,7 @@ function getSortedArrResults() {
 
 function renderArrResults() {
   const section = $("#movies-tv-results");
+  const genresSection = $("#movies-tv-genres");
   const listEl = $("#movies-tv-results-list");
   const statusTextEl = $("#movies-tv-results-status-text");
   const detailEl = $("#movies-tv-results-detail");
@@ -5827,14 +7588,21 @@ function renderArrResults() {
     sortSelect.value = String(state.arrSort || "best_match");
   }
   const modeLabel = state.arrMode === "tv" ? "TV shows" : "movies";
+  const showGenres = (state.moviesTvSection || "search") === "genres";
   if (!Array.isArray(state.arrResults) || state.arrResults.length === 0) {
     section.classList.add("hidden");
+    if (genresSection) {
+      genresSection.classList.remove("hidden");
+    }
     listEl.innerHTML = "";
     statusTextEl.textContent = "Ready to search";
     if (detailEl) detailEl.classList.add("hidden");
     return;
   }
-  section.classList.remove("hidden");
+  section.classList.toggle("hidden", showGenres);
+  if (genresSection) {
+    genresSection.classList.toggle("hidden", !showGenres);
+  }
   statusTextEl.textContent = `Showing ${state.arrResults.length} ${modeLabel}`;
   if (detailEl) {
     const yearText = String(state.arrSearchYear || "").trim();
@@ -5941,7 +7709,7 @@ function setArrMode(mode) {
   state.arrMode = normalizeArrMode(mode);
   state.arrResults = [];
   state.arrSearchQuery = "";
-  state.arrSearchYear = "";
+  setMoviesTvSearchYear("");
   state.arrSearchContext = "search";
   state.arrActiveGenre = null;
   updateArrModeToggleUI();
@@ -6048,11 +7816,11 @@ async function performArrSearch() {
     return;
   }
   const input = $("#movies-tv-search-input");
-  const yearInput = $("#movies-tv-year-input");
   const messageEl = $("#movies-tv-message");
   const query = String(input?.value || "").trim();
-  const yearRaw = String(yearInput?.value || "").trim();
-  const year = /^\d{4}$/.test(yearRaw) ? yearRaw : "";
+  const year = /^\d{4}$/.test(String(state.arrSearchYear || "").trim())
+    ? String(state.arrSearchYear).trim()
+    : "";
   if (!query) {
     setNotice(messageEl, "Enter a movie, show, actor, director, or genre to search TMDb.", true);
     return;
@@ -6075,13 +7843,14 @@ async function performArrSearch() {
     state.arrActiveGenre = null;
     state.arrSearchContext = "search";
     state.arrSearchQuery = query;
-    state.arrSearchYear = year;
+    setMoviesTvSearchYear(year);
     state.arrResults = Array.isArray(data?.results)
       ? data.results.map((item, index) => ({ ...item, _search_rank: index }))
       : [];
     state.arrConnectionStatus[getArrServiceKey()] = data?.connection || state.arrConnectionStatus[getArrServiceKey()];
     renderArrConnectionStatus();
     renderArrResults();
+    setMoviesTvSection("search");
     focusMoviesTvResults();
     startArrStatusPolling();
     setNotice(
@@ -7956,6 +9725,7 @@ function clearLegacyHomeSearchState() {
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
   state.homeCandidateRefreshPending = {};
+  state.homeCandidatesByItem = {};
   const resultsList = $("#home-results-list");
   if (resultsList) {
     resultsList.textContent = "";
@@ -8015,6 +9785,7 @@ async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   state.homeCandidateCache = {};
   state.homeCandidatesLoading = {};
   state.homeCandidateRefreshPending = {};
+  state.homeCandidatesByItem = {};
   state.homeSearchRequestId = data.request_id;
   state.homeSearchMode = autoEnqueue ? "download" : "searchOnly";
   updateHomeViewAdvancedLink();
@@ -8774,6 +10545,132 @@ function scheduleHomeCandidateRefresh(item, container) {
   loadHomeCandidates(item, container, preloadedCandidates);
 }
 
+function renderHomeCandidatesIntoContainer(item, container, candidates = []) {
+  if (!container) return;
+  container.textContent = "";
+  const sortedCandidates = getSortedHomeCandidates(candidates);
+  if (!sortedCandidates.length) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "home-results-empty";
+    placeholder.textContent = "Searching…";
+    container.appendChild(placeholder);
+    return;
+  }
+  const requestId = item?.request_id || state.homeSearchRequestId;
+  const snapshot = state.homeJobSnapshot && state.homeJobSnapshot.requestId === requestId
+    ? state.homeJobSnapshot
+    : null;
+  const rendered = new Set();
+  let bestScore = Number.NEGATIVE_INFINITY;
+  sortedCandidates.forEach((candidate) => {
+    if (candidate?.id) {
+      rendered.add(candidate.id);
+      state.homeCandidateData[candidate.id] = { candidate, item };
+    }
+    if (candidate?.final_score !== undefined) {
+      const score = Number(candidate.final_score);
+      if (Number.isFinite(score) && score > bestScore) {
+        bestScore = score;
+      }
+    }
+    const row = renderHomeCandidateRow(candidate, item);
+    const job = snapshot && candidate?.url ? snapshot.jobsByUrl.get(candidate.url) : null;
+    updateHomeCandidateRowState(row, candidate, item, job || null);
+    container.appendChild(row);
+  });
+  if (item?.id) {
+    state.homeCandidateCache[item.id] = rendered;
+  }
+  if (Number.isFinite(bestScore) && requestId) {
+    recordHomeCandidateScore(requestId, bestScore);
+  }
+}
+
+function rerenderAllHomeCandidateLists() {
+  Object.entries(state.homeCandidatesByItem || {}).forEach(([itemId, entry]) => {
+    if (!entry?.item || !Array.isArray(entry?.candidates)) return;
+    const selector = `.home-result-card[data-item-id="${CSS.escape(itemId)}"] .home-candidate-list`;
+    const container = document.querySelector(selector);
+    if (!container) return;
+    renderHomeCandidatesIntoContainer(entry.item, container, entry.candidates);
+  });
+}
+
+function getHomeItemBestCandidate(item) {
+  if (!item?.id) return null;
+  const entry = state.homeCandidatesByItem?.[item.id];
+  const candidates = Array.isArray(entry?.candidates) ? entry.candidates : Array.isArray(item.candidates) ? item.candidates : [];
+  if (!candidates.length) return null;
+  return getSortedHomeCandidates(candidates)[0] || null;
+}
+
+function getSortedHomeResultItems(items = []) {
+  const results = Array.isArray(items) ? [...items] : [];
+  const sortMode = String(state.homeVideoSort || UI_DEFAULTS.home_video_sort);
+  const byBestMatch = (a, b) => {
+    const candidateA = getHomeItemBestCandidate(a);
+    const candidateB = getHomeItemBestCandidate(b);
+    const scoreDiff = Number(candidateB?.final_score || 0) - Number(candidateA?.final_score || 0);
+    if (scoreDiff !== 0) return scoreDiff;
+    const sourceDiff = getHomeCandidateSourcePriority(candidateA) - getHomeCandidateSourcePriority(candidateB);
+    if (sourceDiff !== 0) return sourceDiff;
+    const postedDiff = getHomeCandidatePostedValue(candidateB) - getHomeCandidatePostedValue(candidateA);
+    if (postedDiff !== 0) return postedDiff;
+    return String(a?.title || "").localeCompare(String(b?.title || ""));
+  };
+  if (sortMode === "newest") {
+    return results.sort((a, b) => {
+      const candidateA = getHomeItemBestCandidate(a);
+      const candidateB = getHomeItemBestCandidate(b);
+      const postedDiff = getHomeCandidatePostedValue(candidateB) - getHomeCandidatePostedValue(candidateA);
+      if (postedDiff !== 0) return postedDiff;
+      return byBestMatch(a, b);
+    });
+  }
+  if (sortMode === "source_priority") {
+    return results.sort((a, b) => {
+      const candidateA = getHomeItemBestCandidate(a);
+      const candidateB = getHomeItemBestCandidate(b);
+      const sourceDiff = getHomeCandidateSourcePriority(candidateA) - getHomeCandidateSourcePriority(candidateB);
+      if (sourceDiff !== 0) return sourceDiff;
+      return byBestMatch(a, b);
+    });
+  }
+  if (sortMode === "title_asc") {
+    return results.sort((a, b) => {
+      const titleDiff = String(a?.title || "").localeCompare(String(b?.title || ""));
+      if (titleDiff !== 0) return titleDiff;
+      return byBestMatch(a, b);
+    });
+  }
+  return results.sort(byBestMatch);
+}
+
+function rerenderHomeResultCards() {
+  const container = $("#home-results-list");
+  if (!container) return;
+  const items = Array.isArray(state.homeResultItems) ? state.homeResultItems : [];
+  if (!items.length) return;
+  const sortedItems = getSortedHomeResultItems(items);
+  const existingCards = new Map();
+  container.querySelectorAll(".home-result-card[data-item-id]").forEach((card) => {
+    existingCards.set(card.dataset.itemId, card);
+  });
+  const fragment = document.createDocumentFragment();
+  sortedItems.forEach((item) => {
+    if (!item?.id) return;
+    let card = existingCards.get(String(item.id));
+    if (!card) {
+      card = renderHomeResultItem(item);
+    } else {
+      updateHomeResultItemCard(card, item);
+    }
+    fragment.appendChild(card);
+  });
+  container.replaceChildren(fragment);
+  rerenderAllHomeCandidateLists();
+}
+
 async function loadHomeCandidates(item, container, preloadedCandidates = null) {
   if (!item || !container) {
     return;
@@ -8815,40 +10712,9 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
       placeholder.remove();
     }
     const requestId = item.request_id || state.homeSearchRequestId;
+    state.homeCandidatesByItem[item.id] = { item, candidates: [...candidates] };
     setHomeResultsState({ hasResults: true, terminal: false });
-    let rendered = state.homeCandidateCache[item.id];
-    if (!rendered) {
-      rendered = new Set();
-    }
-    let bestScore = Number.NEGATIVE_INFINITY;
-    candidates.forEach((candidate) => {
-      if (candidate.id && !rendered.has(candidate.id)) {
-        rendered.add(candidate.id);
-      }
-      if (candidate.final_score !== undefined) {
-        const score = Number(candidate.final_score);
-        if (Number.isFinite(score) && score > bestScore) {
-          bestScore = score;
-        }
-      }
-      let row = null;
-      if (candidate.id) {
-        const selector = `[data-candidate-id="${CSS.escape(candidate.id)}"]`;
-        row = container.querySelector(selector);
-      }
-      if (!row) {
-        row = renderHomeCandidateRow(candidate, item);
-        container.appendChild(row);
-      }
-      updateHomeCandidateRowState(row, candidate, item, null);
-      if (candidate.id) {
-        state.homeCandidateData[candidate.id] = { candidate, item };
-      }
-    });
-    state.homeCandidateCache[item.id] = rendered;
-    if (Number.isFinite(bestScore)) {
-      recordHomeCandidateScore(requestId, bestScore);
-    }
+    renderHomeCandidatesIntoContainer(item, container, candidates);
     // Enrich job-state asynchronously so rendering is never blocked.
     Promise.resolve()
       .then(async () => {
@@ -8861,14 +10727,8 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
       })
       .then((jobSnapshot) => {
         if (!jobSnapshot) return;
-        candidates.forEach((candidate) => {
-          if (!candidate?.id) return;
-          const selector = `[data-candidate-id="${CSS.escape(candidate.id)}"]`;
-          const row = container.querySelector(selector);
-          if (!row) return;
-          const job = candidate.url ? jobSnapshot.jobsByUrl.get(candidate.url) : null;
-          updateHomeCandidateRowState(row, candidate, item, job || null);
-        });
+        const activeEntry = state.homeCandidatesByItem[item.id];
+        renderHomeCandidatesIntoContainer(item, container, activeEntry?.candidates || candidates);
         if (!state.homeJobTimer) {
           const hasActive = Array.from(jobSnapshot.jobsByUrl.values()).some((job) =>
             ["queued", "claimed", "downloading", "postprocessing"].includes(job.status)
@@ -9066,10 +10926,18 @@ function renderHomeCandidateRow(candidate, item) {
   row.appendChild(action);
 
   const postedDate = formatCandidatePostedDate(candidate);
-  if (postedDate) {
+  const durationSeconds = Number(candidate?.duration_sec);
+  const durationText = Number.isFinite(durationSeconds) && durationSeconds > 0
+    ? formatDuration(durationSeconds)
+    : "";
+  const footerMeta = [
+    postedDate ? `Posted: ${postedDate}` : "",
+    durationText ? `Duration: ${durationText}` : "",
+  ].filter(Boolean).join(" • ");
+  if (footerMeta) {
     const postedEl = document.createElement("div");
     postedEl.className = "home-candidate-posted";
-    postedEl.textContent = `Posted: ${postedDate}`;
+    postedEl.textContent = footerMeta;
     row.appendChild(postedEl);
   }
 
@@ -9492,6 +11360,7 @@ function showHomeDirectUrlError(url, message, messageEl) {
   state.homeCandidatesLoading = {};
   state.homeCandidateRefreshPending = {};
   state.homeCandidateData = {};
+  state.homeCandidatesByItem = {};
   stopHomeJobPolling();
   showHomeResults(true);
   setHomeResultsStatus("Failed");
@@ -9518,6 +11387,7 @@ function showHomeDirectUrlPreview(preview) {
   state.homeCandidatesLoading = {};
   state.homeCandidateRefreshPending = {};
   state.homeCandidateData = {};
+  state.homeCandidatesByItem = {};
   stopHomeJobPolling();
   showHomeResults(true);
   setHomeResultsStatus("Direct URL preview");
@@ -9785,8 +11655,10 @@ async function refreshHomeResults(requestId) {
       }
       return requestStatus;
     }
+    state.homeResultItems = Array.isArray(items) ? [...items] : [];
     const currentIds = new Set();
-    items.forEach((item) => {
+    const sortedItems = getSortedHomeResultItems(items);
+    sortedItems.forEach((item) => {
       if (!item.id) {
         return;
       }
@@ -9951,6 +11823,7 @@ async function submitHomeSearch(autoEnqueue) {
   state.homeDirectPreview = null;
   stopHomeJobPolling();
   state.homeCandidateData = {};
+  state.homeCandidatesByItem = {};
   state.homeMusicResultMap = {};
   state.homeAlbumCandidatesRequestId = null;
   clearHomeAlbumCandidates();
@@ -10133,6 +12006,7 @@ async function handleHomePlaylistUrlPreview(url, playlistId, messageEl) {
   state.homeCandidatesLoading = {};
   state.homeCandidateRefreshPending = {};
   state.homeCandidateData = {};
+  state.homeCandidatesByItem = {};
   state.homeDirectPreview = {
     title: `YouTube Playlist (${playlistId})`,
     url,
@@ -10998,6 +12872,26 @@ function addPlaylistRow(entry = {}) {
 function renderConfig(cfg) {
   state.suppressDirty = true;
   syncMusicPreferencesFromConfig(cfg);
+  const uiPrefs = (cfg && typeof cfg.ui_preferences === "object") ? cfg.ui_preferences : {};
+  state.homeVideoCardSize = Number.isFinite(Number(uiPrefs.home_video_card_size))
+    ? Math.max(UI_CARD_SIZE_MIN, Math.min(UI_CARD_SIZE_MAX, Number(uiPrefs.home_video_card_size)))
+    : UI_DEFAULTS.home_video_card_size;
+  state.homeVideoSort = String(uiPrefs.home_video_sort || UI_DEFAULTS.home_video_sort);
+  state.musicCardSize = Number.isFinite(Number(uiPrefs.music_card_size))
+    ? Math.max(UI_CARD_SIZE_MIN, Math.min(UI_CARD_SIZE_MAX, Number(uiPrefs.music_card_size)))
+    : UI_DEFAULTS.music_card_size;
+  state.musicResultsSort = String(uiPrefs.music_sort || UI_DEFAULTS.music_sort);
+  state.arrCardSize = Number.isFinite(Number(uiPrefs.movies_tv_card_size))
+    ? Math.max(UI_CARD_SIZE_MIN, Math.min(UI_CARD_SIZE_MAX, Number(uiPrefs.movies_tv_card_size)))
+    : UI_DEFAULTS.movies_tv_card_size;
+  state.arrSort = String(uiPrefs.movies_tv_sort || UI_DEFAULTS.movies_tv_sort);
+  applyHomeVideoCardSize(state.homeVideoCardSize);
+  applyArrCardSize(state.arrCardSize);
+  const homeVideoSort = $("#home-video-sort");
+  if (homeVideoSort) {
+    homeVideoSort.value = state.homeVideoSort;
+  }
+  rerenderAllHomeCandidateLists();
   applySettingsAdvancedMode(!!cfg.settings_advanced_mode, { persist: false });
   $("#cfg-upload-date-format").value = cfg.upload_date_format ?? "";
   $("#cfg-filename-template").value = cfg.filename_template ?? "";
@@ -11068,6 +12962,7 @@ function renderConfig(cfg) {
   const arrQbit = (arrCfg && typeof arrCfg.qbittorrent === "object") ? arrCfg.qbittorrent : {};
   const arrJellyfin = (arrCfg && typeof arrCfg.jellyfin === "object") ? arrCfg.jellyfin : {};
   const arrVpn = (arrCfg && typeof arrCfg.vpn === "object") ? arrCfg.vpn : {};
+  const playbackCfg = (cfg && typeof cfg.playback === "object") ? cfg.playback : {};
   const setupCfg = (cfg && typeof cfg.setup === "object") ? cfg.setup : {};
   const setupStack = (setupCfg && typeof setupCfg.stack === "object") ? setupCfg.stack : {};
   const securityCfg = (cfg && typeof cfg.security === "object") ? cfg.security : {};
@@ -11097,6 +12992,11 @@ function renderConfig(cfg) {
   $("#cfg-arr-vpn-route-qbittorrent").checked = arrVpn.route_qbittorrent !== false;
   $("#cfg-arr-vpn-route-prowlarr").checked = !!arrVpn.route_prowlarr;
   $("#cfg-arr-vpn-route-retreivr").checked = !!arrVpn.route_retreivr;
+  $("#cfg-playback-external-mode").value = playbackCfg.external_player_mode ?? "none";
+  $("#cfg-playback-external-label").value = playbackCfg.external_player_label ?? "";
+  $("#cfg-playback-external-template").value = playbackCfg.external_player_url_template ?? "";
+  $("#cfg-playback-plex-base-url").value = playbackCfg.plex_base_url ?? "";
+  updatePlaybackIntegrationPreview();
   $("#cfg-security-admin-pin-enabled").checked = !!securityCfg.admin_pin_enabled;
   $("#cfg-security-admin-pin-session-minutes").value = Number.isFinite(securityCfg.admin_pin_session_minutes)
     ? Number(securityCfg.admin_pin_session_minutes)
@@ -11552,6 +13452,51 @@ async function loadConfig() {
   }
 }
 
+async function persistUiPreferences(partial = {}) {
+  const payload = {};
+  if ("home_video_card_size" in partial) {
+    payload.home_video_card_size = Math.max(
+      UI_CARD_SIZE_MIN,
+      Math.min(UI_CARD_SIZE_MAX, Number.parseInt(partial.home_video_card_size, 10) || UI_DEFAULTS.home_video_card_size)
+    );
+  }
+  if ("home_video_sort" in partial) {
+    payload.home_video_sort = String(partial.home_video_sort || UI_DEFAULTS.home_video_sort);
+  }
+  if ("music_card_size" in partial) {
+    payload.music_card_size = Math.max(
+      UI_CARD_SIZE_MIN,
+      Math.min(UI_CARD_SIZE_MAX, Number.parseInt(partial.music_card_size, 10) || UI_DEFAULTS.music_card_size)
+    );
+  }
+  if ("music_sort" in partial) {
+    payload.music_sort = String(partial.music_sort || UI_DEFAULTS.music_sort);
+  }
+  if ("movies_tv_card_size" in partial) {
+    payload.movies_tv_card_size = Math.max(
+      UI_CARD_SIZE_MIN,
+      Math.min(UI_CARD_SIZE_MAX, Number.parseInt(partial.movies_tv_card_size, 10) || UI_DEFAULTS.movies_tv_card_size)
+    );
+  }
+  if ("movies_tv_sort" in partial) {
+    payload.movies_tv_sort = String(partial.movies_tv_sort || UI_DEFAULTS.movies_tv_sort);
+  }
+  if (!Object.keys(payload).length) {
+    return;
+  }
+  try {
+    const prefs = await fetchJson("/api/config/ui-preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    state.config = state.config && typeof state.config === "object" ? state.config : {};
+    state.config.ui_preferences = prefs;
+  } catch (_err) {
+    // Keep UI responsive even if preference persistence fails.
+  }
+}
+
 function buildConfigFromForm() {
   const base = state.config ? JSON.parse(JSON.stringify(state.config)) : {};
   const errors = [];
@@ -11932,6 +13877,13 @@ function buildConfigFromForm() {
   arr.vpn.route_prowlarr = !!$("#cfg-arr-vpn-route-prowlarr").checked;
   arr.vpn.route_retreivr = !!$("#cfg-arr-vpn-route-retreivr").checked;
   base.arr = arr;
+
+  const playback = (base.playback && typeof base.playback === "object") ? { ...base.playback } : {};
+  playback.external_player_mode = $("#cfg-playback-external-mode").value.trim() || "none";
+  playback.external_player_label = $("#cfg-playback-external-label").value.trim();
+  playback.external_player_url_template = $("#cfg-playback-external-template").value.trim();
+  playback.plex_base_url = $("#cfg-playback-plex-base-url").value.trim();
+  base.playback = playback;
 
   const setup = (base.setup && typeof base.setup === "object") ? { ...base.setup } : {};
   const setupStack = (setup.stack && typeof setup.stack === "object") ? { ...setup.stack } : {};
@@ -12474,6 +14426,19 @@ function bindEvents() {
       navToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
     });
   }
+  const brandHome = $("#brand-home");
+  if (brandHome) {
+    brandHome.addEventListener("click", () => {
+      setPage("home");
+      window.location.hash = "home";
+    });
+  }
+  const appSidebarToggle = $("#app-sidebar-toggle");
+  if (appSidebarToggle) {
+    appSidebarToggle.addEventListener("click", () => {
+      applyAppSidebarCollapsed(!state.appSidebarCollapsed, { persist: true });
+    });
+  }
   $$(".filters-toggle").forEach((button) => {
     button.addEventListener("click", () => {
       const targetId = button.dataset.target;
@@ -12536,6 +14501,249 @@ function bindEvents() {
   $("#downloads-body").addEventListener("click", async (event) => {
     await handleCopy(event, $("#downloads-message"));
   });
+  const homeVideoLibraryRefresh = $("#home-video-library-refresh");
+  if (homeVideoLibraryRefresh) {
+    homeVideoLibraryRefresh.addEventListener("click", () => {
+      loadVideoLibrarySection({ force: true }).catch(() => {});
+    });
+  }
+  const musicLibraryRefresh = $("#music-library-refresh");
+  if (musicLibraryRefresh) {
+    musicLibraryRefresh.addEventListener("click", () => {
+      loadMusicLibrarySection({ force: true }).catch(() => {});
+    });
+  }
+  $$("[data-music-library-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.musicLibraryMode = button.dataset.musicLibraryMode || "artists";
+      if (state.musicLibraryMode === "artists") {
+        state.playerSelectedArtistKey = "";
+        state.playerSelectedAlbumKey = "";
+      } else if (state.musicLibraryMode === "albums") {
+        state.playerSelectedAlbumKey = "";
+      }
+      renderMusicLibrarySection();
+    });
+  });
+  const musicLibraryGrid = $("#music-library-grid");
+  if (musicLibraryGrid) {
+    musicLibraryGrid.addEventListener("click", async (event) => {
+      const action = event.target.closest("[data-action]");
+      if (!action) {
+        const card = event.target.closest(".media-library-card");
+        if (!card) return;
+        const type = String(card.dataset.libraryType || "");
+        if (type === "artist") {
+          const artist = (state.playerLibrarySummary?.artists || []).find((entry) => String(entry.artist_key || "") === String(card.dataset.artistKey || ""));
+          if (artist) {
+            openLibraryDetailsModal(buildMusicLibraryArtistModalPayload(artist));
+          }
+        } else if (type === "album") {
+          const album = (state.playerLibrarySummary?.albums || []).find((entry) =>
+            String(entry.artist_key || "") === String(card.dataset.artistKey || "") &&
+            String(entry.album_key || "") === String(card.dataset.albumKey || "")
+          );
+          if (album) {
+            openLibraryDetailsModal(buildMusicLibraryAlbumModalPayload(album));
+          }
+        } else if (type === "track") {
+          const track = getMusicLibraryFilteredTracks().find((entry) => String(entry.id || "") === String(card.dataset.trackId || ""));
+          if (track) {
+            openLibraryDetailsModal(buildMusicLibraryTrackModalPayload(track));
+          }
+        }
+        return;
+      }
+      const actionName = String(action.dataset.action || "");
+      if (actionName === "music-library-reset") {
+        state.musicLibraryMode = "albums";
+        state.playerSelectedArtistKey = "";
+        state.playerSelectedAlbumKey = "";
+        renderMusicLibrarySection();
+        return;
+      }
+      if (actionName === "music-library-open-artist") {
+        state.playerSelectedArtistKey = String(action.dataset.artistKey || "").trim();
+        state.playerSelectedAlbumKey = "";
+        state.musicLibraryMode = "albums";
+        renderMusicLibrarySection();
+        closeLibraryDetailsModal();
+        return;
+      }
+      if (actionName === "music-library-open-album") {
+        state.playerSelectedArtistKey = String(action.dataset.artistKey || "").trim();
+        state.playerSelectedAlbumKey = String(action.dataset.albumKey || "").trim();
+        state.musicLibraryMode = "tracks";
+        renderMusicLibrarySection();
+        closeLibraryDetailsModal();
+        return;
+      }
+      if (actionName === "music-library-play-track") {
+        const trackId = String(action.dataset.trackId || "").trim();
+        const track = getMusicLibraryFilteredTracks().find((entry) => String(entry.id || "") === trackId);
+        if (track) {
+          await playMusicPlayerItem(track);
+        }
+        closeLibraryDetailsModal();
+        return;
+      }
+      if (actionName === "music-library-info") {
+        const type = String(action.dataset.libraryType || "");
+        if (type === "artist") {
+          const artist = (state.playerLibrarySummary?.artists || []).find((entry) => String(entry.artist_key || "") === String(action.dataset.artistKey || ""));
+          if (artist) {
+            openLibraryDetailsModal(buildMusicLibraryArtistModalPayload(artist));
+          }
+        } else if (type === "album") {
+          const album = (state.playerLibrarySummary?.albums || []).find((entry) =>
+            String(entry.artist_key || "") === String(action.dataset.artistKey || "") &&
+            String(entry.album_key || "") === String(action.dataset.albumKey || "")
+          );
+          if (album) {
+            openLibraryDetailsModal(buildMusicLibraryAlbumModalPayload(album));
+          }
+        } else if (type === "track") {
+          const track = getMusicLibraryFilteredTracks().find((entry) => String(entry.id || "") === String(action.dataset.trackId || ""));
+          if (track) {
+            openLibraryDetailsModal(buildMusicLibraryTrackModalPayload(track));
+          }
+        }
+      }
+    });
+  }
+  const musicBreadcrumbs = $("#music-library-breadcrumbs");
+  if (musicBreadcrumbs) {
+    musicBreadcrumbs.addEventListener("click", (event) => {
+      const action = event.target.closest("[data-action]");
+      if (!action) return;
+      const actionName = String(action.dataset.action || "");
+      if (actionName === "music-library-reset") {
+        state.musicLibraryMode = "albums";
+        state.playerSelectedArtistKey = "";
+        state.playerSelectedAlbumKey = "";
+      } else if (actionName === "music-library-open-artist") {
+        state.playerSelectedArtistKey = String(action.dataset.artistKey || "").trim();
+        state.playerSelectedAlbumKey = "";
+        state.musicLibraryMode = "albums";
+      } else if (actionName === "music-library-open-album") {
+        state.playerSelectedArtistKey = String(action.dataset.artistKey || "").trim();
+        state.playerSelectedAlbumKey = String(action.dataset.albumKey || "").trim();
+        state.musicLibraryMode = "tracks";
+      }
+      renderMusicLibrarySection();
+    });
+  }
+  const videoLibraryGrid = $("#home-video-library-grid");
+  if (videoLibraryGrid) {
+    videoLibraryGrid.addEventListener("click", (event) => {
+      const action = event.target.closest("[data-action]");
+      if (!action) {
+        const card = event.target.closest(".media-library-video-card");
+        if (!card) return;
+        const fileId = String(card.dataset.fileId || "").trim();
+        const item = state.videoLibraryItems.find((entry) => String(entry.file_id || "") === fileId);
+        if (item) {
+          openLibraryDetailsModal(buildVideoLibraryModalPayload(item));
+        }
+        return;
+      }
+      const actionName = String(action.dataset.action || "");
+      if (actionName === "video-library-info") {
+        const fileId = String(action.dataset.fileId || "").trim();
+        const item = state.videoLibraryItems.find((entry) => String(entry.file_id || "") === fileId);
+        if (item) {
+          openLibraryDetailsModal(buildVideoLibraryModalPayload(item));
+        }
+      }
+    });
+  }
+  const libraryModal = $("#library-details-modal");
+  if (libraryModal) {
+    $("#library-details-close")?.addEventListener("click", closeLibraryDetailsModal);
+    libraryModal.addEventListener("click", async (event) => {
+      if (event.target === libraryModal) {
+        closeLibraryDetailsModal();
+        return;
+      }
+      const button = event.target.closest("#library-details-primary, #library-details-secondary");
+      const tertiaryButton = event.target.closest("#library-details-tertiary");
+      const targetButton = button || tertiaryButton;
+      if (!targetButton) return;
+      const actionName = String(targetButton.dataset.action || "");
+      const payload = parseLibraryActionPayload(targetButton.dataset.payload || "");
+      if (!actionName) return;
+      if (actionName === "music-library-open-player") {
+        setPage("music");
+        setMusicSection("library");
+        window.location.hash = "music";
+        if (payload.artist_key) {
+          state.playerSelectedArtistKey = String(payload.artist_key || "");
+        }
+        if (payload.album_key) {
+          state.playerSelectedAlbumKey = String(payload.album_key || "");
+        }
+        closeLibraryDetailsModal();
+        loadMusicPlayerView().catch(() => {});
+        return;
+      }
+      if (actionName === "music-library-open-artist") {
+        state.playerSelectedArtistKey = String(payload.artist_key || "");
+        state.playerSelectedAlbumKey = "";
+        state.musicLibraryMode = "albums";
+        renderMusicLibrarySection();
+        closeLibraryDetailsModal();
+        return;
+      }
+      if (actionName === "music-library-open-album") {
+        state.playerSelectedArtistKey = String(payload.artist_key || "");
+        state.playerSelectedAlbumKey = String(payload.album_key || "");
+        state.musicLibraryMode = "tracks";
+        renderMusicLibrarySection();
+        closeLibraryDetailsModal();
+        return;
+      }
+      if (actionName === "music-library-play-track") {
+        await playMusicPlayerItem(payload);
+        closeLibraryDetailsModal();
+        return;
+      }
+      if (actionName === "video-library-download") {
+        const fileId = String(payload.file_id || "").trim();
+        if (fileId) {
+          window.location.href = downloadUrl(fileId);
+        }
+        closeLibraryDetailsModal();
+        return;
+      }
+      if (actionName === "video-library-watch-here") {
+        closeLibraryDetailsModal();
+        openLibraryVideoModal(payload);
+        return;
+      }
+      if (actionName === "video-library-open-external") {
+        const targetUrl = String(payload.external_url || "").trim();
+        if (targetUrl) {
+          window.open(targetUrl, "_blank", "noopener");
+        }
+        return;
+      }
+      if (actionName === "video-library-open-source") {
+        const sourceUrl = String(payload.source_url || payload.canonical_url || payload.input_url || "").trim();
+        if (sourceUrl) {
+          window.open(sourceUrl, "_blank", "noopener");
+        }
+      }
+    });
+  }
+  const libraryVideoModal = $("#library-video-modal");
+  if (libraryVideoModal) {
+    $("#library-video-close")?.addEventListener("click", closeLibraryVideoModal);
+    libraryVideoModal.addEventListener("click", (event) => {
+      if (event.target === libraryVideoModal) {
+        closeLibraryVideoModal();
+      }
+    });
+  }
   const musicSearchOnly = $("#search-create-only");
   if (musicSearchOnly) {
     const onMusicSearchEnter = (event) => {
@@ -12642,18 +14850,31 @@ function bindEvents() {
       }
     });
   }
-  const moviesTvYearInput = $("#movies-tv-year-input");
-  if (moviesTvYearInput) {
-    moviesTvYearInput.addEventListener("keydown", (event) => {
-      if (
-        event.key === "Enter" &&
-        !event.shiftKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        !event.metaKey
-      ) {
-        event.preventDefault();
-        performArrSearch();
+  const moviesTvFiltersToggle = $("#movies-tv-filters-toggle");
+  if (moviesTvFiltersToggle) {
+    moviesTvFiltersToggle.addEventListener("click", () => {
+      setMoviesTvFiltersOpen(!state.arrFiltersOpen);
+    });
+  }
+  const moviesTvYearChips = $("#movies-tv-year-chips");
+  if (moviesTvYearChips) {
+    moviesTvYearChips.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-arr-year]");
+      if (!button) return;
+      const nextYear = String(button.dataset.arrYear || "").trim();
+      const previousYear = String(state.arrSearchYear || "").trim();
+      setMoviesTvSearchYear(nextYear);
+      if (!state.arrResults.length) {
+        return;
+      }
+      const activeQuery = String(state.arrSearchQuery || "").trim();
+      const context = String(state.arrSearchContext || "search");
+      if (context === "genre" && state.arrActiveGenre?.id) {
+        await browseArrGenre(state.arrActiveGenre, { year: nextYear });
+        return;
+      }
+      if (context === "search" && activeQuery && nextYear !== previousYear) {
+        await performArrSearch();
       }
     });
   }
@@ -12677,12 +14898,33 @@ function bindEvents() {
     moviesTvCardSize.addEventListener("input", () => {
       applyArrCardSize(moviesTvCardSize.value);
     });
+    moviesTvCardSize.addEventListener("change", () => {
+      persistUiPreferences({ movies_tv_card_size: moviesTvCardSize.value });
+    });
   }
   const moviesTvSort = $("#movies-tv-sort");
   if (moviesTvSort) {
     moviesTvSort.addEventListener("change", () => {
       state.arrSort = String(moviesTvSort.value || "best_match");
+      persistUiPreferences({ movies_tv_sort: state.arrSort });
       renderArrResults();
+    });
+  }
+  const homeVideoCardSize = $("#home-video-card-size");
+  if (homeVideoCardSize) {
+    homeVideoCardSize.addEventListener("input", () => {
+      applyHomeVideoCardSize(homeVideoCardSize.value);
+    });
+    homeVideoCardSize.addEventListener("change", () => {
+      persistUiPreferences({ home_video_card_size: homeVideoCardSize.value });
+    });
+  }
+  const homeVideoSort = $("#home-video-sort");
+  if (homeVideoSort) {
+    homeVideoSort.addEventListener("change", () => {
+      state.homeVideoSort = String(homeVideoSort.value || UI_DEFAULTS.home_video_sort);
+      persistUiPreferences({ home_video_sort: state.homeVideoSort });
+      rerenderHomeResultCards();
     });
   }
   const moviesTvResults = $("#movies-tv-results-list");
@@ -13094,6 +15336,18 @@ function bindEvents() {
   $("#schedule-run-now").addEventListener("click", runScheduleNow);
   $("#schedule-enabled").addEventListener("change", syncConfigSectionCollapsedStates);
   $("#save-config").addEventListener("click", saveConfig);
+  ["#cfg-playback-external-mode", "#cfg-playback-external-label", "#cfg-playback-external-template", "#cfg-playback-plex-base-url", "#cfg-arr-jellyfin-base-url"].forEach((selector) => {
+    const input = $(selector);
+    if (input) {
+      input.addEventListener("input", updatePlaybackIntegrationPreview);
+      input.addEventListener("change", updatePlaybackIntegrationPreview);
+    }
+  });
+  $$("[data-playback-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyPlaybackPreset(button.dataset.playbackPreset || "");
+    });
+  });
   const securityAdminPinSave = $("#security-admin-pin-save");
   if (securityAdminPinSave) {
     securityAdminPinSave.addEventListener("click", () => {
@@ -13115,6 +15369,27 @@ function bindEvents() {
   $("#browse-config-path").addEventListener("click", () => {
     const input = $("#config-path");
     openBrowser(input, "config", "file", ".json", resolveBrowseStart("config", input.value));
+  });
+  const setupPathBrowsers = [
+    ["browse-setup-env-path", "setup-env-path", "config", "file", ""],
+    ["browse-setup-media-root", "setup-media-root", "downloads", "dir", ""],
+    ["browse-setup-movies-root", "setup-movies-root", "downloads", "dir", ""],
+    ["browse-setup-tv-root", "setup-tv-root", "downloads", "dir", ""],
+    ["browse-setup-downloads-root", "setup-downloads-root", "downloads", "dir", ""],
+    ["browse-setup-books-root", "setup-books-root", "downloads", "dir", ""],
+    ["browse-cfg-arr-movies-root", "cfg-arr-movies-root", "downloads", "dir", ""],
+    ["browse-cfg-arr-tv-root", "cfg-arr-tv-root", "downloads", "dir", ""],
+    ["browse-cfg-arr-books-root", "cfg-arr-books-root", "downloads", "dir", ""],
+    ["browse-cfg-arr-qbittorrent-download-dir", "cfg-arr-qbittorrent-download-dir", "downloads", "dir", ""],
+  ];
+  setupPathBrowsers.forEach(([buttonId, inputId, root, mode, ext]) => {
+    const button = $(`#${buttonId}`);
+    if (!button) return;
+    button.addEventListener("click", () => {
+      const input = $(`#${inputId}`);
+      if (!input) return;
+      openBrowser(input, root, mode, ext, resolveBrowseStart(root, input.value));
+    });
   });
   $("#browse-single-download").addEventListener("click", () => {
     const input = $("#cfg-single-download-folder");
@@ -13234,6 +15509,97 @@ function bindEvents() {
       applySetupStack().catch((err) => setNotice($("#setup-command-helper"), toUserErrorMessage(err), true));
     });
   }
+  const setupWizard = $("#setup-wizard");
+  if (setupWizard) {
+    setupWizard.addEventListener("click", async (event) => {
+      const navButton = event.target.closest("[data-setup-nav]");
+      if (navButton) {
+        const messageEl = $("#setup-wizard-message");
+        if (navButton.dataset.setupNav === "back") {
+          advanceSetupWizardStep(-1);
+        } else {
+          try {
+            setNotice(messageEl, "Saving progress...", false);
+            await saveSetupWizardProgress();
+            advanceSetupWizardStep(1);
+            setNotice(messageEl, "Progress saved.", false);
+          } catch (err) {
+            setNotice(messageEl, toUserErrorMessage(err), true);
+            return;
+          }
+        }
+        renderSetupWizard();
+        return;
+      }
+      const choiceButton = event.target.closest("[data-setup-choice]");
+      if (choiceButton) {
+        const key = String(choiceButton.dataset.setupChoice || "");
+        const rawValue = String(choiceButton.dataset.value || "");
+        const nextValue = rawValue === "true";
+        const revealOnYes = new Set(["wants_tmdb", "enable_vpn", "wants_youtube", "wants_telegram", "enable_jellyfin"]);
+        updateSetupWizardDraftField(key, nextValue);
+        syncSetupWizardToLegacyFields();
+        if (revealOnYes.has(key) && nextValue) {
+          renderSetupWizard();
+          return;
+        }
+        advanceSetupWizardStep(1);
+        renderSetupWizard();
+        return;
+      }
+      const actionButton = event.target.closest("[data-setup-action]");
+      if (actionButton) {
+        const messageEl = $("#setup-wizard-message");
+        try {
+          if (actionButton.dataset.setupAction === "start-over") {
+            resetSetupWizardDraft();
+            renderSetupWizard();
+            setNotice($("#setup-wizard-message"), "Guided setup reset to saved defaults.", false);
+          } else if (actionButton.dataset.setupAction === "save-progress") {
+            setNotice(messageEl, "Saving guided setup...", false);
+            await saveSetupWizardProgress();
+            await refreshSetupStatus();
+            setNotice(messageEl, "Guided setup saved.", false);
+          } else if (actionButton.dataset.setupAction === "apply-env") {
+            setNotice(messageEl, "Saving and writing managed env...", false);
+            await applySetupWizardEnv();
+            await refreshSetupStatus();
+            setNotice(messageEl, "Managed env written. Follow the generated compose command shown below.", false);
+          }
+        } catch (err) {
+          setNotice(messageEl, toUserErrorMessage(err), true);
+        }
+        return;
+      }
+      const browseButton = event.target.closest("[data-setup-browse]");
+      if (browseButton) {
+        const key = String(browseButton.dataset.setupBrowse || "");
+        if (key === "yt_dlp_cookies") {
+          const targetInput = setupWizard.querySelector('[data-setup-input="yt_dlp_cookies"]');
+          const start = resolveBrowseStart("tokens", state.setupWizard?.draft?.yt_dlp_cookies || "");
+          openBrowser(targetInput, "tokens", "file", ".txt", start);
+        }
+      }
+    });
+    setupWizard.addEventListener("change", (event) => {
+      const toggle = event.target.closest("[data-setup-toggle]");
+      if (toggle) {
+        updateSetupWizardDraftField(String(toggle.dataset.setupToggle || ""), !!toggle.checked);
+        renderSetupWizard();
+        return;
+      }
+      const input = event.target.closest("[data-setup-input]");
+      if (input) {
+        updateSetupWizardDraftField(String(input.dataset.setupInput || ""), String(input.value || ""));
+      }
+    });
+    setupWizard.addEventListener("input", (event) => {
+      const input = event.target.closest("[data-setup-input]");
+      if (input) {
+        updateSetupWizardDraftField(String(input.dataset.setupInput || ""), String(input.value || ""));
+      }
+    });
+  }
   const connectionsRefresh = $("#connections-refresh");
   if (connectionsRefresh) {
     connectionsRefresh.addEventListener("click", () => {
@@ -13265,14 +15631,113 @@ function bindEvents() {
       }
     });
   }
-  const playerPanel = $("#music-player-panel");
-  if (playerPanel) {
-    playerPanel.addEventListener("click", async (event) => {
-      const navButton = event.target.closest(".music-player-nav");
-      if (navButton) {
-        setMusicPlayerView(navButton.dataset.playerView || "library");
-        return;
+  const startupSetupClose = $("#startup-setup-close");
+  if (startupSetupClose) {
+    startupSetupClose.addEventListener("click", () => {
+      state.startupSetupPromptDismissedForSession = true;
+      setStartupSetupModalOpen(false);
+    });
+  }
+  const startupSetupRemind = $("#startup-setup-remind");
+  if (startupSetupRemind) {
+    startupSetupRemind.addEventListener("click", () => {
+      state.startupSetupPromptDismissedForSession = true;
+      setStartupSetupModalOpen(false);
+    });
+  }
+  const startupSetupRun = $("#startup-setup-run");
+  if (startupSetupRun) {
+    startupSetupRun.addEventListener("click", () => {
+      state.startupSetupPromptPending = false;
+      setStartupSetupModalOpen(false);
+      setPage("config");
+      setActiveSettingsSection("settings-guided-setup", { jump: false, smooth: false });
+      window.location.hash = "settings-guided-setup";
+    });
+  }
+  const startupSetupDismiss = $("#startup-setup-dismiss");
+  if (startupSetupDismiss) {
+    startupSetupDismiss.addEventListener("click", async () => {
+      const messageEl = $("#startup-setup-message");
+      try {
+        if (messageEl) messageEl.textContent = "Saving preference…";
+        await persistSetupStartupPreference(false);
+        state.startupSetupPromptPending = false;
+        state.startupSetupPromptDismissedForSession = true;
+        setStartupSetupModalOpen(false);
+      } catch (err) {
+        if (messageEl) {
+          messageEl.textContent = `Could not save preference: ${toUserErrorMessage(err)}`;
+        }
       }
+    });
+  }
+  const startupSetupModal = $("#startup-setup-modal");
+  if (startupSetupModal) {
+    startupSetupModal.addEventListener("click", (event) => {
+      if (event.target === startupSetupModal) {
+        state.startupSetupPromptDismissedForSession = true;
+        setStartupSetupModalOpen(false);
+      }
+    });
+  }
+  $$(".music-app-nav").forEach((button) => {
+    button.addEventListener("click", () => {
+      setMusicSection(button.dataset.musicSection || "search");
+    });
+  });
+  $$("[data-home-section]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setHomeSection(button.dataset.homeSection || "search");
+    });
+  });
+  $$("[data-movies-tv-section]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setMoviesTvSection(button.dataset.moviesTvSection || "search");
+    });
+  });
+  const musicBottomToggle = $("#music-bottom-player-toggle");
+  if (musicBottomToggle) {
+    musicBottomToggle.addEventListener("click", async () => {
+      const audio = $("#music-player-audio");
+      if (!audio) return;
+      if (audio.paused) {
+        try {
+          await audio.play();
+        } catch (_err) {
+          // browser gesture policy
+        }
+      } else {
+        audio.pause();
+      }
+      syncBottomPlayerShell();
+    });
+  }
+  const musicBottomPrev = $("#music-bottom-player-prev");
+  if (musicBottomPrev) {
+    musicBottomPrev.addEventListener("click", () => {
+      playPreviousPlayerItem().catch(() => {});
+    });
+  }
+  const musicBottomNext = $("#music-bottom-player-next");
+  if (musicBottomNext) {
+    musicBottomNext.addEventListener("click", () => {
+      playNextPlayerItem().catch(() => {});
+    });
+  }
+  const musicBottomExpand = $("#music-bottom-player-expand");
+  if (musicBottomExpand) {
+    musicBottomExpand.addEventListener("click", () => {
+      openMusicPlayerModal();
+    });
+  }
+  const musicPlayerModalClose = $("#music-player-modal-close");
+  if (musicPlayerModalClose) {
+    musicPlayerModalClose.addEventListener("click", () => {
+      closeMusicPlayerModal();
+    });
+  }
+  const handlePlayerHostClick = async (event) => {
       const createStationButton = event.target.closest("#music-player-create-station");
       if (createStationButton) {
         const name = String($("#music-player-station-name")?.value || "").trim();
@@ -13289,6 +15754,7 @@ function bindEvents() {
         });
         await loadMusicPlayerView();
         setMusicPlayerView("radio");
+        setMusicSection("radio");
         return;
       }
       const createPlaylistButton = event.target.closest("#music-player-create-playlist");
@@ -13306,6 +15772,7 @@ function bindEvents() {
         state.playerSelectedPlaylistId = Number(payload?.playlist?.id || 0) || null;
         await loadMusicPlayerView();
         setMusicPlayerView("library");
+        setMusicSection("playlists");
         setNotice($("#music-player-message"), "Playlist created.", false);
         return;
       }
@@ -13313,9 +15780,9 @@ function bindEvents() {
       if (loadStationButton) {
         const stationId = String(loadStationButton.dataset.stationId || "").trim();
         const payload = await fetchJson(`/api/player/stations/${encodeURIComponent(stationId)}/queue`, { method: "POST" });
-        state.playerQueue = Array.isArray(payload?.queue) ? payload.queue : [];
-        renderMusicPlayerQueue();
+        setPlayerQueue(Array.isArray(payload?.queue) ? payload.queue : []);
         setMusicPlayerView("queue");
+        setMusicSection("queue");
         if (state.playerQueue[0]) {
           await playMusicPlayerItem(state.playerQueue[0]);
         }
@@ -13327,20 +15794,23 @@ function bindEvents() {
         await fetchJson(`/api/player/stations/${encodeURIComponent(stationId)}`, { method: "DELETE" });
         await loadMusicPlayerView();
         setMusicPlayerView("radio");
+        setMusicSection("radio");
         return;
       }
       const libraryModeButton = event.target.closest('[data-action="player-library-mode"]');
       if (libraryModeButton) {
         state.playerLibraryMode = String(libraryModeButton.dataset.libraryMode || "artists");
         renderMusicPlayerLibrary();
+        setMusicSection("library");
         return;
       }
       const resetLibraryButton = event.target.closest('[data-action="player-reset-library"]');
       if (resetLibraryButton) {
         state.playerSelectedArtistKey = "";
         state.playerSelectedAlbumKey = "";
-        state.playerLibraryMode = "artists";
+        state.playerLibraryMode = "albums";
         renderMusicPlayerLibrary();
+        setMusicSection("library");
         return;
       }
       const openArtistButton = event.target.closest('[data-action="player-open-artist"]');
@@ -13349,6 +15819,7 @@ function bindEvents() {
         state.playerSelectedAlbumKey = "";
         state.playerLibraryMode = "albums";
         renderMusicPlayerLibrary();
+        setMusicSection("library");
         return;
       }
       const openAlbumButton = event.target.closest('[data-action="player-open-album"]');
@@ -13367,6 +15838,7 @@ function bindEvents() {
         const detailPayload = await fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}`);
         state.playerSelectedPlaylistItems = Array.isArray(detailPayload?.items) ? detailPayload.items : [];
         renderMusicPlayerLibrary();
+        setMusicSection("playlists");
         return;
       }
       const deletePlaylistButton = event.target.closest('[data-action="player-delete-playlist"]');
@@ -13380,6 +15852,7 @@ function bindEvents() {
         }
         await loadMusicPlayerView();
         setMusicPlayerView("library");
+        setMusicSection("playlists");
         return;
       }
       const removePlaylistItemButton = event.target.closest('[data-action="player-remove-playlist-item"]');
@@ -13425,12 +15898,13 @@ function bindEvents() {
         state.playerSelectedPlaylistItems = Array.isArray(detailPayload?.items) ? detailPayload.items : [];
         state.playerPlaylists = Array.isArray(playlistsPayload?.playlists) ? playlistsPayload.playlists : [];
         renderMusicPlayerLibrary();
+        setMusicSection("playlists");
         setNotice($("#music-player-message"), "Track added to playlist.", false);
         return;
       }
       const playButton = event.target.closest('[data-action="player-play"]');
       if (playButton) {
-        await playMusicPlayerItem({
+        const payload = {
           id: String(playButton.dataset.localPath || playButton.dataset.streamUrl || ""),
           title: String(playButton.dataset.title || ""),
           artist: String(playButton.dataset.artist || ""),
@@ -13438,20 +15912,79 @@ function bindEvents() {
           local_path: String(playButton.dataset.localPath || ""),
           stream_url: String(playButton.dataset.streamUrl || ""),
           kind: String(playButton.dataset.sourceKind || "local"),
-        });
+        };
+        if (playButton.closest("#music-player-queue")) {
+          // preserve current queue order
+        } else if (playButton.closest(".music-player-playlist-items")) {
+          const playlistItems = Array.isArray(state.playerSelectedPlaylistItems) ? state.playerSelectedPlaylistItems : [];
+          setPlayerQueue(buildQueueFromTracks(playlistItems, payload));
+        } else if (playButton.closest("#music-player-library")) {
+          const libraryTracks = getMusicPlayerFilteredTracks();
+          setPlayerQueue(buildQueueFromTracks(libraryTracks, payload));
+        }
+        await playMusicPlayerItem(payload);
       }
+    };
+  [$("#music-panel"), $("#music-player-modal")].filter(Boolean).forEach((host) => {
+    host.addEventListener("click", (event) => {
+      handlePlayerHostClick(event).catch(() => {});
     });
-  }
+  });
   const playerAudio = $("#music-player-audio");
   if (playerAudio) {
+    const playerPlayPause = $("#music-player-playpause");
+    if (playerPlayPause) {
+      playerPlayPause.addEventListener("click", async () => {
+        if (playerAudio.paused) {
+          try {
+            await playerAudio.play();
+          } catch (_err) {
+            // browser gesture policy
+          }
+        } else {
+          playerAudio.pause();
+        }
+        updateMusicPlayerTransportUI();
+        syncBottomPlayerShell();
+      });
+    }
+    $("#music-player-prev")?.addEventListener("click", () => {
+      playPreviousPlayerItem().catch(() => {});
+    });
+    $("#music-player-next")?.addEventListener("click", () => {
+      playNextPlayerItem().catch(() => {});
+    });
+    $("#music-player-shuffle")?.addEventListener("click", () => {
+      togglePlayerShuffle();
+    });
+    $("#music-player-repeat")?.addEventListener("click", () => {
+      cyclePlayerRepeatMode();
+    });
+    const progress = $("#music-player-progress");
+    if (progress) {
+      progress.addEventListener("input", () => {
+        state.playerProgressDragging = true;
+        const duration = Number.isFinite(playerAudio.duration) ? playerAudio.duration : 0;
+        const value = Number(progress.value || 0);
+        const targetTime = duration > 0 ? (value / 1000) * duration : 0;
+        $("#music-player-current-time").textContent = formatPlayerTime(targetTime);
+      });
+      progress.addEventListener("change", () => {
+        const duration = Number.isFinite(playerAudio.duration) ? playerAudio.duration : 0;
+        const value = Number(progress.value || 0);
+        if (duration > 0) {
+          playerAudio.currentTime = (value / 1000) * duration;
+        }
+        state.playerProgressDragging = false;
+        updateMusicPlayerTransportUI();
+      });
+    }
+    playerAudio.addEventListener("timeupdate", () => updateMusicPlayerTransportUI());
+    playerAudio.addEventListener("loadedmetadata", () => updateMusicPlayerTransportUI());
+    playerAudio.addEventListener("play", () => syncBottomPlayerShell());
+    playerAudio.addEventListener("pause", () => syncBottomPlayerShell());
     playerAudio.addEventListener("ended", async () => {
-      if (!Array.isArray(state.playerQueue) || state.playerQueue.length < 2) return;
-      const currentUrl = String(state.playerCurrent?.stream_url || "");
-      const currentIndex = state.playerQueue.findIndex((item) => String(item?.stream_url || "") === currentUrl);
-      const nextItem = currentIndex >= 0 ? state.playerQueue[currentIndex + 1] : state.playerQueue[1];
-      if (nextItem) {
-        await playMusicPlayerItem(nextItem);
-      }
+      await playNextPlayerItem({ autoAdvance: true });
     });
   }
   const moviesTvInlineTmdbSave = $("#movies-tv-inline-tmdb-save");
@@ -13892,6 +16425,38 @@ function bindEvents() {
       }
     });
   }
+  const settingsMoreToggle = $("#settings-more-toggle");
+  const settingsMorePopover = $("#settings-more-popover");
+  if (settingsMoreToggle && settingsMorePopover) {
+    settingsMoreToggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      const open = settingsMorePopover.classList.contains("hidden");
+      settingsMorePopover.classList.toggle("hidden", !open);
+      settingsMoreToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    settingsMorePopover.addEventListener("click", (event) => {
+      const link = event.target.closest(".settings-more-link");
+      if (!link) return;
+      event.preventDefault();
+      const href = String(link.getAttribute("href") || "");
+      const targetId = href.startsWith("#") ? href.slice(1) : "";
+      if (!targetId) return;
+      setActiveSettingsSection(targetId, { jump: false, smooth: false });
+      if (window.location.hash !== `#${targetId}`) {
+        history.replaceState(null, "", `#${targetId}`);
+      }
+      settingsMorePopover.classList.add("hidden");
+      settingsMoreToggle.setAttribute("aria-expanded", "false");
+    });
+    document.addEventListener("click", (event) => {
+      if (!settingsMorePopover.classList.contains("hidden")
+        && !settingsMorePopover.contains(event.target)
+        && !settingsMoreToggle.contains(event.target)) {
+        settingsMorePopover.classList.add("hidden");
+        settingsMoreToggle.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
 
   window.addEventListener("resize", () => {
     syncSettingsMainWidthLock();
@@ -13942,6 +16507,8 @@ function bindEvents() {
   }
   syncConfigSectionCollapsedStates();
   updateArrModeToggleUI();
+  renderMoviesTvYearChips();
+  setMoviesTvFiltersOpen(false);
   renderArrConnectionStatus();
   applyHomeDefaultVideoFormat({ force: true });
   updateMusicModeFormatControl();
@@ -13950,8 +16517,37 @@ function bindEvents() {
 
 }
 
+function loadAppSidebarCollapsedPreference() {
+  try {
+    return localStorage.getItem(APP_SIDEBAR_COLLAPSED_KEY) === "true";
+  } catch (_err) {
+    return false;
+  }
+}
+
+function applyAppSidebarCollapsed(collapsed, { persist = true } = {}) {
+  const normalized = !!collapsed;
+  state.appSidebarCollapsed = normalized;
+  document.body.classList.toggle("app-sidebar-collapsed", normalized);
+  const toggle = $("#app-sidebar-toggle");
+  if (toggle) {
+    toggle.textContent = normalized ? "⇥" : "⇤";
+    toggle.setAttribute("aria-label", normalized ? "Expand sidebar" : "Collapse sidebar");
+    toggle.title = normalized ? "Expand sidebar" : "Collapse sidebar";
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(APP_SIDEBAR_COLLAPSED_KEY, normalized ? "true" : "false");
+    } catch (_err) {
+      // ignore localStorage failures
+    }
+  }
+}
+
 async function init() {
   state.adminPinToken = localStorage.getItem(ADMIN_PIN_TOKEN_KEY) || "";
+  state.appSidebarCollapsed = loadAppSidebarCollapsedPreference();
+  mountSettingsSubpages();
   mountHomePageNodes();
   window.addEventListener("spotify-oauth-complete", () => {
     setNotice(
@@ -13962,30 +16558,36 @@ async function init() {
   });
   applyTheme(resolveTheme());
   bindEvents();
+  applyAppSidebarCollapsed(state.appSidebarCollapsed, { persist: false });
+  setupHeaderScrollVisibility();
+  applyHomeVideoCardSize(state.homeVideoCardSize);
   applyArrCardSize(state.arrCardSize);
+  syncBottomPlayerShell();
   updateReviewPendingIndicators();
   try {
     const cfg = await fetchJson("/api/config");
     state.config = cfg;
     syncMusicPreferencesFromConfig(cfg);
+    renderConfig(cfg);
     updateSearchDestinationDisplay();
     renderMoviesTvSetupGate();
   } catch (_err) {
     // keep boot non-fatal; settings page load path will surface config errors later
   }
-  // Home default: Video mode unless user set a persisted mode.
-  setHomeMediaMode(loadHomeMediaModePreference(), { persist: false, clearResultsOnDisable: false });
+  // Home should always boot into the video-first surface. Preserve the saved
+  // music mode only for when the user navigates to the dedicated Music page.
+  const storedHomeMediaMode = loadHomeMediaModePreference();
+  if (storedHomeMediaMode !== "video") {
+    state.lastMusicMode = storedHomeMediaMode;
+  }
+  setHomeMediaMode("video", { persist: false, clearResultsOnDisable: false });
   applyHomeDefaultDestination({ force: true });
   applyHomeDefaultActiveFormat({ force: true });
   setHomeDeliveryMode(getHomeDeliveryMode());
   setupNavActions();
   await loadPaths();
   let initialPage = (window.location.hash || "#home").replace("#", "");
-  const showSetupOnStartup = !!state.config?.setup?.show_on_startup;
-  const completedModules = Array.isArray(state.config?.setup?.completed_modules) ? state.config.setup.completed_modules : [];
-  if ((!initialPage || initialPage === "home") && showSetupOnStartup && completedModules.length === 0) {
-    initialPage = "setup";
-  }
+  state.startupSetupPromptPending = shouldShowStartupSetupPrompt();
   setPage(initialPage || "home");
   window.addEventListener("hashchange", () => {
     const next = (window.location.hash || "#home").replace("#", "");

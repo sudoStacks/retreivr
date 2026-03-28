@@ -12,33 +12,13 @@
 <body>
   <div class="backdrop"></div>
   <header class="topbar">
-    <div class="brand">
+    <button id="brand-home" class="brand brand-button" type="button" aria-label="Go to Home">
       <img class="app-icon" src="app_icon.png" alt="Retreivr">
       <div class="brand-text">
         <div class="title">Retreivr</div>
         <div class="subtitle">Self-Hosted Media Retrieval</div>
       </div>
-    </div>
-    <button id="nav-toggle" class="button ghost small nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav">
-      Menu
     </button>
-    <nav class="top-nav" id="primary-nav" aria-label="Primary">
-      <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
-      <button class="button ghost small nav-button" data-page="music" type="button">Music</button>
-      <button class="button ghost small nav-button" data-page="music-player" type="button">Music Player</button>
-      <button class="button ghost small nav-button" data-page="movies-tv" type="button">Movies &amp; TV</button>
-      <button class="button ghost small nav-button nav-button-with-count hidden" data-page="review" type="button">
-        <span>Review</span>
-        <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
-      </button>
-      <button class="button ghost small nav-button" data-page="setup" type="button">Setup</button>
-      <button class="button ghost small nav-button" data-page="connections" type="button">Connections</button>
-      <button class="button ghost small nav-button" data-page="services" type="button">Services</button>
-      <button class="button ghost small nav-button" data-page="info" type="button">Info</button>
-      <button class="button ghost small nav-button" data-page="status" type="button">Status</button>
-      <button class="button ghost small nav-button" data-page="config" data-hash="settings" type="button">Settings</button>
-      <div id="nav-actions" class="nav-actions"></div>
-    </nav>
     <div class="top-actions" id="top-actions">
       <button id="toggle-theme" class="button ghost small" type="button" aria-label="Switch to light mode" title="Switch to light mode">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -50,7 +30,36 @@
   </header>
 
   <main class="layout">
+    <aside class="app-global-sidebar" aria-label="Primary navigation">
+      <button id="app-sidebar-toggle" class="button ghost small app-sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar">⇤</button>
+      <button class="button ghost small nav-button" data-page="home" type="button" title="Home">
+        <span class="nav-icon" aria-hidden="true">⌂</span>
+        <span class="nav-label">Home</span>
+      </button>
+      <button class="button ghost small nav-button" data-page="music" type="button" title="Music">
+        <span class="nav-icon" aria-hidden="true">♪</span>
+        <span class="nav-label">Music</span>
+      </button>
+      <button class="button ghost small nav-button" data-page="movies-tv" type="button" title="Movies &amp; TV">
+        <span class="nav-icon" aria-hidden="true">▶</span>
+        <span class="nav-label">Movies &amp; TV</span>
+      </button>
+      <button class="button ghost small nav-button nav-button-with-count hidden" data-page="review" type="button">
+        <span class="nav-icon" aria-hidden="true">✓</span>
+        <span class="nav-label">Review</span>
+        <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
+      </button>
+      <button class="button ghost small nav-button" data-page="config" data-hash="settings" type="button" title="Settings">
+        <span class="nav-icon" aria-hidden="true">⚙</span>
+        <span class="nav-label">Settings</span>
+      </button>
+      <div id="nav-actions" class="nav-actions"></div>
+    </aside>
+    <div class="layout-content">
     <section class="panel full page-full" id="home-panel" data-page="home">
+      <div class="app-page-shell home-page-shell">
+        <div class="app-page-main">
+      <section id="home-search-surface" class="app-page-surface active">
       <div class="home-search-shell">
         <div id="standard-search-container">
           <input
@@ -144,10 +153,28 @@
           <button id="home-review-alert-open" class="button ghost small" type="button">Open Review Queue</button>
         </div>
       </div>
+      <div class="home-section-toggle" aria-label="Home sections">
+        <button class="button ghost small app-page-nav active" data-home-section="search" type="button">Search</button>
+        <button class="button ghost small app-page-nav" data-home-section="library" type="button">Library</button>
+      </div>
       <div class="home-results hidden" id="home-results">
         <div class="home-results-header">
           <span>Results</span>
           <div class="home-results-header-actions">
+            <label class="movies-tv-size-control" for="home-video-card-size">
+              <span class="meta">Card Size</span>
+              <input id="home-video-card-size" type="range" min="120" max="320" step="10" value="220">
+              <span id="home-video-card-size-value" class="meta">Default</span>
+            </label>
+            <label class="movies-tv-sort-control" for="home-video-sort">
+              <span class="meta">Sort</span>
+              <select id="home-video-sort" class="input small">
+                <option value="best_match">Best Match</option>
+                <option value="newest">Newest First</option>
+                <option value="source_priority">Source Priority</option>
+                <option value="title_asc">Title: A-Z</option>
+              </select>
+            </label>
             <span id="home-results-status-text" class="meta">Ready to discover media</span>
           </div>
         </div>
@@ -155,6 +182,20 @@
         <div id="home-results-detail" class="meta home-results-detail hidden"></div>
         <div id="home-results-list"></div>
       </div>
+      </section>
+      <section id="home-library-surface" class="app-page-surface hidden">
+      <section id="home-video-library-section" class="group media-library-section hidden" aria-labelledby="home-video-library-title">
+        <div class="panel-header-row compact">
+          <div>
+            <div id="home-video-library-title" class="group-title">Video Library</div>
+            <div class="meta">Recently acquired videos and moving-image downloads with artwork-forward cards and quick access.</div>
+          </div>
+          <button id="home-video-library-refresh" class="button ghost small" type="button">Refresh Library</button>
+        </div>
+        <div id="home-video-library-message" class="notice hidden" role="status"></div>
+        <div id="home-video-library-grid" class="media-library-grid home-candidate-grid"></div>
+      </section>
+      </section>
       <footer class="home-footer-links info-footer-links" aria-label="Project links">
         <a href="https://github.com/sudoStacks/retreivr" target="_blank" rel="noopener">Retreivr Repository</a>
         <a href="https://github.com/sudoStacks/" target="_blank" rel="noopener">SudoStacks GitHub</a>
@@ -166,20 +207,69 @@
           <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
         </span>
       </footer>
-    </section>
-    <section class="panel full page-full page-hidden" id="music-panel" data-page="music">
-      <div class="panel-header-row">
-        <div>
-          <div class="panel-title">Music</div>
-          <div class="meta">Discovery-first music acquisition with favorites, genres, artist browse, and album download flows.</div>
         </div>
       </div>
-      <div id="music-page-mode-slot"></div>
-      <div class="home-search-shell music-page-shell">
-        <div id="music-page-console-slot"></div>
-        <div id="music-page-results-slot"></div>
-        <div id="music-page-message-slot"></div>
-        <div id="music-page-review-slot"></div>
+    </section>
+    <section class="panel full page-full page-hidden" id="music-panel" data-page="music">
+      <div class="app-page-shell music-shell">
+        <aside class="app-page-sidebar music-app-sidebar" aria-label="Music sections">
+          <button class="button ghost small music-app-nav active" data-music-section="search" type="button">Search</button>
+          <button class="button ghost small music-app-nav" data-music-section="library" type="button">Library</button>
+          <button class="button ghost small music-app-nav" data-music-section="radio" type="button">Radio</button>
+          <button class="button ghost small music-app-nav" data-music-section="playlists" type="button">Playlists</button>
+          <button class="button ghost small music-app-nav" data-music-section="queue" type="button">Queue</button>
+          <button class="button ghost small music-app-nav" data-music-section="recent" type="button">Recently Played</button>
+          <button class="button ghost small music-app-nav" data-music-section="favorites" type="button">Favorites</button>
+        </aside>
+        <div class="music-app-main">
+          <section id="music-discovery-surface" class="music-surface active">
+            <div id="music-page-mode-slot"></div>
+            <div class="home-search-shell music-page-shell">
+              <div id="music-page-console-slot"></div>
+              <div id="music-page-results-slot"></div>
+              <div id="music-page-message-slot"></div>
+              <div id="music-page-review-slot"></div>
+            </div>
+            <section id="music-library-section" class="group media-library-section hidden" aria-labelledby="music-library-title">
+              <div class="panel-header-row compact">
+                <div>
+                  <div id="music-library-title" class="group-title">Downloaded Music Library</div>
+                  <div id="music-library-subtitle" class="meta">Browse downloaded artists, albums, and tracks only. Favorites and suggestions stay under Search.</div>
+                </div>
+                <div class="row compact music-library-toolbar">
+                  <span class="chip subtle">Downloaded only</span>
+                  <div class="music-player-library-modes" role="tablist" aria-label="Music library sections">
+                    <button class="button ghost small" type="button" data-music-library-mode="artists">Artists</button>
+                    <button class="button ghost small active" type="button" data-music-library-mode="albums">Albums</button>
+                    <button class="button ghost small" type="button" data-music-library-mode="tracks">Tracks</button>
+                  </div>
+                  <button id="music-library-refresh" class="button ghost small" type="button">Refresh Library</button>
+                </div>
+              </div>
+              <div id="music-library-breadcrumbs" class="music-player-library-breadcrumbs"></div>
+              <div id="music-library-message" class="notice hidden" role="status"></div>
+              <div id="music-library-grid" class="media-library-grid music-meta-grid"></div>
+            </section>
+          </section>
+          <section id="music-player-surface" class="music-surface hidden">
+            <div id="music-player-inline-slot"></div>
+          </section>
+        </div>
+      </div>
+      <div id="music-bottom-player" class="music-bottom-player hidden" aria-label="Now playing">
+        <div class="music-bottom-player-art">
+          <img id="music-bottom-player-art" src="assets/no_artwork.png" alt="Now playing artwork">
+        </div>
+        <div class="music-bottom-player-copy">
+          <div id="music-bottom-player-title" class="panel-title">Nothing playing</div>
+          <div id="music-bottom-player-meta" class="meta">Choose a track from your library or start a station.</div>
+        </div>
+        <div class="music-bottom-player-controls">
+          <button id="music-bottom-player-prev" class="button ghost small" type="button">Prev</button>
+          <button id="music-bottom-player-toggle" class="button ghost small" type="button">Play</button>
+          <button id="music-bottom-player-next" class="button ghost small" type="button">Next</button>
+          <button id="music-bottom-player-expand" class="button ghost small" type="button">Open Player</button>
+        </div>
       </div>
       <footer class="home-footer-links info-footer-links" aria-label="Project links">
         <a href="https://github.com/sudoStacks/retreivr" target="_blank" rel="noopener">Retreivr Repository</a>
@@ -300,11 +390,31 @@
         </aside>
         <div class="music-player-main">
           <div class="music-player-now-playing">
-            <div class="music-player-now-copy">
-              <div id="music-player-now-title" class="panel-title">Nothing playing</div>
-              <div id="music-player-now-meta" class="meta">Choose a track from your library or start a radio station.</div>
+            <div class="music-player-now-top">
+              <div class="music-player-now-art">
+                <img id="music-player-now-art" src="assets/no_artwork.png" alt="Now playing artwork">
+              </div>
+              <div class="music-player-now-copy">
+                <div id="music-player-now-title" class="panel-title">Nothing playing</div>
+                <div id="music-player-now-meta" class="meta">Choose a track from your library or start a radio station.</div>
+                <div id="music-player-now-context" class="meta music-player-now-context">Local-first playback with queue, playlists, and radio.</div>
+              </div>
             </div>
-            <audio id="music-player-audio" class="music-player-audio" controls preload="metadata"></audio>
+            <audio id="music-player-audio" class="music-player-audio" preload="metadata"></audio>
+            <div class="music-player-transport">
+              <div class="music-player-transport-controls">
+                <button id="music-player-shuffle" class="button ghost small music-player-control-toggle" type="button" aria-pressed="false">Shuffle</button>
+                <button id="music-player-prev" class="button ghost small" type="button">Prev</button>
+                <button id="music-player-playpause" class="button primary small" type="button">Play</button>
+                <button id="music-player-next" class="button ghost small" type="button">Next</button>
+                <button id="music-player-repeat" class="button ghost small music-player-control-toggle" type="button" aria-pressed="false">Repeat: Off</button>
+              </div>
+              <div class="music-player-progress-row">
+                <span id="music-player-current-time" class="meta music-player-time">0:00</span>
+                <input id="music-player-progress" class="music-player-progress" type="range" min="0" max="1000" step="1" value="0" aria-label="Playback position">
+                <span id="music-player-duration" class="meta music-player-time">0:00</span>
+              </div>
+            </div>
           </div>
           <div id="music-player-message" class="notice" role="status">Loading player…</div>
           <div id="music-player-library" class="music-player-view"></div>
@@ -332,11 +442,9 @@
       </div>
     </section>
     <section class="panel full page-full page-hidden" id="movies-tv-panel" data-page="movies-tv">
-      <div class="movies-tv-page-header">
-        <div class="panel-title movies-tv-page-title">Movies &amp; TV</div>
-        <div class="meta movies-tv-page-subtitle">Experimental metadata-first search powered by TMDb with add actions sent to Radarr and Sonarr.</div>
-      </div>
-      <div class="music-mode-toggle-row home-mode-toggle-shell">
+      <div class="app-page-shell movies-tv-page-shell">
+      <div class="app-page-main">
+      <div class="movies-tv-page-mode">
         <div class="home-media-mode-group" role="group" aria-label="Movies and TV mode">
           <span class="home-media-mode-label">Mode</span>
           <div id="arr-mode-toggle" class="home-media-mode-toggle" role="radiogroup" aria-label="ARR media mode">
@@ -378,19 +486,20 @@
             placeholder="Search titles, actors, or directors via TMDb…"
             autocomplete="off"
           />
-          <input
-            id="movies-tv-year-input"
-            class="movies-tv-year-input"
-            type="number"
-            inputmode="numeric"
-            min="1888"
-            max="2100"
-            placeholder="Year"
-            aria-label="Release year"
-          />
+          <button id="movies-tv-filters-toggle" class="button ghost" type="button" aria-expanded="false" aria-controls="movies-tv-filters-panel">Filters</button>
           <button id="movies-tv-search-button" class="button primary" type="button">Search</button>
         </div>
+        <div id="movies-tv-filters-panel" class="movies-tv-filters-panel hidden">
+          <div class="movies-tv-filter-group">
+            <span class="meta">Release year</span>
+            <div id="movies-tv-year-chips" class="movies-tv-year-chips"></div>
+          </div>
+        </div>
         <div id="movies-tv-message" class="notice" role="status">Enter a title to search TMDb. Search works without ARR, but add actions require a verified Radarr or Sonarr connection.</div>
+      </div>
+      <div class="movies-tv-section-toggle" aria-label="Movies and TV sections">
+        <button class="button ghost small movies-tv-nav active" data-movies-tv-section="search" type="button">Search</button>
+        <button class="button ghost small movies-tv-nav" data-movies-tv-section="genres" type="button">Genres</button>
       </div>
       <div class="home-results movies-tv-genres-shell" id="movies-tv-genres">
         <div class="home-results-header">
@@ -408,7 +517,7 @@
           <div class="home-results-header-actions">
             <label class="movies-tv-size-control" for="movies-tv-card-size">
               <span class="meta">Card Size</span>
-              <input id="movies-tv-card-size" type="range" min="220" max="340" step="10" value="280">
+              <input id="movies-tv-card-size" type="range" min="120" max="320" step="10" value="260">
               <span id="movies-tv-card-size-value" class="meta">Default</span>
             </label>
             <label class="movies-tv-sort-control" for="movies-tv-sort">
@@ -439,6 +548,8 @@
           <img class="sudostacks-logo" src="assets/sudostacks.png" alt="SudoStacks">
         </span>
       </footer>
+        </div>
+      </div>
     </section>
     <section class="panel full page-full page-hidden" id="setup-panel" data-page="setup">
       <div class="panel-header-row">
@@ -450,8 +561,11 @@
           <button id="setup-refresh" class="button ghost small" type="button">Refresh Status</button>
         </div>
       </div>
-      <div id="setup-modules" class="setup-module-grid"></div>
-      <div class="group">
+      <div id="setup-wizard" class="setup-wizard-shell"></div>
+      <details class="group setup-advanced-details">
+        <summary class="group-title">Advanced Setup Details</summary>
+        <div id="setup-modules" class="setup-module-grid"></div>
+        <div class="group">
         <div class="group-title">Optional Stack</div>
         <div class="setup-stack-grid">
           <label class="field checkbox"><input id="setup-enable-arr-stack" type="checkbox"><span>Enable ARR stack</span></label>
@@ -465,12 +579,48 @@
           <label class="field checkbox"><input id="setup-enable-jellyfin" type="checkbox"><span>Jellyfin</span></label>
         </div>
         <div class="setup-stack-paths">
-          <input id="setup-env-path" type="text" placeholder=".env">
-          <input id="setup-media-root" type="text" placeholder="./media">
-          <input id="setup-movies-root" type="text" placeholder="./media/movies">
-          <input id="setup-tv-root" type="text" placeholder="./media/tv">
-          <input id="setup-downloads-root" type="text" placeholder="./downloads">
-          <input id="setup-books-root" type="text" placeholder="./media/books">
+          <label class="field full">
+            <span>Env file</span>
+            <div class="row path-picker">
+              <input id="setup-env-path" type="text" placeholder=".env">
+              <button id="browse-setup-env-path" class="button ghost small" type="button">Browse</button>
+            </div>
+          </label>
+          <label class="field full">
+            <span>Media root</span>
+            <div class="row path-picker">
+              <input id="setup-media-root" type="text" placeholder="./media">
+              <button id="browse-setup-media-root" class="button ghost small" type="button">Browse</button>
+            </div>
+          </label>
+          <label class="field full">
+            <span>Movies root</span>
+            <div class="row path-picker">
+              <input id="setup-movies-root" type="text" placeholder="./media/movies">
+              <button id="browse-setup-movies-root" class="button ghost small" type="button">Browse</button>
+            </div>
+          </label>
+          <label class="field full">
+            <span>TV root</span>
+            <div class="row path-picker">
+              <input id="setup-tv-root" type="text" placeholder="./media/tv">
+              <button id="browse-setup-tv-root" class="button ghost small" type="button">Browse</button>
+            </div>
+          </label>
+          <label class="field full">
+            <span>Downloads root</span>
+            <div class="row path-picker">
+              <input id="setup-downloads-root" type="text" placeholder="./downloads">
+              <button id="browse-setup-downloads-root" class="button ghost small" type="button">Browse</button>
+            </div>
+          </label>
+          <label class="field full">
+            <span>Books root</span>
+            <div class="row path-picker">
+              <input id="setup-books-root" type="text" placeholder="./media/books">
+              <button id="browse-setup-books-root" class="button ghost small" type="button">Browse</button>
+            </div>
+          </label>
         </div>
         <div class="row">
           <button id="setup-save-stack" class="button primary" type="button">Save Stack Choices</button>
@@ -478,7 +628,8 @@
         </div>
         <div id="setup-command-helper" class="notice" role="status">Run the generated docker compose command after saving stack choices.</div>
         <div id="setup-command-summary" class="setup-command-summary"></div>
-      </div>
+        </div>
+      </details>
     </section>
     <section class="panel full page-full page-hidden" id="connections-panel" data-page="connections">
       <div class="panel-header-row">
@@ -839,41 +990,86 @@
       </div>
       <div id="ytdlp-update-message" class="notice settings-header-notice" role="status"></div>
       <div class="settings-layout">
-        <aside class="settings-sidebar" aria-label="Settings categories">
+        <aside class="settings-sidebar app-page-sidebar" aria-label="Settings categories">
           <label class="field inline short settings-advanced-control">
             <span>Advanced mode</span>
             <input id="settings-advanced-mode" type="checkbox">
           </label>
           <nav id="settings-nav" class="settings-nav" aria-label="Settings sections">
             <a class="settings-nav-link" href="#settings-all" data-settings-link="all">All Settings</a>
+            <a class="settings-nav-link" href="#settings-guided-setup" data-settings-link="guided-setup">Guided Setup</a>
             <a class="settings-nav-link active" href="#settings-core" data-settings-link="core">General</a>
+            <a class="settings-nav-link" href="#settings-connections-hub" data-settings-link="connections-hub">Connections</a>
             <a class="settings-nav-link" href="#settings-automation" data-settings-link="automation">Automation</a>
-            <a class="settings-nav-link" href="#settings-youtube" data-settings-link="youtube">YouTube</a>
-            <a class="settings-nav-link" href="#settings-spotify" data-settings-link="spotify">Spotify</a>
-            <a class="settings-nav-link settings-advanced-link" href="#settings-telegram" data-settings-link="telegram" data-settings-level="advanced">Telegram</a>
-            <a class="settings-nav-link" href="#settings-tagging" data-settings-link="tagging">Tagging</a>
-            <a class="settings-nav-link" href="#settings-community-cache" data-settings-link="community-cache">Community Cache</a>
-            <a class="settings-nav-link settings-advanced-link" href="#settings-arr" data-settings-link="arr" data-settings-level="advanced">ARR Integration</a>
-            <a class="settings-nav-link settings-advanced-link" href="#settings-runtime" data-settings-link="runtime" data-settings-level="advanced">Runtime</a>
+            <a class="settings-nav-link" href="#settings-security" data-settings-link="security">Security</a>
+            <a class="settings-nav-link" href="#settings-status-hub" data-settings-link="status-hub">Status</a>
           </nav>
+          <div class="settings-more-menu">
+            <button id="settings-more-toggle" class="button ghost small settings-more-toggle" type="button" aria-expanded="false" aria-controls="settings-more-popover">More</button>
+            <div id="settings-more-popover" class="settings-more-popover hidden" role="menu" aria-label="More settings sections">
+              <a class="settings-nav-link settings-more-link" href="#settings-info-hub" data-settings-link="info-hub">Info</a>
+              <a class="settings-nav-link settings-more-link" href="#settings-youtube" data-settings-link="youtube">YouTube</a>
+              <a class="settings-nav-link settings-more-link" href="#settings-spotify" data-settings-link="spotify">Spotify</a>
+              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-services-hub" data-settings-link="services-hub" data-settings-level="advanced">Services</a>
+              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-logs-hub" data-settings-link="logs-hub" data-settings-level="advanced">Logs</a>
+              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-tagging" data-settings-link="tagging" data-settings-level="advanced">Tagging</a>
+              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-community-cache" data-settings-link="community-cache" data-settings-level="advanced">Community Cache</a>
+              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-long-term-retry" data-settings-link="long-term-retry" data-settings-level="advanced">Long-Term Retry</a>
+              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-arr" data-settings-link="arr" data-settings-level="advanced">ARR Integration</a>
+              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-telegram" data-settings-link="telegram" data-settings-level="advanced">Telegram</a>
+              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-runtime" data-settings-link="runtime" data-settings-level="advanced">Runtime</a>
+            </div>
+          </div>
           <label class="field short settings-mobile-jump">
             <span>Section</span>
             <select id="settings-section-select">
               <option value="settings-all">All Settings</option>
+              <option value="settings-guided-setup">Guided Setup</option>
               <option value="settings-core">General</option>
+              <option value="settings-connections-hub">Connections</option>
               <option value="settings-automation">Automation</option>
               <option value="settings-youtube">YouTube</option>
               <option value="settings-spotify">Spotify</option>
-              <option value="settings-telegram" data-settings-level="advanced">Telegram</option>
-              <option value="settings-tagging">Tagging</option>
-              <option value="settings-community-cache">Community Cache</option>
+              <option value="settings-security">Security</option>
+              <option value="settings-status-hub">Status</option>
+              <option value="settings-info-hub">Info</option>
+              <option value="settings-services-hub" data-settings-level="advanced">Services</option>
+              <option value="settings-logs-hub" data-settings-level="advanced">Logs</option>
+              <option value="settings-tagging" data-settings-level="advanced">Tagging</option>
+              <option value="settings-community-cache" data-settings-level="advanced">Community Cache</option>
+              <option value="settings-long-term-retry" data-settings-level="advanced">Long-Term Retry</option>
               <option value="settings-arr" data-settings-level="advanced">ARR Integration</option>
+              <option value="settings-telegram" data-settings-level="advanced">Telegram</option>
               <option value="settings-runtime" data-settings-level="advanced">Runtime</option>
             </select>
           </label>
         </aside>
         <div class="settings-main">
           <div class="stack settings-stack">
+            <section id="settings-guided-setup" class="settings-section" data-settings-section="guided-setup">
+              <div class="settings-section-heading">Guided Setup</div>
+              <div id="settings-setup-slot" class="settings-embedded-slot"></div>
+            </section>
+            <section id="settings-connections-hub" class="settings-section" data-settings-section="connections-hub">
+              <div class="settings-section-heading">Connections</div>
+              <div id="settings-connections-slot" class="settings-embedded-slot"></div>
+            </section>
+            <section id="settings-services-hub" class="settings-section" data-settings-section="services-hub" data-settings-level="advanced">
+              <div class="settings-section-heading">Services</div>
+              <div id="settings-services-slot" class="settings-embedded-slot"></div>
+            </section>
+            <section id="settings-status-hub" class="settings-section" data-settings-section="status-hub">
+              <div class="settings-section-heading">Status</div>
+              <div id="settings-status-slot" class="settings-embedded-slot settings-embedded-slot-stack"></div>
+            </section>
+            <section id="settings-logs-hub" class="settings-section" data-settings-section="logs-hub" data-settings-level="advanced">
+              <div class="settings-section-heading">Logs</div>
+              <div id="settings-logs-slot" class="settings-embedded-slot settings-embedded-slot-stack settings-logs-slot"></div>
+            </section>
+            <section id="settings-info-hub" class="settings-section" data-settings-section="info-hub">
+              <div class="settings-section-heading">Info</div>
+              <div id="settings-info-slot" class="settings-embedded-slot settings-embedded-slot-stack"></div>
+            </section>
             <section id="settings-core" class="settings-section" data-settings-section="core">
               <div class="settings-section-heading">General</div>
               <div class="group">
@@ -950,6 +1146,45 @@
                     <button id="add-music-export" class="button ghost small" type="button">Add Export Target</button>
                   </div>
                   <div class="notice">Exports run after the canonical file is finalized. Copy exports keep the canonical filename only; transcode exports emit flat `.m4a` files without touching the canonical library.</div>
+                </div>
+              </div>
+              <div class="group">
+                <div class="group-title">Playback Integration</div>
+                <div class="stack">
+                  <div class="row compact playback-preset-row">
+                    <button class="button ghost small" type="button" data-playback-preset="jellyfin">Jellyfin</button>
+                    <button class="button ghost small" type="button" data-playback-preset="plex">Plex</button>
+                    <button class="button ghost small" type="button" data-playback-preset="vlc">VLC</button>
+                    <button class="button ghost small" type="button" data-playback-preset="mpv">MPV</button>
+                    <button class="button ghost small" type="button" data-playback-preset="iina">IINA</button>
+                    <button class="button ghost small" type="button" data-playback-preset="none">Clear</button>
+                  </div>
+                  <label class="field short">
+                    <span>External player</span>
+                    <select id="cfg-playback-external-mode">
+                      <option value="none">None</option>
+                      <option value="jellyfin">Jellyfin</option>
+                      <option value="plex">Plex</option>
+                      <option value="custom">Custom / VLC</option>
+                    </select>
+                  </label>
+                  <label class="field full">
+                    <span>External player label</span>
+                    <input id="cfg-playback-external-label" type="text" placeholder="Watch in Jellyfin">
+                  </label>
+                  <label class="field full">
+                    <span>Custom player URL template</span>
+                    <input id="cfg-playback-external-template" type="text" placeholder="vlc://{stream_url}">
+                  </label>
+                  <label class="field full">
+                    <span>Plex base URL</span>
+                    <input id="cfg-playback-plex-base-url" type="text" placeholder="http://plex.local:32400">
+                  </label>
+                  <div class="stack playback-integration-preview">
+                    <div id="cfg-playback-preview-label" class="meta">Button preview: Watch in Jellyfin</div>
+                    <div id="cfg-playback-preview-url" class="meta">Launch URL preview appears here.</div>
+                  </div>
+                  <div class="notice">Video library items can always play inside Retreivr. External player launch is optional and supports Jellyfin search, Plex search, or a custom URL template using placeholders like <code>{title}</code>, <code>{stream_url}</code>, <code>{download_url}</code>, and <code>{source_url}</code>.</div>
                 </div>
               </div>
               <div class="group" data-settings-level="advanced">
@@ -1062,7 +1297,7 @@
               </div>
             </section>
 
-            <section id="settings-community-cache" class="settings-section" data-settings-section="community-cache">
+            <section id="settings-community-cache" class="settings-section" data-settings-section="community-cache" data-settings-level="advanced">
               <div class="settings-section-heading">Community Cache</div>
               <div class="group">
                 <div class="group-title">Lookup</div>
@@ -1192,15 +1427,24 @@
                 <div class="grid two">
                   <label class="field full">
                     <span>Movies root</span>
-                    <input id="cfg-arr-movies-root" type="text" placeholder="./media/movies">
+                    <div class="row path-picker">
+                      <input id="cfg-arr-movies-root" type="text" placeholder="./media/movies">
+                      <button id="browse-cfg-arr-movies-root" class="button ghost small" type="button">Browse</button>
+                    </div>
                   </label>
                   <label class="field full">
                     <span>TV root</span>
-                    <input id="cfg-arr-tv-root" type="text" placeholder="./media/tv">
+                    <div class="row path-picker">
+                      <input id="cfg-arr-tv-root" type="text" placeholder="./media/tv">
+                      <button id="browse-cfg-arr-tv-root" class="button ghost small" type="button">Browse</button>
+                    </div>
                   </label>
                   <label class="field full">
                     <span>Books root</span>
-                    <input id="cfg-arr-books-root" type="text" placeholder="./media/books">
+                    <div class="row path-picker">
+                      <input id="cfg-arr-books-root" type="text" placeholder="./media/books">
+                      <button id="browse-cfg-arr-books-root" class="button ghost small" type="button">Browse</button>
+                    </div>
                   </label>
                 </div>
                 <div class="notice">These paths align Retreivr Setup with ARR auto-configuration targets so Radarr, Sonarr, and Readarr receive the same destination roots.</div>
@@ -1295,7 +1539,10 @@
                   </label>
                   <label class="field full">
                     <span>Download directory</span>
-                    <input id="cfg-arr-qbittorrent-download-dir" type="text" placeholder="/downloads/torrents">
+                    <div class="row path-picker">
+                      <input id="cfg-arr-qbittorrent-download-dir" type="text" placeholder="/downloads/torrents">
+                      <button id="browse-cfg-arr-qbittorrent-download-dir" class="button ghost small" type="button">Browse</button>
+                    </div>
                   </label>
                 </div>
               </div>
@@ -1373,7 +1620,7 @@
                 </div>
                 <div class="row">
                   <button id="security-admin-pin-save" class="button ghost small" type="button">Save Admin PIN Settings</button>
-                  <span id="security-admin-pin-status" class="meta">Admin PIN is disabled.</span>
+                  <div id="security-admin-pin-status" class="notice" role="status">Admin PIN is disabled.</div>
                 </div>
               </div>
             </section>
@@ -1485,7 +1732,7 @@
               </div>
             </section>
 
-            <section id="settings-tagging" class="settings-section" data-settings-section="tagging">
+            <section id="settings-tagging" class="settings-section" data-settings-section="tagging" data-settings-level="advanced">
               <div class="settings-section-heading">Tagging</div>
               <div class="group" id="music-meta-group">
                 <div class="group-title">Post-download tagging &amp; enrichment</div>
@@ -1700,7 +1947,8 @@
     </section>
 
     <section class="panel full page-full page-hidden" id="downloads-panel" data-page="status">
-      <div class="panel-title">Library Downloads (Files)</div>
+      <div class="panel-title">Library Downloads (Legacy Files View)</div>
+      <div class="notice">For richer cover-grid browsing, use `Home → Video Library` and `Music → Music Library`. This table remains available as a low-level file view.</div>
       <div class="row">
         <button id="downloads-refresh" class="button ghost">Refresh</button>
         <button id="cleanup-temp" class="button ghost">Clear temporary files</button>
@@ -1739,7 +1987,8 @@
     </section>
 
     <section class="panel full page-full page-hidden" id="history-panel" data-page="status">
-      <div class="panel-title">Download History (Completed)</div>
+      <div class="panel-title">Download History (Legacy Table)</div>
+      <div class="notice">Use `Home → Video Library` and `Music → Music Library` for the primary acquisition/library view with artwork, details, and source metadata. This table remains only as a low-level record view.</div>
       <div class="row">
         <button class="button ghost small filters-toggle" data-target="history-filters" type="button">Filters</button>
         <button id="history-refresh" class="button ghost">Refresh</button>
@@ -1807,6 +2056,7 @@
         </table>
       </div>
     </section>
+    </div>
   </main>
 
   <div id="browser-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="browser-title">
@@ -1963,6 +2213,61 @@
     </div>
   </div>
 
+  <div id="library-details-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="library-details-title">
+    <div class="modal-card arr-details-card library-details-card">
+      <div class="row space-between">
+        <div id="library-details-title" class="panel-title">Library Item</div>
+        <button id="library-details-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div class="arr-details-layout">
+        <div class="arr-details-poster-wrap">
+          <img id="library-details-poster" class="arr-details-poster" src="assets/no_artwork.png" alt="Artwork">
+        </div>
+        <div class="arr-details-main">
+          <div id="library-details-subtitle" class="meta"></div>
+          <div id="library-details-meta" class="arr-details-meta"></div>
+          <div id="library-details-status" class="notice"></div>
+          <div id="library-details-extra" class="arr-details-cast-section"></div>
+          <div class="arr-details-actions">
+            <div class="arr-details-action-group arr-details-action-group-primary">
+              <button id="library-details-primary" class="button primary" type="button">Open</button>
+            </div>
+            <div class="arr-details-action-group arr-details-action-group-secondary">
+              <button id="library-details-secondary" class="button ghost hidden" type="button">More</button>
+            </div>
+            <div class="arr-details-action-group arr-details-action-group-secondary">
+              <button id="library-details-tertiary" class="button ghost hidden" type="button">Download</button>
+            </div>
+          </div>
+          <div id="library-details-overview" class="arr-details-overview"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="library-video-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="library-video-title">
+    <div class="modal-card library-video-modal-card">
+      <div class="row space-between">
+        <div id="library-video-title" class="panel-title">Watch Video</div>
+        <button id="library-video-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div id="library-video-subtitle" class="meta"></div>
+      <div class="library-video-frame">
+        <video id="library-video-player" class="library-video-player" controls playsinline preload="metadata"></video>
+      </div>
+    </div>
+  </div>
+
+  <div id="music-player-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="music-player-modal-title">
+    <div class="modal-card music-player-modal-card">
+      <div class="row space-between">
+        <div id="music-player-modal-title" class="panel-title">Now Playing</div>
+        <button id="music-player-modal-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div id="music-player-modal-slot"></div>
+    </div>
+  </div>
+
   <div id="admin-pin-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="admin-pin-title">
     <div class="modal-card admin-pin-card">
       <div class="row space-between">
@@ -1977,6 +2282,27 @@
       <div id="admin-pin-message" class="notice" role="status"></div>
       <div class="row">
         <button id="admin-pin-submit" class="button primary" type="button">Unlock</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="startup-setup-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="startup-setup-title">
+    <div class="modal-card startup-setup-card">
+      <div class="row space-between">
+        <div id="startup-setup-title" class="panel-title">Run Initial Setup Guide?</div>
+        <button id="startup-setup-close" class="button ghost small" type="button">Later</button>
+      </div>
+      <div class="meta">
+        Retreivr works on its own, but the setup guide will walk through TMDb, ARR, VPN, YouTube access, notifications, and storage paths one step at a time.
+      </div>
+      <div class="startup-setup-note">
+        Recommended for first-time installs. You can always run Guided Setup later from Settings.
+      </div>
+      <div id="startup-setup-message" class="notice" role="status"></div>
+      <div class="startup-setup-actions">
+        <button id="startup-setup-run" class="button primary" type="button">Yes, run Initial Setup</button>
+        <button id="startup-setup-remind" class="button ghost" type="button">No, remind me later</button>
+        <button id="startup-setup-dismiss" class="button ghost" type="button">No, do not show again</button>
       </div>
     </div>
   </div>

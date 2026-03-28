@@ -93,6 +93,14 @@
     "local_library_first": true,
     "cache_stream_fallback": true
   },
+  "ui_preferences": {
+    "home_video_card_size": 220,
+    "home_video_sort": "best_match",
+    "music_card_size": 180,
+    "music_sort": "recommended",
+    "movies_tv_card_size": 260,
+    "movies_tv_sort": "best_match"
+  },
   "settings_advanced_mode": false,
   "dry_run": false,
   "upload_date_format": "MM-YYYY",
@@ -205,6 +213,12 @@
     "admin_pin_enabled": false,
     "admin_pin_hash": "",
     "admin_pin_session_minutes": 30
+  },
+  "playback": {
+    "external_player_mode": "none",
+    "external_player_label": "",
+    "external_player_url_template": "",
+    "plex_base_url": ""
   },
   "custom_search_adapters_file": "config/custom_search_adapters.yaml"
 }

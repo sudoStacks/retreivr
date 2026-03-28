@@ -420,6 +420,15 @@ def apply_config_defaults(config):
             },
         },
     )
+    normalized.setdefault(
+        "playback",
+        {
+            "external_player_mode": "none",
+            "external_player_label": "",
+            "external_player_url_template": "",
+            "plex_base_url": "",
+        },
+    )
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
     normalized.setdefault("music_skip_metadata_probe", True)
     normalized.setdefault("music_candidate_cooldown_enabled", True)
@@ -682,6 +691,24 @@ def validate_config(config):
                             errors.append(f"music_preferences.favorite_artists[{index}].name must be a non-empty string")
                         if artist_mbid is not None and (not isinstance(artist_mbid, str) or not str(artist_mbid).strip()):
                             errors.append(f"music_preferences.favorite_artists[{index}].artist_mbid must be a non-empty string when present")
+
+    ui_preferences = config.get("ui_preferences")
+    if ui_preferences is not None:
+        if not isinstance(ui_preferences, dict):
+            errors.append("ui_preferences must be an object")
+        else:
+            for key in ("home_video_card_size", "music_card_size", "movies_tv_card_size"):
+                value = ui_preferences.get(key)
+                if value is None:
+                    continue
+                if not isinstance(value, int):
+                    errors.append(f"ui_preferences.{key} must be an integer")
+                elif value < 120 or value > 320:
+                    errors.append(f"ui_preferences.{key} must be between 120 and 320")
+            for key in ("home_video_sort", "music_sort", "movies_tv_sort"):
+                value = ui_preferences.get(key)
+                if value is not None and not isinstance(value, str):
+                    errors.append(f"ui_preferences.{key} must be a string")
 
     if final_format is not None and not isinstance(final_format, str):
         errors.append("final_format must be a string")

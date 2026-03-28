@@ -4,12 +4,21 @@ import json
 import os
 import random
 import sqlite3
+import mimetypes
 from pathlib import Path
 from urllib.parse import quote
 from typing import Any
 
 
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".aac", ".ogg", ".opus", ".wav", ".alac"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+PREFERRED_ART_NAMES = (
+    "cover",
+    "folder",
+    "front",
+    "album",
+    "artwork",
+)
 
 
 def ensure_music_player_tables(conn: sqlite3.Connection) -> None:
@@ -85,9 +94,34 @@ def _music_roots(config: dict[str, Any]) -> list[Path]:
     return roots
 
 
+def _find_album_art(album_dir: Path, cache: dict[str, str | None]) -> str | None:
+    key = str(album_dir.resolve())
+    if key in cache:
+        return cache[key]
+    found: str | None = None
+    try:
+        entries = [entry for entry in album_dir.iterdir() if entry.is_file() and entry.suffix.lower() in IMAGE_EXTENSIONS]
+        if entries:
+            preferred = []
+            fallback = []
+            for entry in entries:
+                stem = entry.stem.lower()
+                if any(stem == name or stem.startswith(f"{name}.") or stem.startswith(f"{name}_") or stem.startswith(f"{name}-") for name in PREFERRED_ART_NAMES):
+                    preferred.append(entry)
+                else:
+                    fallback.append(entry)
+            chosen = (preferred or fallback)[0]
+            found = str(chosen.resolve())
+    except Exception:
+        found = None
+    cache[key] = found
+    return found
+
+
 def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
+    artwork_cache: dict[str, str | None] = {}
     for root in _music_roots(config):
         try:
             if not root.exists():
@@ -104,6 +138,8 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                 artist = path.parent.parent.name if len(path.parts) >= 3 else ""
                 album = path.parent.name
                 title = path.stem
+                stat = path.stat()
+                artwork_local_path = _find_album_art(path.parent, artwork_cache)
                 items.append(
                     {
                         "id": resolved,
@@ -115,6 +151,11 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                         "kind": "local",
                         "stream_url": f"/api/player/stream/local?path={quote(resolved, safe='')}",
                         "local_path": resolved,
+                        "downloaded_at": int(stat.st_mtime),
+                        "size_bytes": int(stat.st_size),
+                        "file_ext": path.suffix.lower(),
+                        "media_type": str(mimetypes.guess_type(resolved)[0] or "").strip() or None,
+                        "artwork_local_path": artwork_local_path,
                     }
                 )
         except Exception:
@@ -144,9 +185,14 @@ def summarize_library(items: list[dict[str, Any]]) -> dict[str, list[dict[str, A
                 "album": album,
                 "album_key": album_key,
                 "track_count": 0,
+                "artwork_local_path": str(item.get("artwork_local_path") or "").strip() or None,
             },
         )
         album_entry["track_count"] += 1
+        if not album_entry.get("artwork_local_path"):
+            album_entry["artwork_local_path"] = str(item.get("artwork_local_path") or "").strip() or None
+        if not artist_entry.get("artwork_local_path"):
+            artist_entry["artwork_local_path"] = str(item.get("artwork_local_path") or "").strip() or None
     for artist_key, artist_entry in artists_map.items():
         artist_entry["album_count"] = sum(1 for (a_key, _), _album in albums_map.items() if a_key == artist_key)
     artists = sorted(artists_map.values(), key=lambda entry: (-int(entry["track_count"]), entry["artist"].lower()))
