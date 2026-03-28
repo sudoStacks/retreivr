@@ -41,6 +41,8 @@ const state = {
   homeMusicViewStack: [],
   musicResultsSort: "recommended",
   musicCardSize: 210,
+  musicGenreBrowseCache: {},
+  musicArtistAlbumsCache: {},
   musicPreferences: {
     favorite_genres: [],
     favorite_artists: [],
@@ -92,6 +94,8 @@ const state = {
   },
   arrGenreRenderToken: 0,
   arrActiveGenre: null,
+  arrGenreBrowseCache: {},
+  arrPersonTitlesCache: {},
   arrConnectionStatus: {
     radarr: { configured: false, reachable: false, message: "Radarr is not configured" },
     sonarr: { configured: false, reachable: false, message: "Sonarr is not configured" },
@@ -4563,7 +4567,15 @@ function createArrGenreCard(genre, renderToken) {
     <div class="home-candidate-meta">Open top recent titles in this genre</div>
   `;
   card.appendChild(content);
-  card.addEventListener("click", () => browseArrGenre(genre));
+  const runBrowseGenre = () => browseArrGenre(genre);
+  card.addEventListener("click", (event) => {
+    if (event.target.closest("button, a, input, select, textarea")) return;
+    runBrowseGenre();
+  });
+  [tile, content].forEach((el) => {
+    if (!el) return;
+    el.classList.add("music-card-click-target");
+  });
   queueArrGenreArtworkJob(genre, tile, renderToken);
   return card;
 }
@@ -4594,16 +4606,38 @@ async function browseArrGenre(genre, { year = "" } = {}) {
   if (!Number.isFinite(genreId)) return;
   const messageEl = $("#movies-tv-message");
   const yearValue = /^\d{4}$/.test(String(year || "").trim()) ? String(year).trim() : "";
+  const kind = getArrGenreKind();
+  const cacheKey = getArrGenreBrowseCacheKey(kind, genreId, yearValue);
+  const cached = state.arrGenreBrowseCache[cacheKey];
+  if (cached && Array.isArray(cached.results)) {
+    state.arrActiveGenre = { id: genreId, name: genreName };
+    state.arrSearchContext = "genre";
+    state.arrSearchQuery = genreName;
+    state.arrSearchYear = yearValue;
+    state.arrResults = cached.results.map((item, index) => ({ ...item, _search_rank: index }));
+    state.arrConnectionStatus[getArrServiceKey()] = cached.connection || state.arrConnectionStatus[getArrServiceKey()];
+    renderArrConnectionStatus();
+    renderArrResults();
+    focusMoviesTvResults();
+    startArrStatusPolling();
+    setNotice(messageEl, `Loaded top ${genreName} titles.`, false);
+    return;
+  }
+  renderArrBrowseLoading(`Loading top ${genreName} titles…`, yearValue ? `Top ${kind === "tv" ? "TV shows" : "movies"} in ${genreName} for ${yearValue}` : `Top ${kind === "tv" ? "TV shows" : "movies"} in ${genreName}`);
   setNotice(messageEl, `Loading top ${genreName} titles…`, false);
   try {
     const params = new URLSearchParams();
-    params.set("kind", getArrGenreKind());
+    params.set("kind", kind);
     params.set("genre_id", String(genreId));
     params.set("limit", "24");
     if (yearValue) {
       params.set("year", yearValue);
     }
     const data = await fetchJson(`/api/arr/genre/browse?${params.toString()}`);
+    state.arrGenreBrowseCache[cacheKey] = {
+      results: Array.isArray(data?.results) ? data.results : [],
+      connection: data?.connection || null,
+    };
     state.arrActiveGenre = { id: genreId, name: genreName };
     state.arrSearchContext = "genre";
     state.arrSearchQuery = genreName;
@@ -4815,11 +4849,33 @@ async function openArrPersonTitles(personId) {
   const numeric = Number.parseInt(String(personId || "").trim(), 10);
   if (!Number.isFinite(numeric)) return;
   const messageEl = $("#movies-tv-message");
+  const kind = getArrKind();
+  const cacheKey = getArrPersonTitlesCacheKey(kind, numeric);
+  const cached = state.arrPersonTitlesCache[cacheKey];
+  if (cached && Array.isArray(cached.results)) {
+    const personName = String(cached.person_name || "Person").trim() || "Person";
+    state.arrActiveGenre = null;
+    state.arrSearchContext = "person";
+    state.arrSearchQuery = personName;
+    state.arrSearchYear = "";
+    state.arrResults = cached.results.map((item, index) => ({ ...item, _search_rank: index }));
+    closeArrDetailsModal();
+    renderArrResults();
+    focusMoviesTvResults();
+    startArrStatusPolling();
+    setNotice(messageEl, state.arrResults.length ? `Loaded titles for ${personName}.` : `No titles found for ${personName}.`, false);
+    return;
+  }
+  renderArrBrowseLoading("Loading filmography…", "Loading person filmography");
   setNotice(messageEl, "Loading filmography…", false);
   try {
     const data = await fetchJson(
-      `/api/arr/person?person_id=${encodeURIComponent(String(numeric))}&kind=${encodeURIComponent(getArrKind())}&limit=24`
+      `/api/arr/person?person_id=${encodeURIComponent(String(numeric))}&kind=${encodeURIComponent(kind)}&limit=24`
     );
+    state.arrPersonTitlesCache[cacheKey] = {
+      person_name: data?.person_name || "",
+      results: Array.isArray(data?.results) ? data.results : [],
+    };
     const personName = String(data?.person_name || "Person").trim() || "Person";
     state.arrActiveGenre = null;
     state.arrSearchContext = "person";
@@ -5374,6 +5430,64 @@ function snapshotMusicResultsView(response = {}, query = "") {
   };
 }
 
+function getMusicArtistAlbumsCacheKey(artist) {
+  const name = typeof artist === "object" && artist !== null
+    ? String(artist.name || "").trim()
+    : String(artist || "").trim();
+  const artistMbid = typeof artist === "object" && artist !== null
+    ? String(artist.artist_mbid || "").trim()
+    : "";
+  return `${artistMbid || name}`.trim().toLowerCase();
+}
+
+function getMusicGenreBrowseCacheKey(genre) {
+  return normalizeMusicGenreIntent(genre).trim().toLowerCase();
+}
+
+function getArrGenreBrowseCacheKey(kind, genreId, year = "") {
+  return `${String(kind || "").trim().toLowerCase()}::${String(genreId || "").trim()}::${String(year || "").trim()}`;
+}
+
+function getArrPersonTitlesCacheKey(kind, personId) {
+  return `${String(kind || "").trim().toLowerCase()}::${String(personId || "").trim()}`;
+}
+
+function renderMusicBrowseLoading(message) {
+  const container = document.getElementById("music-results-container");
+  if (!container) return;
+  state.homeMusicResultMap = {};
+  const renderToken = ++state.homeMusicRenderToken;
+  container.innerHTML = "";
+  const loading = document.createElement("div");
+  loading.className = "home-results-empty";
+  loading.textContent = message;
+  container.appendChild(loading);
+  setHomeResultsStatus("Loading music results…");
+  setHomeResultsDetail(message, false);
+  state.homeMusicCurrentView = null;
+  return renderToken;
+}
+
+function renderArrBrowseLoading(message, detail = "") {
+  const section = $("#movies-tv-results");
+  const listEl = $("#movies-tv-results-list");
+  const statusTextEl = $("#movies-tv-results-status-text");
+  const detailEl = $("#movies-tv-results-detail");
+  if (!section || !listEl || !statusTextEl) return;
+  section.classList.remove("hidden");
+  statusTextEl.textContent = "Loading…";
+  listEl.innerHTML = `<div class="home-results-empty">${escapeHtml(message)}</div>`;
+  if (detailEl) {
+    if (detail) {
+      detailEl.textContent = detail;
+      detailEl.classList.remove("hidden");
+    } else {
+      detailEl.textContent = "";
+      detailEl.classList.add("hidden");
+    }
+  }
+}
+
 function normalizeMusicPreferences(payload = {}) {
   const raw = payload && typeof payload === "object" ? payload : {};
   const favoriteGenres = [];
@@ -5718,8 +5832,17 @@ function createMusicGenreCard(genre, thumbnailJobs, renderToken) {
   meta.textContent = "Open artists in this genre";
   content.appendChild(meta);
   card.appendChild(content);
-  tile.addEventListener("click", () => browseMusicGenre(displayGenre, { pushHistory: true }));
-  title.addEventListener("click", () => browseMusicGenre(displayGenre, { pushHistory: true }));
+  const runBrowseGenre = () => browseMusicGenre(displayGenre, { pushHistory: true });
+  card.addEventListener("click", (event) => {
+    if (event.target.closest(".music-favorite-button, .home-candidate-action, button, a, input, select, textarea")) {
+      return;
+    }
+    runBrowseGenre();
+  });
+  [tile, title, content].forEach((el) => {
+    if (!el) return;
+    el.classList.add("music-card-click-target");
+  });
   queueGenreArtworkJob(displayGenre, tile, thumbnailJobs, renderToken);
   return card;
 }
@@ -5728,11 +5851,30 @@ async function browseMusicGenre(genre, { pushHistory = true } = {}) {
   const genreValue = normalizeMusicGenreIntent(genre);
   if (!genreValue) return;
   const messageEl = $("#home-search-message");
+  const cacheKey = getMusicGenreBrowseCacheKey(genreValue);
+  const cached = state.musicGenreBrowseCache[cacheKey];
+  if (cached && Array.isArray(cached.artists)) {
+    state.musicResultsSort = "recommended";
+    renderMusicModeResults(
+      {
+        artists: cached.artists,
+        albums: [],
+        tracks: [],
+        mode_used: "artist",
+      },
+      genreValue,
+      { pushHistory }
+    );
+    setNotice(messageEl, `Loaded artists for ${genreValue}.`, false);
+    return;
+  }
+  renderMusicBrowseLoading(`Loading artists for ${genreValue}...`);
   setNotice(messageEl, `Loading artists for ${genreValue}...`, false);
   try {
     const mergedArtists = await fetchArtistsForGenreIntent(genreValue, { limit: 24 });
     setNotice(messageEl, `Ranking artists for ${genreValue}...`, false);
     const rankedArtists = await enrichGenreArtistsForRecommendation(mergedArtists);
+    state.musicGenreBrowseCache[cacheKey] = { artists: rankedArtists };
     state.musicResultsSort = "recommended";
     renderMusicModeResults(
       {
@@ -5840,13 +5982,16 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken) {
     }
   };
   button.addEventListener("click", runViewAlbums);
-  [artistThumb.shell, title].forEach((el) => {
+  card.addEventListener("click", (event) => {
+    if (event.target.closest(".music-favorite-button, .home-candidate-action, button, a, input, select, textarea")) {
+      return;
+    }
+    if (button.disabled) return;
+    runViewAlbums();
+  });
+  [artistThumb.shell, title, content].forEach((el) => {
     if (!el) return;
     el.classList.add("music-card-click-target");
-    el.addEventListener("click", () => {
-      if (button.disabled) return;
-      runViewAlbums();
-    });
   });
   action.appendChild(button);
   card.appendChild(action);
@@ -5995,13 +6140,16 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
     }
   };
   viewTracksButton.addEventListener("click", runViewTracks);
-  [albumThumb.shell, title].forEach((el) => {
+  card.addEventListener("click", (event) => {
+    if (event.target.closest(".home-candidate-action, button, a, input, select, textarea")) {
+      return;
+    }
+    if (viewTracksButton.disabled) return;
+    runViewTracks();
+  });
+  [albumThumb.shell, title, content].forEach((el) => {
     if (!el) return;
     el.classList.add("music-card-click-target");
-    el.addEventListener("click", () => {
-      if (viewTracksButton.disabled) return;
-      runViewTracks();
-    });
   });
   button.addEventListener("click", async () => {
     const releaseGroupMbidValue = String(button.dataset.releaseGroupMbid || "").trim();
@@ -6808,6 +6956,10 @@ async function fetchMusicAlbumsByArtist(artist) {
   const artistMbid = typeof artist === "object" && artist !== null
     ? String(artist.artist_mbid || "").trim()
     : "";
+  const cacheKey = getMusicArtistAlbumsCacheKey(artist);
+  if (cacheKey && Array.isArray(state.musicArtistAlbumsCache[cacheKey])) {
+    return state.musicArtistAlbumsCache[cacheKey].map((item) => ({ ...item }));
+  }
   if (!query) {
     return [];
   }
@@ -6846,6 +6998,9 @@ async function fetchMusicAlbumsByArtist(artist) {
     if (aHas !== bHas) return aHas ? -1 : 1;
     return String(a?.title || "").localeCompare(String(b?.title || ""));
   });
+  if (cacheKey) {
+    state.musicArtistAlbumsCache[cacheKey] = out.map((item) => ({ ...item }));
+  }
   return out;
 }
 

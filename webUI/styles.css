@@ -1115,6 +1115,12 @@ body.home-page .home-source-panel .home-source-pill.selected {
   cursor: pointer;
 }
 
+.music-genre-grid-card,
+.music-artist-grid-card,
+.movies-tv-genre-card {
+  cursor: pointer;
+}
+
 .home-candidate-list {
   display: flex;
   flex-direction: column;
