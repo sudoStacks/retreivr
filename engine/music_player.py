@@ -273,20 +273,23 @@ def build_station_queue(conn: sqlite3.Connection, config: dict[str, Any], *, sta
 
     cur = conn.cursor()
     seed_like = f"%{seed_value}%"
-    cur.execute(
-        """
-        SELECT recording_mbid, source, source_url, source_payload_json, verification_status, verification_count
-        FROM resolution_sources
-        WHERE verification_status IN ('verified', 'pending_verification', 'pending')
-          AND (
-            lower(source_payload_json) LIKE ?
-            OR lower(source_url) LIKE ?
-          )
-        ORDER BY verification_status='verified' DESC, verification_count DESC, updated_at DESC
-        LIMIT ?
-        """,
-        (seed_like, seed_like, max(limit * 3, 30)),
-    )
+    try:
+        cur.execute(
+            """
+            SELECT recording_mbid, source, source_url, source_payload_json, verification_status, verification_count
+            FROM resolution_sources
+            WHERE verification_status IN ('verified', 'pending_verification', 'pending')
+              AND (
+                lower(source_payload_json) LIKE ?
+                OR lower(source_url) LIKE ?
+              )
+            ORDER BY verification_status='verified' DESC, verification_count DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (seed_like, seed_like, max(limit * 3, 30)),
+        )
+    except sqlite3.OperationalError:
+        return queue[:limit]
     seen_urls = {str(item.get("stream_url") or "") for item in queue}
     for row in cur.fetchall():
         url = str(row["source_url"] or "").strip()
@@ -313,6 +316,68 @@ def build_station_queue(conn: sqlite3.Connection, config: dict[str, Any], *, sta
         if len(queue) >= limit:
             break
     return queue[:limit]
+
+
+def build_station_preview(conn: sqlite3.Connection, config: dict[str, Any], *, station: dict[str, Any], limit: int = 10) -> dict[str, Any]:
+    queue = build_station_queue(conn, config, station=station, limit=limit)
+    local_count = sum(1 for item in queue if str(item.get("kind") or item.get("source_kind") or "").strip().lower() == "local")
+    cached_count = sum(1 for item in queue if str(item.get("kind") or item.get("source_kind") or "").strip().lower() == "cached")
+    return {
+        "count": len(queue),
+        "local_count": local_count,
+        "cached_count": cached_count,
+        "items": queue,
+    }
+
+
+def list_cached_matches(conn: sqlite3.Connection, *, limit: int = 60) -> list[dict[str, Any]]:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT recording_mbid, source, source_url, source_payload_json, verification_status, verification_count, updated_at
+            FROM resolution_sources
+            WHERE verification_status IN ('verified', 'pending_verification', 'pending')
+              AND COALESCE(source_url, '') <> ''
+            ORDER BY verification_status='verified' DESC, verification_count DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (int(max(1, limit)),),
+        )
+    except sqlite3.OperationalError:
+        return []
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in cur.fetchall():
+        url = str(row["source_url"] or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        try:
+            payload = json.loads(str(row["source_payload_json"] or "{}"))
+        except Exception:
+            payload = {}
+        artist = str(payload.get("artist") or payload.get("uploader") or "").strip()
+        album = str(payload.get("album") or "").strip()
+        title = str(payload.get("title") or payload.get("track") or row["recording_mbid"] or "Cached Match").strip() or "Cached Match"
+        artwork_url = str(payload.get("thumbnail") or payload.get("thumbnail_url") or "").strip()
+        items.append(
+            {
+                "id": f"cached:{row['recording_mbid']}:{url}",
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "kind": "cached",
+                "stream_url": url,
+                "recording_mbid": str(row["recording_mbid"] or ""),
+                "source": str(row["source"] or ""),
+                "verification_status": str(row["verification_status"] or ""),
+                "verification_count": int(row["verification_count"] or 0),
+                "updated_at": str(row["updated_at"] or ""),
+                "artwork_url": artwork_url or None,
+            }
+        )
+    return items
 
 
 def add_history_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:

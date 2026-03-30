@@ -15,6 +15,21 @@
     <button id="brand-home" class="brand brand-button" type="button" aria-label="Go to Home">
       <img class="app-icon" src="app_icon.png" alt="Retreivr">
     </button>
+    <nav class="topbar-nav" aria-label="Primary navigation">
+      <button class="button ghost small nav-button" data-page="video" type="button" title="Video">
+        <span class="nav-label">Video</span>
+      </button>
+      <button class="button ghost small nav-button" data-page="music" type="button" title="Music">
+        <span class="nav-label">Music</span>
+      </button>
+      <button class="button ghost small nav-button" data-page="movies-tv" type="button" title="Movies &amp; TV">
+        <span class="nav-label">Movies &amp; TV</span>
+      </button>
+      <button class="button ghost small nav-button nav-button-with-count hidden" data-page="review" type="button" title="Review">
+        <span class="nav-label">Review</span>
+        <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
+      </button>
+    </nav>
     <div id="topbar-search-host" class="topbar-search-host" aria-live="polite"></div>
     <div class="top-actions" id="top-actions">
       <button id="toggle-theme" class="button ghost small" type="button" aria-label="Switch to light mode" title="Switch to light mode">
@@ -32,31 +47,6 @@
   <div id="topbar-node-parking" class="hidden" aria-hidden="true"></div>
 
   <main class="layout">
-    <aside class="app-global-sidebar" aria-label="Primary navigation">
-      <button id="app-sidebar-toggle" class="button ghost small app-sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar">⇤</button>
-      <button class="button ghost small nav-button" data-page="home" type="button" title="Home">
-        <span class="nav-icon" aria-hidden="true">⌂</span>
-        <span class="nav-label">Home</span>
-      </button>
-      <button class="button ghost small nav-button" data-page="video" type="button" title="Video">
-        <span class="nav-icon" aria-hidden="true">▣</span>
-        <span class="nav-label">Video</span>
-      </button>
-      <button class="button ghost small nav-button" data-page="music" type="button" title="Music">
-        <span class="nav-icon" aria-hidden="true">♪</span>
-        <span class="nav-label">Music</span>
-      </button>
-      <button class="button ghost small nav-button" data-page="movies-tv" type="button" title="Movies &amp; TV">
-        <span class="nav-icon" aria-hidden="true">▶</span>
-        <span class="nav-label">Movies &amp; TV</span>
-      </button>
-      <button class="button ghost small nav-button nav-button-with-count hidden" data-page="review" type="button">
-        <span class="nav-icon" aria-hidden="true">✓</span>
-        <span class="nav-label">Review</span>
-        <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
-      </button>
-      <div id="nav-actions" class="nav-actions"></div>
-    </aside>
     <div class="layout-content">
     <section class="panel full page-full" id="home-landing-panel" data-page="home">
       <div class="home-launcher-shell">
@@ -65,6 +55,11 @@
           <div class="home-launcher-subtitle">Choose the kind of media you want and Retreivr will take you straight into the right workspace.</div>
         </div>
         <div id="home-launcher-grid" class="home-launcher-grid">
+          <button id="home-launcher-setup" class="home-launcher-tile home-launcher-tile-accent hidden" data-home-launch="config" data-home-hash="settings-guided-setup" type="button">
+            <span class="home-launcher-icon" aria-hidden="true">✦</span>
+            <span class="home-launcher-tile-title">Continue Setup</span>
+            <span class="home-launcher-tile-meta">Finish guided setup and unlock the tools and discovery features you want Retreivr to handle for you.</span>
+          </button>
           <button class="home-launcher-tile" data-home-launch="video" type="button">
             <span class="home-launcher-icon" aria-hidden="true">▶</span>
             <span class="home-launcher-tile-title">Video</span>
@@ -91,6 +86,10 @@
     <section class="panel full page-full page-hidden" id="home-panel" data-page="video">
       <div class="app-page-shell home-page-shell">
         <div class="app-page-main">
+      <div class="home-section-toggle video-mode-toggle" aria-label="Video sections">
+        <button class="button ghost small app-page-nav active" data-home-section="search" type="button">Search</button>
+        <button class="button ghost small app-page-nav" data-home-section="library" type="button">Library</button>
+      </div>
       <section id="home-search-surface" class="app-page-surface active">
       <div class="home-search-shell">
         <div id="standard-search-container">
@@ -114,6 +113,12 @@
                 <label class="home-source-pill"><input type="checkbox" data-source="bandcamp"> <span>Bandcamp</span></label>
               </div>
             </div>
+            <span class="searchbar-leading-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                <circle cx="11" cy="11" r="6.5"></circle>
+                <path d="M16 16l5 5"></path>
+              </svg>
+            </span>
             <input
               id="home-search-input"
               class="home-search-input"
@@ -170,7 +175,7 @@
           </div>
         </div>
 
-        <div id="home-search-message" class="notice" role="status">
+        <div id="home-search-message" class="notice hidden" role="status">
           Press Enter or click Search to discover media
         </div>
         <div id="home-review-alert" class="notice review-home-alert hidden" role="status">
@@ -178,10 +183,42 @@
           <button id="home-review-alert-open" class="button ghost small" type="button">Open Review Queue</button>
         </div>
       </div>
-      <div class="home-section-toggle" aria-label="Home sections">
-        <button class="button ghost small app-page-nav active" data-home-section="search" type="button">Search</button>
-        <button class="button ghost small app-page-nav" data-home-section="library" type="button">Library</button>
-      </div>
+      <section id="video-discovery-default" class="video-discovery-default">
+        <div class="video-discovery-copy">
+          <div class="group-title">Start With Something Familiar</div>
+          <div class="meta">Search across your chosen sources, reopen recent searches, or jump into your library without losing your place.</div>
+        </div>
+        <section class="video-discovery-block">
+          <div class="panel-header-row compact">
+            <div>
+              <div class="group-title">Suggested Searches</div>
+              <div class="meta">Start with something familiar.</div>
+            </div>
+          </div>
+          <div id="video-discovery-suggestions" class="video-discovery-suggestions">
+            <button class="button ghost video-suggestion-button" type="button" data-video-suggestion="documentary trailers">Documentary trailers</button>
+            <button class="button ghost video-suggestion-button" type="button" data-video-suggestion="live concerts">Live concerts</button>
+            <button class="button ghost video-suggestion-button" type="button" data-video-suggestion="archive lectures">Archive lectures</button>
+            <button class="button ghost video-suggestion-button" type="button" data-video-suggestion="classic interviews">Classic interviews</button>
+          </div>
+        </section>
+        <section id="video-recent-searches-block" class="video-discovery-block hidden">
+          <div class="panel-header-row compact">
+            <div>
+              <div class="group-title">Recent Searches</div>
+              <div class="meta">Pick up where you left off.</div>
+            </div>
+          </div>
+          <div id="video-recent-searches" class="video-recent-searches"></div>
+        </section>
+        <div class="panel-header-row compact">
+          <div>
+            <div class="group-title">Recently Downloaded</div>
+            <div class="meta">Quick access to your latest video files.</div>
+          </div>
+        </div>
+        <div id="video-discovery-preview-grid" class="media-library-grid home-candidate-grid"></div>
+      </section>
       <div class="home-results hidden" id="home-results">
         <div class="home-results-header">
           <span>Results</span>
@@ -237,21 +274,17 @@
     </section>
     <section class="panel full page-full page-hidden" id="music-panel" data-page="music">
       <div class="app-page-shell music-shell">
-        <aside class="app-page-sidebar music-app-sidebar" aria-label="Music sections">
-          <button class="button ghost small music-app-nav active" data-music-section="home" type="button">Home</button>
-          <button class="button ghost small music-app-nav" data-music-section="search" type="button">Search</button>
-          <button class="button ghost small music-app-nav" data-music-section="library" type="button">Library</button>
-          <button class="button ghost small music-app-nav" data-music-section="favorites" type="button">Favorites</button>
-          <button class="button ghost small music-app-nav" data-music-section="playlists" type="button">Playlists</button>
-          <button class="button ghost small music-app-nav" data-music-section="radio" type="button">Radio</button>
-          <button class="button ghost small music-app-nav" data-music-section="queue" type="button">Queue</button>
-          <button class="button ghost small music-app-nav" data-music-section="recent" type="button">Recently Played</button>
-        </aside>
         <div class="music-app-main">
+          <div class="music-section-toggle" aria-label="Music sections">
+            <button class="button ghost small music-app-nav active" data-music-section="browse" type="button">Browse</button>
+            <button class="button ghost small music-app-nav" data-music-section="library" type="button">Library</button>
+            <button class="button ghost small music-app-nav" data-music-section="favorites" type="button">Favorites</button>
+            <button class="button ghost small music-app-nav" data-music-section="playlists" type="button">Playlists</button>
+            <button class="button ghost small music-app-nav" data-music-section="player" type="button">Player</button>
+            <button class="button ghost small music-app-nav" data-music-section="radio" type="button">Radio</button>
+          </div>
           <section id="music-discovery-surface" class="music-surface active">
-            <div id="music-page-mode-slot"></div>
             <div class="home-search-shell music-page-shell">
-              <div id="music-page-console-slot"></div>
               <div id="music-page-results-slot"></div>
               <div id="music-page-message-slot"></div>
               <div id="music-page-review-slot"></div>
@@ -323,32 +356,16 @@
     <div id="shared-music-nodes" class="hidden" aria-hidden="true">
       <div id="music-header-search" class="music-header-search">
         <div class="music-header-search-bar">
+          <span class="searchbar-leading-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5"></circle>
+              <path d="M16 16l5 5"></path>
+            </svg>
+          </span>
           <input id="music-header-query" class="home-search-input music-header-query" type="text" placeholder="Search artists, albums, or tracks">
+          <button id="music-header-advanced-toggle" class="button ghost small" type="button" aria-expanded="false" aria-controls="music-mode-console">Advanced</button>
+          <button id="music-header-search-clear" class="button ghost small" type="button">Clear</button>
           <button id="music-header-search-submit" class="button primary" type="button">Search</button>
-        </div>
-        <div class="music-header-search-tools">
-          <div id="music-header-mode-toggle" class="home-media-mode-toggle music-mode-toggle" role="radiogroup" aria-label="Music search intent">
-            <button type="button" class="home-media-mode-pill active" data-mode="auto" role="radio" aria-checked="true">Auto</button>
-            <button type="button" class="home-media-mode-pill" data-mode="artist" role="radio" aria-checked="false">Artist</button>
-            <button type="button" class="home-media-mode-pill" data-mode="album" role="radio" aria-checked="false">Album</button>
-            <button type="button" class="home-media-mode-pill" data-mode="track" role="radio" aria-checked="false">Track</button>
-          </div>
-          <button id="music-header-import-toggle" class="button ghost small music-import-toggle" type="button">Import Playlist</button>
-        </div>
-      </div>
-      <div class="music-mode-toggle-row home-mode-toggle-shell">
-        <div class="home-media-mode-group" role="group" aria-label="Search mode">
-          <span class="home-media-mode-label">Mode</span>
-          <div id="home-media-mode-toggle" class="home-media-mode-toggle" role="radiogroup" aria-label="Media mode">
-            <button type="button" class="home-media-mode-pill active" data-mode="video" role="radio" aria-checked="true">Video</button>
-            <button type="button" class="home-media-mode-pill" data-mode="music_video" role="radio" aria-checked="false">Music Video</button>
-            <button type="button" class="home-media-mode-pill" data-mode="music" role="radio" aria-checked="false">Music</button>
-          </div>
-          <select id="home-media-mode" class="hidden" aria-hidden="true" tabindex="-1">
-            <option value="video">Video Mode</option>
-            <option value="music_video">Music Video Mode</option>
-            <option value="music">Music Mode</option>
-          </select>
         </div>
       </div>
       <div id="music-mode-console" class="music-search-console hidden">
@@ -472,9 +489,11 @@
           <div id="music-player-message" class="notice" role="status">Loading player…</div>
           <div id="music-player-home" class="music-player-view"></div>
           <div id="music-player-library" class="music-player-view"></div>
+          <div id="music-player-playlists" class="music-player-view hidden"></div>
           <div id="music-player-radio" class="music-player-view hidden">
             <div class="group">
               <div class="group-title">Stations</div>
+              <div class="meta">Stations are built from your downloaded library first, then filled with verified community-cache matches when available.</div>
               <div class="music-player-station-create">
                 <input id="music-player-station-name" type="text" placeholder="Station name">
                 <select id="music-player-station-seed-type">
@@ -488,6 +507,15 @@
               </div>
             </div>
             <div id="music-player-stations"></div>
+            <div class="group">
+              <div class="panel-header-row compact">
+                <div>
+                  <div class="group-title">Community Cache</div>
+                  <div class="meta">Browse verified shared matches that can help seed radio and playback beyond your local files.</div>
+                </div>
+              </div>
+              <div id="music-player-community-cache"></div>
+            </div>
           </div>
           <div id="music-player-queue" class="music-player-view hidden"></div>
           <div id="music-player-recent" class="music-player-view hidden"></div>
@@ -537,6 +565,12 @@
           <div id="movies-tv-sonarr-status" class="notice movies-tv-connection-chip">Sonarr: Not configured</div>
         </div>
         <div class="movies-tv-search-row">
+          <span class="searchbar-leading-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5"></circle>
+              <path d="M16 16l5 5"></path>
+            </svg>
+          </span>
           <input
             id="movies-tv-search-input"
             class="home-search-input"
@@ -568,6 +602,26 @@
         </div>
         <div id="movies-tv-genres-detail" class="meta home-results-detail">Pick a genre to open top current titles ranked toward mainstream, popular, and recent releases.</div>
         <div id="movies-tv-genres-list" class="movies-tv-genre-grid"></div>
+      </div>
+      <div id="movies-tv-editorial" class="movies-tv-editorial">
+        <section class="home-results movies-tv-editorial-shelf" id="movies-tv-popular">
+          <div class="home-results-header">
+            <span>Popular Now</span>
+            <div class="home-results-header-actions">
+              <span id="movies-tv-popular-status-text" class="meta">Loading popular titles</span>
+            </div>
+          </div>
+          <div id="movies-tv-popular-list" class="music-meta-grid movies-tv-results-grid"></div>
+        </section>
+        <section class="home-results movies-tv-editorial-shelf" id="movies-tv-new">
+          <div class="home-results-header">
+            <span>New Releases</span>
+            <div class="home-results-header-actions">
+              <span id="movies-tv-new-status-text" class="meta">Loading new releases</span>
+            </div>
+          </div>
+          <div id="movies-tv-new-list" class="music-meta-grid movies-tv-results-grid"></div>
+        </section>
       </div>
       <div class="home-results hidden" id="movies-tv-results">
         <div class="home-results-header">
@@ -1059,25 +1113,20 @@
             <a class="settings-nav-link active" href="#settings-core" data-settings-link="core">General</a>
             <a class="settings-nav-link" href="#settings-connections-hub" data-settings-link="connections-hub">Connections</a>
             <a class="settings-nav-link" href="#settings-automation" data-settings-link="automation">Automation</a>
+            <a class="settings-nav-link" href="#settings-youtube" data-settings-link="youtube">YouTube</a>
+            <a class="settings-nav-link" href="#settings-spotify" data-settings-link="spotify">Spotify</a>
             <a class="settings-nav-link" href="#settings-security" data-settings-link="security">Security</a>
             <a class="settings-nav-link" href="#settings-status-hub" data-settings-link="status-hub">Status</a>
+            <a class="settings-nav-link" href="#settings-info-hub" data-settings-link="info-hub">Info</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-services-hub" data-settings-link="services-hub" data-settings-level="advanced">Services</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-logs-hub" data-settings-link="logs-hub" data-settings-level="advanced">Logs</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-tagging" data-settings-link="tagging" data-settings-level="advanced">Tagging</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-community-cache" data-settings-link="community-cache" data-settings-level="advanced">Community Cache</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-long-term-retry" data-settings-link="long-term-retry" data-settings-level="advanced">Long-Term Retry</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-arr" data-settings-link="arr" data-settings-level="advanced">ARR Integration</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-telegram" data-settings-link="telegram" data-settings-level="advanced">Telegram</a>
+            <a class="settings-nav-link settings-advanced-link" href="#settings-runtime" data-settings-link="runtime" data-settings-level="advanced">Runtime</a>
           </nav>
-          <div class="settings-more-menu">
-            <button id="settings-more-toggle" class="button ghost small settings-more-toggle" type="button" aria-expanded="false" aria-controls="settings-more-popover">More</button>
-            <div id="settings-more-popover" class="settings-more-popover hidden" role="menu" aria-label="More settings sections">
-              <a class="settings-nav-link settings-more-link" href="#settings-info-hub" data-settings-link="info-hub">Info</a>
-              <a class="settings-nav-link settings-more-link" href="#settings-youtube" data-settings-link="youtube">YouTube</a>
-              <a class="settings-nav-link settings-more-link" href="#settings-spotify" data-settings-link="spotify">Spotify</a>
-              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-services-hub" data-settings-link="services-hub" data-settings-level="advanced">Services</a>
-              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-logs-hub" data-settings-link="logs-hub" data-settings-level="advanced">Logs</a>
-              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-tagging" data-settings-link="tagging" data-settings-level="advanced">Tagging</a>
-              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-community-cache" data-settings-link="community-cache" data-settings-level="advanced">Community Cache</a>
-              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-long-term-retry" data-settings-link="long-term-retry" data-settings-level="advanced">Long-Term Retry</a>
-              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-arr" data-settings-link="arr" data-settings-level="advanced">ARR Integration</a>
-              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-telegram" data-settings-link="telegram" data-settings-level="advanced">Telegram</a>
-              <a class="settings-nav-link settings-more-link settings-advanced-link" href="#settings-runtime" data-settings-link="runtime" data-settings-level="advanced">Runtime</a>
-            </div>
-          </div>
           <label class="field short settings-mobile-jump">
             <span>Section</span>
             <select id="settings-section-select">

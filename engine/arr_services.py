@@ -943,6 +943,62 @@ def build_arr_genre_browse_response(
     }
 
 
+def build_arr_editorial_response(
+    config: dict | None,
+    *,
+    kind: str,
+    shelf: str,
+    limit: int = 12,
+) -> dict:
+    normalized = _normalized_arr_kind(kind)
+    shelf_key = str(shelf or "").strip().lower()
+    if shelf_key not in {"popular", "new"}:
+        raise ArrServiceError("Unsupported ARR editorial shelf")
+    if shelf_key == "popular":
+        payload = _tmdb_request(config, f"/{normalized}/popular", params={"page": "1", "language": "en-US"})
+    else:
+        params = {
+            "include_adult": "false",
+            "sort_by": "primary_release_date.desc" if normalized == "movie" else "first_air_date.desc",
+            "vote_count.gte": "80" if normalized == "movie" else "40",
+            "page": "1",
+            "language": "en-US",
+        }
+        if normalized == "movie":
+            params["region"] = "US"
+            params["release_date.lte"] = datetime.utcnow().strftime("%Y-%m-%d")
+            params["release_date.gte"] = f"{max(1900, CURRENT_YEAR - 2)}-01-01"
+        else:
+            params["first_air_date.lte"] = datetime.utcnow().strftime("%Y-%m-%d")
+            params["first_air_date.gte"] = f"{max(1900, CURRENT_YEAR - 2)}-01-01"
+        payload = _tmdb_request(config, f"/discover/{normalized}", params=params)
+    raw_results = payload.get("results") or []
+    rows: list[dict] = []
+    for raw in raw_results:
+        row = _movie_result_row(raw) if normalized == "movie" else _tv_result_row(raw)
+        if row:
+            rows.append(row)
+    rows = rows[: max(1, int(limit))]
+    if normalized == "movie":
+        _enrich_movie_certifications(config, rows)
+        rows = [row for row in rows if _movie_allowed(row)]
+        statuses = get_movie_status_map(config, [item["tmdb_id"] for item in rows])
+        connection = test_radarr_connection(config)
+    else:
+        _enrich_tv_certifications(config, rows)
+        rows = [row for row in rows if _tv_allowed(row)]
+        statuses = get_series_status_map(config, [item["tmdb_id"] for item in rows])
+        connection = test_sonarr_connection(config)
+    for item in rows:
+        item["arr_status"] = statuses.get(str(item["tmdb_id"])) or _status_record(False, False)
+    return {
+        "kind": normalized,
+        "shelf": shelf_key,
+        "results": rows,
+        "connection": connection,
+    }
+
+
 def get_bulk_status(config: dict | None, kind: str, tmdb_ids: list[int | str]) -> dict[str, dict]:
     normalized = str(kind or "").strip().lower()
     if normalized == "movie":

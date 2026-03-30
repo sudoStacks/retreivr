@@ -41,6 +41,7 @@ const state = {
   homeMusicResultMap: {},
   homeMusicCurrentView: null,
   homeMusicViewStack: [],
+  musicAdvancedOpen: false,
   musicResultsSort: "recommended",
   musicCardSize: 180,
   musicGenreBrowseCache: {},
@@ -102,6 +103,10 @@ const state = {
   arrGenreRenderToken: 0,
   arrActiveGenre: null,
   arrGenreBrowseCache: {},
+  arrEditorial: {
+    movie: { popular: [], new: [] },
+    tv: { popular: [], new: [] },
+  },
   arrPersonTitlesCache: {},
   arrConnectionStatus: {
     radarr: { configured: false, reachable: false, message: "Radarr is not configured" },
@@ -125,6 +130,7 @@ const state = {
   playerSelectedArtistKey: "",
   playerSelectedAlbumKey: "",
   playerStations: [],
+  playerCommunityCache: [],
   playerPlaylists: [],
   playerSelectedPlaylistId: null,
   playerSelectedPlaylistItems: [],
@@ -135,7 +141,7 @@ const state = {
   playerShuffle: false,
   playerRepeatMode: "off",
   playerProgressDragging: false,
-  musicSection: "home",
+  musicSection: "browse",
   homeSection: "search",
   moviesTvSection: "search",
   musicPlayerExpanded: false,
@@ -304,9 +310,10 @@ const HOME_NO_CANDIDATE_STREAK_LIMIT = 12;
 const DIRECT_URL_PLAYLIST_ERROR =
   "Playlist URLs are not supported in Direct URL mode. Please add this playlist via Scheduler or Playlist settings.";
 const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
-  "Playlist URL detected. Use Search & Download to enqueue all videos in the playlist.";
+  "Playlist URL detected. Use Search to preview matches, then download the items you want.";
 const HOME_HOVER_PREVIEW_DELAY_MS = 800;
 const VIDEO_SOURCE_PREFERENCE_KEY = "retreivr.video_sources";
+const VIDEO_RECENT_SEARCHES_KEY = "retreivr.video_recent_searches";
 const MUSIC_HEADER_MODE_KEY = "retreivr.music_header_mode";
 
 const $ = (selector) => document.querySelector(selector);
@@ -422,6 +429,29 @@ function persistVideoSourcePreferences(values) {
   }
 }
 
+function loadRecentVideoSearches() {
+  try {
+    const raw = localStorage.getItem(VIDEO_RECENT_SEARCHES_KEY);
+    const parsed = JSON.parse(raw || "[]");
+    return Array.isArray(parsed)
+      ? parsed.map((value) => String(value || "").trim()).filter(Boolean).slice(0, 8)
+      : [];
+  } catch (_err) {
+    return [];
+  }
+}
+
+function persistRecentVideoSearch(query) {
+  const text = String(query || "").trim();
+  if (!text) return;
+  const next = [text, ...loadRecentVideoSearches().filter((entry) => entry.toLowerCase() !== text.toLowerCase())].slice(0, 8);
+  try {
+    localStorage.setItem(VIDEO_RECENT_SEARCHES_KEY, JSON.stringify(next));
+  } catch (_err) {
+    // ignore localStorage failures
+  }
+}
+
 function syncTopbarSubbarVisibility() {
   const host = $("#topbar-subbar-host");
   if (!host) return;
@@ -466,9 +496,9 @@ function mountTopbarForPage(page) {
   }
   if (page === "music") {
     const musicHeader = $("#music-header-search");
-    const importPanel = $("#import-playlist-panel");
+    const musicAdvanced = $("#music-mode-console");
     if (musicHeader) searchHost.appendChild(musicHeader);
-    if (importPanel) subbarHost.appendChild(importPanel);
+    if (musicAdvanced) subbarHost.appendChild(musicAdvanced);
     syncTopbarSubbarVisibility();
     return;
   }
@@ -477,10 +507,8 @@ function mountTopbarForPage(page) {
       syncTopbarSubbarVisibility();
       return;
     }
-    const modeRow = $("#movies-tv-panel .movies-tv-page-mode");
     const searchRow = $("#movies-tv-panel .movies-tv-search-row");
     const filtersPanel = $("#movies-tv-filters-panel");
-    if (modeRow) searchHost.appendChild(modeRow);
     if (searchRow) searchHost.appendChild(searchRow);
     if (filtersPanel) subbarHost.appendChild(filtersPanel);
     syncTopbarSubbarVisibility();
@@ -489,8 +517,10 @@ function mountTopbarForPage(page) {
 
 function setNotice(el, message, isError = false) {
   if (!el) return;
-  el.textContent = message;
+  const text = String(message || "");
+  el.textContent = text;
   el.style.color = isError ? "#ff7b7b" : "#59b0ff";
+  el.classList.toggle("hidden", !text.trim());
 }
 
 function toUserErrorMessage(err, fallback = "Unexpected error") {
@@ -1226,7 +1256,7 @@ function setPage(page) {
     }
     if (target === "music") {
       loadMusicLibrarySection().catch(() => {});
-      setMusicSection(state.musicSection || "home");
+      setMusicSection(state.musicSection || "browse");
     }
     if (state.homeSearchRequestId) {
       startHomeResultPolling(state.homeSearchRequestId);
@@ -1293,7 +1323,7 @@ function setPage(page) {
         if (sectionHash.startsWith("settings-")) {
           setActiveSettingsSection(sectionHash, { jump: false, smooth: false });
         } else {
-          setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false });
+          setActiveSettingsSection(state.settingsActiveSectionId || getDefaultSettingsSectionId(), { jump: false, smooth: false });
         }
         if (consumeSpotifyConnectedHashFlag()) {
           await refreshSpotifyConfig();
@@ -1315,7 +1345,7 @@ function setPage(page) {
     })[requested];
     const nextSettingsSection = sectionHash.startsWith("settings-")
       ? sectionHash
-      : (sectionFromPage || state.settingsActiveSectionId || "settings-core");
+      : (sectionFromPage || state.settingsActiveSectionId || getDefaultSettingsSectionId());
     requestAnimationFrame(() => setActiveSettingsSection(nextSettingsSection, { jump: false, smooth: false }));
     refreshSetupStatus().catch(() => {});
     refreshConnectionsStatus().catch(() => {});
@@ -1334,20 +1364,14 @@ function setPage(page) {
 }
 
 function mountMusicPageNodes() {
-  const modeSlot = $("#music-page-mode-slot");
-  const consoleSlot = $("#music-page-console-slot");
   const resultsSlot = $("#music-page-results-slot");
   const messageSlot = $("#music-page-message-slot");
   const reviewSlot = $("#music-page-review-slot");
-  const modeRow = $("#shared-music-nodes .home-mode-toggle-shell") || $("#music-page-mode-slot .home-mode-toggle-shell") || $("#home-panel .home-mode-toggle-shell");
-  const consoleEl = $("#music-mode-console");
   const resultsEl = $("#music-results-container");
   const messageEl = $("#home-search-message");
   const reviewEl = $("#home-review-alert");
   const playerInlineSlot = $("#music-player-inline-slot");
   const playerMain = $("#music-player-panel .music-player-main") || $("#music-player-inline-slot .music-player-main") || $("#music-player-modal-slot .music-player-main");
-  if (modeSlot && modeRow && modeRow.parentElement !== modeSlot) modeSlot.appendChild(modeRow);
-  if (consoleSlot && consoleEl && consoleEl.parentElement !== consoleSlot) consoleSlot.appendChild(consoleEl);
   if (resultsSlot && resultsEl && resultsEl.parentElement !== resultsSlot) resultsSlot.appendChild(resultsEl);
   if (messageSlot && messageEl && messageEl.parentElement !== messageSlot) messageSlot.appendChild(messageEl);
   if (reviewSlot && reviewEl && reviewEl.parentElement !== reviewSlot) reviewSlot.appendChild(reviewEl);
@@ -1364,18 +1388,26 @@ function mountHomePageNodes() {
   if (shell && messageEl && messageEl.parentElement !== shell) shell.appendChild(messageEl);
   if (shell && reviewEl && reviewEl.parentElement !== shell) shell.appendChild(reviewEl);
   if (hiddenHost) {
-    const modeRow = $("#music-page-mode-slot .home-mode-toggle-shell");
-    const consoleEl = $("#music-mode-console");
     const resultsEl = $("#music-results-container");
-    if (modeRow && modeRow.parentElement !== hiddenHost) hiddenHost.appendChild(modeRow);
-    if (consoleEl && consoleEl.parentElement !== hiddenHost) hiddenHost.appendChild(consoleEl);
     if (resultsEl && resultsEl.parentElement !== hiddenHost) hiddenHost.appendChild(resultsEl);
   }
 }
 
+function isInitialSetupComplete() {
+  const completedModules = Array.isArray(state.config?.setup?.completed_modules)
+    ? state.config.setup.completed_modules
+    : [];
+  return completedModules.length > 0;
+}
+
+function getDefaultSettingsSectionId() {
+  return isInitialSetupComplete() ? "settings-core" : "settings-guided-setup";
+}
+
 function renderHomeLauncher() {
   const booksTile = $("#home-launcher-books");
-  if (!booksTile) return;
+  const setupTile = $("#home-launcher-setup");
+  if (!booksTile && !setupTile) return;
   const readarrCfg = (state.config?.arr?.readarr && typeof state.config.arr.readarr === "object")
     ? state.config.arr.readarr
     : {};
@@ -1383,7 +1415,12 @@ function renderHomeLauncher() {
     ? state.config.setup.stack
     : {};
   const enabled = !!(stack.enable_readarr || readarrCfg.base_url || readarrCfg.api_key);
-  booksTile.classList.toggle("hidden", !enabled);
+  if (booksTile) {
+    booksTile.classList.toggle("hidden", !enabled);
+  }
+  if (setupTile) {
+    setupTile.classList.toggle("hidden", isInitialSetupComplete());
+  }
 }
 
 function setHomeSection(section) {
@@ -1403,6 +1440,12 @@ function setHomeSection(section) {
     librarySurface.classList.toggle("hidden", showSearch);
     librarySurface.classList.toggle("active", !showSearch);
   }
+  const discovery = $("#video-discovery-default");
+  if (discovery) {
+    const resultsVisible = !$("#home-results")?.classList.contains("hidden");
+    const showDiscovery = showSearch && !resultsVisible && !state.homeSearchRequestId;
+    discovery.classList.toggle("hidden", !showDiscovery);
+  }
 }
 
 function setMoviesTvSection(section) {
@@ -1413,8 +1456,10 @@ function setMoviesTvSection(section) {
       button.classList.toggle("active", button.dataset.moviesTvSection === "search");
     });
     const genres = $("#movies-tv-genres");
+    const editorial = $("#movies-tv-editorial");
     const results = $("#movies-tv-results");
     if (genres) genres.classList.add("hidden");
+    if (editorial) editorial.classList.add("hidden");
     if (results) results.classList.add("hidden");
     return;
   }
@@ -1423,11 +1468,15 @@ function setMoviesTvSection(section) {
     button.classList.toggle("active", button.dataset.moviesTvSection === normalized);
   });
   const genres = $("#movies-tv-genres");
+  const editorial = $("#movies-tv-editorial");
   const results = $("#movies-tv-results");
   const showGenres = normalized === "genres";
   const hasResults = Array.isArray(state.arrResults) && state.arrResults.length > 0;
   if (genres) {
     genres.classList.toggle("hidden", !(showGenres || !hasResults));
+  }
+  if (editorial) {
+    editorial.classList.toggle("hidden", showGenres || hasResults);
   }
   if (results) {
     results.classList.toggle("hidden", showGenres || !hasResults);
@@ -1504,14 +1553,16 @@ function mountSettingsSubpages() {
 }
 
 function setMusicSection(section) {
-  const normalized = String(section || "home").trim() || "home";
+  const requested = String(section || "browse").trim() || "browse";
+  const normalized = requested === "search" || requested === "home" ? "browse" : requested;
   state.musicSection = normalized;
   $$(".music-app-nav").forEach((button) => {
     button.classList.toggle("active", button.dataset.musicSection === normalized);
   });
   const discovery = $("#music-discovery-surface");
   const playerSurface = $("#music-player-surface");
-  const showDiscovery = normalized === "search";
+  const showDiscovery = normalized === "browse" || normalized === "library";
+  const librarySection = $("#music-library-section");
   if (discovery) {
     discovery.classList.toggle("hidden", !showDiscovery);
     discovery.classList.toggle("active", showDiscovery);
@@ -1519,24 +1570,33 @@ function setMusicSection(section) {
   if (playerSurface) {
     playerSurface.classList.toggle("hidden", showDiscovery);
     playerSurface.classList.toggle("active", !showDiscovery);
+    playerSurface.classList.toggle("music-player-full", normalized === "player");
+  }
+  if (librarySection) {
+    librarySection.classList.toggle("hidden", normalized !== "library");
+  }
+  const resultsSlot = $("#music-page-results-slot");
+  const messageSlot = $("#music-page-message-slot");
+  const reviewSlot = $("#music-page-review-slot");
+  if (resultsSlot) resultsSlot.classList.toggle("hidden", normalized === "library");
+  if (messageSlot) messageSlot.classList.toggle("hidden", normalized === "library");
+  if (reviewSlot) reviewSlot.classList.toggle("hidden", normalized === "library");
+  if (normalized === "browse") {
+    renderMusicLanding();
   }
   const playerViewMap = {
-    home: "home",
     library: "library",
     radio: "radio",
-    playlists: "library",
-    queue: "queue",
-    recent: "recent",
+    playlists: "playlists",
+    player: "queue",
     favorites: "favorites",
   };
   if (!showDiscovery) {
-    if (normalized === "library" && !state.playerSelectedArtistKey && !state.playerSelectedAlbumKey) {
-      state.playerLibraryMode = "albums";
-    }
     const nextPlayerView = playerViewMap[normalized] || "library";
     setMusicPlayerView(nextPlayerView);
     loadMusicPlayerView().catch(() => {});
   }
+  syncBottomPlayerShell();
 }
 
 function syncBottomPlayerShell() {
@@ -1554,7 +1614,8 @@ function syncBottomPlayerShell() {
   const current = state.playerCurrent || {};
   const audioHasSource = !!(audio && (audio.currentSrc || audio.src));
   const hasTrack = !!current.stream_url && audioHasSource;
-  shell.classList.toggle("hidden", !hasTrack);
+  const shouldHide = !hasTrack || (state.currentPage === "music" && state.musicSection === "player");
+  shell.classList.toggle("hidden", shouldHide);
   titleEl.textContent = String(current.title || "Nothing playing");
   metaEl.textContent = [current.artist, current.album, current.kind].filter(Boolean).join(" • ") || "Choose a track from your library or start a station.";
   if (statusEl) {
@@ -1685,6 +1746,9 @@ function ensureSetupWizardState() {
     state.setupWizard = {
       stepIndex: 0,
       draft: buildSetupWizardDraft(),
+      jellyfinDiscovery: null,
+      jellyfinDiscoveryLoading: false,
+      jellyfinDiscoveryError: "",
     };
     return;
   }
@@ -1693,6 +1757,15 @@ function ensureSetupWizardState() {
   }
   if (!Number.isInteger(state.setupWizard.stepIndex) || state.setupWizard.stepIndex < 0) {
     state.setupWizard.stepIndex = 0;
+  }
+  if (!Array.isArray(state.setupWizard.jellyfinDiscovery)) {
+    state.setupWizard.jellyfinDiscovery = [];
+  }
+  if (typeof state.setupWizard.jellyfinDiscoveryLoading !== "boolean") {
+    state.setupWizard.jellyfinDiscoveryLoading = false;
+  }
+  if (typeof state.setupWizard.jellyfinDiscoveryError !== "string") {
+    state.setupWizard.jellyfinDiscoveryError = "";
   }
 }
 
@@ -2324,23 +2397,43 @@ function renderSetupWizard() {
       ` : ""}
     `;
   } else if (step.id === "jellyfin") {
+    const jellyfinEnabledChoice = (draft.arr_setup_mode === "managed" ? draft.managed_jellyfin : draft.enable_jellyfin) === true;
+    const jellyfinSuggestions = Array.isArray(state.setupWizard?.jellyfinDiscovery) ? state.setupWizard.jellyfinDiscovery : [];
+    const jellyfinDiscoveryError = String(state.setupWizard?.jellyfinDiscoveryError || "").trim();
+    const jellyfinDiscoveryLoading = !!state.setupWizard?.jellyfinDiscoveryLoading;
     body = `
       <div class="setup-wizard-choice-row">
-        <button type="button" class="button setup-wizard-choice ${(draft.arr_setup_mode === "managed" ? draft.managed_jellyfin : draft.enable_jellyfin) === true ? "active" : ""}" data-setup-choice="${draft.arr_setup_mode === "managed" ? "managed_jellyfin" : "enable_jellyfin"}" data-value="true">Yes, I want this</button>
+        <button type="button" class="button setup-wizard-choice ${jellyfinEnabledChoice ? "active" : ""}" data-setup-choice="${draft.arr_setup_mode === "managed" ? "managed_jellyfin" : "enable_jellyfin"}" data-value="true">Yes, I want this</button>
         <button type="button" class="button ghost setup-wizard-choice ${(draft.arr_setup_mode === "managed" ? draft.managed_jellyfin : draft.enable_jellyfin) === false ? "active" : ""}" data-setup-choice="${draft.arr_setup_mode === "managed" ? "managed_jellyfin" : "enable_jellyfin"}" data-value="false">No, skip for now</button>
       </div>
-      ${(draft.arr_setup_mode === "managed" ? draft.managed_jellyfin : draft.enable_jellyfin) === true ? `
+      ${jellyfinEnabledChoice ? `
         <div class="setup-wizard-fields two">
           <label class="field full">
-            <span>${draft.arr_setup_mode === "managed" ? "Jellyfin will be included in the managed stack." : "Jellyfin app address"}</span>
+            <span>${draft.arr_setup_mode === "managed" ? "Retreivr-managed Jellyfin" : "Find your Jellyfin app"}</span>
             ${draft.arr_setup_mode === "managed"
-              ? `<div class="setup-wizard-note">Retreivr will use the built-in Jellyfin service address automatically for the managed path. You can add admin access later if you want library creation automated too.</div>`
-              : `<input data-setup-input="jellyfin_base_url" type="text" value="${escapeAttr(draft.jellyfin_base_url || "")}" placeholder="For example: http://jellyfin:8096">`}
+              ? `<div class="setup-wizard-note">Retreivr will include Jellyfin in the managed setup and use the built-in app address automatically. You do not need to enter any internal address for this path.</div>`
+              : `
+                <div class="setup-wizard-link-grid">
+                  <button type="button" class="button ghost" data-setup-action="discover-jellyfin">${jellyfinDiscoveryLoading ? "Looking for Jellyfin..." : "Find Jellyfin on this network"}</button>
+                </div>
+                ${jellyfinSuggestions.length ? `
+                  <div class="setup-wizard-note">We found these likely Jellyfin app addresses. Pick one to fill it in automatically.</div>
+                  <div class="setup-wizard-chip-grid">
+                    ${jellyfinSuggestions.map((item) => `
+                      <button type="button" class="button ghost setup-wizard-suggestion" data-setup-fill="jellyfin_base_url" data-value="${escapeAttr(item.url || "")}">
+                        ${escapeHtml(item.label || item.url || "")}
+                      </button>
+                    `).join("")}
+                  </div>
+                ` : ""}
+                ${jellyfinDiscoveryError ? `<div class="setup-wizard-note warning">${escapeHtml(jellyfinDiscoveryError)}</div>` : `<div class="setup-wizard-note">Retreivr can try common Jellyfin addresses for you first. If nothing is found, enter it manually below.</div>`}
+                <input data-setup-input="jellyfin_base_url" type="text" value="${escapeAttr(draft.jellyfin_base_url || "")}" placeholder="For example: http://jellyfin:8096">
+              `}
           </label>
           ${draft.arr_setup_mode === "managed" ? "" : `
             <label class="field full">
-              <span>Jellyfin API key</span>
-              <input data-setup-input="jellyfin_api_key" type="password" value="${escapeAttr(draft.jellyfin_api_key || "")}" placeholder="Optional right now">
+              <span>Optional admin API key</span>
+              <input data-setup-input="jellyfin_api_key" type="password" value="${escapeAttr(draft.jellyfin_api_key || "")}" placeholder="Only if you already use one">
             </label>
           `}
         </div>
@@ -2611,6 +2704,13 @@ function updateSetupWizardDraftField(key, value) {
   ensureSetupWizardState();
   state.setupWizard.draft[key] = value;
   state.setupWizard.feedback = null;
+  if (key === "managed_jellyfin" || key === "enable_jellyfin" || key === "existing_jellyfin_enabled") {
+    state.setupWizard.jellyfinDiscoveryError = "";
+    if (value !== true) {
+      state.setupWizard.jellyfinDiscovery = [];
+      state.setupWizard.jellyfinDiscoveryLoading = false;
+    }
+  }
   if (key === "arr_setup_mode") {
     if (value === "none") {
       state.setupWizard.draft.managed_movies = false;
@@ -2622,6 +2722,9 @@ function updateSetupWizardDraftField(key, value) {
       state.setupWizard.draft.managed_jellyfin = false;
       state.setupWizard.draft.direct_manage = false;
     }
+    state.setupWizard.jellyfinDiscovery = [];
+    state.setupWizard.jellyfinDiscoveryLoading = false;
+    state.setupWizard.jellyfinDiscoveryError = "";
   }
   if (key === "managed_downloader" && !value) {
     state.setupWizard.draft.managed_vpn = false;
@@ -2640,8 +2743,31 @@ function resetSetupWizardDraft() {
   state.setupWizard = {
     stepIndex: 0,
     draft: buildSetupWizardDraft(),
+    jellyfinDiscovery: [],
+    jellyfinDiscoveryLoading: false,
+    jellyfinDiscoveryError: "",
   };
   syncSetupWizardToLegacyFields();
+}
+
+async function discoverJellyfinForSetup() {
+  ensureSetupWizardState();
+  state.setupWizard.jellyfinDiscoveryLoading = true;
+  state.setupWizard.jellyfinDiscoveryError = "";
+  state.setupWizard.jellyfinDiscovery = [];
+  renderSetupWizard();
+  try {
+    const payload = await fetchJson("/api/setup/jellyfin/discover");
+    state.setupWizard.jellyfinDiscovery = Array.isArray(payload?.suggestions) ? payload.suggestions : [];
+    if (!state.setupWizard.jellyfinDiscovery.length) {
+      state.setupWizard.jellyfinDiscoveryError = "No Jellyfin app was found automatically. You can still enter the address yourself.";
+    }
+  } catch (err) {
+    state.setupWizard.jellyfinDiscoveryError = toUserErrorMessage(err, "Jellyfin discovery failed");
+  } finally {
+    state.setupWizard.jellyfinDiscoveryLoading = false;
+    renderSetupWizard();
+  }
 }
 
 async function saveSetupWizardProgress() {
@@ -2940,6 +3066,12 @@ function renderMusicPlayerPlaylistsPanel() {
     <div class="music-player-playlist-list">${playlistCards}</div>
     ${selectedMarkup}
   `;
+}
+
+function renderMusicPlayerPlaylistsView() {
+  const playlistsEl = $("#music-player-playlists");
+  if (!playlistsEl) return;
+  playlistsEl.innerHTML = renderMusicPlayerPlaylistsPanel();
 }
 
 function renderMusicPlayerHome() {
@@ -3269,12 +3401,60 @@ function renderMusicPlayerStations() {
     <div class="group music-player-station-card">
       <div class="group-title">${escapeHtml(station.name || station.seed_value || "Station")}</div>
       <div class="meta">${escapeHtml(station.seed_type || "artist")} • ${escapeHtml(station.seed_value || "")}</div>
+      <div class="music-status-row">
+        <span class="music-status-badge is-downloaded">${escapeHtml(`${Number(station.preview?.local_count || 0)} local`)}</span>
+        <span class="music-status-badge is-queued">${escapeHtml(`${Number(station.preview?.cached_count || 0)} cached`)}</span>
+        <span class="music-status-badge">${escapeHtml(`${Number(station.preview?.count || 0)} total`)}</span>
+      </div>
+      <div class="music-player-station-preview">
+        ${(Array.isArray(station.preview?.items) ? station.preview.items : []).slice(0, 6).map((item) => `
+          <article class="music-player-browser-card music-player-browser-card-rich music-player-station-item">
+            <div class="music-player-browser-card-art">
+              <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Track")}" loading="lazy">
+            </div>
+            <div class="music-player-browser-card-copy">
+              <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
+              <span class="music-player-track-meta">${escapeHtml([item.artist, item.album].filter(Boolean).join(" • "))}</span>
+              <div class="music-status-row">${buildMusicStatusBadges(item)}</div>
+            </div>
+          </article>
+        `).join("") || `<div class="home-results-empty">No playable items are available for this station yet.</div>`}
+      </div>
       <div class="row">
         <button class="button primary small" type="button" data-action="player-load-station" data-station-id="${escapeAttr(station.id)}">Start Station</button>
         <button class="button ghost small" type="button" data-action="player-delete-station" data-station-id="${escapeAttr(station.id)}">Delete</button>
       </div>
     </div>
   `).join("") : `<div class="home-results-empty">Create a station to start local-first radio.</div>`;
+}
+
+function renderMusicPlayerCommunityCache() {
+  const container = $("#music-player-community-cache");
+  if (!container) return;
+  const items = Array.isArray(state.playerCommunityCache) ? state.playerCommunityCache : [];
+  container.innerHTML = items.length ? `
+    <div class="music-player-browser-grid">
+      ${items.map((item) => `
+        <article class="music-player-browser-card music-player-browser-card-rich">
+          <div class="music-player-browser-card-art">
+            <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Cached Match")}" loading="lazy">
+          </div>
+          <div class="music-player-browser-card-copy">
+            <span class="music-player-track-title">${escapeHtml(item.title || "Cached Match")}</span>
+            <span class="music-player-track-meta">${escapeHtml([item.artist, item.album, item.source].filter(Boolean).join(" • "))}</span>
+            <div class="music-status-row">
+              <span class="music-status-badge is-queued">Community Cache</span>
+              ${item.verification_status ? `<span class="music-status-badge">${escapeHtml(item.verification_status)}</span>` : ""}
+            </div>
+          </div>
+          <div class="music-player-browser-card-actions">
+            <button class="button ghost small" type="button" data-action="player-play" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-source-kind="${escapeAttr(item.kind || "cached")}">Play</button>
+            <button class="button ghost small" type="button" data-action="player-play-next" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-source-kind="${escapeAttr(item.kind || "cached")}">Play Next</button>
+          </div>
+        </article>
+      `).join("")}
+    </div>
+  ` : `<div class="home-results-empty">Verified community-cache matches will appear here when available.</div>`;
 }
 
 function renderMusicPlayerQueue() {
@@ -3540,18 +3720,20 @@ async function loadMusicPlayerView() {
     setNotice(messageEl, "Loading music player…", false);
   }
   try {
-    const [libraryPayload, librarySummaryPayload, stationsPayload, historyPayload, playlistsPayload] = await Promise.all([
+    const [libraryPayload, librarySummaryPayload, stationsPayload, historyPayload, playlistsPayload, communityPayload] = await Promise.all([
       fetchJson("/api/player/library"),
       fetchJson("/api/player/library/summary"),
       fetchJson("/api/player/stations"),
       fetchJson("/api/player/history"),
       fetchJson("/api/player/playlists"),
+      fetchJson("/api/player/community-cache"),
     ]);
     state.playerLibrary = Array.isArray(libraryPayload?.items) ? libraryPayload.items : [];
     state.playerLibrarySummary = (librarySummaryPayload?.summary && typeof librarySummaryPayload.summary === "object")
       ? librarySummaryPayload.summary
       : { artists: [], albums: [], tracks: [] };
     state.playerStations = Array.isArray(stationsPayload?.stations) ? stationsPayload.stations : [];
+    state.playerCommunityCache = Array.isArray(communityPayload?.items) ? communityPayload.items : [];
     state.playerHistory = Array.isArray(historyPayload?.history) ? historyPayload.history : [];
     state.playerMissingHistory = state.playerHistory.filter((item) => !!item?.is_missing_local);
     state.playerHistory = state.playerHistory.filter((item) => !item?.is_missing_local);
@@ -3566,15 +3748,16 @@ async function loadMusicPlayerView() {
     } else {
       state.playerSelectedPlaylistItems = [];
     }
-    renderMusicPlayerHome();
     renderMusicPlayerLibrary();
+    renderMusicPlayerPlaylistsView();
     renderMusicPlayerStations();
+    renderMusicPlayerCommunityCache();
     renderMusicPlayerQueue();
     renderMusicPlayerHistory();
-    setMusicPlayerView(state.playerView || "home");
+    setMusicPlayerView(state.playerView || "library");
     syncBottomPlayerShell();
     if (messageEl) {
-      setNotice(messageEl, "Player ready.", false);
+      setNotice(messageEl, "", false);
     }
   } catch (err) {
     if (messageEl) {
@@ -4096,25 +4279,6 @@ function updateSettingsSectionNavState(activeSectionId = "") {
     link.classList.toggle("hidden", isAdvanced && !advancedEnabled);
     link.classList.toggle("active", normalizedActive && sectionId === normalizedActive);
   });
-  const moreToggle = $("#settings-more-toggle");
-  const morePopover = $("#settings-more-popover");
-  if (moreToggle && morePopover) {
-    const moreLinks = Array.from(morePopover.querySelectorAll(".settings-more-link"));
-    let hasActiveMoreLink = false;
-    moreLinks.forEach((link) => {
-      const href = String(link.getAttribute("href") || "");
-      const sectionId = href.startsWith("#") ? href.slice(1) : href;
-      const isAdvanced = String(link.dataset.settingsLevel || "").trim().toLowerCase() === "advanced";
-      const shouldHide = isAdvanced && !advancedEnabled;
-      const isActive = normalizedActive && sectionId === normalizedActive;
-      link.classList.toggle("hidden", shouldHide);
-      link.classList.toggle("active", !!isActive);
-      if (!shouldHide && isActive) {
-        hasActiveMoreLink = true;
-      }
-    });
-    moreToggle.classList.toggle("active", hasActiveMoreLink);
-  }
   const select = $("#settings-section-select");
   if (select) {
     Array.from(select.options).forEach((option) => {
@@ -4357,28 +4521,17 @@ function updateMusicModeFormatControl() {
 
 function setupNavActions() {
   const topActions = $("#top-actions");
-  const navActions = $("#nav-actions");
-  if (!topActions || !navActions) {
+  if (!topActions) {
     return;
   }
   if (!state.actionButtons) {
     state.actionButtons = Array.from(topActions.children);
   }
-  const mql = window.matchMedia("(max-width: 900px)");
-  const sync = () => {
-    const target = mql.matches ? navActions : topActions;
-    state.actionButtons.forEach((button) => {
-      if (button.parentElement !== target) {
-        target.appendChild(button);
-      }
-    });
-  };
-  sync();
-  if (mql.addEventListener) {
-    mql.addEventListener("change", sync);
-  } else if (mql.addListener) {
-    mql.addListener(sync);
-  }
+  state.actionButtons.forEach((button) => {
+    if (button.parentElement !== topActions) {
+      topActions.appendChild(button);
+    }
+  });
 }
 
 function updatePollingState() {
@@ -4986,9 +5139,64 @@ function runMusicHeaderSearch() {
   if ($("#search-track")) $("#search-track").value = parsed.track;
   const musicSearchOnly = $("#search-create-only");
   if (musicSearchOnly && !musicSearchOnly.disabled) {
-    setMusicSection("search");
+    setMusicSection("browse");
     musicSearchOnly.click();
   }
+}
+
+function getMusicTopMatchCandidate({ artists = [], albums = [], tracks = [] } = {}, rawQuery = "") {
+  const query = String(rawQuery || "").trim().toLowerCase();
+  const scoreTextMatch = (value = "") => {
+    const text = String(value || "").trim().toLowerCase();
+    if (!query || !text) return 0;
+    if (text === query) return 120;
+    if (text.startsWith(query)) return 80;
+    if (text.includes(query)) return 50;
+    return 0;
+  };
+  const candidates = [];
+  artists.forEach((item, index) => {
+    candidates.push({
+      kind: "artist",
+      item,
+      index,
+      key: String(item?.artist_mbid || item?.name || `artist-${index}`),
+      score: scoreTextMatch(item?.name) + (Number(item?.recommended_score) || 0),
+    });
+  });
+  albums.forEach((item, index) => {
+    candidates.push({
+      kind: "album",
+      item,
+      index,
+      key: String(item?.release_group_mbid || item?.title || `album-${index}`),
+      score: Math.max(
+        scoreTextMatch(item?.title),
+        scoreTextMatch(`${item?.artist || ""} ${item?.title || ""}`)
+      ) + (Number(item?.recommended_score) || 0) + 8,
+    });
+  });
+  tracks.forEach((item, index) => {
+    candidates.push({
+      kind: "track",
+      item,
+      index,
+      key: `${item?.recording_mbid || item?.track || "track"}::${item?.mb_release_id || index}`,
+      score: Math.max(
+        scoreTextMatch(item?.track),
+        scoreTextMatch(`${item?.artist || ""} ${item?.track || ""}`),
+        scoreTextMatch(`${item?.artist || ""} ${item?.album || ""} ${item?.track || ""}`)
+      ) + (Number(item?.score) || 0) + 12,
+    });
+  });
+  if (!candidates.length) {
+    return null;
+  }
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.index - b.index;
+  });
+  return candidates[0];
 }
 
 async function persistSetupStartupPreference(showOnStartup) {
@@ -5576,7 +5784,8 @@ function renderMusicLibrarySection() {
   const albums = Array.isArray(summary.albums) ? summary.albums : [];
   const tracks = Array.isArray(summary.tracks) ? summary.tracks : [];
   const total = artists.length + albums.length + tracks.length;
-  section.classList.toggle("hidden", total === 0);
+  const shouldShowSection = total > 0 && state.currentPage === "music" && state.musicSection === "library";
+  section.classList.toggle("hidden", !shouldShowSection);
   if (!total) {
     grid.innerHTML = `<div class="home-results-empty">No local music library files found yet.</div>`;
     breadcrumbs.innerHTML = "";
@@ -5715,6 +5924,47 @@ function renderVideoLibrarySection() {
       </article>
     `;
   }).join("");
+  renderVideoDiscoveryDefault();
+}
+
+function renderVideoDiscoveryDefault() {
+  const grid = $("#video-discovery-preview-grid");
+  const shell = $("#video-discovery-default");
+  const recentBlock = $("#video-recent-searches-block");
+  const recentGrid = $("#video-recent-searches");
+  if (!grid || !shell) return;
+  const items = Array.isArray(state.videoLibraryItems) ? state.videoLibraryItems.slice(0, 6) : [];
+  const resultsVisible = !$("#home-results")?.classList.contains("hidden");
+  const shouldShow = state.homeSection !== "library" && !resultsVisible && !state.homeSearchRequestId;
+  shell.classList.toggle("hidden", !shouldShow);
+  const recentSearches = loadRecentVideoSearches();
+  if (recentBlock && recentGrid) {
+    recentBlock.classList.toggle("hidden", !recentSearches.length);
+    recentGrid.innerHTML = recentSearches.map((entry) => `
+      <button class="button ghost video-recent-search-button" type="button" data-video-suggestion="${escapeAttr(entry)}">${escapeHtml(entry)}</button>
+    `).join("");
+  }
+  if (!items.length) {
+    grid.innerHTML = `<div class="home-results-empty">Recent video downloads will show up here once you start building your library.</div>`;
+    return;
+  }
+  grid.innerHTML = items.map((item) => `
+    <article class="home-candidate-row media-library-card media-library-video-card" data-library-type="video" data-file-id="${escapeAttr(item.file_id || "")}">
+      <div class="home-candidate-artwork media-library-video-artwork">
+        <img src="${escapeAttr(String(item.thumbnail_url || "").trim() || "assets/no_artwork.png")}" alt="${escapeAttr(item.title || "Video")}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
+      </div>
+      <div class="home-candidate-info">
+        <div class="home-candidate-title-row">
+          <div class="home-candidate-title">${escapeHtml(item.title || item.filename || "Video")}</div>
+          <span class="home-candidate-source">${escapeHtml(getVideoLibrarySourceBadge(item))}</span>
+        </div>
+        <div class="home-candidate-meta">${escapeHtml([formatTimestamp(item.downloaded_at), formatBytes(item.size_bytes)].filter(Boolean).join(" • "))}</div>
+      </div>
+      <div class="home-candidate-action home-candidate-action-primary-stack">
+        <button class="button ghost small" type="button" data-action="video-library-info" data-file-id="${escapeAttr(item.file_id || "")}">More Info</button>
+      </div>
+    </article>
+  `).join("");
 }
 
 async function hydrateMusicLibraryArtistCovers() {
@@ -7403,7 +7653,7 @@ function updateHomeMusicModeUI() {
   }
   const musicModeConsole = $("#music-mode-console");
   if (musicModeConsole) {
-    musicModeConsole.classList.toggle("hidden", !state.homeMusicMode);
+    musicModeConsole.classList.toggle("hidden", !(state.homeMusicMode && state.musicAdvancedOpen));
   }
   placeHomeDeliveryControl();
   placeHomeDestinationControl();
@@ -7991,6 +8241,7 @@ function showHomeResults(visible) {
   section.classList.toggle("hidden", !visible);
   section.classList.remove("has-results");
   section.classList.remove("search-complete");
+  renderVideoDiscoveryDefault();
 }
 
 function setHomeSearchActive(active) {
@@ -8084,6 +8335,7 @@ function renderMoviesTvSetupGate() {
   const shell = $("#movies-tv-panel .movies-tv-shell");
   const sectionToggle = $("#movies-tv-panel .movies-tv-section-toggle");
   const genres = $("#movies-tv-genres");
+  const editorial = $("#movies-tv-editorial");
   const results = $("#movies-tv-results");
   const configured = isTmdbConfigured();
   if (landing) {
@@ -8097,6 +8349,9 @@ function renderMoviesTvSetupGate() {
   }
   if (genres) {
     genres.classList.toggle("hidden", !configured);
+  }
+  if (editorial) {
+    editorial.classList.toggle("hidden", !configured);
   }
   if (!configured && results) {
     results.classList.add("hidden");
@@ -8117,11 +8372,13 @@ async function loadArrGenres() {
   const kind = getArrGenreKind();
   if (Array.isArray(state.arrGenres[kind]) && state.arrGenres[kind].length) {
     renderArrGenreShelf();
+    loadArrEditorialShelves().catch(() => {});
     return state.arrGenres[kind];
   }
   const data = await fetchJson(`/api/arr/genres?kind=${encodeURIComponent(kind)}`);
   state.arrGenres[kind] = Array.isArray(data?.genres) ? data.genres : [];
   renderArrGenreShelf();
+  loadArrEditorialShelves().catch(() => {});
   return state.arrGenres[kind];
 }
 
@@ -8652,6 +8909,7 @@ function renderArrResults() {
     listEl.innerHTML = "";
     statusTextEl.textContent = "Ready to search";
     if (detailEl) detailEl.classList.add("hidden");
+    renderArrEditorialShelves();
     return;
   }
   section.classList.toggle("hidden", showGenres);
@@ -8676,10 +8934,15 @@ function renderArrResults() {
     detailEl.classList.remove("hidden");
   }
   const sortedResults = getSortedArrResults();
+  listEl.innerHTML = renderArrCardGridMarkup(sortedResults);
+  renderArrEditorialShelves();
+}
+
+function renderArrCardGridMarkup(items) {
   const serviceKey = getArrServiceKey();
   const serviceName = getArrServiceName();
   const serviceStatus = state.arrConnectionStatus[serviceKey] || {};
-  listEl.innerHTML = sortedResults.map((item) => {
+  return (Array.isArray(items) ? items : []).map((item) => {
     const status = getArrStatusDescriptor(item.arr_status);
     const posterUrl = String(item.poster_url || "").trim() || "assets/no_artwork.png";
     const title = escapeHtml(String(item.title || "Unknown title"));
@@ -8748,6 +9011,52 @@ function renderArrResults() {
       </article>
     `;
   }).join("");
+}
+
+function renderArrEditorialShelves() {
+  const kind = getArrGenreKind();
+  const popular = Array.isArray(state.arrEditorial?.[kind]?.popular) ? state.arrEditorial[kind].popular : [];
+  const newest = Array.isArray(state.arrEditorial?.[kind]?.new) ? state.arrEditorial[kind].new : [];
+  const editorial = $("#movies-tv-editorial");
+  const popularList = $("#movies-tv-popular-list");
+  const newList = $("#movies-tv-new-list");
+  const popularStatus = $("#movies-tv-popular-status-text");
+  const newStatus = $("#movies-tv-new-status-text");
+  const show = isTmdbConfigured() && !state.arrResults.length && (state.moviesTvSection || "search") !== "genres";
+  if (editorial) {
+    editorial.classList.toggle("hidden", !show);
+  }
+  if (popularStatus) popularStatus.textContent = popular.length ? `Showing ${popular.length}` : "Loading popular titles";
+  if (newStatus) newStatus.textContent = newest.length ? `Showing ${newest.length}` : "Loading new releases";
+  if (popularList) {
+    popularList.innerHTML = popular.length ? renderArrCardGridMarkup(popular) : `<div class="home-results-empty">Popular titles will appear here.</div>`;
+  }
+  if (newList) {
+    newList.innerHTML = newest.length ? renderArrCardGridMarkup(newest) : `<div class="home-results-empty">New releases will appear here.</div>`;
+  }
+}
+
+async function loadArrEditorialShelves({ force = false } = {}) {
+  if (!renderMoviesTvSetupGate()) return;
+  const kind = getArrGenreKind();
+  const existing = state.arrEditorial?.[kind] || {};
+  if (!force && Array.isArray(existing.popular) && existing.popular.length && Array.isArray(existing.new) && existing.new.length) {
+    renderArrEditorialShelves();
+    return;
+  }
+  try {
+    const [popularPayload, newPayload] = await Promise.all([
+      fetchJson(`/api/arr/editorial?kind=${encodeURIComponent(kind)}&shelf=popular&limit=10`),
+      fetchJson(`/api/arr/editorial?kind=${encodeURIComponent(kind)}&shelf=new&limit=10`),
+    ]);
+    state.arrEditorial[kind] = {
+      popular: Array.isArray(popularPayload?.results) ? popularPayload.results : [],
+      new: Array.isArray(newPayload?.results) ? newPayload.results : [],
+    };
+  } catch (_err) {
+    state.arrEditorial[kind] = state.arrEditorial[kind] || { popular: [], new: [] };
+  }
+  renderArrEditorialShelves();
 }
 
 function updateArrModeToggleUI() {
@@ -8998,7 +9307,7 @@ function setHomeSearchControlsEnabled(enabled) {
     download.disabled = !enabled || blockedByMode;
     download.setAttribute("aria-disabled", String(download.disabled));
     download.title = blockedByMode
-      ? "Search & Download is unavailable for client delivery. Use Search and click Download on a result."
+      ? "Use Search and then click Download on a result when you want to save it."
       : "";
   }
 }
@@ -9613,6 +9922,10 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken) {
   if (artistItem?.disambiguation) metaParts.push(String(artistItem.disambiguation));
   meta.textContent = metaParts.join(" • ");
   content.appendChild(meta);
+  const statusRow = document.createElement("div");
+  statusRow.className = "music-status-row";
+  statusRow.innerHTML = buildMusicStatusBadges(artistItem);
+  content.appendChild(statusRow);
   const artistRef = document.createElement("div");
   artistRef.className = "home-mb-entity-ref";
   const artistMbid = String(artistItem?.artist_mbid || "").trim();
@@ -9752,6 +10065,10 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   const year = albumItem?.release_year ? ` (${albumItem.release_year})` : "";
   meta.textContent = `${albumItem?.artist || ""}${year}`;
   content.appendChild(meta);
+  const statusRow = document.createElement("div");
+  statusRow.className = "music-status-row";
+  statusRow.innerHTML = buildMusicStatusBadges(albumItem);
+  content.appendChild(statusRow);
   const albumRef = document.createElement("div");
   albumRef.className = "home-mb-entity-ref";
   albumRef.textContent = releaseGroupMbid ? `MB: release-group ${releaseGroupMbid}` : "MB: release-group (unknown)";
@@ -9885,7 +10202,10 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
 
 function renderMusicLanding() {
   const container = document.getElementById("music-results-container");
-  if (!container || !state.homeMusicMode) {
+  if (!container) {
+    return;
+  }
+  if (state.currentPage !== "music" && !state.homeMusicMode) {
     return;
   }
   const artistInput = String(document.getElementById("search-artist")?.value || "").trim();
@@ -9913,9 +10233,9 @@ function renderMusicLanding() {
   hero.innerHTML = `
     <div class="music-discovery-hero-copy">
       <div class="music-discovery-eyebrow">${state.homeMediaMode === "music_video" ? "Music Video Discovery" : "Music Discovery"}</div>
-      <div class="music-discovery-title">Start With What You Already Love</div>
+      <div class="music-discovery-title">Browse Music By Taste</div>
       <div class="music-discovery-subtitle">
-        Browse favorite genres, reopen favorite artists, or use Quick Search when you already know what you want.
+        Explore by favorite genres, reopen favorite artists, or run a smart one-bar search when you know what you want.
       </div>
       <div class="music-discovery-stat-row">
         <div class="music-discovery-stat">
@@ -9933,7 +10253,7 @@ function renderMusicLanding() {
       </div>
     </div>
     <div class="music-discovery-hero-actions">
-      <button type="button" class="button primary" data-action="music-focus-search">Quick Search</button>
+      <button type="button" class="button primary" data-action="music-focus-search">Search Music</button>
       <button type="button" class="button ghost" data-action="music-jump-genres">Browse Genres</button>
       <button type="button" class="button ghost" data-action="music-jump-artists">Favorite Artists</button>
     </div>
@@ -9942,8 +10262,8 @@ function renderMusicLanding() {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (!action) return;
     if (action === "music-focus-search") {
-      document.getElementById("search-artist")?.focus();
-      document.getElementById("music-mode-console")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      document.getElementById("music-header-query")?.focus();
+      window.scrollTo({ top: 0, behavior: "smooth" });
     } else if (action === "music-jump-genres") {
       container.querySelector('[data-discovery-section="browse-genres"]')?.scrollIntoView({ behavior: "smooth", block: "start" });
     } else if (action === "music-jump-artists") {
@@ -10397,6 +10717,121 @@ function buildPreviewStreamUrl(sourceUrl) {
   return `/api/music/preview/stream?url=${encodeURIComponent(raw)}`;
 }
 
+function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeText = "MusicBrainz" } = {}) {
+  const key = `${result.recording_mbid}::${result.mb_release_id}`;
+  state.homeMusicResultMap[key] = result;
+  const card = document.createElement("article");
+  card.className = "home-result-card music-meta-card";
+  card.dataset.recordingMbid = String(result.recording_mbid || "").trim();
+  card.dataset.releaseMbid = String(result.mb_release_id || "").trim();
+  card.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
+  const trackThumb = createMusicCardThumb(result?.album ? `${result.album} cover` : "Album cover");
+  card.appendChild(trackThumb.shell);
+
+  const content = document.createElement("div");
+  content.className = "music-meta-main";
+  const header = document.createElement("div");
+  header.className = "home-result-header";
+  const title = document.createElement("div");
+  title.className = "home-candidate-title";
+  const trackNumber = Number.isFinite(Number(result?.track_number)) ? Number(result.track_number) : null;
+  if (trackNumber && trackNumber > 0) {
+    const trackLabel = String(trackNumber).padStart(2, "0");
+    title.textContent = `${trackLabel}. ${result.track}`;
+  } else {
+    title.textContent = result.track;
+  }
+  header.appendChild(title);
+  const badge = document.createElement("span");
+  badge.className = "home-result-badge matched";
+  badge.textContent = badgeText;
+  header.appendChild(badge);
+  content.appendChild(header);
+
+  const meta = document.createElement("div");
+  meta.className = "home-candidate-meta";
+  const durationText = Number.isFinite(result.duration_ms) ? formatDuration(result.duration_ms / 1000) : "-";
+  meta.textContent = `${result.artist} • ${durationText}`;
+  content.appendChild(meta);
+  const albumLine = document.createElement("div");
+  albumLine.className = "home-candidate-meta";
+  const yearText = result.release_year || "";
+  if (result.album) {
+    albumLine.textContent = `Album: ${result.album}${yearText ? ` (${yearText})` : ""}`;
+  } else if (yearText) {
+    albumLine.textContent = `Release year: ${yearText}`;
+  } else {
+    albumLine.textContent = "Album: (unknown)";
+  }
+  content.appendChild(albumLine);
+  const statusRow = document.createElement("div");
+  statusRow.className = "music-status-row";
+  statusRow.innerHTML = buildMusicStatusBadges(result);
+  content.appendChild(statusRow);
+
+  const entityRef = document.createElement("div");
+  entityRef.className = "home-mb-entity-ref";
+  const recordingMbid = String(result.recording_mbid || "").trim();
+  const releaseMbid = String(result.mb_release_id || "").trim();
+  if (recordingMbid && releaseMbid) {
+    entityRef.textContent = `MB: rec ${recordingMbid} • rel ${releaseMbid}`;
+  } else if (recordingMbid) {
+    entityRef.textContent = `MB: rec ${recordingMbid}`;
+  } else if (releaseMbid) {
+    entityRef.textContent = `MB: rel ${releaseMbid}`;
+  } else {
+    entityRef.textContent = "MB: (unknown)";
+  }
+  content.appendChild(entityRef);
+  card.appendChild(content);
+
+  const action = document.createElement("div");
+  action.className = "home-candidate-action";
+  action.dataset.actionKind = "track";
+  action.dataset.cardKind = "music";
+  const previewButton = document.createElement("button");
+  previewButton.className = "button ghost small music-preview-btn";
+  previewButton.dataset.musicResultKey = key;
+  previewButton.textContent = "Preview";
+  const button = document.createElement("button");
+  button.className = "button primary small music-download-btn home-candidate-download-primary";
+  button.dataset.musicResultKey = key;
+  button.dataset.recordingMbid = String(result.recording_mbid || "").trim();
+  button.dataset.releaseMbid = String(result.mb_release_id || "").trim();
+  button.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
+  button.textContent = "Download";
+  action.appendChild(previewButton);
+  action.appendChild(button);
+  card.appendChild(action);
+
+  const releaseGroupMbid = String(result?.mb_release_group_id || "").trim();
+  if (releaseGroupMbid) {
+    const cachedCover = getCachedAlbumCoverUrl(releaseGroupMbid);
+    if (cachedCover) {
+      trackThumb.setImage(cachedCover);
+    } else if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
+      trackThumb.setNoArt();
+    } else {
+      thumbnailJobs.push(async (activeToken) => {
+        const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
+        if (!coverUrl || state.homeMusicRenderToken !== activeToken) {
+          if (!coverUrl && state.homeMusicRenderToken === activeToken) {
+            trackThumb.setNoArt();
+          }
+          return;
+        }
+        trackThumb.setImage(coverUrl);
+      });
+    }
+  } else if (result.artwork_url) {
+    trackThumb.setImage(result.artwork_url);
+  } else {
+    trackThumb.setNoArt();
+  }
+
+  return card;
+}
+
 function renderMusicModeResults(response, query = "", { pushHistory = false } = {}) {
   if (response?.landing_view) {
     renderMusicLanding();
@@ -10483,25 +10918,47 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
     return body;
   }
 
-  if (artists.length) {
+  const topMatch = getMusicTopMatchCandidate({ artists, albums, tracks }, query);
+  const filteredArtists = topMatch?.kind === "artist"
+    ? artists.filter((artist) => String(artist?.artist_mbid || artist?.name || "") !== String(topMatch.key || ""))
+    : artists;
+  const filteredAlbums = topMatch?.kind === "album"
+    ? albums.filter((album) => String(album?.release_group_mbid || album?.title || "") !== String(topMatch.key || ""))
+    : albums;
+  const filteredTracks = topMatch?.kind === "track"
+    ? tracks.filter((track, index) => `${track?.recording_mbid || track?.track || "track"}::${track?.mb_release_id || index}` !== String(topMatch.key || ""))
+    : tracks;
+
+  if (topMatch) {
+    const topMatchBody = appendSection("Top Match", topMatch.kind === "track" ? "stack" : "grid");
+    if (topMatch.kind === "artist") {
+      topMatchBody.appendChild(createMusicArtistCard(topMatch.item, thumbnailJobs, renderToken));
+    } else if (topMatch.kind === "album") {
+      topMatchBody.appendChild(createMusicAlbumCard(topMatch.item, thumbnailJobs, renderToken));
+    } else {
+      topMatchBody.appendChild(createMusicTrackResultCard(topMatch.item, thumbnailJobs, renderToken, { badgeText: "Top Match" }));
+    }
+  }
+
+  if (filteredArtists.length) {
     const artistGrid = appendSection("Artists", "grid");
-    getSortedMusicArtists(artists).forEach((artistItem) => {
+    getSortedMusicArtists(filteredArtists).forEach((artistItem) => {
       artistGrid.appendChild(createMusicArtistCard(artistItem, thumbnailJobs, renderToken));
     });
   }
 
-  if (albums.length) {
+  if (filteredAlbums.length) {
     const albumGrid = appendSection("Albums", "grid");
-    getSortedMusicAlbums(albums).forEach((albumItem) => {
+    getSortedMusicAlbums(filteredAlbums).forEach((albumItem) => {
       albumGrid.appendChild(createMusicAlbumCard(albumItem, thumbnailJobs, renderToken));
     });
   }
-  const artworkConcurrency = tracks.length ? 3 : 6;
+  const artworkConcurrency = filteredTracks.length ? 3 : 6;
   runPrioritizedThumbnailJobs(thumbnailJobs, renderToken, artworkConcurrency);
 
-  if (tracks.length) {
+  if (filteredTracks.length) {
     const trackStack = appendSection("Tracks", "stack");
-    const orderedTracks = [...tracks].sort((a, b) => {
+    const orderedTracks = [...filteredTracks].sort((a, b) => {
       const discA = Number.isFinite(Number(a?.disc_number)) ? Number(a.disc_number) : Number.MAX_SAFE_INTEGER;
       const discB = Number.isFinite(Number(b?.disc_number)) ? Number(b.disc_number) : Number.MAX_SAFE_INTEGER;
       if (discA !== discB) return discA - discB;
@@ -10511,115 +10968,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false } = 
       return String(a?.track || "").localeCompare(String(b?.track || ""));
     });
     orderedTracks.forEach((result) => {
-      const key = `${result.recording_mbid}::${result.mb_release_id}`;
-      state.homeMusicResultMap[key] = result;
-      const card = document.createElement("article");
-      card.className = "home-result-card music-meta-card";
-      card.dataset.recordingMbid = String(result.recording_mbid || "").trim();
-      card.dataset.releaseMbid = String(result.mb_release_id || "").trim();
-      card.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
-      const trackThumb = createMusicCardThumb(
-        result?.album ? `${result.album} cover` : "Album cover"
-      );
-      card.appendChild(trackThumb.shell);
-
-      const content = document.createElement("div");
-      content.className = "music-meta-main";
-      const header = document.createElement("div");
-      header.className = "home-result-header";
-      const title = document.createElement("div");
-      title.className = "home-candidate-title";
-      const trackNumber = Number.isFinite(Number(result?.track_number)) ? Number(result.track_number) : null;
-      if (trackNumber && trackNumber > 0) {
-        const trackLabel = String(trackNumber).padStart(2, "0");
-        title.textContent = `${trackLabel}. ${result.track}`;
-      } else {
-        title.textContent = result.track;
-      }
-      header.appendChild(title);
-      const badge = document.createElement("span");
-      badge.className = "home-result-badge matched";
-      badge.textContent = "MusicBrainz";
-      header.appendChild(badge);
-      content.appendChild(header);
-
-      const meta = document.createElement("div");
-      meta.className = "home-candidate-meta";
-      const durationText = Number.isFinite(result.duration_ms) ? formatDuration(result.duration_ms / 1000) : "-";
-      meta.textContent = `${result.artist} • ${durationText}`;
-      content.appendChild(meta);
-      const albumLine = document.createElement("div");
-      albumLine.className = "home-candidate-meta";
-      const yearText = result.release_year || "";
-      if (result.album) {
-        albumLine.textContent = `Album: ${result.album}${yearText ? ` (${yearText})` : ""}`;
-      } else if (yearText) {
-        albumLine.textContent = `Release year: ${yearText}`;
-      } else {
-        albumLine.textContent = "Album: (unknown)";
-      }
-      content.appendChild(albumLine);
-
-      const entityRef = document.createElement("div");
-      entityRef.className = "home-mb-entity-ref";
-      const recordingMbid = String(result.recording_mbid || "").trim();
-      const releaseMbid = String(result.mb_release_id || "").trim();
-      if (recordingMbid && releaseMbid) {
-        entityRef.textContent = `MB: rec ${recordingMbid} • rel ${releaseMbid}`;
-      } else if (recordingMbid) {
-        entityRef.textContent = `MB: rec ${recordingMbid}`;
-      } else if (releaseMbid) {
-        entityRef.textContent = `MB: rel ${releaseMbid}`;
-      } else {
-        entityRef.textContent = "MB: (unknown)";
-      }
-      content.appendChild(entityRef);
-      card.appendChild(content);
-
-      const action = document.createElement("div");
-      action.className = "home-candidate-action";
-      action.dataset.actionKind = "track";
-      action.dataset.cardKind = "music";
-      const previewButton = document.createElement("button");
-      previewButton.className = "button ghost small music-preview-btn";
-      previewButton.dataset.musicResultKey = key;
-      previewButton.textContent = "Preview";
-      const button = document.createElement("button");
-      button.className = "button primary small music-download-btn home-candidate-download-primary";
-      button.dataset.musicResultKey = key;
-      button.dataset.recordingMbid = String(result.recording_mbid || "").trim();
-      button.dataset.releaseMbid = String(result.mb_release_id || "").trim();
-      button.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
-      button.textContent = "Download";
-      action.appendChild(previewButton);
-      action.appendChild(button);
-      card.appendChild(action);
-      trackStack.appendChild(card);
-
-      const releaseGroupMbid = String(result?.mb_release_group_id || "").trim();
-      if (releaseGroupMbid) {
-        const cachedCover = getCachedAlbumCoverUrl(releaseGroupMbid);
-        if (cachedCover) {
-          trackThumb.setImage(cachedCover);
-        } else if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
-          trackThumb.setNoArt();
-        } else {
-          thumbnailJobs.push(async (activeToken) => {
-            const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
-            if (!coverUrl || state.homeMusicRenderToken !== activeToken) {
-              if (!coverUrl && state.homeMusicRenderToken === activeToken) {
-                trackThumb.setNoArt();
-              }
-              return;
-            }
-            trackThumb.setImage(coverUrl);
-          });
-        }
-      } else if (result.artwork_url) {
-        trackThumb.setImage(result.artwork_url);
-      } else {
-        trackThumb.setNoArt();
-      }
+      trackStack.appendChild(createMusicTrackResultCard(result, thumbnailJobs, renderToken));
     });
   }
 }
@@ -10803,7 +11152,7 @@ async function handleHomeMusicModeSearch(inputValue, messageEl) {
 
 async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   const payload = buildHomeSearchPayload(autoEnqueue, inputValue);
-  const modeLabel = autoEnqueue ? "Search & Download" : "Search Only";
+  const modeLabel = "Search";
   setNotice(messageEl, `${modeLabel}: creating request...`, false);
   const data = await fetchJson("/api/search/requests", {
     method: "POST",
@@ -10844,7 +11193,7 @@ async function handleHomeStandardSearch(autoEnqueue, inputValue, messageEl) {
   state.homeSearchRequestId = data.request_id;
   state.homeSearchMode = autoEnqueue ? "download" : "searchOnly";
   updateHomeViewAdvancedLink();
-  setNotice(messageEl, `${modeLabel}: created ${data.request_id}`, false);
+  setNotice(messageEl, "", false);
   showHomeResults(true);
   focusHomeResults();
   startHomeResultPolling(data.request_id);
@@ -11296,7 +11645,7 @@ function buildHomeResultsStatusInfo(requestId) {
 function updateHomeResultsStatusForRequest(requestId) {
   if (!requestId) {
     setHomeResultsStatus("Ready to discover media");
-    setHomeResultsDetail("Search Only is the default discovery action; use Search & Download to enqueue jobs.", false);
+    setHomeResultsDetail("Search results appear here. Choose a result when you are ready to download.", false);
     setHomeSearchActive(false);
     return;
   }
@@ -12374,7 +12723,7 @@ function resetHomeIntentConfirmation() {
   }
   setHomeResultsStatus("Ready to discover media");
   setHomeResultsDetail(
-    "Search Only is the default discovery action; use Search & Download to enqueue jobs.",
+    "Search results appear here. Choose a result when you are ready to download.",
     false
   );
 }
@@ -12863,6 +13212,7 @@ async function submitHomeSearch(autoEnqueue) {
   if (!state.homeSearchControlsEnabled) {
     return;
   }
+  persistRecentVideoSearch(inputValue);
   setHomeSearchActive(true);
   showHomeResults(true);
   setHomeResultsState({ hasResults: false, terminal: false });
@@ -12907,7 +13257,7 @@ async function submitHomeSearch(autoEnqueue) {
     return;
   }
   if (deliveryMode === "client" && autoEnqueue) {
-    setNotice(messageEl, "Search & Download is not available for client delivery. Use Search only or select Server delivery.", true);
+    setNotice(messageEl, "Client delivery does not save to a server destination. Use Search and choose a result to continue.", true);
     setHomeSearchControlsEnabled(true);
     setHomeSearchActive(false);
     return;
@@ -16195,6 +16545,30 @@ function bindEvents() {
   if (musicHeaderSubmit) {
     musicHeaderSubmit.addEventListener("click", runMusicHeaderSearch);
   }
+  const musicHeaderAdvancedToggle = $("#music-header-advanced-toggle");
+  const musicAdvancedPanel = $("#music-mode-console");
+  if (musicHeaderAdvancedToggle && musicAdvancedPanel) {
+    musicHeaderAdvancedToggle.setAttribute("aria-expanded", state.musicAdvancedOpen ? "true" : "false");
+    musicHeaderAdvancedToggle.addEventListener("click", () => {
+      state.musicAdvancedOpen = !state.musicAdvancedOpen;
+      musicAdvancedPanel.classList.toggle("hidden", !state.musicAdvancedOpen);
+      musicHeaderAdvancedToggle.setAttribute("aria-expanded", state.musicAdvancedOpen ? "true" : "false");
+      syncTopbarSubbarVisibility();
+    });
+  }
+  const musicHeaderClear = $("#music-header-search-clear");
+  if (musicHeaderClear) {
+    musicHeaderClear.addEventListener("click", () => {
+      const queryInput = $("#music-header-query");
+      if (queryInput) queryInput.value = "";
+      if ($("#search-artist")) $("#search-artist").value = "";
+      if ($("#search-album")) $("#search-album").value = "";
+      if ($("#search-track")) $("#search-track").value = "";
+      clearMusicResultsHistory();
+      renderMusicLanding();
+      setMusicSection("browse");
+    });
+  }
   const musicHeaderQuery = $("#music-header-query");
   if (musicHeaderQuery) {
     musicHeaderQuery.addEventListener("keydown", (event) => {
@@ -16210,20 +16584,17 @@ function bindEvents() {
       }
     });
   }
-  const musicHeaderModeToggle = $("#music-header-mode-toggle");
-  if (musicHeaderModeToggle) {
-    musicHeaderModeToggle.addEventListener("click", (event) => {
-      const button = event.target.closest("button[data-mode]");
-      if (!button) return;
-      setMusicHeaderMode(button.dataset.mode || "auto", { persist: true });
-    });
-  }
-  const musicHeaderImportToggle = $("#music-header-import-toggle");
-  const musicImportPanel = document.getElementById("import-playlist-panel");
-  if (musicHeaderImportToggle && musicImportPanel) {
-    musicHeaderImportToggle.addEventListener("click", () => {
-      musicImportPanel.classList.toggle("hidden");
-      syncTopbarSubbarVisibility();
+  const videoDiscoveryDefault = $("#video-discovery-default");
+  if (videoDiscoveryDefault) {
+    videoDiscoveryDefault.addEventListener("click", (event) => {
+      const chip = event.target.closest("[data-video-suggestion]");
+      if (!chip) return;
+      const input = $("#home-search-input");
+      if (!input) return;
+      const nextValue = String(chip.dataset.videoSuggestion || chip.textContent || "").trim();
+      if (!nextValue) return;
+      input.value = nextValue;
+      input.focus();
     });
   }
   const homeViewAdvanced = $("#home-view-advanced");
@@ -16682,10 +17053,20 @@ function bindEvents() {
         const key = String(choiceButton.dataset.setupChoice || "");
         const rawValue = String(choiceButton.dataset.value || "");
         const nextValue = rawValue === "true" ? true : rawValue === "false" ? false : rawValue;
-        const revealOnYes = new Set(["wants_tmdb", "enable_vpn", "wants_youtube", "wants_telegram", "enable_jellyfin"]);
+        const revealOnYes = new Set(["wants_tmdb", "enable_vpn", "wants_youtube", "wants_telegram", "enable_jellyfin", "managed_jellyfin"]);
         updateSetupWizardDraftField(key, nextValue);
         syncSetupWizardToLegacyFields();
         if (revealOnYes.has(key) && nextValue === true) {
+          if (key === "enable_jellyfin") {
+            state.setupWizard.feedback = {
+              stepId: getSetupWizardSteps()[Math.max(0, Number(state.setupWizard?.stepIndex || 0))]?.id || "",
+              tone: "success",
+              text: "Great. Retreivr is looking for likely Jellyfin addresses now.",
+            };
+            renderSetupWizard();
+            await discoverJellyfinForSetup();
+            return;
+          }
           state.setupWizard.feedback = {
             stepId: getSetupWizardSteps()[Math.max(0, Number(state.setupWizard?.stepIndex || 0))]?.id || "",
             tone: "success",
@@ -16705,6 +17086,22 @@ function bindEvents() {
         renderSetupWizard();
         return;
       }
+      const fillButton = event.target.closest("[data-setup-fill]");
+      if (fillButton) {
+        const key = String(fillButton.dataset.setupFill || "");
+        const value = String(fillButton.dataset.value || "");
+        if (key) {
+          updateSetupWizardDraftField(key, value);
+          syncSetupWizardToLegacyFields();
+          state.setupWizard.feedback = {
+            stepId: getSetupWizardSteps()[Math.max(0, Number(state.setupWizard?.stepIndex || 0))]?.id || "",
+            tone: "success",
+            text: "Filled in. You can keep going or edit it first.",
+          };
+          renderSetupWizard();
+        }
+        return;
+      }
       const actionButton = event.target.closest("[data-setup-action]");
       if (actionButton) {
         const messageEl = $("#setup-wizard-message");
@@ -16713,6 +17110,8 @@ function bindEvents() {
             resetSetupWizardDraft();
             renderSetupWizard();
             setNotice($("#setup-wizard-message"), "Setup guide reset to your saved defaults.", false);
+          } else if (actionButton.dataset.setupAction === "discover-jellyfin") {
+            await discoverJellyfinForSetup();
           } else if (actionButton.dataset.setupAction === "save-progress") {
             setNotice(messageEl, "Saving your setup choices...", false);
             await saveSetupWizardProgress();
@@ -16945,10 +17344,17 @@ function bindEvents() {
         const stationId = String(loadStationButton.dataset.stationId || "").trim();
         const payload = await fetchJson(`/api/player/stations/${encodeURIComponent(stationId)}/queue`, { method: "POST" });
         setPlayerQueue(Array.isArray(payload?.queue) ? payload.queue : []);
+        if (!state.playerQueue.length) {
+          setMusicPlayerView("radio");
+          setMusicSection("radio");
+          setNotice($("#music-player-message"), "This station does not have any playable items yet. Try a different seed or browse Community Cache below.", true);
+          return;
+        }
         setMusicPlayerView("queue");
-        setMusicSection("queue");
+        setMusicSection("player");
         if (state.playerQueue[0]) {
           await playMusicPlayerItem(state.playerQueue[0]);
+          setNotice($("#music-player-message"), `Loaded ${state.playerQueue.length} station item${state.playerQueue.length === 1 ? "" : "s"}.`, false);
         }
         return;
       }
@@ -16977,7 +17383,7 @@ function bindEvents() {
       }
       const musicGoSearch = event.target.closest('[data-action="music-go-search"]');
       if (musicGoSearch) {
-        setMusicSection("search");
+        setMusicSection("browse");
         return;
       }
       const musicGoFavorites = event.target.closest('[data-action="music-go-favorites"]');
@@ -17748,38 +18154,6 @@ function bindEvents() {
       }
     });
   }
-  const settingsMoreToggle = $("#settings-more-toggle");
-  const settingsMorePopover = $("#settings-more-popover");
-  if (settingsMoreToggle && settingsMorePopover) {
-    settingsMoreToggle.addEventListener("click", (event) => {
-      event.preventDefault();
-      const open = settingsMorePopover.classList.contains("hidden");
-      settingsMorePopover.classList.toggle("hidden", !open);
-      settingsMoreToggle.setAttribute("aria-expanded", open ? "true" : "false");
-    });
-    settingsMorePopover.addEventListener("click", (event) => {
-      const link = event.target.closest(".settings-more-link");
-      if (!link) return;
-      event.preventDefault();
-      const href = String(link.getAttribute("href") || "");
-      const targetId = href.startsWith("#") ? href.slice(1) : "";
-      if (!targetId) return;
-      setActiveSettingsSection(targetId, { jump: false, smooth: false });
-      if (window.location.hash !== `#${targetId}`) {
-        history.replaceState(null, "", `#${targetId}`);
-      }
-      settingsMorePopover.classList.add("hidden");
-      settingsMoreToggle.setAttribute("aria-expanded", "false");
-    });
-    document.addEventListener("click", (event) => {
-      if (!settingsMorePopover.classList.contains("hidden")
-        && !settingsMorePopover.contains(event.target)
-        && !settingsMoreToggle.contains(event.target)) {
-        settingsMorePopover.classList.add("hidden");
-        settingsMoreToggle.setAttribute("aria-expanded", "false");
-      }
-    });
-  }
 
   window.addEventListener("resize", () => {
     syncSettingsMainWidthLock();
@@ -17836,7 +18210,7 @@ function bindEvents() {
   applyHomeDefaultVideoFormat({ force: true });
   updateMusicModeFormatControl();
   syncSettingsMainWidthLock();
-  setActiveSettingsSection(state.settingsActiveSectionId || "settings-core", { jump: false, smooth: false });
+  setActiveSettingsSection(state.settingsActiveSectionId || getDefaultSettingsSectionId(), { jump: false, smooth: false });
 
 }
 

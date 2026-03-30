@@ -135,6 +135,7 @@ from engine.runtime import get_runtime_info
 from engine.arr_services import (
     ArrServiceError,
     add_movie_to_radarr,
+    build_arr_editorial_response,
     add_series_to_sonarr,
     build_arr_genre_browse_response,
     build_movie_search_response,
@@ -150,6 +151,7 @@ from engine.arr_services import (
 from engine.music_player import (
     add_history_entry,
     add_playlist_item,
+    build_station_preview,
     build_station_queue,
     create_playlist,
     create_station,
@@ -158,6 +160,7 @@ from engine.music_player import (
     delete_station,
     ensure_music_player_tables,
     list_history,
+    list_cached_matches,
     list_playlists,
     list_stations,
     playlist_items,
@@ -10443,6 +10446,70 @@ async def api_setup_managed_retry(request: Request):
     return safe_json({"status": "retrying", "managed_stack": build_managed_status(persisted)})
 
 
+def _build_jellyfin_discovery_candidates(request: Request) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = [
+        ("Retreivr managed Jellyfin", "http://jellyfin:8096"),
+        ("This device (http)", "http://localhost:8096"),
+        ("This device (https)", "https://localhost:8920"),
+        ("Docker host alias", "http://host.docker.internal:8096"),
+    ]
+    seen: set[str] = set()
+
+    def add_candidate(label: str, url: str) -> None:
+        normalized = str(url or "").strip().rstrip("/")
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append((label, normalized))
+
+    request_host = str(request.url.hostname or "").strip()
+    if request_host and request_host not in {"localhost", "127.0.0.1", "::1"}:
+        add_candidate("Current app host", f"http://{request_host}:8096")
+        add_candidate("Current app host (https)", f"https://{request_host}:8920")
+
+    try:
+        hostname = socket.gethostname()
+        _, _, host_ips = socket.gethostbyname_ex(hostname)
+        for ip in host_ips:
+            ip_value = str(ip or "").strip()
+            if not ip_value or ip_value.startswith("127."):
+                continue
+            add_candidate(f"Local network ({ip_value})", f"http://{ip_value}:8096")
+            add_candidate(f"Local network secure ({ip_value})", f"https://{ip_value}:8920")
+    except Exception:
+        pass
+
+    ordered: list[tuple[str, str]] = []
+    seen.clear()
+    for label, url in candidates:
+        normalized = str(url or "").strip().rstrip("/")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append((label, normalized))
+    return ordered
+
+
+@app.get("/api/setup/jellyfin/discover")
+async def api_setup_jellyfin_discover(request: Request):
+    _require_admin_session(request)
+    suggestions: list[dict[str, Any]] = []
+    for label, base_url in _build_jellyfin_discovery_candidates(request):
+        reachable, message = _probe_json(f"{base_url}/System/Info/Public")
+        if not reachable:
+            reachable, message = _probe_json(f"{base_url}/System/Info")
+        if not reachable:
+            continue
+        suggestions.append(
+            {
+                "label": label,
+                "url": base_url,
+                "status": message,
+            }
+        )
+    return safe_json({"suggestions": suggestions})
+
+
 @app.post("/api/setup/existing/discover")
 async def api_setup_existing_discover(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
@@ -10632,9 +10699,16 @@ async def api_player_library_summary(limit: int = Query(1000, ge=1, le=5000)):
 
 @app.get("/api/player/stations")
 async def api_player_stations():
+    cfg = _current_loaded_config()
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
-        stations = list_stations(conn)
+        stations = [
+            {
+                **station,
+                "preview": build_station_preview(conn, cfg, station=station, limit=10),
+            }
+            for station in list_stations(conn)
+        ]
     return safe_json({"stations": stations})
 
 
@@ -10669,6 +10743,14 @@ async def api_player_station_queue(station_id: int, limit: int = Query(25, ge=1,
             raise HTTPException(status_code=404, detail={"error": "station_not_found"})
         queue = build_station_queue(conn, cfg, station=station, limit=limit)
     return safe_json({"station": station, "queue": queue})
+
+
+@app.get("/api/player/community-cache")
+async def api_player_community_cache(limit: int = Query(60, ge=1, le=120)):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        items = list_cached_matches(conn, limit=limit)
+    return safe_json({"items": items})
 
 
 @app.get("/api/player/history")
@@ -11153,6 +11235,18 @@ async def api_arr_genre_browse(
 ):
     try:
         return safe_json(build_arr_genre_browse_response(_current_loaded_config(), kind=kind, genre_id=genre_id, limit=limit, year=year))
+    except ArrServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/api/arr/editorial")
+async def api_arr_editorial(
+    kind: str = Query(...),
+    shelf: str = Query(...),
+    limit: int = Query(12, ge=1, le=24),
+):
+    try:
+        return safe_json(build_arr_editorial_response(_current_loaded_config(), kind=kind, shelf=shelf, limit=limit))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
