@@ -42,6 +42,54 @@
       </button>
     </div>
   </header>
+  <div id="retreivr-hunt-launcher" class="retreivr-hunt-launcher hidden" aria-live="polite">
+    <div class="retreivr-hunt-launcher-title">Retreivr Hunt</div>
+    <div class="retreivr-hunt-launcher-copy">Hidden mini game unlocked.</div>
+    <div class="retreivr-hunt-launcher-actions">
+      <button id="retreivr-hunt-launch-play" class="button primary small" type="button">Play</button>
+      <button id="retreivr-hunt-launch-close" class="button ghost small" type="button">Later</button>
+    </div>
+  </div>
+
+  <div id="retreivr-hunt-overlay" class="retreivr-hunt-overlay hidden" aria-hidden="true">
+    <div class="retreivr-hunt-shell">
+      <div class="retreivr-hunt-hud">
+        <div class="retreivr-hunt-hud-group">
+          <div class="retreivr-hunt-hud-label">Score</div>
+          <div id="retreivr-hunt-score" class="retreivr-hunt-hud-value">0</div>
+        </div>
+        <div class="retreivr-hunt-hud-group">
+          <div class="retreivr-hunt-hud-label">Birds Left</div>
+          <div id="retreivr-hunt-left" class="retreivr-hunt-hud-value">20</div>
+        </div>
+        <div class="retreivr-hunt-hud-group">
+          <div class="retreivr-hunt-hud-label">Best</div>
+          <div id="retreivr-hunt-best" class="retreivr-hunt-hud-value">0</div>
+        </div>
+        <button id="retreivr-hunt-close" class="button ghost small retreivr-hunt-close" type="button">Close</button>
+      </div>
+      <div id="retreivr-hunt-stage" class="retreivr-hunt-stage">
+        <div class="retreivr-hunt-sky-glow" aria-hidden="true"></div>
+        <div class="retreivr-hunt-bushes" aria-hidden="true"></div>
+        <div class="retreivr-hunt-ground" aria-hidden="true"></div>
+        <div class="retreivr-hunt-dog-mark" aria-hidden="true">
+          <img src="app_icon.png" alt="">
+        </div>
+        <div id="retreivr-hunt-birds" class="retreivr-hunt-birds"></div>
+        <div id="retreivr-hunt-reticle" class="retreivr-hunt-reticle" aria-hidden="true"></div>
+        <div id="retreivr-hunt-flash" class="retreivr-hunt-flash hidden" aria-hidden="true"></div>
+        <div id="retreivr-hunt-panel" class="retreivr-hunt-panel">
+          <div id="retreivr-hunt-panel-kicker" class="retreivr-hunt-panel-kicker">Easter Egg</div>
+          <div id="retreivr-hunt-panel-title" class="retreivr-hunt-panel-title">Retreivr Hunt</div>
+          <div id="retreivr-hunt-panel-copy" class="retreivr-hunt-panel-copy">At dusk, silhouette birds lift from the brush. Hit as many as you can before all 20 get away.</div>
+          <div class="retreivr-hunt-panel-actions">
+            <button id="retreivr-hunt-start" class="button primary" type="button">Start Round</button>
+            <button id="retreivr-hunt-restart" class="button ghost hidden" type="button">Play Again</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <main class="layout">
     <section class="panel full page-full" id="home-panel" data-page="home">

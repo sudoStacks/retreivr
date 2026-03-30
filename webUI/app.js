@@ -68,6 +68,20 @@ const state = {
   settingsActiveSectionId: "settings-core",
   settingsLayoutObserver: null,
   logsStickToBottom: true,
+  hunt: {
+    launcherOpen: false,
+    overlayOpen: false,
+    roundActive: false,
+    score: 0,
+    hits: 0,
+    launched: 0,
+    birds: [],
+    rafId: 0,
+    spawnTimer: null,
+    lastFrameAt: 0,
+    pointer: { x: 0, y: 0 },
+    longPressTimer: null,
+  },
 };
 const browserState = {
   open: false,
@@ -140,6 +154,9 @@ const HOME_VIDEO_SOURCE_PRIORITY = [
 const HOME_VIDEO_KEYWORDS = ["show", "podcast", "episode", "interview"];
 const HOME_MUSIC_MODE_FORMATS = ["mp3", "m4a"];
 const HOME_MUSIC_VIDEO_MODE_FORMATS = ["mp4", "mkv", "webm"];
+const RETREIVR_HUNT_BEST_KEY = "retreivr_hunt_best_score_v1";
+const RETREIVR_HUNT_LONG_PRESS_MS = 1500;
+const RETREIVR_HUNT_TOTAL_BIRDS = 20;
 const SETTINGS_ADVANCED_MODE_KEY = "retreivr_settings_advanced_mode";
 const SETTINGS_ALL_SECTION_ID = "settings-all";
 const HOME_PREVIEW_EMBED_BUILDERS = {
@@ -9220,7 +9237,318 @@ function setupTimers() {
   }, 4000);
 }
 
+function loadRetreivrHuntBestScore() {
+  try {
+    const raw = localStorage.getItem(RETREIVR_HUNT_BEST_KEY);
+    const value = Number.parseInt(String(raw || "0"), 10);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch (_err) {
+    return 0;
+  }
+}
+
+function saveRetreivrHuntBestScore(score) {
+  const next = Number.parseInt(String(score || "0"), 10);
+  if (!Number.isFinite(next) || next < 0) return;
+  try {
+    localStorage.setItem(RETREIVR_HUNT_BEST_KEY, String(next));
+  } catch (_err) {
+    // ignore storage failures
+  }
+}
+
+function updateRetreivrHuntHud() {
+  const scoreEl = $("#retreivr-hunt-score");
+  const leftEl = $("#retreivr-hunt-left");
+  const bestEl = $("#retreivr-hunt-best");
+  if (scoreEl) scoreEl.textContent = String(state.hunt.score || 0);
+  if (leftEl) leftEl.textContent = String(Math.max(0, RETREIVR_HUNT_TOTAL_BIRDS - Number(state.hunt.launched || 0)));
+  if (bestEl) bestEl.textContent = String(loadRetreivrHuntBestScore());
+}
+
+function closeRetreivrHuntLauncher() {
+  const launcher = $("#retreivr-hunt-launcher");
+  if (launcher) launcher.classList.add("hidden");
+  state.hunt.launcherOpen = false;
+}
+
+function openRetreivrHuntLauncher() {
+  const launcher = $("#retreivr-hunt-launcher");
+  if (!launcher) return;
+  launcher.classList.remove("hidden");
+  state.hunt.launcherOpen = true;
+}
+
+function flashRetreivrHuntAt(x, y) {
+  const flash = $("#retreivr-hunt-flash");
+  if (!flash) return;
+  flash.style.left = `${x}px`;
+  flash.style.top = `${y}px`;
+  flash.classList.remove("hidden", "active");
+  void flash.offsetWidth;
+  flash.classList.add("active");
+  window.setTimeout(() => {
+    flash.classList.remove("active");
+    flash.classList.add("hidden");
+  }, 220);
+}
+
+function clearRetreivrHuntBirds() {
+  state.hunt.birds.forEach((bird) => {
+    try {
+      bird.el?.remove();
+    } catch (_err) {
+      // ignore
+    }
+  });
+  state.hunt.birds = [];
+}
+
+function setRetreivrHuntPanel(title, copy, { showStart = false, showRestart = false, kicker = "Easter Egg" } = {}) {
+  const panel = $("#retreivr-hunt-panel");
+  const titleEl = $("#retreivr-hunt-panel-title");
+  const copyEl = $("#retreivr-hunt-panel-copy");
+  const kickerEl = $("#retreivr-hunt-panel-kicker");
+  const startBtn = $("#retreivr-hunt-start");
+  const restartBtn = $("#retreivr-hunt-restart");
+  if (panel) panel.classList.remove("hidden");
+  if (titleEl) titleEl.textContent = title;
+  if (copyEl) copyEl.textContent = copy;
+  if (kickerEl) kickerEl.textContent = kicker;
+  if (startBtn) startBtn.classList.toggle("hidden", !showStart);
+  if (restartBtn) restartBtn.classList.toggle("hidden", !showRestart);
+}
+
+function hideRetreivrHuntPanel() {
+  const panel = $("#retreivr-hunt-panel");
+  if (panel) panel.classList.add("hidden");
+}
+
+function closeRetreivrHuntOverlay() {
+  const overlay = $("#retreivr-hunt-overlay");
+  if (overlay) {
+    overlay.classList.add("hidden");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+  closeRetreivrHuntLauncher();
+  if (state.hunt.spawnTimer) {
+    window.clearTimeout(state.hunt.spawnTimer);
+    state.hunt.spawnTimer = null;
+  }
+  if (state.hunt.rafId) {
+    window.cancelAnimationFrame(state.hunt.rafId);
+    state.hunt.rafId = 0;
+  }
+  state.hunt.overlayOpen = false;
+  state.hunt.roundActive = false;
+  state.hunt.lastFrameAt = 0;
+  clearRetreivrHuntBirds();
+}
+
+function openRetreivrHuntOverlay() {
+  const overlay = $("#retreivr-hunt-overlay");
+  const reticle = $("#retreivr-hunt-reticle");
+  const stage = $("#retreivr-hunt-stage");
+  if (!overlay || !reticle || !stage) return;
+  overlay.classList.remove("hidden");
+  overlay.setAttribute("aria-hidden", "false");
+  state.hunt.overlayOpen = true;
+  state.hunt.roundActive = false;
+  state.hunt.score = 0;
+  state.hunt.hits = 0;
+  state.hunt.launched = 0;
+  state.hunt.lastFrameAt = 0;
+  clearRetreivrHuntBirds();
+  updateRetreivrHuntHud();
+  setRetreivrHuntPanel(
+    "Retreivr Hunt",
+    "At dusk, silhouette birds lift from the brush. Hit as many as you can before all 20 get away.",
+    { showStart: true, showRestart: false, kicker: "Hidden Game" }
+  );
+  const rect = stage.getBoundingClientRect();
+  state.hunt.pointer = { x: rect.width * 0.5, y: rect.height * 0.5 };
+  reticle.style.left = `${state.hunt.pointer.x}px`;
+  reticle.style.top = `${state.hunt.pointer.y}px`;
+}
+
+function createRetreivrHuntBirdElement() {
+  const bird = document.createElement("button");
+  bird.type = "button";
+  bird.className = "retreivr-hunt-bird";
+  bird.innerHTML = `
+    <span class="retreivr-hunt-bird-wing left"></span>
+    <span class="retreivr-hunt-bird-body"></span>
+    <span class="retreivr-hunt-bird-wing right"></span>
+  `;
+  return bird;
+}
+
+function spawnRetreivrHuntBird() {
+  const stage = $("#retreivr-hunt-stage");
+  const birdsLayer = $("#retreivr-hunt-birds");
+  if (!stage || !birdsLayer || !state.hunt.roundActive) return;
+  if (state.hunt.launched >= RETREIVR_HUNT_TOTAL_BIRDS) return;
+  const rect = stage.getBoundingClientRect();
+  const direction = Math.random() > 0.5 ? 1 : -1;
+  const birdEl = createRetreivrHuntBirdElement();
+  birdsLayer.appendChild(birdEl);
+  const bird = {
+    id: `bird-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    el: birdEl,
+    x: rect.width * (0.16 + Math.random() * 0.68),
+    y: rect.height - (60 + Math.random() * 24),
+    vx: direction * (90 + Math.random() * 90),
+    vy: -(260 + Math.random() * 120),
+    gravity: 130 + Math.random() * 40,
+    scale: 0.9 + Math.random() * 0.45,
+    launchedAt: performance.now(),
+    alive: true,
+    direction,
+  };
+  birdEl.dataset.huntBirdId = bird.id;
+  state.hunt.birds.push(bird);
+  state.hunt.launched += 1;
+  updateRetreivrHuntHud();
+}
+
+function scheduleRetreivrHuntBirdSpawn() {
+  if (state.hunt.spawnTimer) {
+    window.clearTimeout(state.hunt.spawnTimer);
+    state.hunt.spawnTimer = null;
+  }
+  if (!state.hunt.roundActive || state.hunt.launched >= RETREIVR_HUNT_TOTAL_BIRDS) return;
+  state.hunt.spawnTimer = window.setTimeout(() => {
+    state.hunt.spawnTimer = null;
+    if (state.hunt.birds.filter((bird) => bird.alive).length < 2 || Math.random() > 0.55) {
+      spawnRetreivrHuntBird();
+    }
+    scheduleRetreivrHuntBirdSpawn();
+  }, 520 + Math.random() * 520);
+}
+
+function endRetreivrHuntRound() {
+  state.hunt.roundActive = false;
+  if (state.hunt.spawnTimer) {
+    window.clearTimeout(state.hunt.spawnTimer);
+    state.hunt.spawnTimer = null;
+  }
+  if (state.hunt.rafId) {
+    window.cancelAnimationFrame(state.hunt.rafId);
+    state.hunt.rafId = 0;
+  }
+  const best = loadRetreivrHuntBestScore();
+  if (state.hunt.score > best) {
+    saveRetreivrHuntBestScore(state.hunt.score);
+  }
+  updateRetreivrHuntHud();
+  const accuracy = state.hunt.launched ? Math.round((state.hunt.hits / state.hunt.launched) * 100) : 0;
+  setRetreivrHuntPanel(
+    state.hunt.score > best ? "New High Score" : "Round Over",
+    `You hit ${state.hunt.hits} of ${RETREIVR_HUNT_TOTAL_BIRDS} birds. Accuracy: ${accuracy}%.`,
+    { showStart: false, showRestart: true, kicker: "Retreivr Hunt" }
+  );
+}
+
+function updateRetreivrHuntFrame(now) {
+  if (!state.hunt.roundActive) return;
+  const stage = $("#retreivr-hunt-stage");
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  const last = state.hunt.lastFrameAt || now;
+  const dt = Math.min(0.032, Math.max(0.008, (now - last) / 1000));
+  state.hunt.lastFrameAt = now;
+  state.hunt.birds = state.hunt.birds.filter((bird) => bird.alive);
+  state.hunt.birds.forEach((bird) => {
+    bird.x += bird.vx * dt;
+    bird.y += bird.vy * dt;
+    bird.vy += bird.gravity * dt;
+    if (bird.el) {
+      bird.el.style.transform = `translate(${bird.x}px, ${bird.y}px) scale(${bird.direction < 0 ? -bird.scale : bird.scale}, ${bird.scale})`;
+    }
+    if (bird.y > rect.height + 40 || bird.x < -80 || bird.x > rect.width + 80) {
+      bird.alive = false;
+      bird.el?.remove();
+    }
+  });
+  state.hunt.birds = state.hunt.birds.filter((bird) => bird.alive);
+  if (state.hunt.launched >= RETREIVR_HUNT_TOTAL_BIRDS && state.hunt.birds.length === 0) {
+    endRetreivrHuntRound();
+    return;
+  }
+  state.hunt.rafId = window.requestAnimationFrame(updateRetreivrHuntFrame);
+}
+
+function startRetreivrHuntRound() {
+  clearRetreivrHuntBirds();
+  state.hunt.roundActive = true;
+  state.hunt.score = 0;
+  state.hunt.hits = 0;
+  state.hunt.launched = 0;
+  state.hunt.lastFrameAt = 0;
+  hideRetreivrHuntPanel();
+  updateRetreivrHuntHud();
+  spawnRetreivrHuntBird();
+  scheduleRetreivrHuntBirdSpawn();
+  state.hunt.rafId = window.requestAnimationFrame(updateRetreivrHuntFrame);
+}
+
+function moveRetreivrHuntReticle(clientX, clientY) {
+  const stage = $("#retreivr-hunt-stage");
+  const reticle = $("#retreivr-hunt-reticle");
+  if (!stage || !reticle) return;
+  const rect = stage.getBoundingClientRect();
+  const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+  const y = Math.max(0, Math.min(rect.height, clientY - rect.top));
+  state.hunt.pointer = { x, y };
+  reticle.style.left = `${x}px`;
+  reticle.style.top = `${y}px`;
+}
+
+function fireRetreivrHuntShot(clientX, clientY, targetBirdId = "") {
+  const stage = $("#retreivr-hunt-stage");
+  if (!stage || !state.hunt.roundActive) return;
+  moveRetreivrHuntReticle(clientX, clientY);
+  flashRetreivrHuntAt(state.hunt.pointer.x, state.hunt.pointer.y);
+  if (!targetBirdId) return;
+  const bird = state.hunt.birds.find((entry) => entry.id === targetBirdId && entry.alive);
+  if (!bird) return;
+  bird.alive = false;
+  bird.el?.classList.add("is-hit");
+  window.setTimeout(() => bird.el?.remove(), 60);
+  const ageSeconds = Math.max(0, (performance.now() - bird.launchedAt) / 1000);
+  state.hunt.hits += 1;
+  state.hunt.score += ageSeconds < 0.7 ? 150 : 100;
+  updateRetreivrHuntHud();
+}
+
+function beginRetreivrHuntLongPress() {
+  if (state.hunt.longPressTimer) {
+    window.clearTimeout(state.hunt.longPressTimer);
+  }
+  state.hunt.longPressTimer = window.setTimeout(() => {
+    state.hunt.longPressTimer = null;
+    openRetreivrHuntLauncher();
+  }, RETREIVR_HUNT_LONG_PRESS_MS);
+}
+
+function cancelRetreivrHuntLongPress() {
+  if (state.hunt.longPressTimer) {
+    window.clearTimeout(state.hunt.longPressTimer);
+    state.hunt.longPressTimer = null;
+  }
+}
+
 function bindEvents() {
+  const brand = $(".brand");
+  if (brand) {
+    brand.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      beginRetreivrHuntLongPress();
+    });
+    ["pointerup", "pointerleave", "pointercancel"].forEach((eventName) => {
+      brand.addEventListener(eventName, cancelRetreivrHuntLongPress);
+    });
+  }
   const navToggle = $("#nav-toggle");
   if (navToggle) {
     navToggle.addEventListener("click", () => {
@@ -10086,6 +10414,55 @@ function bindEvents() {
     applyTheme(next);
   });
 
+  const huntLauncherPlay = $("#retreivr-hunt-launch-play");
+  if (huntLauncherPlay) {
+    huntLauncherPlay.addEventListener("click", () => {
+      openRetreivrHuntOverlay();
+    });
+  }
+  const huntLauncherClose = $("#retreivr-hunt-launch-close");
+  if (huntLauncherClose) {
+    huntLauncherClose.addEventListener("click", closeRetreivrHuntLauncher);
+  }
+  const huntOverlayClose = $("#retreivr-hunt-close");
+  if (huntOverlayClose) {
+    huntOverlayClose.addEventListener("click", closeRetreivrHuntOverlay);
+  }
+  const huntStart = $("#retreivr-hunt-start");
+  if (huntStart) {
+    huntStart.addEventListener("click", startRetreivrHuntRound);
+  }
+  const huntRestart = $("#retreivr-hunt-restart");
+  if (huntRestart) {
+    huntRestart.addEventListener("click", startRetreivrHuntRound);
+  }
+  const huntOverlay = $("#retreivr-hunt-overlay");
+  if (huntOverlay) {
+    huntOverlay.addEventListener("click", (event) => {
+      if (event.target === huntOverlay) {
+        closeRetreivrHuntOverlay();
+      }
+    });
+  }
+  const huntStage = $("#retreivr-hunt-stage");
+  if (huntStage) {
+    huntStage.addEventListener("pointermove", (event) => {
+      moveRetreivrHuntReticle(event.clientX, event.clientY);
+    });
+    huntStage.addEventListener("pointerdown", (event) => {
+      const bird = event.target.closest(".retreivr-hunt-bird");
+      fireRetreivrHuntShot(event.clientX, event.clientY, bird?.dataset?.huntBirdId || "");
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeRetreivrHuntLauncher();
+      if (state.hunt.overlayOpen) {
+        closeRetreivrHuntOverlay();
+      }
+    }
+  });
+
   document.addEventListener("focusin", (event) => {
     const tag = (event.target && event.target.tagName) || "";
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
@@ -10206,6 +10583,7 @@ async function init() {
   });
   applyTheme(resolveTheme());
   bindEvents();
+  updateRetreivrHuntHud();
   // Home default: Video mode unless user set a persisted mode.
   setHomeMediaMode(loadHomeMediaModePreference(), { persist: false, clearResultsOnDisable: false });
   setHomeDeliveryMode(getHomeDeliveryMode());

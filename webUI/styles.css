@@ -700,6 +700,338 @@ body.home-page .home-results {
   display: none;
 }
 
+.retreivr-hunt-launcher {
+  position: fixed;
+  top: 74px;
+  left: 22px;
+  z-index: 30;
+  width: min(300px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(14, 18, 24, 0.94);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(10px);
+}
+
+.retreivr-hunt-launcher-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.retreivr-hunt-launcher-copy {
+  margin-top: 6px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.retreivr-hunt-launcher-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.retreivr-hunt-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 18px;
+  background:
+    radial-gradient(circle at top, rgba(255, 188, 102, 0.14), transparent 38%),
+    rgba(6, 8, 12, 0.78);
+  backdrop-filter: blur(8px);
+}
+
+.retreivr-hunt-shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-radius: 26px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: linear-gradient(180deg, rgba(14, 17, 28, 0.98), rgba(7, 9, 15, 0.98));
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.48);
+}
+
+.retreivr-hunt-hud {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(8, 11, 18, 0.8);
+}
+
+.retreivr-hunt-hud-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 80px;
+}
+
+.retreivr-hunt-hud-label {
+  font-size: 11px;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.72);
+}
+
+.retreivr-hunt-hud-value {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.retreivr-hunt-close {
+  margin-left: auto;
+}
+
+.retreivr-hunt-stage {
+  position: relative;
+  flex: 1;
+  min-height: 420px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, #0f1a31 0%, #2a3250 34%, #d37f4f 71%, #20160e 100%);
+  cursor: none;
+}
+
+.retreivr-hunt-sky-glow {
+  position: absolute;
+  inset: 10% 12% auto;
+  height: 160px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(255, 194, 118, 0.34), rgba(255, 194, 118, 0.06) 58%, transparent 74%);
+  filter: blur(8px);
+}
+
+.retreivr-hunt-ground,
+.retreivr-hunt-bushes {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.retreivr-hunt-ground {
+  height: 18%;
+  background: linear-gradient(180deg, rgba(12, 18, 18, 0), #09100d 44%, #050808 100%);
+}
+
+.retreivr-hunt-bushes {
+  height: 24%;
+  background:
+    radial-gradient(circle at 6% 100%, #0b1210 0 46px, transparent 47px),
+    radial-gradient(circle at 16% 100%, #09100d 0 62px, transparent 63px),
+    radial-gradient(circle at 28% 100%, #0b1210 0 54px, transparent 55px),
+    radial-gradient(circle at 40% 100%, #09100d 0 70px, transparent 71px),
+    radial-gradient(circle at 54% 100%, #0b1210 0 52px, transparent 53px),
+    radial-gradient(circle at 68% 100%, #09100d 0 66px, transparent 67px),
+    radial-gradient(circle at 82% 100%, #0b1210 0 58px, transparent 59px),
+    radial-gradient(circle at 95% 100%, #09100d 0 74px, transparent 75px);
+}
+
+.retreivr-hunt-dog-mark {
+  position: absolute;
+  left: 22px;
+  bottom: 34px;
+  width: 120px;
+  opacity: 0.22;
+  pointer-events: none;
+}
+
+.retreivr-hunt-dog-mark img {
+  display: block;
+  width: 100%;
+  filter: grayscale(1) brightness(0) contrast(1.15);
+}
+
+.retreivr-hunt-birds {
+  position: absolute;
+  inset: 0;
+}
+
+.retreivr-hunt-bird {
+  position: absolute;
+  width: 58px;
+  height: 36px;
+  transform-origin: center center;
+  pointer-events: auto;
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: none;
+}
+
+.retreivr-hunt-bird-body,
+.retreivr-hunt-bird-wing {
+  position: absolute;
+  background: rgba(7, 9, 10, 0.95);
+}
+
+.retreivr-hunt-bird-body {
+  left: 21px;
+  top: 11px;
+  width: 16px;
+  height: 12px;
+  border-radius: 10px 10px 7px 7px;
+}
+
+.retreivr-hunt-bird-wing {
+  top: 8px;
+  width: 22px;
+  height: 12px;
+  border-radius: 100% 100% 0 100%;
+}
+
+.retreivr-hunt-bird-wing.left {
+  left: 6px;
+  transform: rotate(-28deg);
+}
+
+.retreivr-hunt-bird-wing.right {
+  right: 6px;
+  transform: scaleX(-1) rotate(-28deg);
+}
+
+.retreivr-hunt-bird.is-hit {
+  opacity: 0.25;
+}
+
+.retreivr-hunt-reticle,
+.retreivr-hunt-flash {
+  position: absolute;
+  width: 46px;
+  height: 46px;
+  margin-left: -23px;
+  margin-top: -23px;
+  pointer-events: none;
+}
+
+.retreivr-hunt-reticle::before,
+.retreivr-hunt-reticle::after,
+.retreivr-hunt-flash::before,
+.retreivr-hunt-flash::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+}
+
+.retreivr-hunt-reticle::before {
+  border: 2px solid rgba(245, 245, 245, 0.86);
+}
+
+.retreivr-hunt-reticle::after {
+  inset: 50%;
+  margin: -1px 0 0 -22px;
+  width: 44px;
+  height: 2px;
+  background: rgba(245, 245, 245, 0.84);
+  box-shadow: 21px -21px 0 -20px rgba(245, 245, 245, 0.84), 21px 21px 0 -20px rgba(245, 245, 245, 0.84), -21px -21px 0 -20px rgba(245, 245, 245, 0.84), -21px 21px 0 -20px rgba(245, 245, 245, 0.84);
+}
+
+.retreivr-hunt-flash {
+  opacity: 0;
+}
+
+.retreivr-hunt-flash.active {
+  opacity: 1;
+  animation: retreivr-hunt-flash 180ms ease-out forwards;
+}
+
+.retreivr-hunt-flash::before {
+  border: 2px solid rgba(255, 225, 164, 0.94);
+  transform: scale(0.6);
+}
+
+.retreivr-hunt-flash::after {
+  inset: 50%;
+  margin: -1px 0 0 -18px;
+  width: 36px;
+  height: 2px;
+  background: rgba(255, 225, 164, 0.94);
+}
+
+.retreivr-hunt-panel {
+  position: absolute;
+  left: 50%;
+  bottom: 44px;
+  transform: translateX(-50%);
+  width: min(520px, calc(100% - 40px));
+  padding: 22px 24px;
+  border-radius: 24px;
+  border: 1px solid rgba(248, 250, 252, 0.12);
+  background: rgba(11, 15, 20, 0.82);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
+  text-align: center;
+  backdrop-filter: blur(10px);
+}
+
+.retreivr-hunt-panel-kicker {
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.7);
+}
+
+.retreivr-hunt-panel-title {
+  margin-top: 10px;
+  font-size: 34px;
+  font-weight: 800;
+}
+
+.retreivr-hunt-panel-copy {
+  margin-top: 10px;
+  color: rgba(226, 232, 240, 0.82);
+  line-height: 1.6;
+}
+
+.retreivr-hunt-panel-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+@keyframes retreivr-hunt-flash {
+  0% { opacity: 1; transform: scale(0.8); }
+  100% { opacity: 0; transform: scale(1.18); }
+}
+
+@media (max-width: 900px) {
+  .retreivr-hunt-overlay {
+    padding: 10px;
+  }
+
+  .retreivr-hunt-hud {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .retreivr-hunt-panel {
+    bottom: 18px;
+    width: calc(100% - 24px);
+    padding: 18px 18px 20px;
+  }
+
+  .retreivr-hunt-panel-title {
+    font-size: 28px;
+  }
+
+  .retreivr-hunt-dog-mark {
+    width: 88px;
+    left: 12px;
+    bottom: 18px;
+  }
+}
+
 .filters {
   gap: 10px;
 }
