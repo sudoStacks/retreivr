@@ -429,6 +429,69 @@ def apply_config_defaults(config):
             "plex_base_url": "",
         },
     )
+    normalized.setdefault(
+        "setup",
+        {
+            "show_on_startup": True,
+            "completed_modules": [],
+            "last_applied_at": "",
+            "last_applied_command": "",
+            "last_applied_env_path": "",
+            "restart_required": False,
+            "service_management": {
+                "mode": "none",
+                "apply_mode": "manual",
+            },
+            "managed_stack": {
+                "direct_manage_requested": False,
+                "hostctl_enabled": False,
+                "phase": "idle",
+                "phase_message": "",
+                "last_error": "",
+                "selected_services": [],
+                "enabled_features": {
+                    "movies": False,
+                    "tv": False,
+                    "books": False,
+                    "subtitles": False,
+                    "downloader": False,
+                    "vpn": False,
+                    "jellyfin": False,
+                },
+                "internal_urls": {},
+                "generated_credentials": {
+                    "qbittorrent_username": "",
+                    "qbittorrent_password": "",
+                },
+                "resume_ready": False,
+                "apply_result": "",
+                "last_health": {},
+                "last_configure_result": {},
+            },
+            "existing_stack": {
+                "selected_services": [],
+                "discovered_health": {},
+            },
+            "stack": {
+                "enable_arr_stack": False,
+                "enable_radarr": False,
+                "enable_sonarr": False,
+                "enable_readarr": False,
+                "enable_prowlarr": False,
+                "enable_bazarr": False,
+                "enable_qbittorrent": False,
+                "enable_vpn": False,
+                "enable_jellyfin": False,
+                "env_path": ".env",
+                "compose_profiles": [],
+                "media_root": "./media",
+                "movies_root": "./media/movies",
+                "tv_root": "./media/tv",
+                "downloads_root": "./downloads",
+                "books_root": "./media/books",
+            },
+        },
+    )
     normalized.setdefault("custom_search_adapters_file", "config/custom_search_adapters.yaml")
     normalized.setdefault("music_skip_metadata_probe", True)
     normalized.setdefault("music_candidate_cooldown_enabled", True)
@@ -975,6 +1038,48 @@ def validate_config(config):
             restart_required = setup_cfg.get("restart_required")
             if restart_required is not None and not isinstance(restart_required, bool):
                 errors.append("setup.restart_required must be true/false")
+            service_mgmt = setup_cfg.get("service_management")
+            if service_mgmt is not None:
+                if not isinstance(service_mgmt, dict):
+                    errors.append("setup.service_management must be an object")
+                else:
+                    mode = service_mgmt.get("mode")
+                    if mode is not None and mode not in ("managed", "existing", "none"):
+                        errors.append("setup.service_management.mode must be one of managed, existing, none")
+                    apply_mode = service_mgmt.get("apply_mode")
+                    if apply_mode is not None and apply_mode not in ("direct", "manual"):
+                        errors.append("setup.service_management.apply_mode must be one of direct, manual")
+            managed_stack = setup_cfg.get("managed_stack")
+            if managed_stack is not None:
+                if not isinstance(managed_stack, dict):
+                    errors.append("setup.managed_stack must be an object")
+                else:
+                    for bool_name in ("direct_manage_requested", "hostctl_enabled", "resume_ready"):
+                        value = managed_stack.get(bool_name)
+                        if value is not None and not isinstance(value, bool):
+                            errors.append(f"setup.managed_stack.{bool_name} must be true/false")
+                    for str_name in ("phase", "phase_message", "last_error", "apply_result"):
+                        value = managed_stack.get(str_name)
+                        if value is not None and not isinstance(value, str):
+                            errors.append(f"setup.managed_stack.{str_name} must be a string")
+                    for obj_name in ("internal_urls", "generated_credentials", "enabled_features", "last_health", "last_configure_result"):
+                        value = managed_stack.get(obj_name)
+                        if value is not None and not isinstance(value, dict):
+                            errors.append(f"setup.managed_stack.{obj_name} must be an object")
+                    selected = managed_stack.get("selected_services")
+                    if selected is not None and (not isinstance(selected, list) or not all(isinstance(entry, str) for entry in selected)):
+                        errors.append("setup.managed_stack.selected_services must be a list of strings")
+            existing_stack = setup_cfg.get("existing_stack")
+            if existing_stack is not None:
+                if not isinstance(existing_stack, dict):
+                    errors.append("setup.existing_stack must be an object")
+                else:
+                    selected = existing_stack.get("selected_services")
+                    if selected is not None and (not isinstance(selected, list) or not all(isinstance(entry, str) for entry in selected)):
+                        errors.append("setup.existing_stack.selected_services must be a list of strings")
+                    discovered = existing_stack.get("discovered_health")
+                    if discovered is not None and not isinstance(discovered, dict):
+                        errors.append("setup.existing_stack.discovered_health must be an object")
             stack_cfg = setup_cfg.get("stack")
             if stack_cfg is not None:
                 if not isinstance(stack_cfg, dict):
@@ -990,6 +1095,7 @@ def validate_config(config):
                         "enable_qbittorrent",
                         "enable_vpn",
                         "enable_jellyfin",
+                        "enable_hostctl",
                     ):
                         value = stack_cfg.get(bool_name)
                         if value is not None and not isinstance(value, bool):

@@ -153,6 +153,7 @@ from engine.music_player import (
     build_station_queue,
     create_playlist,
     create_station,
+    delete_history_entry,
     delete_playlist,
     delete_station,
     ensure_music_player_tables,
@@ -160,17 +161,27 @@ from engine.music_player import (
     list_playlists,
     list_stations,
     playlist_items,
+    reorder_playlist_items,
     scan_local_library,
     remove_playlist_item,
     summarize_library,
 )
 from engine.stack_setup import (
+    _probe_json,
+    _qbit_login_session,
+    _qbit_request,
     auto_configure_services,
+    apply_managed_service_defaults,
     build_stack_apply_summary,
     build_compose_command,
     build_connections_status,
+    build_existing_status,
+    build_managed_status,
     build_setup_status,
+    discover_managed_service_keys,
     managed_env_values,
+    normalize_existing_stack_payload,
+    normalize_managed_plan,
     normalize_stack_config,
     write_managed_env_block,
 )
@@ -10261,6 +10272,257 @@ async def api_setup_status():
     return safe_json({**_build_stack_payload(cfg), "security": _admin_security_status(cfg)})
 
 
+@app.post("/api/setup/managed/plan")
+async def api_setup_managed_plan(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    plan = normalize_managed_plan(cfg, payload)
+    updated_cfg = _managed_setup_config_update(
+        cfg,
+        plan,
+        phase="planned",
+        phase_message="Managed setup plan saved. Review and apply when ready.",
+        last_error="",
+        resume_ready=False,
+        apply_result="",
+    )
+    persisted = _persist_config_payload(updated_cfg)
+    summary = build_stack_apply_summary(persisted, normalize_stack_config(persisted))
+    return safe_json(
+        {
+            "status": "planned",
+            "service_management": build_setup_status(persisted).get("service_management") or {},
+            "managed_stack": build_managed_status(persisted),
+            "stack": normalize_stack_config(persisted),
+            "apply_summary": summary,
+        }
+    )
+
+
+@app.post("/api/setup/managed/apply")
+async def api_setup_managed_apply(request: Request):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    managed_cfg = setup_cfg.get("managed_stack") if isinstance(setup_cfg.get("managed_stack"), dict) else {}
+    if not managed_cfg:
+        raise HTTPException(status_code=400, detail={"error": "managed_plan_missing"})
+    plan = normalize_managed_plan(cfg, {**(managed_cfg.get("enabled_features") or {}), "direct_manage": bool(managed_cfg.get("direct_manage_requested"))})
+    prepared_cfg = _managed_setup_config_update(
+        cfg,
+        plan,
+        phase="prepared",
+        phase_message="Retreivr prepared your managed stack settings.",
+        last_error="",
+        resume_ready=True,
+        apply_result="prepared",
+    )
+    prepared_cfg = _discover_and_persist_managed_keys(prepared_cfg)
+    written = write_managed_env_block(_default_env_path(prepared_cfg), managed_env_values(prepared_cfg, normalize_stack_config(prepared_cfg)))
+    summary = build_stack_apply_summary(prepared_cfg, normalize_stack_config(prepared_cfg))
+    service_mgmt = dict((prepared_cfg.get("setup") or {}).get("service_management") or {})
+    service_mgmt["mode"] = "managed"
+    service_mgmt["apply_mode"] = str(plan.get("apply_mode") or "manual")
+    prepared_cfg.setdefault("setup", {})["service_management"] = service_mgmt
+    prepared_cfg["setup"]["last_applied_env_path"] = str(written)
+    prepared_cfg["setup"]["last_applied_command"] = str(summary.get("compose_command") or "")
+    prepared_cfg["setup"]["last_applied_at"] = datetime.now(timezone.utc).isoformat()
+    next_steps = [f"Run `{summary['compose_command']}` from the Retreivr project root."]
+    direct_attempt = {"status": "not_attempted"}
+    if str(plan.get("apply_mode")) == "direct" and normalize_stack_config(prepared_cfg).get("enable_hostctl"):
+        try:
+            direct_attempt = _hostctl_request(
+                "POST",
+                "/compose/apply",
+                {
+                    "profiles": summary.get("profiles") or [],
+                    "project_dir": str(_repo_root()),
+                },
+                timeout=90.0,
+            )
+            prepared_cfg = _managed_setup_config_update(
+                prepared_cfg,
+                plan,
+                phase="checking_services",
+                phase_message="Retreivr started the managed services and is checking readiness.",
+                last_error="",
+                resume_ready=True,
+                apply_result="direct_started",
+            )
+            next_steps = ["Retreivr started the managed services directly. Refresh setup status if the services are still warming up."]
+        except Exception as exc:  # noqa: BLE001
+            prepared_cfg = _managed_setup_config_update(
+                prepared_cfg,
+                plan,
+                phase="waiting_for_restart",
+                phase_message="Direct management is not available yet. One restart/apply step is still needed.",
+                last_error=str(exc),
+                resume_ready=True,
+                apply_result="manual_fallback",
+            )
+            next_steps.append("Direct management was not available yet, so Retreivr prepared a one-step fallback.")
+    else:
+        prepared_cfg = _managed_setup_config_update(
+            prepared_cfg,
+            plan,
+            phase="waiting_for_restart",
+            phase_message="Managed setup is prepared. Finish the restart/apply step to continue automatically.",
+            last_error="",
+            resume_ready=True,
+            apply_result="manual_required",
+        )
+        next_steps.append("Return to Retreivr after restart. Guided Setup will continue from there.")
+    persisted = _persist_config_payload(prepared_cfg)
+    return safe_json(
+        {
+            "status": str(((persisted.get("setup") or {}).get("managed_stack") or {}).get("apply_result") or "prepared"),
+            "env_path": str(written),
+            "compose_command": str(summary.get("compose_command") or ""),
+            "profiles": summary.get("profiles") or [],
+            "direct_attempt": direct_attempt,
+            "managed_stack": build_managed_status(persisted),
+            "next_steps": next_steps,
+        }
+    )
+
+
+@app.get("/api/setup/managed/status")
+async def api_setup_managed_status():
+    cfg = _current_loaded_config()
+    status = build_managed_status(cfg)
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    managed_cfg = setup_cfg.get("managed_stack") if isinstance(setup_cfg.get("managed_stack"), dict) else {}
+    phase = str(status.get("phase") or "")
+    if phase in ("checking_services", "waiting_for_restart", "prepared") and bool(managed_cfg.get("resume_ready")):
+        current_cfg = _discover_and_persist_managed_keys(cfg)
+        health = build_connections_status(current_cfg)
+        configure_result = auto_configure_services(current_cfg)
+        desired_services = set(str(item) for item in (managed_cfg.get("selected_services") or []))
+        ready = True
+        for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "qbittorrent"):
+            if service_name not in desired_services:
+                continue
+            service_payload = health.get(service_name) if isinstance(health.get(service_name), dict) else {}
+            if not bool(service_payload.get("reachable")):
+                ready = False
+        next_phase = "configured" if ready else "checking_services"
+        next_message = "Managed services are configured." if ready else "Managed services are still starting or need attention."
+        updated_cfg = _managed_setup_config_update(
+            current_cfg,
+            normalize_managed_plan(current_cfg, {**(managed_cfg.get("enabled_features") or {}), "direct_manage": bool(managed_cfg.get("direct_manage_requested"))}),
+            phase=next_phase,
+            phase_message=next_message,
+            last_error="",
+            resume_ready=not ready,
+            apply_result="configured" if ready else str(managed_cfg.get("apply_result") or ""),
+            last_health=health,
+            last_configure_result=configure_result,
+        )
+        cfg = _persist_config_payload(updated_cfg)
+        status = build_managed_status(cfg)
+    return safe_json(status)
+
+
+@app.post("/api/setup/managed/retry")
+async def api_setup_managed_retry(request: Request):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    managed_cfg = setup_cfg.get("managed_stack") if isinstance(setup_cfg.get("managed_stack"), dict) else {}
+    if not managed_cfg:
+        raise HTTPException(status_code=400, detail={"error": "managed_plan_missing"})
+    updated_cfg = _managed_setup_config_update(
+        cfg,
+        normalize_managed_plan(cfg, {**(managed_cfg.get("enabled_features") or {}), "direct_manage": bool(managed_cfg.get("direct_manage_requested"))}),
+        phase="checking_services",
+        phase_message="Retrying managed service discovery and configuration.",
+        last_error="",
+        resume_ready=True,
+    )
+    persisted = _persist_config_payload(updated_cfg)
+    return safe_json({"status": "retrying", "managed_stack": build_managed_status(persisted)})
+
+
+@app.post("/api/setup/existing/discover")
+async def api_setup_existing_discover(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    normalized = normalize_existing_stack_payload(payload)
+    discovered: dict[str, Any] = {}
+    for service_name, service_cfg in (normalized.get("services") or {}).items():
+        if not isinstance(service_cfg, dict) or not service_cfg.get("enabled"):
+            continue
+        base_url = str(service_cfg.get("base_url") or "").strip().rstrip("/")
+        if not base_url:
+            discovered[service_name] = {"configured": False, "reachable": False, "status": "address_needed"}
+            continue
+        if service_name == "qbittorrent":
+            try:
+                session = _qbit_login_session(base_url, str(service_cfg.get("username") or "").strip(), str(service_cfg.get("password") or "").strip())
+                _qbit_request(session, base_url, "GET", "app/version")
+                discovered[service_name] = {"configured": True, "reachable": True, "status": "reachable", "base_url": base_url}
+            except Exception as exc:  # noqa: BLE001
+                discovered[service_name] = {"configured": True, "reachable": False, "status": str(exc), "base_url": base_url}
+            continue
+        api_key = str(service_cfg.get("api_key") or "").strip()
+        headers = {"X-Api-Key": api_key} if api_key else {}
+        endpoint = "/System/Info" if service_name == "jellyfin" else f"/api/{'v1' if service_name == 'prowlarr' else 'v3'}/system/status"
+        reachable, message = _probe_json(f"{base_url}{endpoint}", headers=headers)
+        discovered[service_name] = {"configured": True, "reachable": reachable, "status": message, "base_url": base_url}
+    cfg = dict(_current_loaded_config())
+    setup_cfg = dict(cfg.get("setup") or {})
+    service_mgmt = dict(setup_cfg.get("service_management") or {})
+    service_mgmt["mode"] = "existing"
+    service_mgmt["apply_mode"] = "manual"
+    setup_cfg["service_management"] = service_mgmt
+    setup_cfg["existing_stack"] = {"selected_services": list(discovered.keys()), "discovered_health": discovered}
+    cfg["setup"] = setup_cfg
+    persisted = _persist_config_payload(cfg)
+    return safe_json({"status": "discovered", "existing_stack": build_existing_status(persisted)})
+
+
+@app.post("/api/setup/existing/connect")
+async def api_setup_existing_connect(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    normalized = normalize_existing_stack_payload(payload)
+    cfg = dict(_current_loaded_config())
+    arr_cfg = dict(cfg.get("arr") or {})
+    selected_services: list[str] = []
+    for service_name, service_cfg in (normalized.get("services") or {}).items():
+        if not isinstance(service_cfg, dict) or not service_cfg.get("enabled"):
+            continue
+        selected_services.append(service_name)
+        if service_name == "qbittorrent":
+            qb_cfg = dict(arr_cfg.get("qbittorrent") or {})
+            qb_cfg["base_url"] = str(service_cfg.get("base_url") or "").strip()
+            qb_cfg["username"] = str(service_cfg.get("username") or "").strip()
+            qb_cfg["password"] = str(service_cfg.get("password") or "").strip()
+            arr_cfg["qbittorrent"] = qb_cfg
+        elif service_name == "jellyfin":
+            jelly_cfg = dict(arr_cfg.get("jellyfin") or {})
+            jelly_cfg["base_url"] = str(service_cfg.get("base_url") or "").strip()
+            jelly_cfg["api_key"] = str(service_cfg.get("api_key") or "").strip()
+            arr_cfg["jellyfin"] = jelly_cfg
+        else:
+            service_target = dict(arr_cfg.get(service_name) or {})
+            service_target["base_url"] = str(service_cfg.get("base_url") or "").strip()
+            service_target["api_key"] = str(service_cfg.get("api_key") or "").strip()
+            arr_cfg[service_name] = service_target
+    cfg["arr"] = arr_cfg
+    setup_cfg = dict(cfg.get("setup") or {})
+    service_mgmt = dict(setup_cfg.get("service_management") or {})
+    service_mgmt["mode"] = "existing"
+    service_mgmt["apply_mode"] = "manual"
+    setup_cfg["service_management"] = service_mgmt
+    setup_cfg["existing_stack"] = {
+        "selected_services": selected_services,
+        "discovered_health": build_connections_status({**cfg, "arr": arr_cfg}),
+    }
+    cfg["setup"] = setup_cfg
+    cfg = _persist_config_payload(cfg)
+    configure_result = auto_configure_services(cfg)
+    return safe_json({"status": "connected", "existing_stack": build_existing_status(cfg), "configure_result": configure_result})
+
+
 @app.post("/api/setup/stack")
 async def api_setup_stack_update(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
@@ -10414,7 +10676,50 @@ async def api_player_history(limit: int = Query(50, ge=1, le=200)):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         history_rows = list_history(conn, limit=limit)
+    for item in history_rows:
+        local_path = str(item.get("local_path") or "").strip()
+        is_local = str(item.get("source_kind") or "").strip().lower() == "local"
+        exists_locally = bool(local_path and os.path.isfile(local_path))
+        item["exists_locally"] = exists_locally
+        item["is_missing_local"] = bool(is_local and local_path and not exists_locally)
+        item["can_redownload"] = bool((item["is_missing_local"] or not exists_locally) and str(item.get("title") or "").strip() and str(item.get("artist") or "").strip())
     return safe_json({"history": history_rows})
+
+
+@app.delete("/api/player/history/{history_id}")
+async def api_player_history_delete(history_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        delete_history_entry(conn, history_id)
+    return safe_json({"status": "deleted", "history_id": int(history_id)})
+
+
+@app.post("/api/player/history/{history_id}/redownload")
+async def api_player_history_redownload(history_id: int):
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        history_rows = list_history(conn, limit=500)
+    entry = next((row for row in history_rows if int(row.get("id") or 0) == int(history_id)), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail={"error": "history_not_found"})
+    artist = str(entry.get("artist") or "").strip()
+    title = str(entry.get("title") or "").strip()
+    album = str(entry.get("album") or "").strip() or None
+    if not artist or not title:
+        raise HTTPException(status_code=400, detail={"error": "not_enough_metadata_to_redownload"})
+    adapter = _IntentQueueAdapter()
+    result = adapter.enqueue(
+        {
+            "artist": artist,
+            "track": title,
+            "album": album,
+            "media_type": "music",
+            "origin": "player_history",
+            "origin_id": f"history:{history_id}",
+            "force_redownload": True,
+        }
+    )
+    return safe_json({"status": "queued", "history_id": int(history_id), "result": result})
 
 
 @app.get("/api/player/playlists")
@@ -10469,6 +10774,17 @@ async def api_player_playlist_delete_item(playlist_id: int, item_id: int):
         conn.row_factory = sqlite3.Row
         remove_playlist_item(conn, playlist_id, item_id)
     return safe_json({"status": "deleted", "playlist_id": int(playlist_id), "item_id": int(item_id)})
+
+
+@app.post("/api/player/playlists/{playlist_id}/reorder")
+async def api_player_playlist_reorder(playlist_id: int, payload: dict = Body(...)):
+    ordered_ids = payload.get("item_ids")
+    if not isinstance(ordered_ids, list):
+        raise HTTPException(status_code=400, detail={"error": "item_ids must be a list"})
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        items = reorder_playlist_items(conn, playlist_id, ordered_ids)
+    return safe_json({"playlist_id": int(playlist_id), "items": items})
 
 
 @app.delete("/api/player/playlists/{playlist_id}")
@@ -10581,6 +10897,66 @@ def _default_env_path(config: dict | None = None) -> Path:
     if not candidate.is_absolute():
         candidate = (_repo_root() / candidate).resolve()
     return candidate
+
+
+def _hostctl_base_url() -> str:
+    return str(os.environ.get("RETREIVR_HOSTCTL_URL") or "http://retreivr-hostctl:8010").strip().rstrip("/")
+
+
+def _hostctl_request(method: str, path: str, payload: dict | None = None, timeout: float = 20.0) -> dict[str, Any]:
+    base = _hostctl_base_url()
+    response = requests.request(method.upper(), f"{base}{path}", json=payload or {}, timeout=timeout)
+    if response.status_code >= 400:
+        raise RuntimeError(f"hostctl_{response.status_code}")
+    if not response.content:
+        return {}
+    return response.json() if "json" in str(response.headers.get("content-type", "")).lower() else {"text": response.text}
+
+
+def _managed_setup_config_update(cfg: dict, plan: dict[str, Any], *, phase: str, phase_message: str = "", last_error: str = "", resume_ready: bool | None = None, apply_result: str | None = None, last_health: dict | None = None, last_configure_result: dict | None = None) -> dict:
+    updated = apply_managed_service_defaults(cfg, plan)
+    setup_cfg = dict(updated.get("setup") or {})
+    service_mgmt = dict(setup_cfg.get("service_management") or {})
+    service_mgmt["mode"] = "managed"
+    service_mgmt["apply_mode"] = str(plan.get("apply_mode") or "manual")
+    setup_cfg["service_management"] = service_mgmt
+    managed_cfg = dict(setup_cfg.get("managed_stack") or {})
+    managed_cfg["direct_manage_requested"] = bool(plan.get("direct_manage_requested"))
+    managed_cfg["hostctl_enabled"] = bool((plan.get("stack") or {}).get("enable_hostctl"))
+    managed_cfg["phase"] = str(phase or managed_cfg.get("phase") or "idle")
+    managed_cfg["phase_message"] = str(phase_message or "")
+    managed_cfg["last_error"] = str(last_error or "")
+    managed_cfg["selected_services"] = list(plan.get("selected_services") or [])
+    managed_cfg["enabled_features"] = dict(plan.get("enabled_features") or {})
+    managed_cfg["internal_urls"] = dict(plan.get("internal_urls") or {})
+    managed_cfg["generated_credentials"] = dict(plan.get("generated_credentials") or {})
+    if resume_ready is not None:
+        managed_cfg["resume_ready"] = bool(resume_ready)
+    if apply_result is not None:
+        managed_cfg["apply_result"] = str(apply_result)
+    if isinstance(last_health, dict):
+        managed_cfg["last_health"] = last_health
+    if isinstance(last_configure_result, dict):
+        managed_cfg["last_configure_result"] = last_configure_result
+    setup_cfg["managed_stack"] = managed_cfg
+    stack = dict(plan.get("stack") or {})
+    setup_cfg["stack"] = stack
+    setup_cfg["restart_required"] = bool(phase in ("prepared", "waiting_for_restart"))
+    updated["setup"] = setup_cfg
+    return updated
+
+
+def _discover_and_persist_managed_keys(cfg: dict) -> dict:
+    updated = dict(cfg)
+    arr_cfg = dict(updated.get("arr") or {})
+    discovered = discover_managed_service_keys(updated)
+    for service_name, api_key in discovered.items():
+        service_cfg = dict(arr_cfg.get(service_name) or {})
+        if api_key:
+            service_cfg["api_key"] = api_key
+        arr_cfg[service_name] = service_cfg
+    updated["arr"] = arr_cfg
+    return updated
 
 
 def _build_stack_payload(config: dict | None = None) -> dict[str, Any]:

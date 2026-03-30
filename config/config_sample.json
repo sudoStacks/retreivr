@@ -190,6 +190,40 @@
     "last_applied_command": "",
     "last_applied_env_path": "",
     "restart_required": false,
+    "service_management": {
+      "mode": "none",
+      "apply_mode": "manual"
+    },
+    "managed_stack": {
+      "direct_manage_requested": false,
+      "hostctl_enabled": false,
+      "phase": "idle",
+      "phase_message": "",
+      "last_error": "",
+      "selected_services": [],
+      "enabled_features": {
+        "movies": false,
+        "tv": false,
+        "books": false,
+        "subtitles": false,
+        "downloader": false,
+        "vpn": false,
+        "jellyfin": false
+      },
+      "internal_urls": {},
+      "generated_credentials": {
+        "qbittorrent_username": "",
+        "qbittorrent_password": ""
+      },
+      "resume_ready": false,
+      "apply_result": "",
+      "last_health": {},
+      "last_configure_result": {}
+    },
+    "existing_stack": {
+      "selected_services": [],
+      "discovered_health": {}
+    },
     "stack": {
       "enable_arr_stack": false,
       "enable_radarr": false,
@@ -200,6 +234,7 @@
       "enable_qbittorrent": false,
       "enable_vpn": false,
       "enable_jellyfin": false,
+      "enable_hostctl": false,
       "env_path": ".env",
       "compose_profiles": [],
       "media_root": "./media",

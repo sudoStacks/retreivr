@@ -118,7 +118,7 @@ const state = {
     session_valid: false,
   },
   adminPinToken: "",
-  playerView: "library",
+  playerView: "home",
   playerLibrary: [],
   playerLibrarySummary: { artists: [], albums: [], tracks: [] },
   playerLibraryMode: "albums",
@@ -130,11 +130,12 @@ const state = {
   playerSelectedPlaylistItems: [],
   playerQueue: [],
   playerHistory: [],
+  playerMissingHistory: [],
   playerCurrent: null,
   playerShuffle: false,
   playerRepeatMode: "off",
   playerProgressDragging: false,
-  musicSection: "search",
+  musicSection: "home",
   homeSection: "search",
   moviesTvSection: "search",
   musicPlayerExpanded: false,
@@ -305,6 +306,8 @@ const DIRECT_URL_PLAYLIST_ERROR =
 const HOME_PLAYLIST_SEARCH_ONLY_MESSAGE =
   "Playlist URL detected. Use Search & Download to enqueue all videos in the playlist.";
 const HOME_HOVER_PREVIEW_DELAY_MS = 800;
+const VIDEO_SOURCE_PREFERENCE_KEY = "retreivr.video_sources";
+const MUSIC_HEADER_MODE_KEY = "retreivr.music_header_mode";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -349,6 +352,7 @@ async function refreshHomeSourceOptions() {
     const videoExcluded = new Set(["youtube_music", "soundcloud", "bandcamp"]);
     sources = sources.filter((source) => !videoExcluded.has(String(source || "").trim().toLowerCase()));
   }
+  const persistedChecked = new Set(loadVideoSourcePreferences());
   const existingChecked = new Set(
     Array.from(panel.querySelectorAll("input[type=checkbox][data-source]:checked")).map((el) => el.dataset.source)
   );
@@ -359,7 +363,11 @@ async function refreshHomeSourceOptions() {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.dataset.source = source;
-    input.checked = existingChecked.size ? existingChecked.has(source) : source === "youtube" || index === 0;
+    input.checked = existingChecked.size
+      ? existingChecked.has(source)
+      : persistedChecked.size
+        ? persistedChecked.has(source)
+        : source === "youtube" || index === 0;
     const span = document.createElement("span");
     span.textContent = formatSourceLabel(source);
     label.appendChild(input);
@@ -389,7 +397,82 @@ function normalizePageName(page) {
   if (["downloads", "history", "logs"].includes(cleanPage)) {
     return "status";
   }
+  if (cleanPage === "video") {
+    return "video";
+  }
   return cleanPage;
+}
+
+function loadVideoSourcePreferences() {
+  try {
+    const raw = localStorage.getItem(VIDEO_SOURCE_PREFERENCE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((value) => String(value || "").trim()).filter(Boolean) : [];
+  } catch (_err) {
+    return [];
+  }
+}
+
+function persistVideoSourcePreferences(values) {
+  try {
+    localStorage.setItem(VIDEO_SOURCE_PREFERENCE_KEY, JSON.stringify(Array.isArray(values) ? values : []));
+  } catch (_err) {
+    // ignore localStorage failures
+  }
+}
+
+function syncTopbarSubbarVisibility() {
+  const host = $("#topbar-subbar-host");
+  if (!host) return;
+  const hasVisibleChild = Array.from(host.children).some((child) => !child.classList.contains("hidden"));
+  host.classList.toggle("hidden", !hasVisibleChild);
+}
+
+function clearTopbarHosts() {
+  const searchHost = $("#topbar-search-host");
+  const subbarHost = $("#topbar-subbar-host");
+  if (searchHost) searchHost.textContent = "";
+  if (subbarHost) {
+    subbarHost.textContent = "";
+    subbarHost.classList.add("hidden");
+  }
+}
+
+function mountTopbarForPage(page) {
+  clearTopbarHosts();
+  const searchHost = $("#topbar-search-host");
+  const subbarHost = $("#topbar-subbar-host");
+  if (!searchHost || !subbarHost) return;
+  if (page === "video") {
+    const searchBar = $("#standard-search-container");
+    const advancedPanel = $("#home-advanced-panel");
+    if (searchBar) searchHost.appendChild(searchBar);
+    if (advancedPanel) subbarHost.appendChild(advancedPanel);
+    syncTopbarSubbarVisibility();
+    return;
+  }
+  if (page === "music") {
+    const musicHeader = $("#music-header-search");
+    const importPanel = $("#import-playlist-panel");
+    if (musicHeader) searchHost.appendChild(musicHeader);
+    if (importPanel) subbarHost.appendChild(importPanel);
+    syncTopbarSubbarVisibility();
+    return;
+  }
+  if (page === "movies-tv") {
+    if (!isTmdbConfigured()) {
+      syncTopbarSubbarVisibility();
+      return;
+    }
+    const modeRow = $("#movies-tv-panel .movies-tv-page-mode");
+    const searchRow = $("#movies-tv-panel .movies-tv-search-row");
+    const filtersPanel = $("#movies-tv-filters-panel");
+    if (modeRow) searchHost.appendChild(modeRow);
+    if (searchRow) searchHost.appendChild(searchRow);
+    if (filtersPanel) subbarHost.appendChild(filtersPanel);
+    syncTopbarSubbarVisibility();
+  }
 }
 
 function setNotice(el, message, isError = false) {
@@ -1112,16 +1195,17 @@ async function refreshCommunityCacheSyncStatus() {
 function setPage(page) {
   const normalized = normalizePageName(page);
   const requested = String(page || "").split("?")[0] || page;
-  const allowed = new Set(["home", "music", "movies-tv", "review", "config"]);
+  const allowed = new Set(["home", "video", "music", "movies-tv", "review", "config"]);
   const target = allowed.has(normalized) ? normalized : "home";
   state.currentPage = target;
+  mountTopbarForPage(target);
   if (target === "music") {
     mountMusicPageNodes();
-  } else if (target === "home") {
+  } else if (target === "video") {
     mountHomePageNodes();
   }
-  if (target === "home" || target === "music") {
-    if (target === "home") {
+  if (target === "video" || target === "music") {
+    if (target === "video") {
       setHomeMediaMode("video", { persist: false, clearResultsOnDisable: false });
       loadVideoLibrarySection().catch(() => {});
       setHomeSection(state.homeSection || "search");
@@ -1130,7 +1214,7 @@ function setPage(page) {
     }
     if (target === "music") {
       loadMusicLibrarySection().catch(() => {});
-      setMusicSection(state.musicSection || "search");
+      setMusicSection(state.musicSection || "home");
     }
     if (state.homeSearchRequestId) {
       startHomeResultPolling(state.homeSearchRequestId);
@@ -1147,10 +1231,11 @@ function setPage(page) {
     stopArrStatusPolling();
   }
   document.body.classList.remove("nav-open");
-  // Home-only root class for scoping styles
-  document.body.classList.toggle("home-page", target === "home" || target === "music");
+  document.body.classList.toggle("home-page", target === "video" || target === "music");
+  document.body.classList.toggle("launcher-page", target === "home");
+  document.body.classList.toggle("video-page", target === "video");
   document.body.classList.toggle("music-page", target === "music");
-  if (target !== "home" && target !== "music") {
+  if (target !== "video" && target !== "music") {
     setHomeSearchActive(false);
     setHomeResultsState({ hasResults: false, terminal: false });
     stopHomeJobPolling();
@@ -1231,6 +1316,7 @@ function setPage(page) {
     refreshLogs();
   }
   if (target === "home") {
+    renderHomeLauncher();
     requestAnimationFrame(() => maybeShowStartupSetupPrompt());
   }
 }
@@ -1275,6 +1361,19 @@ function mountHomePageNodes() {
   }
 }
 
+function renderHomeLauncher() {
+  const booksTile = $("#home-launcher-books");
+  if (!booksTile) return;
+  const readarrCfg = (state.config?.arr?.readarr && typeof state.config.arr.readarr === "object")
+    ? state.config.arr.readarr
+    : {};
+  const stack = (state.config?.setup?.stack && typeof state.config.setup.stack === "object")
+    ? state.config.setup.stack
+    : {};
+  const enabled = !!(stack.enable_readarr || readarrCfg.base_url || readarrCfg.api_key);
+  booksTile.classList.toggle("hidden", !enabled);
+}
+
 function setHomeSection(section) {
   const normalized = String(section || "search").trim() || "search";
   state.homeSection = normalized;
@@ -1296,6 +1395,17 @@ function setHomeSection(section) {
 
 function setMoviesTvSection(section) {
   const normalized = String(section || "search").trim() || "search";
+  if (!isTmdbConfigured()) {
+    state.moviesTvSection = "search";
+    $$("[data-movies-tv-section]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.moviesTvSection === "search");
+    });
+    const genres = $("#movies-tv-genres");
+    const results = $("#movies-tv-results");
+    if (genres) genres.classList.add("hidden");
+    if (results) results.classList.add("hidden");
+    return;
+  }
   state.moviesTvSection = normalized;
   $$("[data-movies-tv-section]").forEach((button) => {
     button.classList.toggle("active", button.dataset.moviesTvSection === normalized);
@@ -1346,6 +1456,7 @@ function setMoviesTvFiltersOpen(open) {
   if (toggle) {
     toggle.setAttribute("aria-expanded", state.arrFiltersOpen ? "true" : "false");
   }
+  syncTopbarSubbarVisibility();
 }
 
 function setMoviesTvSearchYear(year) {
@@ -1381,7 +1492,7 @@ function mountSettingsSubpages() {
 }
 
 function setMusicSection(section) {
-  const normalized = String(section || "search").trim() || "search";
+  const normalized = String(section || "home").trim() || "home";
   state.musicSection = normalized;
   $$(".music-app-nav").forEach((button) => {
     button.classList.toggle("active", button.dataset.musicSection === normalized);
@@ -1398,6 +1509,7 @@ function setMusicSection(section) {
     playerSurface.classList.toggle("active", !showDiscovery);
   }
   const playerViewMap = {
+    home: "home",
     library: "library",
     radio: "radio",
     playlists: "library",
@@ -1423,6 +1535,8 @@ function syncBottomPlayerShell() {
   const toggleButton = $("#music-bottom-player-toggle");
   const prevButton = $("#music-bottom-player-prev");
   const nextButton = $("#music-bottom-player-next");
+  const queueButton = $("#music-bottom-player-queue");
+  const statusEl = $("#music-bottom-player-status");
   const audio = $("#music-player-audio");
   if (!shell || !titleEl || !metaEl || !artEl || !toggleButton) return;
   const current = state.playerCurrent || {};
@@ -1431,10 +1545,19 @@ function syncBottomPlayerShell() {
   shell.classList.toggle("hidden", !hasTrack);
   titleEl.textContent = String(current.title || "Nothing playing");
   metaEl.textContent = [current.artist, current.album, current.kind].filter(Boolean).join(" • ") || "Choose a track from your library or start a station.";
+  if (statusEl) {
+    const badges = buildMusicStatusBadges(current, { queueOnly: true });
+    statusEl.innerHTML = badges;
+    statusEl.classList.toggle("hidden", !badges);
+  }
   artEl.src = getMusicLibraryArtworkUrl(current);
   toggleButton.textContent = audio && !audio.paused ? "Pause" : "Play";
   if (prevButton) prevButton.disabled = !hasTrack;
   if (nextButton) nextButton.disabled = !hasTrack;
+  if (queueButton) {
+    queueButton.disabled = !hasTrack;
+    queueButton.textContent = `Queue ${Array.isArray(state.playerQueue) && state.playerQueue.length ? `(${state.playerQueue.length})` : ""}`.trim();
+  }
 }
 
 function openMusicPlayerModal() {
@@ -1468,23 +1591,42 @@ function escapeAttr(value) {
 function buildSetupWizardDraft() {
   const cfg = state.config && typeof state.config === "object" ? state.config : {};
   const stack = state.setupStatus?.stack || cfg?.setup?.stack || {};
+  const serviceManagement = state.setupStatus?.service_management || cfg?.setup?.service_management || {};
+  const managedStack = state.setupStatus?.managed_stack || cfg?.setup?.managed_stack || {};
+  const existingStack = state.setupStatus?.existing_stack || cfg?.setup?.existing_stack || {};
   const arr = cfg.arr && typeof cfg.arr === "object" ? cfg.arr : {};
   const vpn = arr.vpn && typeof arr.vpn === "object" ? arr.vpn : {};
   const jellyfin = arr.jellyfin && typeof arr.jellyfin === "object" ? arr.jellyfin : {};
   const telegram = cfg.telegram && typeof cfg.telegram === "object" ? cfg.telegram : {};
+  const hasTmdb = !!arr.tmdb_api_key;
+  const hasYoutube = !!cfg.yt_dlp_cookies;
+  const hasTelegram = !!(telegram.bot_token || telegram.chat_id);
+  const hasVpn = !!vpn.enabled;
+  const hasJellyfin = !!(stack.enable_jellyfin || jellyfin.base_url || jellyfin.api_key);
+  const hasArr = !!stack.enable_arr_stack;
+  const existingServices = existingStack.services && typeof existingStack.services === "object" ? existingStack.services : {};
+  const managedFeatures = managedStack.enabled_features && typeof managedStack.enabled_features === "object" ? managedStack.enabled_features : {};
   return {
-    enable_arr_stack: !!stack.enable_arr_stack,
+    arr_setup_mode: String(serviceManagement.mode || (hasArr ? "managed" : "none")) || "none",
+    direct_manage: String(serviceManagement.apply_mode || "manual") === "direct" || !!managedStack.direct_manage_requested,
+    managed_movies: !!managedFeatures.movies || !!stack.enable_radarr,
+    managed_tv: !!managedFeatures.tv || !!stack.enable_sonarr,
+    managed_books: !!managedFeatures.books || !!stack.enable_readarr,
+    managed_subtitles: !!managedFeatures.subtitles || !!stack.enable_bazarr,
+    managed_downloader: !!managedFeatures.downloader || !!stack.enable_qbittorrent,
+    managed_vpn: !!managedFeatures.vpn || hasVpn,
+    managed_jellyfin: !!managedFeatures.jellyfin || hasJellyfin,
     enable_radarr: !!stack.enable_radarr,
     enable_sonarr: !!stack.enable_sonarr,
     enable_readarr: !!stack.enable_readarr,
     enable_prowlarr: !!stack.enable_prowlarr,
     enable_bazarr: !!stack.enable_bazarr,
     enable_qbittorrent: !!stack.enable_qbittorrent,
-    enable_vpn: !!stack.enable_vpn,
-    enable_jellyfin: !!stack.enable_jellyfin,
-    wants_tmdb: !!arr.tmdb_api_key,
-    wants_youtube: !!cfg.yt_dlp_cookies,
-    wants_telegram: !!(telegram.bot_token || telegram.chat_id),
+    enable_vpn: hasVpn ? true : null,
+    enable_jellyfin: hasJellyfin ? true : null,
+    wants_tmdb: hasTmdb ? true : null,
+    wants_youtube: hasYoutube ? true : null,
+    wants_telegram: hasTelegram ? true : null,
     env_path: String(stack.env_path || ".env"),
     media_root: String(stack.media_root || "./media"),
     movies_root: String(stack.movies_root || "./media/movies"),
@@ -1497,11 +1639,32 @@ function buildSetupWizardDraft() {
     telegram_chat_id: String(telegram.chat_id || ""),
     vpn_provider: String(vpn.provider || "gluetun"),
     vpn_control_url: String(vpn.control_url || ""),
+    vpn_openvpn_user: "",
+    vpn_openvpn_password: "",
+    vpn_wireguard_private_key: "",
+    vpn_server_countries: "",
     vpn_route_qbittorrent: vpn.route_qbittorrent !== false,
     vpn_route_prowlarr: !!vpn.route_prowlarr,
     vpn_route_retreivr: !!vpn.route_retreivr,
     jellyfin_base_url: String(jellyfin.base_url || ""),
     jellyfin_api_key: String(jellyfin.api_key || ""),
+    existing_radarr_enabled: !!existingServices.radarr?.configured || !!arr.radarr?.base_url,
+    existing_sonarr_enabled: !!existingServices.sonarr?.configured || !!arr.sonarr?.base_url,
+    existing_readarr_enabled: !!existingServices.readarr?.configured || !!arr.readarr?.base_url,
+    existing_prowlarr_enabled: !!existingServices.prowlarr?.configured || !!arr.prowlarr?.base_url,
+    existing_bazarr_enabled: !!existingServices.bazarr?.configured || !!arr.bazarr?.base_url,
+    existing_qbittorrent_enabled: !!existingServices.qbittorrent?.configured || !!arr.qbittorrent?.base_url,
+    existing_jellyfin_enabled: !!existingServices.jellyfin?.configured || !!arr.jellyfin?.base_url,
+    existing_radarr_base_url: String(arr.radarr?.base_url || ""),
+    existing_sonarr_base_url: String(arr.sonarr?.base_url || ""),
+    existing_readarr_base_url: String(arr.readarr?.base_url || ""),
+    existing_prowlarr_base_url: String(arr.prowlarr?.base_url || ""),
+    existing_bazarr_base_url: String(arr.bazarr?.base_url || ""),
+    existing_qbittorrent_base_url: String(arr.qbittorrent?.base_url || ""),
+    existing_qbittorrent_username: String(arr.qbittorrent?.username || ""),
+    existing_qbittorrent_password: String(arr.qbittorrent?.password || ""),
+    existing_jellyfin_base_url: String(arr.jellyfin?.base_url || ""),
+    existing_jellyfin_api_key: String(arr.jellyfin?.api_key || ""),
   };
 }
 
@@ -1525,70 +1688,262 @@ function getSetupWizardSteps() {
   const draft = state.setupWizard?.draft || buildSetupWizardDraft();
   const steps = [
     {
-      id: "arr-intro",
-      title: "Do you want to set up ARR?",
-      subtitle: "Retreivr stays usable on its own. ARR is optional and best when you want movies, TV, books, torrents, or Usenet automation behind one guided workflow.",
+      id: "arr-mode",
+      title: "Do you want help setting up movie, show, and book automation?",
+      subtitle: "Retreivr can set up a new managed stack for you, connect to tools you already use, or skip this for now.",
       required: false,
     },
   ];
-  if (draft.enable_arr_stack) {
+  if (draft.arr_setup_mode === "managed") {
     steps.push({
-      id: "arr-services",
-      title: "Choose the ARR services you want",
-      subtitle: "Enable only the pieces you actually want Retreivr to manage. qBittorrent is recommended for ARR-backed downloads.",
+      id: "arr-managed-features",
+      title: "What should Retreivr set up for you?",
+      subtitle: "Choose what you want to enable. Retreivr handles the internal connections for the managed setup path.",
+      required: false,
+    });
+    steps.push({
+      id: "arr-managed-control",
+      title: "Should Retreivr manage these services directly on this device?",
+      subtitle: "If you allow it, Retreivr can use its built-in helper to start the managed services and continue setup automatically after restart.",
+      required: false,
+    });
+  }
+  if (draft.arr_setup_mode === "existing") {
+    steps.push({
+      id: "arr-existing-services",
+      title: "Which services do you already have?",
+      subtitle: "Choose only the apps you want Retreivr to connect to. You only need to enter their app addresses on this path.",
       required: false,
     });
   }
   steps.push(
     {
       id: "tmdb",
-      title: "Connect TMDb for Movies & TV discovery",
-      subtitle: "TMDb unlocks native title, cast, genre, and trailer browsing in Retreivr before ARR is even configured.",
+      title: "Do you want movies and TV discovery inside Retreivr?",
+      subtitle: "A free TMDb key unlocks browsing by title, cast, genre, year, and trailers inside Retreivr.",
       required: false,
     },
     {
       id: "vpn",
-      title: "Configure VPN policy",
-      subtitle: "VPN is optional overall, but strongly recommended for qBittorrent flows. Retreivr will show exactly which services you intend to route through it.",
+      title: "Do you want guided VPN setup?",
+      subtitle: "This is most useful if you plan to use download tools such as qBittorrent. Retreivr will help you choose what should use the VPN.",
       required: false,
     },
     {
       id: "youtube",
-      title: "Set up YouTube access",
-      subtitle: "If you use authenticated or more restrictive sources, add your cookie file path here so Retreivr can work reliably.",
+      title: "Do you want improved YouTube access?",
+      subtitle: "You can add browser cookies for harder-to-access videos and follow a guided path for optional YouTube API setup later.",
       required: false,
     },
     {
       id: "telegram",
       title: "Do you want Telegram notifications?",
-      subtitle: "Telegram is optional. Add it if you want run summaries, queue events, or delivery notices pushed out of band.",
+      subtitle: "This lets Retreivr send download updates and review alerts to your phone or desktop through Telegram.",
       required: false,
     },
     {
       id: "jellyfin",
-      title: "Will you connect Jellyfin too?",
-      subtitle: "Jellyfin remains optional. Retreivr can still acquire and organize media without it, but this keeps playback server setup in the same guided flow.",
+      title: "Do you want to connect Jellyfin too?",
+      subtitle: "Jellyfin is optional. Retreivr can still acquire and organize media without it, but you can connect it now if you want playback in the same ecosystem.",
       required: false,
     },
     {
       id: "paths",
-      title: "Confirm your managed stack paths",
-      subtitle: "These become the shared roots Retreivr and the optional ARR stack will use for media, downloads, and books.",
+      title: "Where should Retreivr keep your files?",
+      subtitle: "Choose the folders Retreivr will use for your media, downloads, and books. You can change them later if needed.",
       required: true,
     },
     {
       id: "review",
-      title: "Review and apply your setup",
-      subtitle: "Retreivr will save your choices, write the managed env block when requested, and show the exact restart command you should run.",
+      title: "Review your setup choices",
+      subtitle: "Retreivr will save what you chose, prepare the stack settings it manages, and show you the exact restart step to run next.",
       required: true,
     }
   );
   return steps;
 }
 
+function getSetupWizardStepState(step, draft = state.setupWizard?.draft || buildSetupWizardDraft()) {
+  const status = { tone: "pending", label: "Needs attention", message: "Finish this step before moving on." };
+  if (!step) return status;
+  const nonEmpty = (value) => String(value || "").trim().length > 0;
+  if (step.id === "arr-mode") {
+    if (draft.arr_setup_mode === "managed") return { tone: "success", label: "Managed setup", message: "Retreivr will prepare a bundled automation stack for you." };
+    if (draft.arr_setup_mode === "existing") return { tone: "success", label: "Existing services", message: "Retreivr will connect to tools you already run." };
+    if (draft.arr_setup_mode === "none") return { tone: "skipped", label: "Skipped", message: "Retreivr-only mode stays active. You can add automation later." };
+    return { tone: "pending", label: "Choose one", message: "Choose whether Retreivr should set up a new stack, connect an existing one, or skip this." };
+  }
+  if (step.id === "arr-managed-features") {
+    const enabled = [
+      draft.managed_movies,
+      draft.managed_tv,
+      draft.managed_books,
+      draft.managed_subtitles,
+      draft.managed_downloader,
+      draft.managed_vpn,
+      draft.managed_jellyfin,
+    ].filter(Boolean).length;
+    if (!enabled) return { tone: "warning", label: "Choose features", message: "Pick at least one managed feature for Retreivr to set up." };
+    return { tone: "success", label: `${enabled} selected`, message: "Your managed setup choices are ready." };
+  }
+  if (step.id === "arr-managed-control") {
+    if (draft.direct_manage === true) return { tone: "success", label: "Direct manage", message: "Retreivr will try to continue setup automatically after restart." };
+    if (draft.direct_manage === false) return { tone: "success", label: "Manual apply", message: "Retreivr will prepare a single restart/apply step for you." };
+    return { tone: "pending", label: "Choose one", message: "Choose whether Retreivr should manage the bundled services directly on this device." };
+  }
+  if (step.id === "arr-existing-services") {
+    const enabled = [
+      draft.existing_radarr_enabled,
+      draft.existing_sonarr_enabled,
+      draft.existing_readarr_enabled,
+      draft.existing_prowlarr_enabled,
+      draft.existing_bazarr_enabled,
+      draft.existing_qbittorrent_enabled,
+      draft.existing_jellyfin_enabled,
+    ].filter(Boolean).length;
+    if (!enabled) return { tone: "warning", label: "Choose services", message: "Pick at least one existing service to connect." };
+    return { tone: "success", label: `${enabled} selected`, message: "Retreivr will probe the services you selected and connect what it can." };
+  }
+  if (step.id === "tmdb") {
+    if (draft.wants_tmdb === false) return { tone: "skipped", label: "Skipped", message: "Movies & TV discovery will stay limited until you add a TMDb key later." };
+    if (draft.wants_tmdb === true && nonEmpty(draft.tmdb_api_key)) return { tone: "success", label: "Ready", message: "TMDb is ready to unlock title, cast, genre, and trailer browsing." };
+    if (draft.wants_tmdb === true) return { tone: "warning", label: "Key needed", message: "Paste your TMDb key to finish this step." };
+    return { tone: "pending", label: "Choose one", message: "Decide whether you want movie and TV discovery inside Retreivr." };
+  }
+  if (step.id === "vpn") {
+    if (draft.enable_vpn === false) return { tone: "skipped", label: "Skipped", message: "No VPN guidance will be added right now." };
+    if (draft.enable_vpn === true && nonEmpty(draft.vpn_provider)) return { tone: "success", label: "Ready", message: "VPN guidance is in place. You can still adjust routed apps later." };
+    if (draft.enable_vpn === true) return { tone: "warning", label: "More info needed", message: "Choose a VPN provider name before moving on." };
+    return { tone: "pending", label: "Choose one", message: "Decide whether you want Retreivr to guide your VPN setup." };
+  }
+  if (step.id === "youtube") {
+    if (draft.wants_youtube === false) return { tone: "skipped", label: "Skipped", message: "You can add better YouTube access later if normal browsing works well enough now." };
+    if (draft.wants_youtube === true && nonEmpty(draft.yt_dlp_cookies)) return { tone: "success", label: "Ready", message: "Retreivr has a cookies file location for tougher YouTube downloads." };
+    if (draft.wants_youtube === true) return { tone: "warning", label: "File needed", message: "Choose a cookies.txt file location to finish this step." };
+    return { tone: "pending", label: "Choose one", message: "Decide whether you want the extra YouTube access setup now." };
+  }
+  if (step.id === "telegram") {
+    if (draft.wants_telegram === false) return { tone: "skipped", label: "Skipped", message: "Telegram notifications will stay off for now." };
+    if (draft.wants_telegram === true && nonEmpty(draft.telegram_bot_token) && nonEmpty(draft.telegram_chat_id)) return { tone: "success", label: "Ready", message: "Telegram notifications are configured and ready to test later." };
+    if (draft.wants_telegram === true) return { tone: "warning", label: "More info needed", message: "Paste both your bot token and chat ID to finish this step." };
+    return { tone: "pending", label: "Choose one", message: "Decide whether you want notifications from Retreivr." };
+  }
+  if (step.id === "jellyfin") {
+    if (draft.arr_setup_mode === "managed") {
+      if (draft.managed_jellyfin === false) return { tone: "skipped", label: "Skipped", message: "Jellyfin will stay out of the managed setup for now." };
+      if (draft.managed_jellyfin === true) return { tone: "success", label: "Included", message: "Jellyfin will be included in the managed stack if available." };
+      return { tone: "pending", label: "Choose one", message: "Decide whether you want Jellyfin included too." };
+    }
+    if (draft.enable_jellyfin === false) return { tone: "skipped", label: "Skipped", message: "Jellyfin will stay out of your setup for now." };
+    if (draft.enable_jellyfin === true && nonEmpty(draft.jellyfin_base_url)) return { tone: "success", label: "Ready", message: "Retreivr has enough Jellyfin info to guide the rest later." };
+    if (draft.enable_jellyfin === true) return { tone: "warning", label: "Address needed", message: "Add your Jellyfin app address to finish this step." };
+    return { tone: "pending", label: "Choose one", message: "Decide whether you want to connect Jellyfin right now." };
+  }
+  if (step.id === "paths") {
+    const required = [draft.media_root, draft.movies_root, draft.tv_root, draft.downloads_root, draft.books_root].every(nonEmpty);
+    return required
+      ? { tone: "success", label: "Ready", message: "Your file locations are set." }
+      : { tone: "warning", label: "Paths needed", message: "Add all file locations before moving on." };
+  }
+  if (step.id === "review") {
+    return { tone: "success", label: "Ready", message: "You can save your choices now and prepare the next restart step." };
+  }
+  return status;
+}
+
+function validateSetupWizardStep(step, draft = state.setupWizard?.draft || buildSetupWizardDraft()) {
+  if (!step) return null;
+  const nonEmpty = (value) => String(value || "").trim().length > 0;
+  if (step.id === "arr-mode" && !["managed", "existing", "none"].includes(String(draft.arr_setup_mode || ""))) return "Choose one of the setup options before moving on.";
+  if (step.id === "arr-managed-features") {
+    const enabled = [
+      draft.managed_movies,
+      draft.managed_tv,
+      draft.managed_books,
+      draft.managed_subtitles,
+      draft.managed_downloader,
+      draft.managed_vpn,
+      draft.managed_jellyfin,
+    ].some(Boolean);
+    if (!enabled) return "Choose at least one managed feature to continue.";
+  }
+  if (step.id === "arr-managed-control" && typeof draft.direct_manage !== "boolean") {
+    return "Choose whether Retreivr should manage the bundled services directly on this device.";
+  }
+  if (step.id === "arr-existing-services") {
+    const enabled = [
+      draft.existing_radarr_enabled,
+      draft.existing_sonarr_enabled,
+      draft.existing_readarr_enabled,
+      draft.existing_prowlarr_enabled,
+      draft.existing_bazarr_enabled,
+      draft.existing_qbittorrent_enabled,
+      draft.existing_jellyfin_enabled,
+    ].some(Boolean);
+    if (!enabled) return "Choose at least one existing service to connect.";
+    if (draft.existing_radarr_enabled && !nonEmpty(draft.existing_radarr_base_url)) return "Add your Radarr app address to continue.";
+    if (draft.existing_sonarr_enabled && !nonEmpty(draft.existing_sonarr_base_url)) return "Add your Sonarr app address to continue.";
+    if (draft.existing_readarr_enabled && !nonEmpty(draft.existing_readarr_base_url)) return "Add your Readarr app address to continue.";
+    if (draft.existing_prowlarr_enabled && !nonEmpty(draft.existing_prowlarr_base_url)) return "Add your Prowlarr app address to continue.";
+    if (draft.existing_bazarr_enabled && !nonEmpty(draft.existing_bazarr_base_url)) return "Add your Bazarr app address to continue.";
+    if (draft.existing_qbittorrent_enabled && (!nonEmpty(draft.existing_qbittorrent_base_url) || !nonEmpty(draft.existing_qbittorrent_username) || !nonEmpty(draft.existing_qbittorrent_password))) {
+      return "Add the qBittorrent address, username, and password to continue.";
+    }
+    if (draft.existing_jellyfin_enabled && !nonEmpty(draft.existing_jellyfin_base_url)) return "Add your Jellyfin app address to continue.";
+  }
+  if (step.id === "tmdb") {
+    if (draft.wants_tmdb == null) return "Choose Yes or No before moving on.";
+    if (draft.wants_tmdb === true && !nonEmpty(draft.tmdb_api_key)) return "Paste your TMDb key to continue.";
+  }
+  if (step.id === "vpn") {
+    if (draft.enable_vpn == null) return "Choose Yes or No before moving on.";
+    if (draft.enable_vpn === true && !nonEmpty(draft.vpn_provider)) return "Add a VPN provider name to continue.";
+  }
+  if (step.id === "youtube") {
+    if (draft.wants_youtube == null) return "Choose Yes or No before moving on.";
+    if (draft.wants_youtube === true && !nonEmpty(draft.yt_dlp_cookies)) return "Choose a cookies.txt file location to continue.";
+  }
+  if (step.id === "telegram") {
+    if (draft.wants_telegram == null) return "Choose Yes or No before moving on.";
+    if (draft.wants_telegram === true && (!nonEmpty(draft.telegram_bot_token) || !nonEmpty(draft.telegram_chat_id))) {
+      return "Add both the Telegram bot token and the chat ID to continue.";
+    }
+  }
+  if (step.id === "jellyfin") {
+    if (draft.arr_setup_mode === "managed") {
+      if (draft.managed_jellyfin == null) return "Choose Yes or No before moving on.";
+      return null;
+    }
+    if (draft.enable_jellyfin == null) return "Choose Yes or No before moving on.";
+    if (draft.enable_jellyfin === true && !nonEmpty(draft.jellyfin_base_url)) return "Add your Jellyfin app address to continue.";
+  }
+  if (step.id === "paths") {
+    const required = [
+      ["Media folder", draft.media_root],
+      ["Movies folder", draft.movies_root],
+      ["TV folder", draft.tv_root],
+      ["Downloads folder", draft.downloads_root],
+      ["Books folder", draft.books_root],
+    ];
+    const missing = required.find(([, value]) => !nonEmpty(value));
+    if (missing) return `${missing[0]} is required before moving on.`;
+  }
+  return null;
+}
+
 function syncSetupWizardToLegacyFields() {
   const draft = state.setupWizard?.draft;
   if (!draft) return;
+  draft.enable_arr_stack = draft.arr_setup_mode === "managed";
+  draft.enable_radarr = !!draft.managed_movies;
+  draft.enable_sonarr = !!draft.managed_tv;
+  draft.enable_readarr = !!draft.managed_books;
+  draft.enable_prowlarr = !!(draft.managed_movies || draft.managed_tv || draft.managed_books);
+  draft.enable_bazarr = !!draft.managed_subtitles;
+  draft.enable_qbittorrent = !!draft.managed_downloader;
+  draft.enable_vpn = !!draft.managed_vpn;
+  draft.enable_jellyfin = !!draft.managed_jellyfin;
+  draft.enable_hostctl = !!draft.direct_manage;
   const mappings = [
     ["setup-enable-arr-stack", !!draft.enable_arr_stack, "checked"],
     ["setup-enable-radarr", !!draft.enable_radarr, "checked"],
@@ -1632,7 +1987,7 @@ async function saveSetupWizardConfig() {
   base.yt_dlp_cookies = String(draft.yt_dlp_cookies || "").trim();
   base.telegram.bot_token = String(draft.telegram_bot_token || "").trim();
   base.telegram.chat_id = String(draft.telegram_chat_id || "").trim();
-  base.arr.vpn.enabled = !!draft.enable_vpn;
+  base.arr.vpn.enabled = !!(draft.arr_setup_mode === "managed" ? draft.managed_vpn : draft.enable_vpn);
   base.arr.vpn.provider = String(draft.vpn_provider || "gluetun").trim() || "gluetun";
   base.arr.vpn.control_url = String(draft.vpn_control_url || "").trim();
   base.arr.vpn.route_qbittorrent = !!draft.vpn_route_qbittorrent;
@@ -1646,23 +2001,83 @@ async function saveSetupWizardConfig() {
     body: JSON.stringify(base),
   });
   state.config = base;
+
+  if (draft.arr_setup_mode === "managed") {
+    await fetchJson("/api/setup/managed/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        movies: !!draft.managed_movies,
+        tv: !!draft.managed_tv,
+        books: !!draft.managed_books,
+        subtitles: !!draft.managed_subtitles,
+        downloader: !!draft.managed_downloader,
+        vpn: !!draft.managed_vpn,
+        jellyfin: !!draft.managed_jellyfin,
+        direct_manage: !!draft.direct_manage,
+        env_path: String(draft.env_path || ".env"),
+        media_root: String(draft.media_root || "./media"),
+        movies_root: String(draft.movies_root || "./media/movies"),
+        tv_root: String(draft.tv_root || "./media/tv"),
+        downloads_root: String(draft.downloads_root || "./downloads"),
+        books_root: String(draft.books_root || "./media/books"),
+        vpn_provider: String(draft.vpn_provider || "gluetun"),
+        vpn_openvpn_user: String(draft.vpn_openvpn_user || ""),
+        vpn_openvpn_password: String(draft.vpn_openvpn_password || ""),
+        vpn_wireguard_private_key: String(draft.vpn_wireguard_private_key || ""),
+        vpn_server_countries: String(draft.vpn_server_countries || ""),
+      }),
+    });
+  } else if (draft.arr_setup_mode === "existing") {
+    await fetchJson("/api/setup/existing/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        radarr: { enabled: !!draft.existing_radarr_enabled, base_url: draft.existing_radarr_base_url, api_key: "" },
+        sonarr: { enabled: !!draft.existing_sonarr_enabled, base_url: draft.existing_sonarr_base_url, api_key: "" },
+        readarr: { enabled: !!draft.existing_readarr_enabled, base_url: draft.existing_readarr_base_url, api_key: "" },
+        prowlarr: { enabled: !!draft.existing_prowlarr_enabled, base_url: draft.existing_prowlarr_base_url, api_key: "" },
+        bazarr: { enabled: !!draft.existing_bazarr_enabled, base_url: draft.existing_bazarr_base_url, api_key: "" },
+        qbittorrent: { enabled: !!draft.existing_qbittorrent_enabled, base_url: draft.existing_qbittorrent_base_url, username: draft.existing_qbittorrent_username, password: draft.existing_qbittorrent_password },
+        jellyfin: { enabled: !!draft.existing_jellyfin_enabled, base_url: draft.existing_jellyfin_base_url, api_key: draft.existing_jellyfin_api_key },
+      }),
+    });
+  }
+  await loadSetupStatus();
 }
 
 function buildSetupWizardSummaryRows() {
   const draft = state.setupWizard?.draft || buildSetupWizardDraft();
-  const enabledServices = [
-    draft.enable_radarr ? "Radarr" : null,
-    draft.enable_sonarr ? "Sonarr" : null,
-    draft.enable_readarr ? "Readarr" : null,
-    draft.enable_prowlarr ? "Prowlarr" : null,
-    draft.enable_bazarr ? "Bazarr" : null,
-    draft.enable_qbittorrent ? "qBittorrent" : null,
-    draft.enable_vpn ? "VPN" : null,
-    draft.enable_jellyfin ? "Jellyfin" : null,
-  ].filter(Boolean).join(", ") || "Retreivr only";
+  const modeLabel = draft.arr_setup_mode === "managed"
+    ? "Managed stack"
+    : draft.arr_setup_mode === "existing"
+      ? "Existing services"
+      : "Retreivr only";
+  const enabledServices = draft.arr_setup_mode === "managed"
+    ? [
+        draft.managed_movies ? "Movies" : null,
+        draft.managed_tv ? "TV" : null,
+        draft.managed_books ? "Books" : null,
+        draft.managed_subtitles ? "Subtitles" : null,
+        draft.managed_downloader ? "Downloader" : null,
+        draft.managed_vpn ? "VPN" : null,
+        draft.managed_jellyfin ? "Jellyfin" : null,
+      ].filter(Boolean).join(", ") || "None selected"
+    : draft.arr_setup_mode === "existing"
+      ? [
+          draft.existing_radarr_enabled ? "Radarr" : null,
+          draft.existing_sonarr_enabled ? "Sonarr" : null,
+          draft.existing_readarr_enabled ? "Readarr" : null,
+          draft.existing_prowlarr_enabled ? "Prowlarr" : null,
+          draft.existing_bazarr_enabled ? "Bazarr" : null,
+          draft.existing_qbittorrent_enabled ? "qBittorrent" : null,
+          draft.existing_jellyfin_enabled ? "Jellyfin" : null,
+        ].filter(Boolean).join(", ") || "None selected"
+      : "Retreivr only";
   return [
-    ["Mode", draft.enable_arr_stack ? "Retreivr + ARR stack" : "Retreivr only"],
+    ["Mode", modeLabel],
     ["Services", enabledServices],
+    ["Apply", draft.arr_setup_mode === "managed" ? (draft.direct_manage ? "Retreivr-managed after restart" : "One restart step, then resume") : "Manual / existing"],
     ["TMDb", draft.tmdb_api_key ? "Configured" : "Not configured"],
     ["YouTube", draft.yt_dlp_cookies ? "Cookie path added" : "No cookie path"],
     ["Telegram", draft.telegram_bot_token && draft.telegram_chat_id ? "Configured" : "Not configured"],
@@ -1686,42 +2101,99 @@ function renderSetupWizard() {
   const modules = state.setupStatus?.modules || {};
   const progressPct = steps.length > 1 ? Math.round(((stepIndex + 1) / steps.length) * 100) : 100;
   const moduleEntries = Object.entries(modules).slice(0, 5);
+  const stepState = getSetupWizardStepState(step, draft);
+  const feedback = state.setupWizard?.feedback && state.setupWizard.feedback.stepId === step.id
+    ? state.setupWizard.feedback
+    : null;
+  const messageText = feedback?.text || stepState.message;
+  const messageTone = feedback?.tone || stepState.tone;
 
   let body = "";
-  if (step.id === "arr-intro") {
+  if (step.id === "arr-mode") {
     body = `
       <div class="setup-wizard-note">
-        ARR is not part of Retreivr itself. Retreivr acts as the frontend and control plane so people can use Radarr, Sonarr, Readarr, qBittorrent, VPN, and related services with far less friction.
+        Retreivr can stay simple, set up a new managed automation stack for you, or connect to services you already run. On the managed path, Retreivr handles the internal app-to-app connections for you.
       </div>
       <div class="setup-wizard-choice-row">
-        <button type="button" class="button setup-wizard-choice ${draft.enable_arr_stack ? "active" : ""}" data-setup-choice="enable_arr_stack" data-value="true">Yes, enable ARR setup</button>
-        <button type="button" class="button ghost setup-wizard-choice ${!draft.enable_arr_stack ? "active" : ""}" data-setup-choice="enable_arr_stack" data-value="false">No, keep Retreivr only</button>
+        <button type="button" class="button setup-wizard-choice ${draft.arr_setup_mode === "managed" ? "active" : ""}" data-setup-choice="arr_setup_mode" data-value="managed">Set up a new managed stack</button>
+        <button type="button" class="button setup-wizard-choice ${draft.arr_setup_mode === "existing" ? "active" : ""}" data-setup-choice="arr_setup_mode" data-value="existing">Connect my existing services</button>
+        <button type="button" class="button ghost setup-wizard-choice ${draft.arr_setup_mode === "none" ? "active" : ""}" data-setup-choice="arr_setup_mode" data-value="none">Skip for now</button>
       </div>
       <div class="setup-wizard-step-list">
-        <div>Retreivr-only stays the default unless you explicitly enable the ARR stack.</div>
-        <div>If enabled, Retreivr will guide you through service selection, paths, VPN policy, and post-restart validation.</div>
-        <div>You can still browse Movies & TV with only a TMDb key, even before ARR is configured.</div>
+        <div>Managed stack: Retreivr prepares the bundled tools and their internal connections for you.</div>
+        <div>Existing services: Retreivr asks only for the app addresses you already use.</div>
+        <div>You can still browse movies and TV with only a TMDb key, even if you skip the extra tools.</div>
       </div>
     `;
-  } else if (step.id === "arr-services") {
+  } else if (step.id === "arr-managed-features") {
     body = `
+      <div class="setup-wizard-note">Choose what you want Retreivr to set up. You only need to choose features here, not internal app addresses or app-to-app API keys.</div>
       <div class="setup-wizard-fields two">
-        <label class="field checkbox"><input data-setup-toggle="enable_radarr" type="checkbox" ${draft.enable_radarr ? "checked" : ""}><span>Radarr</span></label>
-        <label class="field checkbox"><input data-setup-toggle="enable_sonarr" type="checkbox" ${draft.enable_sonarr ? "checked" : ""}><span>Sonarr</span></label>
-        <label class="field checkbox"><input data-setup-toggle="enable_readarr" type="checkbox" ${draft.enable_readarr ? "checked" : ""}><span>Readarr</span></label>
-        <label class="field checkbox"><input data-setup-toggle="enable_prowlarr" type="checkbox" ${draft.enable_prowlarr ? "checked" : ""}><span>Prowlarr</span></label>
-        <label class="field checkbox"><input data-setup-toggle="enable_bazarr" type="checkbox" ${draft.enable_bazarr ? "checked" : ""}><span>Bazarr</span></label>
-        <label class="field checkbox"><input data-setup-toggle="enable_qbittorrent" type="checkbox" ${draft.enable_qbittorrent ? "checked" : ""}><span>qBittorrent</span></label>
+        <label class="field checkbox"><input data-setup-toggle="managed_movies" type="checkbox" ${draft.managed_movies ? "checked" : ""}><span>Movies</span></label>
+        <label class="field checkbox"><input data-setup-toggle="managed_tv" type="checkbox" ${draft.managed_tv ? "checked" : ""}><span>TV</span></label>
+        <label class="field checkbox"><input data-setup-toggle="managed_books" type="checkbox" ${draft.managed_books ? "checked" : ""}><span>Books</span></label>
+        <label class="field checkbox"><input data-setup-toggle="managed_subtitles" type="checkbox" ${draft.managed_subtitles ? "checked" : ""}><span>Subtitles</span></label>
+        <label class="field checkbox"><input data-setup-toggle="managed_downloader" type="checkbox" ${draft.managed_downloader ? "checked" : ""}><span>Downloader</span></label>
+        <label class="field checkbox"><input data-setup-toggle="managed_vpn" type="checkbox" ${draft.managed_vpn ? "checked" : ""}><span>VPN</span></label>
+        <label class="field checkbox"><input data-setup-toggle="managed_jellyfin" type="checkbox" ${draft.managed_jellyfin ? "checked" : ""}><span>Jellyfin</span></label>
       </div>
-      <div class="setup-wizard-note">Recommended starter setup: Radarr, Sonarr, Prowlarr, and qBittorrent. Readarr and Bazarr are optional depending on whether you want books and subtitle automation.</div>
+      <div class="setup-wizard-step-list">
+        <div>Movies and TV turn on the matching automation apps.</div>
+        <div>Downloader adds qBittorrent for torrent-based downloads.</div>
+        <div>VPN is recommended when you use the downloader.</div>
+        <div>Subtitles adds Bazarr on top of movie/show automation.</div>
+      </div>
+    `;
+  } else if (step.id === "arr-managed-control") {
+    body = `
+      <div class="setup-wizard-choice-row">
+        <button type="button" class="button setup-wizard-choice ${draft.direct_manage === true ? "active" : ""}" data-setup-choice="direct_manage" data-value="true">Yes, let Retreivr manage this setup</button>
+        <button type="button" class="button ghost setup-wizard-choice ${draft.direct_manage === false ? "active" : ""}" data-setup-choice="direct_manage" data-value="false">No, just prepare a single restart step</button>
+      </div>
+      <div class="setup-wizard-note">If you allow direct management, Retreivr uses its bundled helper to continue setup after restart. If not, Retreivr still prepares everything and shows one exact restart step.</div>
+    `;
+  } else if (step.id === "arr-existing-services") {
+    body = `
+      <div class="setup-wizard-note">Choose the services you already run and add only their app addresses here. Retreivr will probe them and link what it can automatically.</div>
+      <div class="setup-wizard-fields two">
+        <label class="field checkbox"><input data-setup-toggle="existing_radarr_enabled" type="checkbox" ${draft.existing_radarr_enabled ? "checked" : ""}><span>Radarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="existing_sonarr_enabled" type="checkbox" ${draft.existing_sonarr_enabled ? "checked" : ""}><span>Sonarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="existing_readarr_enabled" type="checkbox" ${draft.existing_readarr_enabled ? "checked" : ""}><span>Readarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="existing_prowlarr_enabled" type="checkbox" ${draft.existing_prowlarr_enabled ? "checked" : ""}><span>Prowlarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="existing_bazarr_enabled" type="checkbox" ${draft.existing_bazarr_enabled ? "checked" : ""}><span>Bazarr</span></label>
+        <label class="field checkbox"><input data-setup-toggle="existing_qbittorrent_enabled" type="checkbox" ${draft.existing_qbittorrent_enabled ? "checked" : ""}><span>qBittorrent</span></label>
+        <label class="field checkbox"><input data-setup-toggle="existing_jellyfin_enabled" type="checkbox" ${draft.existing_jellyfin_enabled ? "checked" : ""}><span>Jellyfin</span></label>
+      </div>
+      <div class="setup-wizard-fields two">
+        ${draft.existing_radarr_enabled ? `<label class="field full"><span>Radarr app address</span><input data-setup-input="existing_radarr_base_url" type="text" value="${escapeAttr(draft.existing_radarr_base_url || "")}" placeholder="For example: http://radarr:7878"></label>` : ""}
+        ${draft.existing_sonarr_enabled ? `<label class="field full"><span>Sonarr app address</span><input data-setup-input="existing_sonarr_base_url" type="text" value="${escapeAttr(draft.existing_sonarr_base_url || "")}" placeholder="For example: http://sonarr:8989"></label>` : ""}
+        ${draft.existing_readarr_enabled ? `<label class="field full"><span>Readarr app address</span><input data-setup-input="existing_readarr_base_url" type="text" value="${escapeAttr(draft.existing_readarr_base_url || "")}" placeholder="For example: http://readarr:8787"></label>` : ""}
+        ${draft.existing_prowlarr_enabled ? `<label class="field full"><span>Prowlarr app address</span><input data-setup-input="existing_prowlarr_base_url" type="text" value="${escapeAttr(draft.existing_prowlarr_base_url || "")}" placeholder="For example: http://prowlarr:9696"></label>` : ""}
+        ${draft.existing_bazarr_enabled ? `<label class="field full"><span>Bazarr app address</span><input data-setup-input="existing_bazarr_base_url" type="text" value="${escapeAttr(draft.existing_bazarr_base_url || "")}" placeholder="For example: http://bazarr:6767"></label>` : ""}
+        ${draft.existing_qbittorrent_enabled ? `<label class="field full"><span>qBittorrent app address</span><input data-setup-input="existing_qbittorrent_base_url" type="text" value="${escapeAttr(draft.existing_qbittorrent_base_url || "")}" placeholder="For example: http://qbittorrent:8080"></label>` : ""}
+        ${draft.existing_qbittorrent_enabled ? `<label class="field full"><span>qBittorrent username</span><input data-setup-input="existing_qbittorrent_username" type="text" value="${escapeAttr(draft.existing_qbittorrent_username || "")}" placeholder="Username"></label>` : ""}
+        ${draft.existing_qbittorrent_enabled ? `<label class="field full"><span>qBittorrent password</span><input data-setup-input="existing_qbittorrent_password" type="password" value="${escapeAttr(draft.existing_qbittorrent_password || "")}" placeholder="Password"></label>` : ""}
+        ${draft.existing_jellyfin_enabled ? `<label class="field full"><span>Jellyfin app address</span><input data-setup-input="existing_jellyfin_base_url" type="text" value="${escapeAttr(draft.existing_jellyfin_base_url || "")}" placeholder="For example: http://jellyfin:8096"></label>` : ""}
+        ${draft.existing_jellyfin_enabled ? `<label class="field full"><span>Jellyfin API key</span><input data-setup-input="existing_jellyfin_api_key" type="password" value="${escapeAttr(draft.existing_jellyfin_api_key || "")}" placeholder="Only if you already use one"></label>` : ""}
+      </div>
     `;
   } else if (step.id === "tmdb") {
     body = `
       <div class="setup-wizard-choice-row">
-        <button type="button" class="button setup-wizard-choice ${draft.wants_tmdb ? "active" : ""}" data-setup-choice="wants_tmdb" data-value="true">Yes, set up TMDb</button>
-        <button type="button" class="button ghost setup-wizard-choice ${!draft.wants_tmdb ? "active" : ""}" data-setup-choice="wants_tmdb" data-value="false">No, skip for now</button>
+        <button type="button" class="button setup-wizard-choice ${draft.wants_tmdb === true ? "active" : ""}" data-setup-choice="wants_tmdb" data-value="true">Yes, I want this</button>
+        <button type="button" class="button ghost setup-wizard-choice ${draft.wants_tmdb === false ? "active" : ""}" data-setup-choice="wants_tmdb" data-value="false">No, skip for now</button>
       </div>
-      ${draft.wants_tmdb ? `
+      ${draft.wants_tmdb === true ? `
+        <div class="setup-wizard-helper-grid">
+          <a class="setup-wizard-helper-card" href="https://www.themoviedb.org/signup" target="_blank" rel="noreferrer">
+            <strong>Create a free TMDb account</strong>
+            <span>Start here if you do not already have one.</span>
+          </a>
+          <a class="setup-wizard-helper-card" href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">
+            <strong>Open the TMDb API page</strong>
+            <span>Create or copy your TMDb API key, then paste it below.</span>
+          </a>
+        </div>
         <div class="setup-wizard-fields">
           <label class="field full">
             <span>TMDb API key</span>
@@ -1729,29 +2201,50 @@ function renderSetupWizard() {
           </label>
         </div>
         <div class="setup-wizard-step-list">
-          <div>1. Create a free TMDb API key from your TMDb account settings.</div>
-          <div>2. Paste it here.</div>
-          <div>3. Movies & TV discovery, genres, cast, trailers, and title search will unlock immediately.</div>
+          <div>1. Create a free TMDb account if you do not already have one.</div>
+          <div>2. Open the API page and create a key.</div>
+          <div>3. Paste the key here to unlock movies and TV discovery.</div>
         </div>
       ` : ""}
     `;
   } else if (step.id === "vpn") {
     body = `
       <div class="setup-wizard-choice-row">
-        <button type="button" class="button setup-wizard-choice ${draft.enable_vpn ? "active" : ""}" data-setup-choice="enable_vpn" data-value="true">Yes, enable VPN guidance</button>
-        <button type="button" class="button ghost setup-wizard-choice ${!draft.enable_vpn ? "active" : ""}" data-setup-choice="enable_vpn" data-value="false">No VPN for now</button>
+        <button type="button" class="button setup-wizard-choice ${draft.enable_vpn === true ? "active" : ""}" data-setup-choice="enable_vpn" data-value="true">Yes, I want this</button>
+        <button type="button" class="button ghost setup-wizard-choice ${draft.enable_vpn === false ? "active" : ""}" data-setup-choice="enable_vpn" data-value="false">No, skip for now</button>
       </div>
-      ${draft.enable_vpn ? `
+      ${draft.enable_vpn === true ? `
+        <div class="setup-wizard-note">Most people only need the VPN for the download tool itself. Retreivr can keep the rest of the system simple unless you choose otherwise.</div>
         <div class="setup-wizard-fields two">
           <label class="field full">
             <span>Provider</span>
-            <input data-setup-input="vpn_provider" type="text" value="${escapeAttr(draft.vpn_provider || "gluetun")}" placeholder="gluetun">
+            <input data-setup-input="vpn_provider" type="text" value="${escapeAttr(draft.vpn_provider || "gluetun")}" placeholder="For example: gluetun">
           </label>
           <label class="field full">
-            <span>Control URL</span>
-            <input data-setup-input="vpn_control_url" type="text" value="${escapeAttr(draft.vpn_control_url || "")}" placeholder="http://gluetun:8000/v1/publicip/ip">
+            <span>VPN status address</span>
+            <input data-setup-input="vpn_control_url" type="text" value="${escapeAttr(draft.vpn_control_url || "")}" placeholder="Optional: where Retreivr can check your VPN status">
           </label>
         </div>
+        ${draft.arr_setup_mode === "managed" ? `
+          <div class="setup-wizard-fields two">
+            <label class="field full">
+              <span>OpenVPN username</span>
+              <input data-setup-input="vpn_openvpn_user" type="text" value="${escapeAttr(draft.vpn_openvpn_user || "")}" placeholder="Only if your provider uses OpenVPN">
+            </label>
+            <label class="field full">
+              <span>OpenVPN password</span>
+              <input data-setup-input="vpn_openvpn_password" type="password" value="${escapeAttr(draft.vpn_openvpn_password || "")}" placeholder="Only if your provider uses OpenVPN">
+            </label>
+            <label class="field full">
+              <span>WireGuard private key</span>
+              <input data-setup-input="vpn_wireguard_private_key" type="password" value="${escapeAttr(draft.vpn_wireguard_private_key || "")}" placeholder="Only if your provider uses WireGuard">
+            </label>
+            <label class="field full">
+              <span>Preferred countries</span>
+              <input data-setup-input="vpn_server_countries" type="text" value="${escapeAttr(draft.vpn_server_countries || "")}" placeholder="Optional, comma-separated">
+            </label>
+          </div>
+        ` : ""}
         <div class="setup-wizard-fields">
           <label class="field checkbox"><input data-setup-toggle="vpn_route_qbittorrent" type="checkbox" ${draft.vpn_route_qbittorrent ? "checked" : ""}><span>Route qBittorrent through VPN</span></label>
           <label class="field checkbox"><input data-setup-toggle="vpn_route_prowlarr" type="checkbox" ${draft.vpn_route_prowlarr ? "checked" : ""}><span>Route Prowlarr through VPN</span></label>
@@ -1762,15 +2255,25 @@ function renderSetupWizard() {
   } else if (step.id === "youtube") {
     body = `
       <div class="setup-wizard-choice-row">
-        <button type="button" class="button setup-wizard-choice ${draft.wants_youtube ? "active" : ""}" data-setup-choice="wants_youtube" data-value="true">Yes, set up YouTube access</button>
-        <button type="button" class="button ghost setup-wizard-choice ${!draft.wants_youtube ? "active" : ""}" data-setup-choice="wants_youtube" data-value="false">No, skip for now</button>
+        <button type="button" class="button setup-wizard-choice ${draft.wants_youtube === true ? "active" : ""}" data-setup-choice="wants_youtube" data-value="true">Yes, I want this</button>
+        <button type="button" class="button ghost setup-wizard-choice ${draft.wants_youtube === false ? "active" : ""}" data-setup-choice="wants_youtube" data-value="false">No, skip for now</button>
       </div>
-      ${draft.wants_youtube ? `
+      ${draft.wants_youtube === true ? `
+        <div class="setup-wizard-helper-grid">
+          <a class="setup-wizard-helper-card" href="https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp" target="_blank" rel="noreferrer">
+            <strong>How to export a cookies.txt file</strong>
+            <span>Open a simple guide for exporting browser cookies when you need them.</span>
+          </a>
+          <a class="setup-wizard-helper-card" href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">
+            <strong>Optional: YouTube API guide</strong>
+            <span>If you want API-based setup later, this is the official starting point.</span>
+          </a>
+        </div>
         <div class="setup-wizard-fields">
           <label class="field full">
-            <span>YouTube cookies file path</span>
+            <span>cookies.txt file</span>
             <div class="row path-picker">
-              <input data-setup-input="yt_dlp_cookies" type="text" value="${escapeAttr(draft.yt_dlp_cookies || "")}" placeholder="tokens/youtube_cookies.txt">
+              <input data-setup-input="yt_dlp_cookies" type="text" value="${escapeAttr(draft.yt_dlp_cookies || "")}" placeholder="Choose your cookies.txt file">
               <button type="button" class="button ghost small" data-setup-browse="yt_dlp_cookies">Browse</button>
             </div>
           </label>
@@ -1781,10 +2284,20 @@ function renderSetupWizard() {
   } else if (step.id === "telegram") {
     body = `
       <div class="setup-wizard-choice-row">
-        <button type="button" class="button setup-wizard-choice ${draft.wants_telegram ? "active" : ""}" data-setup-choice="wants_telegram" data-value="true">Yes, set up Telegram</button>
-        <button type="button" class="button ghost setup-wizard-choice ${!draft.wants_telegram ? "active" : ""}" data-setup-choice="wants_telegram" data-value="false">No, skip for now</button>
+        <button type="button" class="button setup-wizard-choice ${draft.wants_telegram === true ? "active" : ""}" data-setup-choice="wants_telegram" data-value="true">Yes, I want this</button>
+        <button type="button" class="button ghost setup-wizard-choice ${draft.wants_telegram === false ? "active" : ""}" data-setup-choice="wants_telegram" data-value="false">No, skip for now</button>
       </div>
-      ${draft.wants_telegram ? `
+      ${draft.wants_telegram === true ? `
+        <div class="setup-wizard-helper-grid">
+          <a class="setup-wizard-helper-card" href="https://t.me/BotFather" target="_blank" rel="noreferrer">
+            <strong>Open BotFather</strong>
+            <span>Create a bot and copy its token from Telegram.</span>
+          </a>
+          <a class="setup-wizard-helper-card" href="https://t.me/userinfobot" target="_blank" rel="noreferrer">
+            <strong>Find your chat ID</strong>
+            <span>Open a Telegram helper bot to look up your chat ID.</span>
+          </a>
+        </div>
         <div class="setup-wizard-fields two">
           <label class="field full">
             <span>Bot token</span>
@@ -1801,31 +2314,35 @@ function renderSetupWizard() {
   } else if (step.id === "jellyfin") {
     body = `
       <div class="setup-wizard-choice-row">
-        <button type="button" class="button setup-wizard-choice ${draft.enable_jellyfin ? "active" : ""}" data-setup-choice="enable_jellyfin" data-value="true">Yes, include Jellyfin</button>
-        <button type="button" class="button ghost setup-wizard-choice ${!draft.enable_jellyfin ? "active" : ""}" data-setup-choice="enable_jellyfin" data-value="false">No, not now</button>
+        <button type="button" class="button setup-wizard-choice ${(draft.arr_setup_mode === "managed" ? draft.managed_jellyfin : draft.enable_jellyfin) === true ? "active" : ""}" data-setup-choice="${draft.arr_setup_mode === "managed" ? "managed_jellyfin" : "enable_jellyfin"}" data-value="true">Yes, I want this</button>
+        <button type="button" class="button ghost setup-wizard-choice ${(draft.arr_setup_mode === "managed" ? draft.managed_jellyfin : draft.enable_jellyfin) === false ? "active" : ""}" data-setup-choice="${draft.arr_setup_mode === "managed" ? "managed_jellyfin" : "enable_jellyfin"}" data-value="false">No, skip for now</button>
       </div>
-      ${draft.enable_jellyfin ? `
+      ${(draft.arr_setup_mode === "managed" ? draft.managed_jellyfin : draft.enable_jellyfin) === true ? `
         <div class="setup-wizard-fields two">
           <label class="field full">
-            <span>Jellyfin URL</span>
-            <input data-setup-input="jellyfin_base_url" type="text" value="${escapeAttr(draft.jellyfin_base_url || "")}" placeholder="http://jellyfin:8096">
+            <span>${draft.arr_setup_mode === "managed" ? "Jellyfin will be included in the managed stack." : "Jellyfin app address"}</span>
+            ${draft.arr_setup_mode === "managed"
+              ? `<div class="setup-wizard-note">Retreivr will use the built-in Jellyfin service address automatically for the managed path. You can add admin access later if you want library creation automated too.</div>`
+              : `<input data-setup-input="jellyfin_base_url" type="text" value="${escapeAttr(draft.jellyfin_base_url || "")}" placeholder="For example: http://jellyfin:8096">`}
           </label>
-          <label class="field full">
-            <span>Jellyfin API key</span>
-            <input data-setup-input="jellyfin_api_key" type="password" value="${escapeAttr(draft.jellyfin_api_key || "")}" placeholder="Optional for later validation">
-          </label>
+          ${draft.arr_setup_mode === "managed" ? "" : `
+            <label class="field full">
+              <span>Jellyfin API key</span>
+              <input data-setup-input="jellyfin_api_key" type="password" value="${escapeAttr(draft.jellyfin_api_key || "")}" placeholder="Optional right now">
+            </label>
+          `}
         </div>
       ` : ""}
     `;
   } else if (step.id === "paths") {
     body = `
       <div class="setup-wizard-fields two">
-        <label class="field full"><span>Env file</span><input data-setup-input="env_path" type="text" value="${escapeAttr(draft.env_path || ".env")}"></label>
-        <label class="field full"><span>Media root</span><input data-setup-input="media_root" type="text" value="${escapeAttr(draft.media_root || "./media")}"></label>
-        <label class="field full"><span>Movies root</span><input data-setup-input="movies_root" type="text" value="${escapeAttr(draft.movies_root || "./media/movies")}"></label>
-        <label class="field full"><span>TV root</span><input data-setup-input="tv_root" type="text" value="${escapeAttr(draft.tv_root || "./media/tv")}"></label>
-        <label class="field full"><span>Downloads root</span><input data-setup-input="downloads_root" type="text" value="${escapeAttr(draft.downloads_root || "./downloads")}"></label>
-        <label class="field full"><span>Books root</span><input data-setup-input="books_root" type="text" value="${escapeAttr(draft.books_root || "./media/books")}"></label>
+        <label class="field full"><span>App settings file</span><input data-setup-input="env_path" type="text" value="${escapeAttr(draft.env_path || ".env")}"></label>
+        <label class="field full"><span>Main media folder</span><input data-setup-input="media_root" type="text" value="${escapeAttr(draft.media_root || "./media")}"></label>
+        <label class="field full"><span>Movies folder</span><input data-setup-input="movies_root" type="text" value="${escapeAttr(draft.movies_root || "./media/movies")}"></label>
+        <label class="field full"><span>TV folder</span><input data-setup-input="tv_root" type="text" value="${escapeAttr(draft.tv_root || "./media/tv")}"></label>
+        <label class="field full"><span>Downloads folder</span><input data-setup-input="downloads_root" type="text" value="${escapeAttr(draft.downloads_root || "./downloads")}"></label>
+        <label class="field full"><span>Books folder</span><input data-setup-input="books_root" type="text" value="${escapeAttr(draft.books_root || "./media/books")}"></label>
       </div>
     `;
   } else if (step.id === "review") {
@@ -1838,7 +2355,7 @@ function renderSetupWizard() {
           </div>
         `).join("")}
       </div>
-      <div class="setup-wizard-note">Save progress stores your settings in Retreivr. Write managed env updates the managed .env block Retreivr owns and gives you the exact docker compose restart command to run next.</div>
+      <div class="setup-wizard-note">Save your choices first. When you are ready, let Retreivr prepare the stack settings it manages and show you the exact restart step to run next.</div>
     `;
   }
 
@@ -1852,20 +2369,23 @@ function renderSetupWizard() {
     </div>
     <div class="setup-wizard-stage">
       <div class="setup-wizard-card">
-        <div class="setup-wizard-kicker">${escapeHtml(step.required ? "Required step" : "Optional step")}</div>
+        <div class="setup-wizard-card-top">
+          <div class="setup-wizard-kicker">${escapeHtml(step.required ? "Required step" : "Optional step")}</div>
+          <span class="setup-wizard-step-state is-${escapeAttr(messageTone)}">${escapeHtml(stepState.label)}</span>
+        </div>
         <h2 class="setup-wizard-title">${escapeHtml(step.title)}</h2>
         <div class="setup-wizard-lead">${escapeHtml(step.subtitle)}</div>
         ${body}
-        <div id="setup-wizard-message" class="notice" role="status">${escapeHtml(step.id === "review" ? "Ready to save and apply your setup." : "Work through one setup topic at a time. You can change any of this later.")}</div>
+        <div id="setup-wizard-message" class="notice ${messageTone === "warning" || messageTone === "error" ? "error" : ""}" role="status">${escapeHtml(messageText)}</div>
         <div class="setup-wizard-actions">
           <div class="setup-wizard-actions-group">
             <button type="button" class="button ghost" data-setup-nav="back" ${stepIndex === 0 ? "disabled" : ""}>Back</button>
-            <button type="button" class="button ${stepIndex === steps.length - 1 ? "ghost" : "primary"}" data-setup-nav="next">${stepIndex === steps.length - 1 ? "Stay on Review" : "Next"}</button>
+            <button type="button" class="button ${stepIndex === steps.length - 1 ? "ghost" : "primary"}" data-setup-nav="next">${stepIndex === steps.length - 1 ? "Review complete" : "Next"}</button>
           </div>
           <div class="setup-wizard-actions-group">
             <button type="button" class="button ghost" data-setup-action="start-over">Start Over</button>
             <button type="button" class="button ghost" data-setup-action="save-progress">Save Progress</button>
-            <button type="button" class="button primary" data-setup-action="apply-env">Write Managed Env</button>
+            <button type="button" class="button primary" data-setup-action="apply-env">Prepare Setup</button>
           </div>
         </div>
       </div>
@@ -1883,7 +2403,7 @@ function renderSetupWizard() {
           `).join("")}
         </div>
         <div class="setup-wizard-note">
-          Retreivr-only stays the default until you explicitly save stack choices and write the managed env block.
+          Retreivr-only stays the default until you explicitly save your setup choices and prepare the restart step.
         </div>
       </div>
     </div>
@@ -2078,13 +2598,21 @@ async function applySetupStack() {
 function updateSetupWizardDraftField(key, value) {
   ensureSetupWizardState();
   state.setupWizard.draft[key] = value;
-  if (key === "enable_arr_stack" && !value) {
-    state.setupWizard.draft.enable_radarr = false;
-    state.setupWizard.draft.enable_sonarr = false;
-    state.setupWizard.draft.enable_readarr = false;
-    state.setupWizard.draft.enable_prowlarr = false;
-    state.setupWizard.draft.enable_bazarr = false;
-    state.setupWizard.draft.enable_qbittorrent = false;
+  state.setupWizard.feedback = null;
+  if (key === "arr_setup_mode") {
+    if (value === "none") {
+      state.setupWizard.draft.managed_movies = false;
+      state.setupWizard.draft.managed_tv = false;
+      state.setupWizard.draft.managed_books = false;
+      state.setupWizard.draft.managed_subtitles = false;
+      state.setupWizard.draft.managed_downloader = false;
+      state.setupWizard.draft.managed_vpn = false;
+      state.setupWizard.draft.managed_jellyfin = false;
+      state.setupWizard.draft.direct_manage = false;
+    }
+  }
+  if (key === "managed_downloader" && !value) {
+    state.setupWizard.draft.managed_vpn = false;
   }
 }
 
@@ -2107,16 +2635,47 @@ function resetSetupWizardDraft() {
 async function saveSetupWizardProgress() {
   syncSetupWizardToLegacyFields();
   await saveSetupWizardConfig();
-  await saveSetupStack();
+  if (state.setupWizard?.draft?.arr_setup_mode === "none") {
+    await saveSetupStack();
+  }
   if (state.setupWizard?.draft) {
     state.setupWizard.draft.__hydrated = true;
+  }
+  if (state.setupWizard) {
+    const step = getSetupWizardSteps()[Math.max(0, Number(state.setupWizard.stepIndex || 0))];
+    state.setupWizard.feedback = {
+      stepId: step?.id || "",
+      tone: "success",
+      text: "Saved. You can keep going or come back later.",
+    };
   }
 }
 
 async function applySetupWizardEnv() {
   syncSetupWizardToLegacyFields();
   await saveSetupWizardConfig();
-  await applySetupStack();
+  const mode = state.setupWizard?.draft?.arr_setup_mode || "none";
+  if (mode === "managed") {
+    await fetchJson("/api/setup/managed/apply", { method: "POST" });
+    await refreshSetupStatus();
+  } else if (mode === "existing") {
+    await fetchJson("/api/setup/existing/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        radarr: { enabled: !!state.setupWizard.draft.existing_radarr_enabled, base_url: state.setupWizard.draft.existing_radarr_base_url, api_key: "" },
+        sonarr: { enabled: !!state.setupWizard.draft.existing_sonarr_enabled, base_url: state.setupWizard.draft.existing_sonarr_base_url, api_key: "" },
+        readarr: { enabled: !!state.setupWizard.draft.existing_readarr_enabled, base_url: state.setupWizard.draft.existing_readarr_base_url, api_key: "" },
+        prowlarr: { enabled: !!state.setupWizard.draft.existing_prowlarr_enabled, base_url: state.setupWizard.draft.existing_prowlarr_base_url, api_key: "" },
+        bazarr: { enabled: !!state.setupWizard.draft.existing_bazarr_enabled, base_url: state.setupWizard.draft.existing_bazarr_base_url, api_key: "" },
+        qbittorrent: { enabled: !!state.setupWizard.draft.existing_qbittorrent_enabled, base_url: state.setupWizard.draft.existing_qbittorrent_base_url, username: state.setupWizard.draft.existing_qbittorrent_username, password: state.setupWizard.draft.existing_qbittorrent_password },
+        jellyfin: { enabled: !!state.setupWizard.draft.existing_jellyfin_enabled, base_url: state.setupWizard.draft.existing_jellyfin_base_url, api_key: state.setupWizard.draft.existing_jellyfin_api_key },
+      }),
+    });
+    await refreshSetupStatus();
+  } else {
+    await applySetupStack();
+  }
   if (state.setupWizard?.draft) {
     state.setupWizard.draft.__hydrated = true;
   }
@@ -2327,7 +2886,10 @@ function renderMusicPlayerPlaylistsPanel() {
           <div class="group-title">${escapeHtml(selected.name || "Playlist")}</div>
           <div class="meta">${escapeHtml(`${items.length} saved track${items.length === 1 ? "" : "s"}`)}</div>
         </div>
-        <button class="button ghost small" type="button" data-action="player-delete-playlist" data-playlist-id="${escapeAttr(selected.id)}">Delete Playlist</button>
+        <div class="row compact">
+          <button class="button ghost small" type="button" data-action="player-play-playlist" data-playlist-id="${escapeAttr(selected.id)}">Play Playlist</button>
+          <button class="button ghost small" type="button" data-action="player-delete-playlist" data-playlist-id="${escapeAttr(selected.id)}">Delete Playlist</button>
+        </div>
       </div>
       <div class="music-player-playlist-items">
         ${items.length ? items.map((item) => `
@@ -2346,7 +2908,10 @@ function renderMusicPlayerPlaylistsPanel() {
               <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
               <span class="music-player-track-meta">${escapeHtml([item.artist, item.album].filter(Boolean).join(" • "))}</span>
             </button>
-            <button class="button ghost small" type="button" data-action="player-remove-playlist-item" data-playlist-id="${escapeAttr(selected.id)}" data-item-id="${escapeAttr(item.id)}">Remove</button>
+            <div class="music-player-inline-actions">
+              <button class="button ghost small" type="button" data-action="player-play-next" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.source_kind || "local")}">Play Next</button>
+              <button class="button ghost small" type="button" data-action="player-remove-playlist-item" data-playlist-id="${escapeAttr(selected.id)}" data-item-id="${escapeAttr(item.id)}">Remove</button>
+            </div>
           </div>
         `).join("") : `<div class="home-results-empty">Add tracks from the library to start this playlist.</div>`}
       </div>
@@ -2365,6 +2930,135 @@ function renderMusicPlayerPlaylistsPanel() {
   `;
 }
 
+function renderMusicPlayerHome() {
+  const homeEl = $("#music-player-home");
+  if (!homeEl) return;
+  const summary = state.playerLibrarySummary || { artists: [], albums: [], tracks: [] };
+  const albums = Array.isArray(summary.albums) ? summary.albums : [];
+  const recentTracks = Array.isArray(state.playerHistory) ? state.playerHistory.filter((item) => !item?.is_missing_local).slice(0, 6) : [];
+  const recentlyAdded = albums.slice(0, 8);
+  const favoriteArtists = Array.isArray(state.musicPreferences?.favorite_artists) ? state.musicPreferences.favorite_artists : [];
+  const favoriteArtistRows = favoriteArtists.slice(0, 8).map((artist) => {
+    const artistKey = String((artist?.name || "")).trim().toLowerCase();
+    const downloadedArtist = (Array.isArray(summary.artists) ? summary.artists : []).find((entry) => String(entry.artist_key || "").trim().toLowerCase() === artistKey) || null;
+    return {
+      name: artist?.name || "Favorite Artist",
+      artist_key: artistKey,
+      artwork_url: getMusicLibraryArtworkUrl(downloadedArtist || artist),
+      downloaded: !!downloadedArtist,
+      album_count: Number(downloadedArtist?.album_count || 0),
+      track_count: Number(downloadedArtist?.track_count || 0),
+    };
+  });
+  const newFromFavorites = recentlyAdded.filter((album) => isMusicArtistFavorited(String(album.artist || ""), String(album.artist_key || ""))).slice(0, 8);
+  homeEl.innerHTML = `
+    <div class="music-home-layout">
+      <section class="group">
+        <div class="panel-header-row compact">
+          <div>
+            <div class="group-title">Continue Listening</div>
+            <div class="meta">Pick up where you left off from your local library.</div>
+          </div>
+        </div>
+        <div class="music-player-track-list">
+          ${recentTracks.length ? recentTracks.map((item) => `
+            <article class="music-player-track-row music-player-track-row-rich">
+              <div class="music-player-browser-card-art music-player-track-art">
+                <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Track")}" loading="lazy">
+              </div>
+              <button class="music-player-track" type="button" data-action="player-play" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.source_kind || "local")}">
+                <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
+                <span class="music-player-track-meta">${escapeHtml([item.artist, item.played_at].filter(Boolean).join(" • "))}</span>
+              </button>
+              <button class="button ghost small" type="button" data-action="player-play-next" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.source_kind || "local")}">Play Next</button>
+            </article>
+          `).join("") : `<div class="home-results-empty">Start playing something from Library or Radio to build your listening history.</div>`}
+        </div>
+      </section>
+      <section class="group">
+        <div class="panel-header-row compact">
+          <div>
+            <div class="group-title">Recently Added</div>
+            <div class="meta">Newest downloaded albums in your library.</div>
+          </div>
+          <button class="button ghost small" type="button" data-action="music-go-library">Open Library</button>
+        </div>
+        <div class="music-player-browser-grid">
+          ${recentlyAdded.length ? recentlyAdded.map((album) => `
+            <article class="music-player-browser-card music-player-browser-card-rich">
+              <div class="music-player-browser-card-art">
+                <img src="${escapeAttr(getMusicLibraryArtworkUrl(album))}" alt="${escapeAttr(album.album || "Album")}" loading="lazy">
+              </div>
+              <div class="music-player-browser-card-copy">
+                <span class="music-player-track-title">${escapeHtml(album.album || "Album")}</span>
+                <span class="music-player-track-meta">${escapeHtml([album.artist, `${album.track_count || 0} tracks`].filter(Boolean).join(" • "))}</span>
+                <div class="music-status-row">${buildMusicStatusBadges(album)}</div>
+              </div>
+              <div class="music-player-browser-card-actions">
+                <button class="button ghost small" type="button" data-action="player-open-album" data-artist-key="${escapeAttr(album.artist_key || "")}" data-album-key="${escapeAttr(album.album_key || "")}">Open Album</button>
+              </div>
+            </article>
+          `).join("") : `<div class="home-results-empty">Downloaded albums will appear here.</div>`}
+        </div>
+      </section>
+      <section class="group">
+        <div class="panel-header-row compact">
+          <div>
+            <div class="group-title">New From Favorite Artists</div>
+            <div class="meta">Downloaded albums from artists you have favorited.</div>
+          </div>
+        </div>
+        <div class="music-player-browser-grid">
+          ${newFromFavorites.length ? newFromFavorites.map((album) => `
+            <article class="music-player-browser-card music-player-browser-card-rich">
+              <div class="music-player-browser-card-art">
+                <img src="${escapeAttr(getMusicLibraryArtworkUrl(album))}" alt="${escapeAttr(album.album || "Album")}" loading="lazy">
+              </div>
+              <div class="music-player-browser-card-copy">
+                <span class="music-player-track-title">${escapeHtml(album.album || "Album")}</span>
+                <span class="music-player-track-meta">${escapeHtml([album.artist, `${album.track_count || 0} tracks`].filter(Boolean).join(" • "))}</span>
+                <div class="music-status-row">${buildMusicStatusBadges(album)}</div>
+              </div>
+              <div class="music-player-browser-card-actions">
+                <button class="button ghost small" type="button" data-action="player-open-album" data-artist-key="${escapeAttr(album.artist_key || "")}" data-album-key="${escapeAttr(album.album_key || "")}">Open Album</button>
+              </div>
+            </article>
+          `).join("") : `<div class="home-results-empty">Favorite more artists or download more albums to fill this section.</div>`}
+        </div>
+      </section>
+      <section class="group">
+        <div class="panel-header-row compact">
+          <div>
+            <div class="group-title">Favorites</div>
+            <div class="meta">Favorites are your taste profile. They are not always downloaded.</div>
+          </div>
+          <button class="button ghost small" type="button" data-action="music-go-favorites">Open Favorites</button>
+        </div>
+        <div class="music-player-browser-grid">
+          ${favoriteArtistRows.length ? favoriteArtistRows.map((artist) => `
+            <article class="music-player-browser-card music-player-browser-card-rich">
+              <div class="music-player-browser-card-art">
+                <img src="${escapeAttr(artist.artwork_url || "assets/no_artwork.png")}" alt="${escapeAttr(artist.name || "Favorite Artist")}" loading="lazy">
+              </div>
+              <div class="music-player-browser-card-copy">
+                <span class="music-player-track-title">${escapeHtml(artist.name || "Favorite Artist")}</span>
+                <span class="music-player-track-meta">${artist.downloaded ? escapeHtml(`${artist.album_count} albums • ${artist.track_count} tracks downloaded`) : "Favorited only • Not downloaded yet"}</span>
+                <div class="music-status-row">
+                  <span class="music-status-badge is-favorited">Favorited</span>
+                  ${artist.downloaded ? `<span class="music-status-badge is-downloaded">Downloaded</span>` : `<span class="music-status-badge">Not Downloaded</span>`}
+                </div>
+              </div>
+              <div class="music-player-browser-card-actions">
+                ${artist.downloaded ? `<button class="button ghost small" type="button" data-action="player-open-artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">Open Library</button>` : `<button class="button ghost small" type="button" data-action="music-go-search">Find Music</button>`}
+              </div>
+            </article>
+          `).join("") : `<div class="home-results-empty">Favorite artists from Search to build your taste profile here.</div>`}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function renderMusicPlayerLibrary() {
   const libraryEl = $("#music-player-library");
   if (!libraryEl) return;
@@ -2378,6 +3072,7 @@ function renderMusicPlayerLibrary() {
   const libraryMode = String(state.playerLibraryMode || "artists");
   const rootsLabel = getMusicLibraryRootsLabel();
   let browserMarkup = `<div class="home-results-empty">No local library tracks found yet.</div>`;
+  let detailHero = "";
 
   if (artists.length) {
     if (libraryMode === "artists") {
@@ -2391,10 +3086,11 @@ function renderMusicPlayerLibrary() {
               <div class="music-player-browser-card-copy">
                 <span class="music-player-track-title">${escapeHtml(artist.artist || "Unknown Artist")}</span>
                 <span class="music-player-track-meta">${escapeHtml(`${artist.album_count || 0} albums • ${artist.track_count || 0} tracks`)}</span>
+                <div class="music-status-row">${buildMusicStatusBadges(artist)}</div>
               </div>
               <div class="music-player-browser-card-actions">
                 <button class="button ghost small" type="button" data-action="player-open-artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">Browse Albums</button>
-                <button class="button ghost small" type="button" data-action="player-library-mode" data-library-mode="tracks">Tracks</button>
+                <button class="button ghost small" type="button" data-action="player-play-artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">Play Artist</button>
               </div>
             </article>
           `).join("")}
@@ -2419,6 +3115,7 @@ function renderMusicPlayerLibrary() {
               <div class="music-player-browser-card-copy">
                 <span class="music-player-track-title">${escapeHtml(album.album || "Unknown Album")}</span>
                 <span class="music-player-track-meta">${escapeHtml([album.artist, `${album.track_count || 0} tracks`].filter(Boolean).join(" • "))}</span>
+                <div class="music-status-row">${buildMusicStatusBadges(album)}</div>
               </div>
               <div class="music-player-browser-card-actions">
                 <button
@@ -2428,6 +3125,7 @@ function renderMusicPlayerLibrary() {
                   data-artist-key="${escapeAttr(album.artist_key || "")}"
                   data-album-key="${escapeAttr(album.album_key || "")}"
                 >View Tracks</button>
+                <button class="button ghost small" type="button" data-action="player-queue-album" data-artist-key="${escapeAttr(album.artist_key || "")}" data-album-key="${escapeAttr(album.album_key || "")}">Queue Album</button>
               </div>
             </article>
           `).join("")}
@@ -2455,24 +3153,64 @@ function renderMusicPlayerLibrary() {
                 <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
                 <span class="music-player-track-meta">${escapeHtml([item.artist, item.album].filter(Boolean).join(" • "))}</span>
               </button>
-              <button
-                class="button ghost small"
-                type="button"
-                data-action="player-add-to-playlist"
-                data-playlist-id="${escapeAttr(selectedPlaylistId || "")}"
-                data-stream-url="${escapeAttr(item.stream_url || "")}"
-                data-title="${escapeAttr(item.title || "")}"
-                data-artist="${escapeAttr(item.artist || "")}"
-                data-album="${escapeAttr(item.album || "")}"
-                data-local-path="${escapeAttr(item.local_path || "")}"
-                data-source-kind="${escapeAttr(item.kind || "local")}"
-                ${selectedPlaylistId ? "" : "disabled"}
-              >Add to Playlist</button>
+              <div class="music-player-inline-actions">
+                <button class="button ghost small" type="button" data-action="player-play-next" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.kind || "local")}">Play Next</button>
+                <button class="button ghost small" type="button" data-action="player-queue-track" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.kind || "local")}">Queue</button>
+                <button
+                  class="button ghost small"
+                  type="button"
+                  data-action="player-add-to-playlist"
+                  data-playlist-id="${escapeAttr(selectedPlaylistId || "")}"
+                  data-stream-url="${escapeAttr(item.stream_url || "")}"
+                  data-title="${escapeAttr(item.title || "")}"
+                  data-artist="${escapeAttr(item.artist || "")}"
+                  data-album="${escapeAttr(item.album || "")}"
+                  data-local-path="${escapeAttr(item.local_path || "")}"
+                  data-source-kind="${escapeAttr(item.kind || "local")}"
+                  ${selectedPlaylistId ? "" : "disabled"}
+                >Add to Playlist</button>
+              </div>
             </article>
           `).join("")}
         </div>
       ` : `<div class="home-results-empty">No tracks available for this selection.</div>`;
     }
+  }
+
+  if (selectedArtist && !selectedAlbum) {
+    detailHero = `
+      <div class="group music-library-detail-hero">
+        <div class="music-library-detail-art">
+          <img src="${escapeAttr(getMusicLibraryArtworkUrl(selectedArtist))}" alt="${escapeAttr(selectedArtist.artist || "Artist")}" loading="lazy">
+        </div>
+        <div class="music-library-detail-copy">
+          <div class="group-title">${escapeHtml(selectedArtist.artist || "Artist")}</div>
+          <div class="meta">${escapeHtml(`${selectedArtist.album_count || 0} albums • ${selectedArtist.track_count || 0} tracks downloaded`)}</div>
+          <div class="music-status-row">${buildMusicStatusBadges(selectedArtist)}</div>
+          <div class="row compact">
+            <button class="button primary small" type="button" data-action="player-play-artist" data-artist-key="${escapeAttr(selectedArtist.artist_key || "")}">Play Artist</button>
+            <button class="button ghost small" type="button" data-action="player-shuffle-artist" data-artist-key="${escapeAttr(selectedArtist.artist_key || "")}">Shuffle Artist</button>
+          </div>
+        </div>
+      </div>
+    `;
+  } else if (selectedAlbum) {
+    detailHero = `
+      <div class="group music-library-detail-hero">
+        <div class="music-library-detail-art">
+          <img src="${escapeAttr(getMusicLibraryArtworkUrl(selectedAlbum))}" alt="${escapeAttr(selectedAlbum.album || "Album")}" loading="lazy">
+        </div>
+        <div class="music-library-detail-copy">
+          <div class="group-title">${escapeHtml(selectedAlbum.album || "Album")}</div>
+          <div class="meta">${escapeHtml([selectedAlbum.artist, `${selectedAlbum.track_count || 0} tracks downloaded`].filter(Boolean).join(" • "))}</div>
+          <div class="music-status-row">${buildMusicStatusBadges(selectedAlbum)}</div>
+          <div class="row compact">
+            <button class="button primary small" type="button" data-action="player-play-album" data-artist-key="${escapeAttr(selectedAlbum.artist_key || "")}" data-album-key="${escapeAttr(selectedAlbum.album_key || "")}">Play Album</button>
+            <button class="button ghost small" type="button" data-action="player-queue-album" data-artist-key="${escapeAttr(selectedAlbum.artist_key || "")}" data-album-key="${escapeAttr(selectedAlbum.album_key || "")}">Queue Album</button>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   const breadcrumbBits = [];
@@ -2501,6 +3239,7 @@ function renderMusicPlayerLibrary() {
           <button class="button ghost small" type="button" data-action="player-reset-library">All Library</button>
           ${breadcrumbBits.join("")}
         </div>
+        ${detailHero}
         ${browserMarkup}
       </div>
       <aside class="music-player-library-sidepanel">
@@ -2530,33 +3269,93 @@ function renderMusicPlayerQueue() {
   const queueEl = $("#music-player-queue");
   if (!queueEl) return;
   const queue = Array.isArray(state.playerQueue) ? state.playerQueue : [];
-  queueEl.innerHTML = queue.length ? queue.map((item, index) => `
-    <button class="music-player-track" type="button" data-action="player-play" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.kind || "cached")}">
-      <span class="music-player-track-title">${index + 1}. ${escapeHtml(item.title || "Untitled")}</span>
-      <span class="music-player-track-meta">${escapeHtml([item.artist, item.album, item.kind].filter(Boolean).join(" • "))}</span>
-    </button>
-  `).join("") : `<div class="home-results-empty">Queue is empty. Start a station or pick a library track.</div>`;
+  queueEl.innerHTML = `
+    <div class="group">
+      <div class="panel-header-row compact">
+        <div>
+          <div class="group-title">Queue</div>
+          <div class="meta">${escapeHtml(`${queue.length} upcoming track${queue.length === 1 ? "" : "s"}`)}</div>
+        </div>
+        <div class="row compact">
+          <button class="button ghost small" type="button" data-action="player-save-queue-playlist" ${queue.length ? "" : "disabled"}>Save Queue as Playlist</button>
+          <button class="button ghost small" type="button" data-action="player-clear-queue" ${queue.length ? "" : "disabled"}>Clear Queue</button>
+        </div>
+      </div>
+    </div>
+    ${queue.length ? `
+      <div class="music-player-track-list">
+        ${queue.map((item, index) => `
+          <article class="music-player-track-row music-player-track-row-rich${String(state.playerCurrent?.stream_url || "") === String(item.stream_url || "") ? " is-current" : ""}">
+            <div class="music-player-browser-card-art music-player-track-art">
+              <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Track")}" loading="lazy">
+            </div>
+            <button class="music-player-track" type="button" data-action="player-play" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.kind || "cached")}">
+              <span class="music-player-track-title">${index + 1}. ${escapeHtml(item.title || "Untitled")}</span>
+              <span class="music-player-track-meta">${escapeHtml([item.artist, item.album, item.kind].filter(Boolean).join(" • "))}</span>
+            </button>
+            <div class="music-player-inline-actions">
+              <button class="button ghost small" type="button" data-action="player-queue-move-up" data-queue-index="${escapeAttr(index)}" ${index === 0 ? "disabled" : ""}>Up</button>
+              <button class="button ghost small" type="button" data-action="player-queue-move-down" data-queue-index="${escapeAttr(index)}" ${index === queue.length - 1 ? "disabled" : ""}>Down</button>
+              <button class="button ghost small" type="button" data-action="player-remove-queue-item" data-queue-index="${escapeAttr(index)}">Remove</button>
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    ` : `<div class="home-results-empty">Queue is empty. Start a station or pick a library track.</div>`}
+  `;
 }
 
 function renderMusicPlayerHistory() {
   const recentEl = $("#music-player-recent");
   const favoritesEl = $("#music-player-favorites");
   if (recentEl) {
-    recentEl.innerHTML = (state.playerHistory || []).length ? state.playerHistory.map((item) => `
-      <div class="music-player-history-item">
-        <div class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</div>
-        <div class="music-player-track-meta">${escapeHtml([item.artist, item.played_at].filter(Boolean).join(" • "))}</div>
+    const recentItems = Array.isArray(state.playerHistory) ? state.playerHistory.filter((item) => !item?.is_missing_local) : [];
+    recentEl.innerHTML = recentItems.length ? `
+      <div class="music-player-track-list">
+        ${recentItems.map((item) => `
+          <article class="music-player-track-row music-player-track-row-rich">
+            <div class="music-player-browser-card-art music-player-track-art">
+              <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Track")}" loading="lazy">
+            </div>
+            <button class="music-player-track" type="button" data-action="player-play" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.source_kind || "local")}">
+              <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
+              <span class="music-player-track-meta">${escapeHtml([item.artist, item.played_at].filter(Boolean).join(" • "))}</span>
+            </button>
+            <button class="button ghost small" type="button" data-action="player-play-next" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.source_kind || "local")}">Play Next</button>
+          </article>
+        `).join("")}
       </div>
-    `).join("") : `<div class="home-results-empty">No recent playback yet.</div>`;
+    ` : `<div class="home-results-empty">No recent playback yet.</div>`;
   }
   if (favoritesEl) {
     const favoriteArtists = Array.isArray(state.musicPreferences?.favorite_artists) ? state.musicPreferences.favorite_artists : [];
-    favoritesEl.innerHTML = favoriteArtists.length ? favoriteArtists.map((artist) => `
-      <div class="music-player-history-item">
-        <div class="music-player-track-title">${escapeHtml(artist.name || artist.artist_name || "Favorite Artist")}</div>
-        <div class="music-player-track-meta">${escapeHtml(artist.genre || "Artist favorite")}</div>
+    favoritesEl.innerHTML = favoriteArtists.length ? `
+      <div class="music-player-browser-grid">
+        ${favoriteArtists.map((artist) => {
+          const artistName = artist.name || artist.artist_name || "Favorite Artist";
+          const artistKey = String(artistName).trim().toLowerCase();
+          const downloadedArtist = (Array.isArray(state.playerLibrarySummary?.artists) ? state.playerLibrarySummary.artists : []).find((entry) => String(entry.artist_key || "").trim().toLowerCase() === artistKey) || null;
+          return `
+            <article class="music-player-browser-card music-player-browser-card-rich">
+              <div class="music-player-browser-card-art">
+                <img src="${escapeAttr(getMusicLibraryArtworkUrl(downloadedArtist || artist))}" alt="${escapeAttr(artistName)}" loading="lazy">
+              </div>
+              <div class="music-player-browser-card-copy">
+                <span class="music-player-track-title">${escapeHtml(artistName)}</span>
+                <span class="music-player-track-meta">${downloadedArtist ? escapeHtml(`${downloadedArtist.album_count || 0} albums • ${downloadedArtist.track_count || 0} tracks downloaded`) : "Favorited only • Not downloaded yet"}</span>
+                <div class="music-status-row">
+                  <span class="music-status-badge is-favorited">Favorited</span>
+                  ${downloadedArtist ? `<span class="music-status-badge is-downloaded">Downloaded</span>` : `<span class="music-status-badge">Not Downloaded</span>`}
+                </div>
+              </div>
+              <div class="music-player-browser-card-actions">
+                ${downloadedArtist ? `<button class="button ghost small" type="button" data-action="player-open-artist" data-artist-key="${escapeAttr(downloadedArtist.artist_key || "")}">Open Library</button>` : `<button class="button ghost small" type="button" data-action="music-go-search">Find Music</button>`}
+              </div>
+            </article>
+          `;
+        }).join("")}
       </div>
-    `).join("") : `<div class="home-results-empty">Favorite artists appear here for quick radio seeds.</div>`;
+    ` : `<div class="home-results-empty">Favorite artists appear here for quick access. Favorites are not the same as downloaded music.</div>`;
   }
 }
 
@@ -2709,6 +3508,20 @@ function buildQueueFromTracks(tracks, currentItem) {
   return [...items.slice(currentIndex), ...items.slice(0, currentIndex)];
 }
 
+function getPlayerTracksForArtist(artistKey = "") {
+  const key = String(artistKey || "").trim().toLowerCase();
+  return (Array.isArray(state.playerLibrarySummary?.tracks) ? state.playerLibrarySummary.tracks : []).filter((entry) => String(entry.artist_key || "").trim().toLowerCase() === key);
+}
+
+function getPlayerTracksForAlbum(artistKey = "", albumKey = "") {
+  const artistMatch = String(artistKey || "").trim().toLowerCase();
+  const albumMatch = String(albumKey || "").trim().toLowerCase();
+  return (Array.isArray(state.playerLibrarySummary?.tracks) ? state.playerLibrarySummary.tracks : []).filter((entry) =>
+    String(entry.artist_key || "").trim().toLowerCase() === artistMatch &&
+    String(entry.album_key || "").trim().toLowerCase() === albumMatch
+  );
+}
+
 async function loadMusicPlayerView() {
   const messageEl = $("#music-player-message");
   if (messageEl) {
@@ -2728,6 +3541,8 @@ async function loadMusicPlayerView() {
       : { artists: [], albums: [], tracks: [] };
     state.playerStations = Array.isArray(stationsPayload?.stations) ? stationsPayload.stations : [];
     state.playerHistory = Array.isArray(historyPayload?.history) ? historyPayload.history : [];
+    state.playerMissingHistory = state.playerHistory.filter((item) => !!item?.is_missing_local);
+    state.playerHistory = state.playerHistory.filter((item) => !item?.is_missing_local);
     state.playerPlaylists = Array.isArray(playlistsPayload?.playlists) ? playlistsPayload.playlists : [];
     if (!state.playerSelectedPlaylistId && state.playerPlaylists[0]) {
       state.playerSelectedPlaylistId = Number(state.playerPlaylists[0].id || 0) || null;
@@ -2739,11 +3554,12 @@ async function loadMusicPlayerView() {
     } else {
       state.playerSelectedPlaylistItems = [];
     }
+    renderMusicPlayerHome();
     renderMusicPlayerLibrary();
     renderMusicPlayerStations();
     renderMusicPlayerQueue();
     renderMusicPlayerHistory();
-    setMusicPlayerView(state.playerView || "library");
+    setMusicPlayerView(state.playerView || "home");
     syncBottomPlayerShell();
     if (messageEl) {
       setNotice(messageEl, "Player ready.", false);
@@ -4088,6 +4904,81 @@ function maybeShowStartupSetupPrompt() {
   setStartupSetupModalOpen(true);
 }
 
+function loadMusicHeaderModePreference() {
+  try {
+    const value = localStorage.getItem(MUSIC_HEADER_MODE_KEY);
+    return ["auto", "artist", "album", "track"].includes(value || "") ? value : "auto";
+  } catch (_err) {
+    return "auto";
+  }
+}
+
+function setMusicHeaderMode(mode, { persist = true } = {}) {
+  const normalized = ["auto", "artist", "album", "track"].includes(String(mode || "").trim())
+    ? String(mode || "").trim()
+    : "auto";
+  state.musicHeaderMode = normalized;
+  $$("#music-header-mode-toggle [data-mode]").forEach((button) => {
+    const active = button.dataset.mode === normalized;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", active ? "true" : "false");
+  });
+  if (persist) {
+    try {
+      localStorage.setItem(MUSIC_HEADER_MODE_KEY, normalized);
+    } catch (_err) {
+      // ignore
+    }
+  }
+}
+
+function parseMusicHeaderQuery(rawQuery, mode = "auto") {
+  const query = String(rawQuery || "").trim();
+  const normalizedMode = ["auto", "artist", "album", "track"].includes(mode) ? mode : "auto";
+  if (!query) {
+    return { artist: "", album: "", track: "" };
+  }
+  const parts = query.split(/\s[-–:]\s/).map((part) => part.trim()).filter(Boolean);
+  if (normalizedMode === "artist") {
+    return { artist: query, album: "", track: "" };
+  }
+  if (normalizedMode === "album") {
+    if (parts.length >= 2) {
+      return { artist: parts[0], album: parts.slice(1).join(" - "), track: "" };
+    }
+    return { artist: query, album: "", track: "" };
+  }
+  if (normalizedMode === "track") {
+    if (parts.length >= 2) {
+      return { artist: parts[0], album: "", track: parts.slice(1).join(" - ") };
+    }
+    return { artist: "", album: "", track: query };
+  }
+  if (parts.length >= 2) {
+    const right = parts.slice(1).join(" - ");
+    const likelyTrack = right.split(/\s+/).length <= 5 || /["']/.test(right);
+    return {
+      artist: parts[0],
+      album: likelyTrack ? "" : right,
+      track: likelyTrack ? right : "",
+    };
+  }
+  return { artist: query, album: "", track: "" };
+}
+
+function runMusicHeaderSearch() {
+  const query = $("#music-header-query")?.value || "";
+  const parsed = parseMusicHeaderQuery(query, state.musicHeaderMode || "auto");
+  if ($("#search-artist")) $("#search-artist").value = parsed.artist;
+  if ($("#search-album")) $("#search-album").value = parsed.album;
+  if ($("#search-track")) $("#search-track").value = parsed.track;
+  const musicSearchOnly = $("#search-create-only");
+  if (musicSearchOnly && !musicSearchOnly.disabled) {
+    setMusicSection("search");
+    musicSearchOnly.click();
+  }
+}
+
 async function persistSetupStartupPreference(showOnStartup) {
   const nextConfig = state.config && typeof state.config === "object"
     ? JSON.parse(JSON.stringify(state.config))
@@ -4241,6 +5132,119 @@ function getMusicLibraryArtworkUrl(item) {
     if (matchingAlbum?.artwork_url) return String(matchingAlbum.artwork_url).trim();
   }
   return "assets/no_artwork.png";
+}
+
+function isMusicArtistFavorited(artistName = "", artistKey = "") {
+  if (artistKey && isFavoriteArtist({ artist_mbid: "", name: artistName, artist_name: artistName, artist_key: artistKey })) {
+    return true;
+  }
+  return isFavoriteArtist({ name: artistName, artist_name: artistName });
+}
+
+function isMusicArtistDownloaded(artistKey = "") {
+  const artists = Array.isArray(state.playerLibrarySummary?.artists) ? state.playerLibrarySummary.artists : [];
+  const key = String(artistKey || "").trim().toLowerCase();
+  return !!key && artists.some((entry) => String(entry.artist_key || "").trim().toLowerCase() === key);
+}
+
+function isMusicAlbumDownloaded(artistKey = "", albumKey = "") {
+  const albums = Array.isArray(state.playerLibrarySummary?.albums) ? state.playerLibrarySummary.albums : [];
+  const artistMatch = String(artistKey || "").trim().toLowerCase();
+  const albumMatch = String(albumKey || "").trim().toLowerCase();
+  return !!albumMatch && albums.some((entry) =>
+    String(entry.artist_key || "").trim().toLowerCase() === artistMatch &&
+    String(entry.album_key || "").trim().toLowerCase() === albumMatch
+  );
+}
+
+function isPlayerQueueItem(item) {
+  const items = Array.isArray(state.playerQueue) ? state.playerQueue : [];
+  const targetStream = String(item?.stream_url || "").trim();
+  const targetLocal = String(item?.local_path || "").trim();
+  return items.some((entry) => {
+    if (targetStream && String(entry?.stream_url || "").trim() === targetStream) return true;
+    if (targetLocal && String(entry?.local_path || "").trim() === targetLocal) return true;
+    return false;
+  });
+}
+
+function buildMusicStatusBadges(item, { queueOnly = false } = {}) {
+  const bits = [];
+  const isDownloaded = !!(item?.local_path || item?.kind === "local" || isMusicAlbumDownloaded(item?.artist_key, item?.album_key) || isMusicArtistDownloaded(item?.artist_key));
+  const isFavorited = !queueOnly && isMusicArtistFavorited(String(item?.artist || item?.name || ""), String(item?.artist_key || ""));
+  const isQueued = isPlayerQueueItem(item);
+  if (isDownloaded) bits.push(`<span class="music-status-badge is-downloaded">Downloaded</span>`);
+  if (isFavorited) bits.push(`<span class="music-status-badge is-favorited">Favorited</span>`);
+  if (isQueued) bits.push(`<span class="music-status-badge is-queued">In Queue</span>`);
+  if (!bits.length && !queueOnly && !isDownloaded && item?.artist_key) {
+    bits.push(`<span class="music-status-badge">Not Downloaded</span>`);
+  }
+  return bits.join("");
+}
+
+function queueTracksAtEnd(items = []) {
+  const normalized = Array.isArray(items) ? items.filter((entry) => entry?.stream_url) : [];
+  if (!normalized.length) return;
+  const existing = Array.isArray(state.playerQueue) ? state.playerQueue.slice() : [];
+  const merged = existing.slice();
+  normalized.forEach((item) => {
+    if (!merged.some((entry) => String(entry.stream_url || "") === String(item.stream_url || ""))) {
+      merged.push(item);
+    }
+  });
+  setPlayerQueue(merged, { preserveCurrent: true });
+  renderMusicPlayerQueue();
+  syncBottomPlayerShell();
+}
+
+function queueTrackNext(item) {
+  if (!item?.stream_url) return;
+  const existing = Array.isArray(state.playerQueue) ? state.playerQueue.slice() : [];
+  const filtered = existing.filter((entry) => String(entry.stream_url || "") !== String(item.stream_url || ""));
+  const currentIndex = getCurrentQueueIndex();
+  if (currentIndex >= 0 && currentIndex < filtered.length) {
+    filtered.splice(currentIndex + 1, 0, item);
+  } else {
+    filtered.unshift(item);
+  }
+  setPlayerQueue(filtered, { preserveCurrent: true });
+  renderMusicPlayerQueue();
+  syncBottomPlayerShell();
+}
+
+function moveQueueItem(fromIndex, toIndex) {
+  const queue = Array.isArray(state.playerQueue) ? state.playerQueue.slice() : [];
+  if (fromIndex < 0 || fromIndex >= queue.length || toIndex < 0 || toIndex >= queue.length || fromIndex === toIndex) return;
+  const [item] = queue.splice(fromIndex, 1);
+  queue.splice(toIndex, 0, item);
+  setPlayerQueue(queue, { preserveCurrent: true });
+  renderMusicPlayerQueue();
+  syncBottomPlayerShell();
+}
+
+function removeQueueItem(index) {
+  const queue = Array.isArray(state.playerQueue) ? state.playerQueue.slice() : [];
+  if (index < 0 || index >= queue.length) return;
+  const [removed] = queue.splice(index, 1);
+  const removedCurrent = state.playerCurrent && (
+    String(state.playerCurrent.stream_url || "") === String(removed?.stream_url || "") ||
+    String(state.playerCurrent.local_path || "") === String(removed?.local_path || "")
+  );
+  setPlayerQueue(queue, { preserveCurrent: true });
+  if (removedCurrent && !queue.length) {
+    clearMusicPlayerCurrentState();
+  }
+  renderMusicPlayerQueue();
+  syncBottomPlayerShell();
+}
+
+function clearQueue() {
+  setPlayerQueue([], { preserveCurrent: true });
+  if (!state.playerCurrent?.stream_url) {
+    clearMusicPlayerCurrentState();
+  }
+  renderMusicPlayerQueue();
+  syncBottomPlayerShell();
 }
 
 function openLibraryDetailsModal(payload) {
@@ -4552,6 +5556,8 @@ function renderMusicLibrarySection() {
   const section = $("#music-library-section");
   const grid = $("#music-library-grid");
   const breadcrumbs = $("#music-library-breadcrumbs");
+  const missingSection = $("#music-library-missing");
+  const missingGrid = $("#music-library-missing-grid");
   if (!section || !grid || !breadcrumbs) return;
   const summary = state.playerLibrarySummary || { artists: [], albums: [], tracks: [] };
   const artists = Array.isArray(summary.artists) ? summary.artists : [];
@@ -4562,8 +5568,35 @@ function renderMusicLibrarySection() {
   if (!total) {
     grid.innerHTML = `<div class="home-results-empty">No local music library files found yet.</div>`;
     breadcrumbs.innerHTML = "";
-    return;
   }
+  const missingItems = Array.isArray(state.playerMissingHistory) ? state.playerMissingHistory : [];
+  if (missingSection && missingGrid) {
+    missingSection.classList.toggle("hidden", !missingItems.length);
+    if (missingItems.length) {
+      missingGrid.innerHTML = missingItems.map((item) => `
+        <article class="music-player-track-row music-player-track-row-rich">
+          <div class="music-player-browser-card-art music-player-track-art">
+            <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Missing track")}" loading="lazy">
+          </div>
+          <div class="music-player-track">
+            <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
+            <span class="music-player-track-meta">${escapeHtml([item.artist, item.played_at || "Previously played"].filter(Boolean).join(" • "))}</span>
+            <div class="music-status-row">
+              <span class="music-status-badge">Missing</span>
+              <span class="music-status-badge">${escapeHtml(item.local_path ? "File missing" : "No local file")}</span>
+            </div>
+          </div>
+          <div class="music-player-inline-actions">
+            <button class="button ghost small" type="button" data-action="music-history-redownload" data-history-id="${escapeAttr(item.id || "")}" ${item.can_redownload ? "" : "disabled"}>Re-download</button>
+            <button class="button ghost small" type="button" data-action="music-history-remove" data-history-id="${escapeAttr(item.id || "")}">Remove from History</button>
+          </div>
+        </article>
+      `).join("");
+    } else {
+      missingGrid.innerHTML = "";
+    }
+  }
+  if (!total) return;
   const mode = String(state.musicLibraryMode || "artists");
   const selectedArtist = getMusicLibrarySelectedArtist();
   const selectedAlbum = getMusicLibrarySelectedAlbum();
@@ -7037,6 +8070,7 @@ function isTmdbConfigured() {
 function renderMoviesTvSetupGate() {
   const landing = $("#movies-tv-setup-landing");
   const shell = $("#movies-tv-panel .movies-tv-shell");
+  const sectionToggle = $("#movies-tv-panel .movies-tv-section-toggle");
   const genres = $("#movies-tv-genres");
   const results = $("#movies-tv-results");
   const configured = isTmdbConfigured();
@@ -7046,11 +8080,20 @@ function renderMoviesTvSetupGate() {
   if (shell) {
     shell.classList.toggle("hidden", !configured);
   }
+  if (sectionToggle) {
+    sectionToggle.classList.toggle("hidden", !configured);
+  }
   if (genres) {
     genres.classList.toggle("hidden", !configured);
   }
   if (!configured && results) {
     results.classList.add("hidden");
+  }
+  if (!configured) {
+    state.moviesTvSection = "search";
+  }
+  if (state.currentPage === "movies-tv") {
+    mountTopbarForPage("movies-tv");
   }
   return configured;
 }
@@ -14384,7 +15427,7 @@ function setupTimers() {
       if (!state.reviewPreviewItemId) {
         withPollingGuard(refreshReviewQueue);
       }
-    } else if (state.currentPage === "home") {
+    } else if (state.currentPage === "video") {
       withPollingGuard(refreshReviewQueue);
     }
   }, 3000);
@@ -14633,6 +15676,33 @@ function bindEvents() {
       renderMusicLibrarySection();
     });
   }
+  const musicMissingGrid = $("#music-library-missing-grid");
+  if (musicMissingGrid) {
+    musicMissingGrid.addEventListener("click", async (event) => {
+      const action = event.target.closest("[data-action]");
+      if (!action) return;
+      const historyId = Number(action.dataset.historyId || 0) || null;
+      if (!historyId) return;
+      const actionName = String(action.dataset.action || "");
+      const messageEl = $("#music-library-message");
+      try {
+        if (actionName === "music-history-redownload") {
+          setMediaLibraryNotice(messageEl, "Queueing re-download…", false);
+          await fetchJson(`/api/player/history/${encodeURIComponent(historyId)}/redownload`, { method: "POST" });
+          setMediaLibraryNotice(messageEl, "Re-download queued. Review Queue and Search will show progress as it resolves.", false);
+          return;
+        }
+        if (actionName === "music-history-remove") {
+          await fetchJson(`/api/player/history/${encodeURIComponent(historyId)}`, { method: "DELETE" });
+          state.playerMissingHistory = (state.playerMissingHistory || []).filter((item) => Number(item?.id || 0) !== historyId);
+          renderMusicLibrarySection();
+          setMediaLibraryNotice(messageEl, "Removed from history.", false);
+        }
+      } catch (err) {
+        setMediaLibraryNotice(messageEl, toUserErrorMessage(err), true);
+      }
+    });
+  }
   const videoLibraryGrid = $("#home-video-library-grid");
   if (videoLibraryGrid) {
     videoLibraryGrid.addEventListener("click", (event) => {
@@ -14818,10 +15888,6 @@ function bindEvents() {
       if (!row) return;
       moveSourcePriorityRow(row, button.dataset.action);
     });
-  }
-  const homeSearchDownload = $("#home-search-download");
-  if (homeSearchDownload) {
-    homeSearchDownload.addEventListener("click", () => submitHomeSearch(true));
   }
   const homeSearchOnly = $("#home-search-only");
   if (homeSearchOnly) {
@@ -15051,6 +16117,7 @@ function bindEvents() {
   if (importToggle && importPanel) {
     importToggle.addEventListener("click", () => {
       importPanel.classList.toggle("hidden");
+      syncTopbarSubbarVisibility();
     });
   }
   const homeSourceToggle = $("#home-source-toggle");
@@ -15082,6 +16149,9 @@ function bindEvents() {
     homeSourcePanel.addEventListener("change", (event) => {
       if (event.target && event.target.matches('input[type="checkbox"][data-source]')) {
         updateHomeSourceToggleLabel();
+        persistVideoSourcePreferences(
+          Array.from(homeSourcePanel.querySelectorAll('input[type="checkbox"][data-source]:checked')).map((el) => el.dataset.source)
+        );
       }
     });
     refreshHomeSourceOptions();
@@ -15095,6 +16165,53 @@ function bindEvents() {
       const isOpen = !homeAdvancedPanel.classList.contains("hidden");
       homeAdvancedPanel.classList.toggle("hidden", isOpen);
       homeAdvancedToggle.setAttribute("aria-expanded", String(!isOpen));
+      syncTopbarSubbarVisibility();
+    });
+  }
+  const launcherGrid = $("#home-launcher-grid");
+  if (launcherGrid) {
+    launcherGrid.addEventListener("click", (event) => {
+      const tile = event.target.closest("[data-home-launch]");
+      if (!tile) return;
+      const page = String(tile.dataset.homeLaunch || "home");
+      const hash = String(tile.dataset.homeHash || page);
+      setPage(page);
+      window.location.hash = hash;
+    });
+  }
+  const musicHeaderSubmit = $("#music-header-search-submit");
+  if (musicHeaderSubmit) {
+    musicHeaderSubmit.addEventListener("click", runMusicHeaderSearch);
+  }
+  const musicHeaderQuery = $("#music-header-query");
+  if (musicHeaderQuery) {
+    musicHeaderQuery.addEventListener("keydown", (event) => {
+      if (
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey
+      ) {
+        event.preventDefault();
+        runMusicHeaderSearch();
+      }
+    });
+  }
+  const musicHeaderModeToggle = $("#music-header-mode-toggle");
+  if (musicHeaderModeToggle) {
+    musicHeaderModeToggle.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-mode]");
+      if (!button) return;
+      setMusicHeaderMode(button.dataset.mode || "auto", { persist: true });
+    });
+  }
+  const musicHeaderImportToggle = $("#music-header-import-toggle");
+  const musicImportPanel = document.getElementById("import-playlist-panel");
+  if (musicHeaderImportToggle && musicImportPanel) {
+    musicHeaderImportToggle.addEventListener("click", () => {
+      musicImportPanel.classList.toggle("hidden");
+      syncTopbarSubbarVisibility();
     });
   }
   const homeViewAdvanced = $("#home-view-advanced");
@@ -15516,13 +16633,30 @@ function bindEvents() {
       if (navButton) {
         const messageEl = $("#setup-wizard-message");
         if (navButton.dataset.setupNav === "back") {
+          state.setupWizard.feedback = null;
           advanceSetupWizardStep(-1);
         } else {
+          const currentStep = getSetupWizardSteps()[Math.max(0, Number(state.setupWizard?.stepIndex || 0))];
+          const validationError = validateSetupWizardStep(currentStep);
+          if (validationError) {
+            state.setupWizard.feedback = {
+              stepId: currentStep?.id || "",
+              tone: "error",
+              text: validationError,
+            };
+            renderSetupWizard();
+            return;
+          }
           try {
-            setNotice(messageEl, "Saving progress...", false);
+            setNotice(messageEl, "Saving your progress...", false);
             await saveSetupWizardProgress();
+            state.setupWizard.feedback = null;
             advanceSetupWizardStep(1);
-            setNotice(messageEl, "Progress saved.", false);
+            state.setupWizard.feedback = {
+              stepId: getSetupWizardSteps()[Math.max(0, Number(state.setupWizard?.stepIndex || 0))]?.id || "",
+              tone: "success",
+              text: "Saved. Continue when you are ready.",
+            };
           } catch (err) {
             setNotice(messageEl, toUserErrorMessage(err), true);
             return;
@@ -15535,14 +16669,26 @@ function bindEvents() {
       if (choiceButton) {
         const key = String(choiceButton.dataset.setupChoice || "");
         const rawValue = String(choiceButton.dataset.value || "");
-        const nextValue = rawValue === "true";
+        const nextValue = rawValue === "true" ? true : rawValue === "false" ? false : rawValue;
         const revealOnYes = new Set(["wants_tmdb", "enable_vpn", "wants_youtube", "wants_telegram", "enable_jellyfin"]);
         updateSetupWizardDraftField(key, nextValue);
         syncSetupWizardToLegacyFields();
-        if (revealOnYes.has(key) && nextValue) {
+        if (revealOnYes.has(key) && nextValue === true) {
+          state.setupWizard.feedback = {
+            stepId: getSetupWizardSteps()[Math.max(0, Number(state.setupWizard?.stepIndex || 0))]?.id || "",
+            tone: "success",
+            text: "Great. Finish the details below to keep going.",
+          };
           renderSetupWizard();
           return;
         }
+        if ((key === "arr_setup_mode" && nextValue !== "none") || (key === "direct_manage")) {
+          state.setupWizard.feedback = null;
+          advanceSetupWizardStep(1);
+          renderSetupWizard();
+          return;
+        }
+        state.setupWizard.feedback = null;
         advanceSetupWizardStep(1);
         renderSetupWizard();
         return;
@@ -15554,17 +16700,17 @@ function bindEvents() {
           if (actionButton.dataset.setupAction === "start-over") {
             resetSetupWizardDraft();
             renderSetupWizard();
-            setNotice($("#setup-wizard-message"), "Guided setup reset to saved defaults.", false);
+            setNotice($("#setup-wizard-message"), "Setup guide reset to your saved defaults.", false);
           } else if (actionButton.dataset.setupAction === "save-progress") {
-            setNotice(messageEl, "Saving guided setup...", false);
+            setNotice(messageEl, "Saving your setup choices...", false);
             await saveSetupWizardProgress();
             await refreshSetupStatus();
-            setNotice(messageEl, "Guided setup saved.", false);
+            setNotice(messageEl, "Your setup choices were saved.", false);
           } else if (actionButton.dataset.setupAction === "apply-env") {
-            setNotice(messageEl, "Saving and writing managed env...", false);
+            setNotice(messageEl, "Preparing your setup...", false);
             await applySetupWizardEnv();
             await refreshSetupStatus();
-            setNotice(messageEl, "Managed env written. Follow the generated compose command shown below.", false);
+            setNotice(messageEl, "Setup prepared. Follow the restart step shown below.", false);
           }
         } catch (err) {
           setNotice(messageEl, toUserErrorMessage(err), true);
@@ -15683,7 +16829,7 @@ function bindEvents() {
   }
   $$(".music-app-nav").forEach((button) => {
     button.addEventListener("click", () => {
-      setMusicSection(button.dataset.musicSection || "search");
+      setMusicSection(button.dataset.musicSection || "home");
     });
   });
   $$("[data-home-section]").forEach((button) => {
@@ -15729,6 +16875,12 @@ function bindEvents() {
   if (musicBottomExpand) {
     musicBottomExpand.addEventListener("click", () => {
       openMusicPlayerModal();
+    });
+  }
+  const musicBottomQueue = $("#music-bottom-player-queue");
+  if (musicBottomQueue) {
+    musicBottomQueue.addEventListener("click", () => {
+      setMusicSection("queue");
     });
   }
   const musicPlayerModalClose = $("#music-player-modal-close");
@@ -15804,6 +16956,23 @@ function bindEvents() {
         setMusicSection("library");
         return;
       }
+      const musicGoLibrary = event.target.closest('[data-action="music-go-library"]');
+      if (musicGoLibrary) {
+        state.playerLibraryMode = "albums";
+        renderMusicPlayerLibrary();
+        setMusicSection("library");
+        return;
+      }
+      const musicGoSearch = event.target.closest('[data-action="music-go-search"]');
+      if (musicGoSearch) {
+        setMusicSection("search");
+        return;
+      }
+      const musicGoFavorites = event.target.closest('[data-action="music-go-favorites"]');
+      if (musicGoFavorites) {
+        setMusicSection("favorites");
+        return;
+      }
       const resetLibraryButton = event.target.closest('[data-action="player-reset-library"]');
       if (resetLibraryButton) {
         state.playerSelectedArtistKey = "";
@@ -15828,6 +16997,50 @@ function bindEvents() {
         state.playerSelectedAlbumKey = String(openAlbumButton.dataset.albumKey || "");
         state.playerLibraryMode = "tracks";
         renderMusicPlayerLibrary();
+        setMusicSection("library");
+        return;
+      }
+      const playArtistButton = event.target.closest('[data-action="player-play-artist"]');
+      if (playArtistButton) {
+        const artistKey = String(playArtistButton.dataset.artistKey || state.playerSelectedArtistKey || "");
+        const tracks = getPlayerTracksForArtist(artistKey);
+        if (!tracks.length) return;
+        setPlayerQueue(tracks);
+        await playMusicPlayerItem(tracks[0]);
+        setMusicSection("library");
+        return;
+      }
+      const shuffleArtistButton = event.target.closest('[data-action="player-shuffle-artist"]');
+      if (shuffleArtistButton) {
+        const artistKey = String(shuffleArtistButton.dataset.artistKey || state.playerSelectedArtistKey || "");
+        const tracks = getPlayerTracksForArtist(artistKey);
+        if (!tracks.length) return;
+        const shuffled = tracks.slice().sort(() => Math.random() - 0.5);
+        setPlayerQueue(shuffled);
+        await playMusicPlayerItem(shuffled[0]);
+        setMusicSection("library");
+        return;
+      }
+      const playAlbumButton = event.target.closest('[data-action="player-play-album"]');
+      if (playAlbumButton) {
+        const artistKey = String(playAlbumButton.dataset.artistKey || state.playerSelectedArtistKey || "");
+        const albumKey = String(playAlbumButton.dataset.albumKey || state.playerSelectedAlbumKey || "");
+        const tracks = getPlayerTracksForAlbum(artistKey, albumKey);
+        if (!tracks.length) return;
+        setPlayerQueue(tracks);
+        await playMusicPlayerItem(tracks[0]);
+        setMusicSection("library");
+        return;
+      }
+      const queueAlbumButton = event.target.closest('[data-action="player-queue-album"]');
+      if (queueAlbumButton) {
+        const artistKey = String(queueAlbumButton.dataset.artistKey || state.playerSelectedArtistKey || "");
+        const albumKey = String(queueAlbumButton.dataset.albumKey || state.playerSelectedAlbumKey || "");
+        const tracks = getPlayerTracksForAlbum(artistKey, albumKey);
+        if (!tracks.length) return;
+        queueTracksAtEnd(tracks);
+        setNotice($("#music-player-message"), `${tracks.length} track${tracks.length === 1 ? "" : "s"} added to queue.`, false);
+        renderMusicPlayerLibrary();
         return;
       }
       const openPlaylistButton = event.target.closest('[data-action="player-open-playlist"]');
@@ -15838,6 +17051,15 @@ function bindEvents() {
         const detailPayload = await fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}`);
         state.playerSelectedPlaylistItems = Array.isArray(detailPayload?.items) ? detailPayload.items : [];
         renderMusicPlayerLibrary();
+        setMusicSection("playlists");
+        return;
+      }
+      const playPlaylistButton = event.target.closest('[data-action="player-play-playlist"]');
+      if (playPlaylistButton) {
+        const playlistItems = Array.isArray(state.playerSelectedPlaylistItems) ? state.playerSelectedPlaylistItems : [];
+        if (!playlistItems.length) return;
+        setPlayerQueue(playlistItems);
+        await playMusicPlayerItem(playlistItems[0]);
         setMusicSection("playlists");
         return;
       }
@@ -15902,6 +17124,92 @@ function bindEvents() {
         setNotice($("#music-player-message"), "Track added to playlist.", false);
         return;
       }
+      const queueTrackButton = event.target.closest('[data-action="player-queue-track"]');
+      if (queueTrackButton) {
+        const payload = {
+          id: String(queueTrackButton.dataset.localPath || queueTrackButton.dataset.streamUrl || ""),
+          title: String(queueTrackButton.dataset.title || ""),
+          artist: String(queueTrackButton.dataset.artist || ""),
+          album: String(queueTrackButton.dataset.album || ""),
+          local_path: String(queueTrackButton.dataset.localPath || ""),
+          stream_url: String(queueTrackButton.dataset.streamUrl || ""),
+          kind: String(queueTrackButton.dataset.sourceKind || "local"),
+        };
+        queueTracksAtEnd([payload]);
+        renderMusicPlayerLibrary();
+        setNotice($("#music-player-message"), "Added to queue.", false);
+        return;
+      }
+      const playNextButton = event.target.closest('[data-action="player-play-next"]');
+      if (playNextButton) {
+        const payload = {
+          id: String(playNextButton.dataset.localPath || playNextButton.dataset.streamUrl || ""),
+          title: String(playNextButton.dataset.title || ""),
+          artist: String(playNextButton.dataset.artist || ""),
+          album: String(playNextButton.dataset.album || ""),
+          local_path: String(playNextButton.dataset.localPath || ""),
+          stream_url: String(playNextButton.dataset.streamUrl || ""),
+          kind: String(playNextButton.dataset.sourceKind || "local"),
+        };
+        queueTrackNext(payload);
+        renderMusicPlayerLibrary();
+        setNotice($("#music-player-message"), "Will play next.", false);
+        return;
+      }
+      const moveQueueUpButton = event.target.closest('[data-action="player-queue-move-up"]');
+      if (moveQueueUpButton) {
+        moveQueueItem(Number(moveQueueUpButton.dataset.queueIndex || 0), Number(moveQueueUpButton.dataset.queueIndex || 0) - 1);
+        return;
+      }
+      const moveQueueDownButton = event.target.closest('[data-action="player-queue-move-down"]');
+      if (moveQueueDownButton) {
+        moveQueueItem(Number(moveQueueDownButton.dataset.queueIndex || 0), Number(moveQueueDownButton.dataset.queueIndex || 0) + 1);
+        return;
+      }
+      const removeQueueItemButton = event.target.closest('[data-action="player-remove-queue-item"]');
+      if (removeQueueItemButton) {
+        removeQueueItem(Number(removeQueueItemButton.dataset.queueIndex || 0));
+        return;
+      }
+      const clearQueueButton = event.target.closest('[data-action="player-clear-queue"]');
+      if (clearQueueButton) {
+        clearQueue();
+        setNotice($("#music-player-message"), "Queue cleared.", false);
+        return;
+      }
+      const saveQueuePlaylistButton = event.target.closest('[data-action="player-save-queue-playlist"]');
+      if (saveQueuePlaylistButton) {
+        const queue = Array.isArray(state.playerQueue) ? state.playerQueue : [];
+        if (!queue.length) return;
+        const name = window.prompt("Playlist name", `Queue ${new Date().toLocaleDateString()}`);
+        if (!name || !String(name).trim()) return;
+        const payload = await fetchJson("/api/player/playlists", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: String(name).trim() }),
+        });
+        const playlistId = Number(payload?.playlist?.id || 0) || null;
+        if (!playlistId) return;
+        for (const item of queue) {
+          // preserve order by inserting sequentially
+          await fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}/items`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(item),
+          });
+        }
+        state.playerSelectedPlaylistId = playlistId;
+        const [detailPayload, playlistsPayload] = await Promise.all([
+          fetchJson(`/api/player/playlists/${encodeURIComponent(playlistId)}`),
+          fetchJson("/api/player/playlists"),
+        ]);
+        state.playerSelectedPlaylistItems = Array.isArray(detailPayload?.items) ? detailPayload.items : [];
+        state.playerPlaylists = Array.isArray(playlistsPayload?.playlists) ? playlistsPayload.playlists : [];
+        renderMusicPlayerLibrary();
+        setMusicSection("playlists");
+        setNotice($("#music-player-message"), "Queue saved as playlist.", false);
+        return;
+      }
       const playButton = event.target.closest('[data-action="player-play"]');
       if (playButton) {
         const payload = {
@@ -15918,6 +17226,9 @@ function bindEvents() {
         } else if (playButton.closest(".music-player-playlist-items")) {
           const playlistItems = Array.isArray(state.playerSelectedPlaylistItems) ? state.playerSelectedPlaylistItems : [];
           setPlayerQueue(buildQueueFromTracks(playlistItems, payload));
+        } else if (playButton.closest("#music-player-recent")) {
+          const historyItems = Array.isArray(state.playerHistory) ? state.playerHistory.filter((entry) => entry?.stream_url) : [];
+          setPlayerQueue(buildQueueFromTracks(historyItems, payload));
         } else if (playButton.closest("#music-player-library")) {
           const libraryTracks = getMusicPlayerFilteredTracks();
           setPlayerQueue(buildQueueFromTracks(libraryTracks, payload));
@@ -16547,6 +17858,7 @@ function applyAppSidebarCollapsed(collapsed, { persist = true } = {}) {
 async function init() {
   state.adminPinToken = localStorage.getItem(ADMIN_PIN_TOKEN_KEY) || "";
   state.appSidebarCollapsed = loadAppSidebarCollapsedPreference();
+  state.musicHeaderMode = loadMusicHeaderModePreference();
   mountSettingsSubpages();
   mountHomePageNodes();
   window.addEventListener("spotify-oauth-complete", () => {
@@ -16559,6 +17871,7 @@ async function init() {
   applyTheme(resolveTheme());
   bindEvents();
   applyAppSidebarCollapsed(state.appSidebarCollapsed, { persist: false });
+  setMusicHeaderMode(state.musicHeaderMode, { persist: false });
   setupHeaderScrollVisibility();
   applyHomeVideoCardSize(state.homeVideoCardSize);
   applyArrCardSize(state.arrCardSize);
@@ -16627,18 +17940,20 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
 (function ensureHomeClass() {
-  const homeSection = document.querySelector('section[data-page="home"]');
+  const videoSection = document.querySelector('section[data-page="video"]');
   const musicSection = document.querySelector('section[data-page="music"]');
-  if (!homeSection && !musicSection) return;
+  if (!videoSection && !musicSection) return;
 
   const syncPageClass = () => {
-    const homeVisible = homeSection ? !homeSection.classList.contains("page-hidden") : false;
+    const videoVisible = videoSection ? !videoSection.classList.contains("page-hidden") : false;
     const musicVisible = musicSection ? !musicSection.classList.contains("page-hidden") : false;
-    const homeLike = homeVisible || musicVisible;
-    document.body.classList.toggle("home-page", homeLike);
+    const videoLike = videoVisible || musicVisible;
+    document.body.classList.toggle("home-page", videoLike);
+    document.body.classList.toggle("video-page", videoVisible);
+    document.body.classList.toggle("launcher-page", !videoVisible && !musicVisible && state.currentPage === "home");
     document.body.classList.toggle("music-page", musicVisible);
-    if (homeVisible) {
-      document.body.dataset.page = "home";
+    if (videoVisible) {
+      document.body.dataset.page = "video";
     } else if (musicVisible) {
       document.body.dataset.page = "music";
     } else if (state.currentPage) {
@@ -16649,7 +17964,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const observer = new MutationObserver(() => {
     syncPageClass();
   });
-  if (homeSection) observer.observe(homeSection, { attributes: true, attributeFilter: ["class"] });
+  if (videoSection) observer.observe(videoSection, { attributes: true, attributeFilter: ["class"] });
   if (musicSection) observer.observe(musicSection, { attributes: true, attributeFilter: ["class"] });
   syncPageClass();
 })();

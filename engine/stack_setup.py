@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -29,6 +30,17 @@ PROFILE_MAP = {
     "enable_readarr": "books",
 }
 
+MANAGED_INTERNAL_URLS = {
+    "radarr": "http://radarr:7878",
+    "sonarr": "http://sonarr:8989",
+    "readarr": "http://readarr:8787",
+    "prowlarr": "http://prowlarr:9696",
+    "bazarr": "http://bazarr:6767",
+    "qbittorrent": "http://qbittorrent:8080",
+    "gluetun": "http://gluetun:8000/v1/publicip/ip",
+    "jellyfin": "http://jellyfin:8096",
+}
+
 
 def _trimmed(value: Any) -> str:
     return str(value or "").strip()
@@ -48,6 +60,7 @@ def normalize_stack_config(config: dict | None) -> dict[str, Any]:
         "enable_qbittorrent": bool(stack.get("enable_qbittorrent")),
         "enable_vpn": bool(stack.get("enable_vpn")),
         "enable_jellyfin": bool(stack.get("enable_jellyfin")),
+        "enable_hostctl": bool(stack.get("enable_hostctl")),
         "env_path": _trimmed(stack.get("env_path")) or ".env",
         "compose_profiles": list(stack.get("compose_profiles") or []),
         "media_root": _trimmed(stack.get("media_root")) or "./media",
@@ -72,8 +85,139 @@ def derive_profiles(stack: dict[str, Any]) -> list[str]:
             continue
         if bool(stack.get(key)) and profile not in profiles:
             profiles.append(profile)
+    if bool(stack.get("enable_hostctl")) and "hostctl" not in profiles:
+        profiles.append("hostctl")
     return profiles
 
+
+def managed_service_feature_map() -> dict[str, tuple[str, ...]]:
+    return {
+        "movies": ("enable_arr_stack", "enable_radarr", "enable_prowlarr"),
+        "tv": ("enable_arr_stack", "enable_sonarr", "enable_prowlarr"),
+        "books": ("enable_arr_stack", "enable_readarr", "enable_prowlarr"),
+        "subtitles": ("enable_bazarr",),
+        "downloader": ("enable_qbittorrent",),
+        "vpn": ("enable_vpn",),
+        "jellyfin": ("enable_jellyfin",),
+    }
+
+
+def normalize_managed_plan(config: dict[str, Any] | None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = config if isinstance(config, dict) else {}
+    setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
+    managed_cfg = setup_cfg.get("managed_stack") if isinstance(setup_cfg.get("managed_stack"), dict) else {}
+    stack = normalize_stack_config(cfg)
+    arr_cfg = cfg.get("arr") if isinstance(cfg.get("arr"), dict) else {}
+    vpn_cfg = arr_cfg.get("vpn") if isinstance(arr_cfg.get("vpn"), dict) else {}
+    source = payload if isinstance(payload, dict) else {}
+    enabled_features = managed_cfg.get("enabled_features") if isinstance(managed_cfg.get("enabled_features"), dict) else {}
+    feature_map = managed_service_feature_map()
+    features = {
+        key: bool(source.get(key, enabled_features.get(key, False)))
+        for key in feature_map.keys()
+    }
+    if features["movies"] or features["tv"] or features["books"]:
+        features["downloader"] = bool(source.get("downloader", features["downloader"] or True))
+    if features["downloader"] and bool(source.get("vpn", enabled_features.get("vpn", False))):
+        features["vpn"] = True
+    direct_manage = bool(source.get("direct_manage", managed_cfg.get("direct_manage_requested")))
+    selected_services: list[str] = []
+    next_stack = dict(stack)
+    for stack_key in (
+        "enable_arr_stack",
+        "enable_radarr",
+        "enable_sonarr",
+        "enable_readarr",
+        "enable_prowlarr",
+        "enable_bazarr",
+        "enable_qbittorrent",
+        "enable_vpn",
+        "enable_jellyfin",
+        "enable_hostctl",
+    ):
+        next_stack[stack_key] = False
+    for feature_name, stack_keys in feature_map.items():
+        if not features.get(feature_name):
+            continue
+        for stack_key in stack_keys:
+            next_stack[stack_key] = True
+    if next_stack.get("enable_bazarr"):
+        next_stack["enable_arr_stack"] = True
+        next_stack["enable_radarr"] = True
+        next_stack["enable_sonarr"] = True
+    if next_stack.get("enable_qbittorrent") and not next_stack.get("enable_vpn"):
+        next_stack["enable_vpn"] = bool(source.get("vpn_required_if_downloader", False))
+    for path_key in ("env_path", "media_root", "movies_root", "tv_root", "downloads_root", "books_root"):
+        if path_key in source:
+            next_stack[path_key] = _trimmed(source.get(path_key))
+    next_stack["compose_profiles"] = derive_profiles(next_stack)
+    for key, label in (
+        ("enable_radarr", "radarr"),
+        ("enable_sonarr", "sonarr"),
+        ("enable_readarr", "readarr"),
+        ("enable_prowlarr", "prowlarr"),
+        ("enable_bazarr", "bazarr"),
+        ("enable_qbittorrent", "qbittorrent"),
+        ("enable_vpn", "gluetun"),
+        ("enable_jellyfin", "jellyfin"),
+    ):
+        if next_stack.get(key):
+            selected_services.append(label)
+    if direct_manage:
+        selected_services.append("retreivr-hostctl")
+        next_stack["enable_hostctl"] = True
+    selected_services = list(dict.fromkeys(selected_services))
+    vpn_provider = _trimmed(source.get("vpn_provider")) or _trimmed(vpn_cfg.get("provider")) or "gluetun"
+    vpn_credentials = {
+        "provider": vpn_provider,
+        "openvpn_user": _trimmed(source.get("vpn_openvpn_user")),
+        "openvpn_password": _trimmed(source.get("vpn_openvpn_password")),
+        "wireguard_private_key": _trimmed(source.get("vpn_wireguard_private_key")),
+        "server_countries": _trimmed(source.get("vpn_server_countries")),
+    }
+    internal_urls = {
+        "radarr": MANAGED_INTERNAL_URLS["radarr"] if next_stack.get("enable_radarr") else "",
+        "sonarr": MANAGED_INTERNAL_URLS["sonarr"] if next_stack.get("enable_sonarr") else "",
+        "readarr": MANAGED_INTERNAL_URLS["readarr"] if next_stack.get("enable_readarr") else "",
+        "prowlarr": MANAGED_INTERNAL_URLS["prowlarr"] if next_stack.get("enable_prowlarr") else "",
+        "bazarr": MANAGED_INTERNAL_URLS["bazarr"] if next_stack.get("enable_bazarr") else "",
+        "qbittorrent": MANAGED_INTERNAL_URLS["qbittorrent"] if next_stack.get("enable_qbittorrent") else "",
+        "jellyfin": MANAGED_INTERNAL_URLS["jellyfin"] if next_stack.get("enable_jellyfin") else "",
+        "vpn_control": MANAGED_INTERNAL_URLS["gluetun"] if next_stack.get("enable_vpn") else "",
+    }
+    credentials = managed_cfg.get("generated_credentials") if isinstance(managed_cfg.get("generated_credentials"), dict) else {}
+    qb_username = _trimmed(credentials.get("qbittorrent_username")) or _trimmed((arr_cfg.get("qbittorrent") or {}).get("username")) or "retreivr"
+    qb_password = _trimmed(credentials.get("qbittorrent_password")) or _trimmed((arr_cfg.get("qbittorrent") or {}).get("password")) or secrets.token_urlsafe(18)
+    return {
+        "mode": "managed",
+        "apply_mode": "direct" if direct_manage else "manual",
+        "direct_manage_requested": direct_manage,
+        "selected_services": selected_services,
+        "enabled_features": features,
+        "stack": next_stack,
+        "internal_urls": internal_urls,
+        "generated_credentials": {
+            "qbittorrent_username": qb_username,
+            "qbittorrent_password": qb_password,
+        },
+        "vpn": vpn_credentials,
+    }
+
+
+def normalize_existing_stack_payload(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = payload if isinstance(payload, dict) else {}
+    normalized: dict[str, Any] = {"mode": "existing", "services": {}}
+    for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "bazarr", "qbittorrent", "jellyfin"):
+        service_payload = source.get(service_name) if isinstance(source.get(service_name), dict) else {}
+        enabled = bool(service_payload.get("enabled"))
+        normalized["services"][service_name] = {
+            "enabled": enabled,
+            "base_url": _trimmed(service_payload.get("base_url")),
+            "api_key": _trimmed(service_payload.get("api_key")),
+            "username": _trimmed(service_payload.get("username")),
+            "password": _trimmed(service_payload.get("password")),
+        }
+    return normalized
 
 def build_compose_command(stack: dict[str, Any]) -> str:
     profiles = derive_profiles(stack)
@@ -100,17 +244,22 @@ def managed_env_values(config: dict[str, Any], stack: dict[str, Any]) -> dict[st
         "RETREIVR_STACK_ENABLE_QBITTORRENT": "1" if stack.get("enable_qbittorrent") else "0",
         "RETREIVR_STACK_ENABLE_VPN": "1" if stack.get("enable_vpn") else "0",
         "RETREIVR_STACK_ENABLE_JELLYFIN": "1" if stack.get("enable_jellyfin") else "0",
+        "RETREIVR_STACK_ENABLE_HOSTCTL": "1" if stack.get("enable_hostctl") else "0",
         "RETREIVR_MEDIA_ROOT": str(stack.get("media_root") or "./media"),
         "RETREIVR_MOVIES_ROOT": str(stack.get("movies_root") or "./media/movies"),
         "RETREIVR_TV_ROOT": str(stack.get("tv_root") or "./media/tv"),
         "RETREIVR_DOWNLOADS_ROOT": str(stack.get("downloads_root") or "./downloads"),
         "RETREIVR_BOOKS_ROOT": str(stack.get("books_root") or "./media/books"),
         "RETREIVR_QBITTORRENT_BASE_URL": _trimmed(qb_cfg.get("base_url")) or "http://qbittorrent:8080",
+        "RETREIVR_QBITTORRENT_USERNAME": _trimmed(qb_cfg.get("username")) or "retreivr",
+        "RETREIVR_QBITTORRENT_PASSWORD": _trimmed(qb_cfg.get("password")),
         "RETREIVR_JELLYFIN_BASE_URL": _trimmed(jelly_cfg.get("base_url")) or "http://jellyfin:8096",
         "RETREIVR_VPN_CONTROL_URL": _trimmed(vpn_cfg.get("control_url")) or "http://gluetun:8000/v1/publicip/ip",
         "RETREIVR_VPN_ROUTE_QBITTORRENT": "1" if vpn_cfg.get("route_qbittorrent", True) else "0",
         "RETREIVR_VPN_ROUTE_PROWLARR": "1" if vpn_cfg.get("route_prowlarr") else "0",
         "RETREIVR_VPN_ROUTE_RETREIVR": "1" if vpn_cfg.get("route_retreivr") else "0",
+        "RETREIVR_HOSTCTL_URL": os.environ.get("RETREIVR_HOSTCTL_URL") or "http://retreivr-hostctl:8010",
+        "GLUETUN_PROVIDER": _trimmed(vpn_cfg.get("provider")),
     }
 
 
@@ -141,6 +290,126 @@ def write_managed_env_block(env_path: str | os.PathLike[str], values: dict[str, 
     out.append("")
     target.write_text("\n".join(out), encoding="utf-8")
     return target
+
+
+def _repo_root_from_env() -> Path:
+    return Path(os.environ.get("RETREIVR_WORKSPACE") or Path(__file__).resolve().parents[1]).resolve()
+
+
+def _managed_config_root(service_name: str) -> Path:
+    return _repo_root_from_env() / "config" / service_name
+
+
+def _discover_servarr_api_key(service_name: str) -> str:
+    config_xml = _managed_config_root(service_name) / "config.xml"
+    if not config_xml.exists():
+        return ""
+    try:
+        text = config_xml.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    marker_start = "<ApiKey>"
+    marker_end = "</ApiKey>"
+    start = text.find(marker_start)
+    end = text.find(marker_end)
+    if start == -1 or end == -1 or end <= start:
+        return ""
+    return text[start + len(marker_start):end].strip()
+
+
+def discover_managed_service_keys(config: dict[str, Any]) -> dict[str, str]:
+    keys: dict[str, str] = {}
+    stack = normalize_stack_config(config)
+    for service_name, stack_key in (
+        ("radarr", "enable_radarr"),
+        ("sonarr", "enable_sonarr"),
+        ("readarr", "enable_readarr"),
+        ("prowlarr", "enable_prowlarr"),
+    ):
+        if stack.get(stack_key):
+            api_key = _discover_servarr_api_key(service_name)
+            if api_key:
+                keys[service_name] = api_key
+    return keys
+
+
+def apply_managed_service_defaults(config: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(config or {})
+    arr_cfg = dict(updated.get("arr") or {})
+    stack = dict(plan.get("stack") or {})
+    internal_urls = plan.get("internal_urls") if isinstance(plan.get("internal_urls"), dict) else {}
+    credentials = plan.get("generated_credentials") if isinstance(plan.get("generated_credentials"), dict) else {}
+    for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"):
+        service_cfg = dict(arr_cfg.get(service_name) or {})
+        if internal_urls.get(service_name):
+            service_cfg["base_url"] = internal_urls.get(service_name)
+        arr_cfg[service_name] = service_cfg
+    qb_cfg = dict(arr_cfg.get("qbittorrent") or {})
+    if internal_urls.get("qbittorrent"):
+        qb_cfg["base_url"] = internal_urls.get("qbittorrent")
+    qb_cfg["username"] = _trimmed(credentials.get("qbittorrent_username")) or _trimmed(qb_cfg.get("username")) or "retreivr"
+    qb_cfg["password"] = _trimmed(credentials.get("qbittorrent_password")) or _trimmed(qb_cfg.get("password"))
+    qb_cfg["download_dir"] = str(stack.get("downloads_root") or qb_cfg.get("download_dir") or "./downloads")
+    arr_cfg["qbittorrent"] = qb_cfg
+    vpn_cfg = dict(arr_cfg.get("vpn") or {})
+    if internal_urls.get("vpn_control"):
+        vpn_cfg["control_url"] = internal_urls.get("vpn_control")
+    vpn_data = plan.get("vpn") if isinstance(plan.get("vpn"), dict) else {}
+    if vpn_data:
+        vpn_cfg["provider"] = _trimmed(vpn_data.get("provider")) or _trimmed(vpn_cfg.get("provider")) or "gluetun"
+    vpn_cfg["enabled"] = bool(stack.get("enable_vpn"))
+    vpn_cfg["route_qbittorrent"] = True
+    arr_cfg["vpn"] = vpn_cfg
+    discovered_keys = discover_managed_service_keys(updated)
+    for service_name, api_key in discovered_keys.items():
+        service_cfg = dict(arr_cfg.get(service_name) or {})
+        service_cfg["api_key"] = api_key
+        arr_cfg[service_name] = service_cfg
+    updated["arr"] = arr_cfg
+    return updated
+
+
+def build_managed_status(config: dict[str, Any]) -> dict[str, Any]:
+    setup_cfg = config.get("setup") if isinstance(config.get("setup"), dict) else {}
+    managed = setup_cfg.get("managed_stack") if isinstance(setup_cfg.get("managed_stack"), dict) else {}
+    stack = normalize_stack_config(config)
+    internal_urls = managed.get("internal_urls") if isinstance(managed.get("internal_urls"), dict) else {}
+    selected_services = list(managed.get("selected_services") or [])
+    health = build_connections_status(config)
+    hostctl_cfg = {
+        "configured": bool(stack.get("enable_hostctl")),
+        "reachable": False,
+        "status": "not_enabled",
+    }
+    hostctl_url = _trimmed(os.environ.get("RETREIVR_HOSTCTL_URL")) or "http://retreivr-hostctl:8010"
+    if stack.get("enable_hostctl"):
+        reachable, message = _probe_json(f"{hostctl_url}/health")
+        hostctl_cfg = {"configured": True, "reachable": reachable, "status": message, "base_url": hostctl_url}
+    phase = _trimmed(managed.get("phase")) or "idle"
+    return {
+        "mode": "managed",
+        "apply_mode": "direct" if bool(managed.get("direct_manage_requested")) else "manual",
+        "phase": phase,
+        "phase_message": _trimmed(managed.get("phase_message")),
+        "last_error": _trimmed(managed.get("last_error")),
+        "resume_ready": bool(managed.get("resume_ready")),
+        "selected_services": selected_services,
+        "internal_urls": internal_urls,
+        "hostctl": hostctl_cfg,
+        "services": health,
+        "last_health": managed.get("last_health") if isinstance(managed.get("last_health"), dict) else {},
+        "last_configure_result": managed.get("last_configure_result") if isinstance(managed.get("last_configure_result"), dict) else {},
+    }
+
+
+def build_existing_status(config: dict[str, Any]) -> dict[str, Any]:
+    setup_cfg = config.get("setup") if isinstance(config.get("setup"), dict) else {}
+    existing = setup_cfg.get("existing_stack") if isinstance(setup_cfg.get("existing_stack"), dict) else {}
+    return {
+        "mode": "existing",
+        "selected_services": list(existing.get("selected_services") or []),
+        "services": existing.get("discovered_health") if isinstance(existing.get("discovered_health"), dict) else {},
+    }
 
 
 def _probe_json(url: str, *, headers: dict[str, str] | None = None, timeout: float = 4.0) -> tuple[bool, str]:
@@ -518,10 +787,13 @@ def build_setup_status(config: dict[str, Any]) -> dict[str, Any]:
     storage_ready = bool(_trimmed(music_cfg.get("library_path")) or _trimmed(config.get("single_download_folder")))
     arr_enabled = any(stack.get(key) for key in ("enable_arr_stack", "enable_radarr", "enable_sonarr", "enable_readarr", "enable_prowlarr"))
     setup_cfg = config.get("setup") if isinstance(config.get("setup"), dict) else {}
+    service_mgmt = setup_cfg.get("service_management") if isinstance(setup_cfg.get("service_management"), dict) else {}
     restart_required = bool(setup_cfg.get("restart_required"))
     last_applied_at = _trimmed(setup_cfg.get("last_applied_at"))
     last_applied_command = _trimmed(setup_cfg.get("last_applied_command"))
     last_applied_env_path = _trimmed(setup_cfg.get("last_applied_env_path"))
+    managed_status = build_managed_status(config)
+    existing_status = build_existing_status(config)
     modules = {
         "core": {"required": True, "status": "verified", "title": "Core Retreivr", "summary": "Retreivr is installed and reachable."},
         "youtube": {"required": False, "status": "verified" if youtube_ready else "needs_input", "title": "YouTube / Cookies", "summary": "Optional for watcher and authenticated YouTube flows."},
@@ -536,6 +808,12 @@ def build_setup_status(config: dict[str, Any]) -> dict[str, Any]:
         payload["complete"] = key in completed_modules or payload["status"] == "verified"
     return {
         "modules": modules,
+        "service_management": {
+            "mode": _trimmed(service_mgmt.get("mode")) or "none",
+            "apply_mode": _trimmed(service_mgmt.get("apply_mode")) or "manual",
+        },
+        "managed_stack": managed_status,
+        "existing_stack": existing_status,
         "stack": {
             **stack,
             "compose_profiles": derive_profiles(stack),
@@ -563,6 +841,7 @@ def build_stack_apply_summary(config: dict[str, Any], stack: dict[str, Any]) -> 
         ("enable_qbittorrent", "qBittorrent"),
         ("enable_vpn", "VPN / Gluetun"),
         ("enable_jellyfin", "Jellyfin"),
+        ("enable_hostctl", "Retreivr Host Control"),
     ):
         if stack.get(key):
             enabled_services.append(label)

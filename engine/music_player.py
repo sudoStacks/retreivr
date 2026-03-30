@@ -18,6 +18,9 @@ PREFERRED_ART_NAMES = (
     "front",
     "album",
     "artwork",
+    "poster",
+    "thumb",
+    "thumbnail",
 )
 
 
@@ -99,21 +102,23 @@ def _find_album_art(album_dir: Path, cache: dict[str, str | None]) -> str | None
     if key in cache:
         return cache[key]
     found: str | None = None
-    try:
-        entries = [entry for entry in album_dir.iterdir() if entry.is_file() and entry.suffix.lower() in IMAGE_EXTENSIONS]
-        if entries:
-            preferred = []
-            fallback = []
-            for entry in entries:
-                stem = entry.stem.lower()
-                if any(stem == name or stem.startswith(f"{name}.") or stem.startswith(f"{name}_") or stem.startswith(f"{name}-") for name in PREFERRED_ART_NAMES):
-                    preferred.append(entry)
-                else:
-                    fallback.append(entry)
-            chosen = (preferred or fallback)[0]
-            found = str(chosen.resolve())
-    except Exception:
-        found = None
+    for candidate_dir in (album_dir, album_dir.parent):
+        try:
+            entries = [entry for entry in candidate_dir.iterdir() if entry.is_file() and entry.suffix.lower() in IMAGE_EXTENSIONS]
+            if entries:
+                preferred = []
+                fallback = []
+                for entry in entries:
+                    stem = entry.stem.lower()
+                    if any(stem == name or stem.startswith(f"{name}.") or stem.startswith(f"{name}_") or stem.startswith(f"{name}-") for name in PREFERRED_ART_NAMES):
+                        preferred.append(entry)
+                    else:
+                        fallback.append(entry)
+                chosen = (preferred or fallback)[0]
+                found = str(chosen.resolve())
+                break
+        except Exception:
+            continue
     cache[key] = found
     return found
 
@@ -174,9 +179,10 @@ def summarize_library(items: list[dict[str, Any]]) -> dict[str, list[dict[str, A
         album_key = album.lower()
         artist_entry = artists_map.setdefault(
             artist_key,
-            {"artist": artist, "artist_key": artist_key, "album_count": 0, "track_count": 0},
+            {"artist": artist, "artist_key": artist_key, "album_count": 0, "track_count": 0, "latest_downloaded_at": 0},
         )
         artist_entry["track_count"] += 1
+        artist_entry["latest_downloaded_at"] = max(int(artist_entry.get("latest_downloaded_at") or 0), int(item.get("downloaded_at") or 0))
         album_entry = albums_map.setdefault(
             (artist_key, album_key),
             {
@@ -185,19 +191,21 @@ def summarize_library(items: list[dict[str, Any]]) -> dict[str, list[dict[str, A
                 "album": album,
                 "album_key": album_key,
                 "track_count": 0,
+                "latest_downloaded_at": 0,
                 "artwork_local_path": str(item.get("artwork_local_path") or "").strip() or None,
             },
         )
         album_entry["track_count"] += 1
+        album_entry["latest_downloaded_at"] = max(int(album_entry.get("latest_downloaded_at") or 0), int(item.get("downloaded_at") or 0))
         if not album_entry.get("artwork_local_path"):
             album_entry["artwork_local_path"] = str(item.get("artwork_local_path") or "").strip() or None
         if not artist_entry.get("artwork_local_path"):
             artist_entry["artwork_local_path"] = str(item.get("artwork_local_path") or "").strip() or None
     for artist_key, artist_entry in artists_map.items():
         artist_entry["album_count"] = sum(1 for (a_key, _), _album in albums_map.items() if a_key == artist_key)
-    artists = sorted(artists_map.values(), key=lambda entry: (-int(entry["track_count"]), entry["artist"].lower()))
-    albums = sorted(albums_map.values(), key=lambda entry: (-int(entry["track_count"]), entry["artist"].lower(), entry["album"].lower()))
-    tracks = sorted(tracks, key=lambda entry: (str(entry.get("artist") or "").lower(), str(entry.get("album") or "").lower(), str(entry.get("title") or "").lower()))
+    artists = sorted(artists_map.values(), key=lambda entry: (-int(entry.get("latest_downloaded_at") or 0), entry["artist"].lower()))
+    albums = sorted(albums_map.values(), key=lambda entry: (-int(entry.get("latest_downloaded_at") or 0), entry["artist"].lower(), entry["album"].lower()))
+    tracks = sorted(tracks, key=lambda entry: (-int(entry.get("downloaded_at") or 0), str(entry.get("artist") or "").lower(), str(entry.get("album") or "").lower(), str(entry.get("title") or "").lower()))
     return {"artists": artists, "albums": albums, "tracks": tracks}
 
 
@@ -342,6 +350,13 @@ def list_history(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict[str,
     return [dict(row) for row in cur.fetchall()]
 
 
+def delete_history_entry(conn: sqlite3.Connection, history_id: int) -> None:
+    ensure_music_player_tables(conn)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM music_player_history WHERE id=?", (int(history_id),))
+    conn.commit()
+
+
 def list_playlists(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ensure_music_player_tables(conn)
     cur = conn.cursor()
@@ -484,3 +499,30 @@ def remove_playlist_item(conn: sqlite3.Connection, playlist_id: int, item_row_id
         (int(playlist_id),),
     )
     conn.commit()
+
+
+def reorder_playlist_items(conn: sqlite3.Connection, playlist_id: int, ordered_item_ids: list[int]) -> list[dict[str, Any]]:
+    ensure_music_player_tables(conn)
+    normalized_ids = [int(item_id) for item_id in ordered_item_ids if str(item_id).strip()]
+    cur = conn.cursor()
+    existing = playlist_items(conn, playlist_id)
+    if not existing:
+      return []
+    existing_ids = [int(item["id"]) for item in existing]
+    remainder = [item_id for item_id in existing_ids if item_id not in normalized_ids]
+    final_order = [item_id for item_id in normalized_ids if item_id in existing_ids] + remainder
+    for position, item_id in enumerate(final_order):
+        cur.execute(
+            """
+            UPDATE music_player_playlist_items
+            SET position=?
+            WHERE playlist_id=? AND id=?
+            """,
+            (int(position), int(playlist_id), int(item_id)),
+        )
+    cur.execute(
+        "UPDATE music_player_playlists SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (int(playlist_id),),
+    )
+    conn.commit()
+    return playlist_items(conn, playlist_id)
