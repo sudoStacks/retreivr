@@ -150,6 +150,9 @@ const state = {
   playerCurrent: null,
   playerCurrentHasVideo: false,
   playerVideoVisible: false,
+  playerYT: null,           // active YT.Player instance, or null when using <audio>
+  playerYTReady: false,     // IFrame API script loaded and YT.Player can be instantiated
+  playerYTProgressTimer: null,
   playerShuffle: false,
   playerRepeatMode: "off",
   playerProgressDragging: false,
@@ -1892,7 +1895,7 @@ function syncBottomPlayerShell() {
   if (!shell || !titleEl || !metaEl || !artEl || !toggleButton) return;
   const current = state.playerCurrent || {};
   const audioHasSource = !!(audio && (audio.currentSrc || audio.src));
-  const hasTrack = !!current.stream_url && audioHasSource;
+  const hasTrack = !!(current.stream_url && audioHasSource) || !!(current.video_id && activePlayerIsYT());
   const shouldHide = !hasTrack || (state.currentPage === "music" && state.musicSection === "player");
   shell.classList.toggle("hidden", shouldHide);
   titleEl.textContent = String(current.title || "Nothing playing");
@@ -1910,7 +1913,7 @@ function syncBottomPlayerShell() {
     statusEl.classList.toggle("hidden", !badges);
   }
   artEl.src = getMusicLibraryArtworkUrl(current);
-  toggleButton.textContent = audio && !audio.paused ? "Pause" : "Play";
+  toggleButton.textContent = activePlayerIsPaused() ? "Play" : "Pause";
   if (prevButton) prevButton.disabled = !hasTrack;
   if (nextButton) nextButton.disabled = !hasTrack;
   if (queueButton) {
@@ -3835,24 +3838,151 @@ function renderMusicPlayerQueue() {
 
 function syncMusicPlayerVideoShell() {
   const shell = $("#music-player-video-shell");
-  const frame = $("#music-player-video-frame");
   const toggle = $("#music-player-video-toggle");
-  if (!shell || !frame) return;
-  const embedUrl = String(state.playerCurrent?.video_embed_url || "").trim();
-  const hasVideo = !!embedUrl;
+  if (!shell) return;
+  // YT items: shell is always "available"; visibility toggled by user or section.
+  const hasVideo = activePlayerIsYT() || !!String(state.playerCurrent?.video_embed_url || "").trim();
   const shouldShow = hasVideo && !!state.playerVideoVisible && state.musicSection === "player";
   if (toggle) {
     toggle.classList.toggle("hidden", !hasVideo);
-    toggle.textContent = shouldShow ? "Hide Video" : "Show Video";
+    toggle.textContent = state.playerVideoVisible ? "Hide Video" : "Show Video";
   }
   shell.classList.toggle("hidden", !shouldShow);
-  if (shouldShow) {
-    if (frame.src !== embedUrl) {
-      frame.src = embedUrl;
-    }
-  } else if (frame.src) {
-    frame.src = "";
+  // For non-YT embed-url items (legacy path) keep the frame src in sync.
+  if (!activePlayerIsYT()) {
+    const frame = $("#music-player-video-frame");
+    if (!frame) return;
+    const embedUrl = String(state.playerCurrent?.video_embed_url || "").trim();
+    if (shouldShow && embedUrl && frame.src !== embedUrl) frame.src = embedUrl;
+    else if (!shouldShow && frame.src && !activePlayerIsYT()) frame.src = "";
   }
+}
+
+// ── YouTube IFrame player abstraction ────────────────────────────────────────
+// Load the IFrame API once; sets state.playerYTReady when the API is callable.
+function ensureYouTubeAPILoaded() {
+  if (window.YT && window.YT.Player) {
+    state.playerYTReady = true;
+    return;
+  }
+  if (document.getElementById("yt-iframe-api-script")) return;
+  window.onYouTubeIframeAPIReady = () => {
+    state.playerYTReady = true;
+  };
+  const script = document.createElement("script");
+  script.id = "yt-iframe-api-script";
+  script.src = "https://www.youtube.com/iframe_api";
+  document.head.appendChild(script);
+}
+
+function _stopYTProgressTimer() {
+  if (state.playerYTProgressTimer) {
+    clearInterval(state.playerYTProgressTimer);
+    state.playerYTProgressTimer = null;
+  }
+}
+
+function _startYTProgressTimer() {
+  _stopYTProgressTimer();
+  state.playerYTProgressTimer = setInterval(() => {
+    updateMusicPlayerTransportUI();
+    syncBottomPlayerShell();
+  }, 500);
+}
+
+// Destroy any existing YT.Player and reset the iframe to a clean state.
+function destroyYTPlayer() {
+  _stopYTProgressTimer();
+  if (state.playerYT) {
+    try { state.playerYT.destroy(); } catch (_e) {}
+    state.playerYT = null;
+  }
+  const frame = $("#music-player-video-frame");
+  if (frame) frame.src = "";
+}
+
+// Create a YT.Player for the given videoId. Resolves when the player is ready.
+function createYTPlayer(videoId) {
+  return new Promise((resolve, reject) => {
+    if (!state.playerYTReady || !window.YT || !window.YT.Player) {
+      // API not loaded yet — wait up to 8 seconds
+      let waited = 0;
+      const poll = setInterval(() => {
+        waited += 200;
+        if (window.YT && window.YT.Player && state.playerYTReady) {
+          clearInterval(poll);
+          _doCreate();
+        } else if (waited >= 8000) {
+          clearInterval(poll);
+          reject(new Error("YouTube IFrame API failed to load"));
+        }
+      }, 200);
+    } else {
+      _doCreate();
+    }
+    function _doCreate() {
+      destroyYTPlayer();
+      const frame = $("#music-player-video-frame");
+      if (!frame) { reject(new Error("video frame element missing")); return; }
+      // Give the iframe a stable id the YT API needs
+      frame.id = "music-player-video-frame";
+      state.playerYT = new window.YT.Player("music-player-video-frame", {
+        videoId,
+        playerVars: { autoplay: 1, rel: 0, modestbranding: 1, enablejsapi: 1 },
+        events: {
+          onReady: (event) => {
+            event.target.playVideo();
+            _startYTProgressTimer();
+            resolve(event.target);
+          },
+          onStateChange: (event) => {
+            const S = window.YT.PlayerState;
+            if (event.data === S.ENDED) {
+              playNextPlayerItem({ autoAdvance: true }).catch(() => {});
+            }
+            updateMusicPlayerTransportUI();
+            syncBottomPlayerShell();
+          },
+          onError: (event) => {
+            console.warn("[YT] playback error", event.data);
+            // skip to next on unplayable video
+            playNextPlayerItem({ autoAdvance: true }).catch(() => {});
+          },
+        },
+      });
+    }
+  });
+}
+
+// Active-player helpers — route to YT.Player or <audio> transparently.
+function activePlayerIsYT() { return !!state.playerYT; }
+
+function activePlayerPlay() {
+  if (activePlayerIsYT()) { try { state.playerYT.playVideo(); } catch (_e) {} return; }
+  const a = $("#music-player-audio"); if (a) a.play().catch(() => {});
+}
+function activePlayerPause() {
+  if (activePlayerIsYT()) { try { state.playerYT.pauseVideo(); } catch (_e) {} return; }
+  const a = $("#music-player-audio"); if (a) a.pause();
+}
+function activePlayerIsPaused() {
+  if (activePlayerIsYT()) {
+    try { return state.playerYT.getPlayerState() !== window.YT?.PlayerState?.PLAYING; } catch (_e) {}
+    return true;
+  }
+  const a = $("#music-player-audio"); return !a || a.paused;
+}
+function activePlayerCurrentTime() {
+  if (activePlayerIsYT()) { try { return state.playerYT.getCurrentTime() || 0; } catch (_e) {} return 0; }
+  const a = $("#music-player-audio"); return Number(a?.currentTime) || 0;
+}
+function activePlayerDuration() {
+  if (activePlayerIsYT()) { try { const d = state.playerYT.getDuration(); return d > 0 ? d : 0; } catch (_e) {} return 0; }
+  const a = $("#music-player-audio"); return Number.isFinite(a?.duration) ? a.duration : 0;
+}
+function activePlayerSeek(seconds) {
+  if (activePlayerIsYT()) { try { state.playerYT.seekTo(seconds, true); } catch (_e) {} return; }
+  const a = $("#music-player-audio"); if (a) a.currentTime = seconds;
 }
 
 function stopStationPrimeTimer() {
@@ -3962,7 +4092,6 @@ function formatPlayerTime(seconds) {
 }
 
 function updateMusicPlayerTransportUI() {
-  const audio = $("#music-player-audio");
   const playPause = $("#music-player-playpause");
   const shuffle = $("#music-player-shuffle");
   const repeat = $("#music-player-repeat");
@@ -3970,8 +4099,7 @@ function updateMusicPlayerTransportUI() {
   const currentTimeEl = $("#music-player-current-time");
   const durationEl = $("#music-player-duration");
   if (playPause) {
-    const isPlaying = !!audio && !audio.paused && !audio.ended && !!audio.src;
-    playPause.textContent = isPlaying ? "Pause" : "Play";
+    playPause.textContent = activePlayerIsPaused() ? "Play" : "Pause";
   }
   if (shuffle) {
     shuffle.classList.toggle("active", !!state.playerShuffle);
@@ -3983,14 +4111,12 @@ function updateMusicPlayerTransportUI() {
     repeat.classList.toggle("active", mode !== "off");
     repeat.setAttribute("aria-pressed", mode !== "off" ? "true" : "false");
   }
-  if (audio) {
-    const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
-    const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-    if (currentTimeEl) currentTimeEl.textContent = formatPlayerTime(currentTime);
-    if (durationEl) durationEl.textContent = formatPlayerTime(duration);
-    if (progress && !state.playerProgressDragging) {
-      progress.value = duration > 0 ? String(Math.round((currentTime / duration) * 1000)) : "0";
-    }
+  const duration = activePlayerDuration();
+  const currentTime = activePlayerCurrentTime();
+  if (currentTimeEl) currentTimeEl.textContent = formatPlayerTime(currentTime);
+  if (durationEl) durationEl.textContent = formatPlayerTime(duration);
+  if (progress && !state.playerProgressDragging) {
+    progress.value = duration > 0 ? String(Math.round((currentTime / duration) * 1000)) : "0";
   }
 }
 
@@ -3999,7 +4125,12 @@ function getCurrentQueueIndex() {
     return -1;
   }
   const currentUrl = String(state.playerCurrent.stream_url || "");
-  return state.playerQueue.findIndex((item) => String(item?.stream_url || "") === currentUrl);
+  const currentVideoId = String(state.playerCurrent.video_id || "");
+  return state.playerQueue.findIndex((item) => {
+    if (currentVideoId && String(item?.video_id || "") === currentVideoId) return true;
+    if (currentUrl && String(item?.stream_url || "") === currentUrl) return true;
+    return false;
+  });
 }
 
 function setPlayerQueue(items = [], { preserveCurrent = false } = {}) {
@@ -4017,7 +4148,52 @@ async function playPlayerQueueIndex(index) {
   if (!Array.isArray(state.playerQueue) || !state.playerQueue.length) return;
   const targetIndex = Number.parseInt(String(index), 10);
   if (!Number.isFinite(targetIndex) || targetIndex < 0 || targetIndex >= state.playerQueue.length) return;
-  await playMusicPlayerItem(state.playerQueue[targetIndex]);
+  const item = state.playerQueue[targetIndex];
+  if (!item.stream_url && String(item.kind || "") === "unresolved" && item.recording_mbid) {
+    // Resolve the stream URL before playing — update queue in place so the UI reflects it.
+    const resolved = await resolveRecordingStreamUrl(item.recording_mbid, {
+      artist: item.artist,
+      track: item.title,
+      album: item.album,
+      release_group_mbid: item.mb_release_group_id,
+    });
+    if (resolved?.stream_url || resolved?.video_id) {
+      const readyItem = { ...item, stream_url: resolved.stream_url || null, video_id: resolved.video_id || null, kind: resolved.video_id ? "youtube" : "cached", source: resolved.source, resolved_via: resolved.resolved_via };
+      state.playerQueue[targetIndex] = readyItem;
+      await playMusicPlayerItem(readyItem);
+      // Pre-resolve the next unresolved item in the background so it's ready when needed.
+      _prefetchNextUnresolved(targetIndex + 1);
+      return;
+    }
+    // Could not resolve — skip to next track.
+    const nextIndex = targetIndex + 1;
+    if (nextIndex < state.playerQueue.length) {
+      await playPlayerQueueIndex(nextIndex);
+    }
+    return;
+  }
+  await playMusicPlayerItem(item);
+  _prefetchNextUnresolved(targetIndex + 1);
+}
+
+// Background-resolve the next unresolved queue item so playback can start instantly.
+function _prefetchNextUnresolved(fromIndex) {
+  const queue = Array.isArray(state.playerQueue) ? state.playerQueue : [];
+  for (let i = fromIndex; i < Math.min(fromIndex + 3, queue.length); i++) {
+    const item = queue[i];
+    if (!item?.stream_url && String(item?.kind || "") === "unresolved" && item?.recording_mbid) {
+      const capturedIndex = i;
+      resolveRecordingStreamUrl(item.recording_mbid, {
+        artist: item.artist, track: item.title, album: item.album, release_group_mbid: item.mb_release_group_id,
+      }).then((resolved) => {
+        if (!resolved?.stream_url && !resolved?.video_id) return;
+        if (Array.isArray(state.playerQueue) && state.playerQueue[capturedIndex]?.recording_mbid === item.recording_mbid) {
+          state.playerQueue[capturedIndex] = { ...state.playerQueue[capturedIndex], stream_url: resolved.stream_url || null, video_id: resolved.video_id || null, kind: resolved.video_id ? "youtube" : "cached", source: resolved.source };
+        }
+      }).catch(() => {});
+      break; // one at a time
+    }
+  }
 }
 
 async function playNextPlayerItem({ autoAdvance = false } = {}) {
@@ -4211,51 +4387,76 @@ async function loadMusicPlayerView() {
 }
 
 async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
-  const audio = $("#music-player-audio");
-  if (!audio || !payload?.stream_url) return;
+  if (!payload) return;
   if (!preserveStation) {
     clearActiveStationPlayback();
   }
-  audio.src = payload.stream_url;
-  try {
-    await audio.play();
-  } catch (_err) {
-    // user gesture/browser policy
+
+  const videoId = String(payload.video_id || "").trim();
+  const isYouTube = !!videoId;
+
+  if (isYouTube) {
+    // Stop any audio playback and hand off to YT IFrame player.
+    const audio = $("#music-player-audio");
+    if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
+    ensureYouTubeAPILoaded();
+    try {
+      await createYTPlayer(videoId);
+    } catch (err) {
+      console.warn("[YT] createYTPlayer failed:", err);
+      return;
+    }
+    state.playerCurrentHasVideo = true;
+    // Auto-show video when in the main player view; otherwise keep minimized.
+    if (state.musicSection === "player") {
+      state.playerVideoVisible = true;
+    }
+  } else {
+    // Local file / direct stream — use <audio>.
+    const audio = $("#music-player-audio");
+    if (!audio || !payload.stream_url) return;
+    destroyYTPlayer();
+    audio.src = payload.stream_url;
+    try { await audio.play(); } catch (_err) {}
+    state.playerCurrentHasVideo = !!String(payload.video_embed_url || "").trim();
+    if (!state.playerCurrentHasVideo) state.playerVideoVisible = false;
   }
+
   state.playerCurrent = payload;
-  $("#music-player-now-title").textContent = payload.title || "Now Playing";
-  $("#music-player-now-meta").textContent = [payload.artist, payload.album, payload.kind].filter(Boolean).join(" • ") || "Playing";
+  const titleEl = $("#music-player-now-title");
+  const metaEl = $("#music-player-now-meta");
   const contextEl = $("#music-player-now-context");
-  if (contextEl) {
-    const kindLabel = payload.kind === "local" ? "Playing from your library" : payload.kind === "cached" ? "Streaming from cached match" : "Playing from Retreivr";
-    contextEl.textContent = [kindLabel, payload.source || payload.provider || ""].filter(Boolean).join(" • ");
-  }
   const nowArt = $("#music-player-now-art");
-  if (nowArt) {
-    nowArt.src = getMusicLibraryArtworkUrl(payload);
+  if (titleEl) titleEl.textContent = payload.title || "Now Playing";
+  if (metaEl) metaEl.textContent = [payload.artist, payload.album].filter(Boolean).join(" • ") || "Playing";
+  if (contextEl) {
+    const kindLabel = isYouTube ? "Streaming via YouTube"
+      : payload.kind === "local" ? "Playing from your library"
+      : "Streaming from cached match";
+    contextEl.textContent = [kindLabel, payload.source || ""].filter(Boolean).join(" • ");
   }
-  state.playerCurrentHasVideo = !!String(payload.video_embed_url || "").trim();
-  if (!state.playerCurrentHasVideo) {
-    state.playerVideoVisible = false;
-  }
+  if (nowArt) nowArt.src = getMusicLibraryArtworkUrl(payload);
+
   syncBottomPlayerShell();
   updateMusicPlayerTransportUI();
   syncMusicPlayerVideoShell();
-  await fetchJson("/api/player/history", {
+
+  fetchJson("/api/player/history", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      item_id: payload.id || payload.local_path || payload.stream_url,
+      item_id: payload.id || payload.local_path || payload.stream_url || `yt:${videoId}`,
       title: payload.title,
       artist: payload.artist,
-      stream_url: payload.stream_url,
+      stream_url: payload.stream_url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null),
       local_path: payload.local_path,
-      source_kind: payload.kind || "local",
+      source_kind: isYouTube ? "youtube" : (payload.kind || "local"),
     }),
   }).catch(() => {});
 }
 
 function clearMusicPlayerCurrentState() {
+  destroyYTPlayer();
   const audio = $("#music-player-audio");
   if (audio) {
     audio.pause();
@@ -11205,9 +11406,9 @@ function createMusicLandingTrackRow(item) {
 
 function renderMusicLanding() {
   const toolbarSlot = getMusicToolbarSlot();
-  if (toolbarSlot) {
-    toolbarSlot.innerHTML = "";
-  }
+  if (toolbarSlot) toolbarSlot.innerHTML = "";
+  const navSlot = getMusicNavSlot();
+  if (navSlot) navSlot.innerHTML = "";
   const container = document.getElementById("music-results-container");
   if (!container) {
     return;
@@ -11714,10 +11915,65 @@ function buildPreviewStreamUrl(sourceUrl) {
   return `/api/music/preview/stream?url=${encodeURIComponent(raw)}`;
 }
 
+// Resolve a recording MBID to a stream URL using the local resolution index, then
+// the preview/YouTube endpoint as a fallback. Returns a stream_url string or null.
+// Extract YouTube video ID from a watch URL or youtu.be shortlink.
+function extractYouTubeVideoId(url) {
+  const s = String(url || "").trim();
+  if (!s) return null;
+  try {
+    const u = new URL(s);
+    if (u.hostname === "youtu.be") return u.pathname.slice(1) || null;
+    if (u.hostname.includes("youtube.com")) return u.searchParams.get("v") || null;
+  } catch (_e) {}
+  return null;
+}
+
+// Resolve a recording MBID to stream metadata.
+// Returns { stream_url, video_id, source, resolved_via } or null.
+// video_id is populated for YouTube sources — playMusicPlayerItem uses it to trigger
+// the YT IFrame player path instead of the <audio> element.
+async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
+  // 1. Resolution index (local DB — fast, no external calls required)
+  if (recordingMbid) {
+    try {
+      const resolution = await fetchJson(`/resolve/recording/${encodeURIComponent(recordingMbid)}`);
+      const selectedUrl = String(resolution?.selection?.selected_url || "").trim();
+      const source = String(resolution?.best_source?.source || "").toLowerCase();
+      if (selectedUrl) {
+        const videoId = extractYouTubeVideoId(selectedUrl);
+        if (videoId) {
+          // YouTube URL — no proxy needed, use IFrame player directly.
+          return { stream_url: selectedUrl, video_id: videoId, source: source || "youtube", resolved_via: "resolution_index" };
+        }
+        const proxied = buildPreviewStreamUrl(selectedUrl);
+        if (proxied) return { stream_url: proxied, video_id: null, source, resolved_via: "resolution_index" };
+      }
+    } catch (_err) {
+      // index miss — fall through
+    }
+  }
+  // 2. Preview endpoint (community cache + YouTube fallback, may take a few seconds)
+  try {
+    const response = await fetchMusicTrackPreview({ recording_mbid: recordingMbid, ...trackMeta });
+    const sourceUrl = String(response?.source_url || "").trim();
+    const videoId = String(response?.video_id || extractYouTubeVideoId(sourceUrl) || "").trim() || null;
+    if (videoId) {
+      return { stream_url: sourceUrl, video_id: videoId, source: String(response?.source || "youtube"), resolved_via: "preview_api" };
+    }
+    const streamUrl = String(response?.stream_url || buildPreviewStreamUrl(sourceUrl) || "").trim();
+    if (streamUrl) return { stream_url: streamUrl, video_id: null, source: String(response?.source || ""), resolved_via: "preview_api" };
+  } catch (_err) {
+    // preview unavailable
+  }
+  return null;
+}
+
 // Resolve a search-result track to a stream and play it in the main player.
-// Checks the local library first; falls back to transport resolution via preview API.
+// Checks the local library first; falls back to the resolution index and preview API.
 async function playMusicSearchResult(result) {
   const recordingMbid = String(result?.recording_mbid || "").trim();
+  // 1. Local library match by MBID
   const localMatch = recordingMbid
     ? (state.playerLibrary || []).find((item) => String(item?.recording_mbid || "") === recordingMbid)
     : null;
@@ -11736,18 +11992,25 @@ async function playMusicSearchResult(result) {
     await playMusicPlayerItem(item);
     return;
   }
-  const response = await fetchMusicTrackPreview(result);
-  const sourceUrl = String(response?.source_url || "").trim();
-  const streamUrl = String(response?.stream_url || buildPreviewStreamUrl(sourceUrl) || "").trim();
-  if (!streamUrl) throw new Error("No playable stream found for this track.");
+  // 2. Resolution index → preview API
+  const resolved = await resolveRecordingStreamUrl(recordingMbid, {
+    artist: result.artist,
+    track: result.track,
+    album: result.album,
+    release_mbid: result.mb_release_id,
+    release_group_mbid: result.mb_release_group_id,
+  });
+  if (!resolved?.stream_url && !resolved?.video_id) throw new Error("No playable stream found. Try downloading the track first.");
   const item = {
     id: `search:${recordingMbid || result.track || "track"}`,
-    title: response?.title || result.track || "Track",
-    artist: response?.artist || result.artist || "",
+    title: result.track || "Track",
+    artist: result.artist || "",
     album: result.album || "",
-    stream_url: streamUrl,
-    kind: "cached",
-    source: response?.source || "",
+    stream_url: resolved.stream_url || null,
+    video_id: resolved.video_id || null,
+    kind: resolved.video_id ? "youtube" : "cached",
+    source: resolved.source,
+    resolved_via: resolved.resolved_via,
     recording_mbid: recordingMbid || null,
     artwork_url: result.artwork_url || null,
     mb_release_group_id: String(result?.mb_release_group_id || "").trim() || null,
@@ -11796,22 +12059,25 @@ async function playMusicAlbumFromSearch(albumItem) {
   setPlayerQueue(queueItems);
   setMusicPlayerView("queue");
   setMusicSection("player");
-  // Play first local item immediately, or resolve the first track
-  const firstLocal = queueItems.find((i) => i.kind === "local" && (i.stream_url || i.local_path));
-  if (firstLocal) {
-    await playMusicPlayerItem(firstLocal);
+  // Play first local item immediately if available; otherwise resolve via index → preview API.
+  const firstLocalIndex = queueItems.findIndex((i) => i.kind === "local" && (i.stream_url || i.local_path));
+  if (firstLocalIndex >= 0) {
+    await playMusicPlayerItem(queueItems[firstLocalIndex]);
+    _prefetchNextUnresolved(firstLocalIndex + 1);
     return;
   }
-  const firstTrack = tracks[0];
-  if (!firstTrack) return;
-  const response = await fetchMusicTrackPreview(firstTrack);
-  const sourceUrl = String(response?.source_url || "").trim();
-  const streamUrl = String(response?.stream_url || buildPreviewStreamUrl(sourceUrl) || "").trim();
-  if (!streamUrl) return;
-  const firstItem = { ...queueItems[0], stream_url: streamUrl, kind: "cached", source: response?.source || "" };
+  // No local files — resolve first unresolved track and start playback.
+  const firstUnresolved = queueItems[0];
+  if (!firstUnresolved?.recording_mbid) return;
+  const resolved = await resolveRecordingStreamUrl(firstUnresolved.recording_mbid, {
+    artist: firstUnresolved.artist, track: firstUnresolved.title, album: albumTitle, release_group_mbid: releaseGroupMbid,
+  });
+  if (!resolved?.stream_url && !resolved?.video_id) return;
+  const firstItem = { ...firstUnresolved, stream_url: resolved.stream_url || null, video_id: resolved.video_id || null, kind: resolved.video_id ? "youtube" : "cached", source: resolved.source };
   queueItems[0] = firstItem;
   setPlayerQueue(queueItems);
   await playMusicPlayerItem(firstItem);
+  _prefetchNextUnresolved(1);
 }
 
 function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeText = "MusicBrainz" } = {}) {
@@ -11978,6 +12244,10 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
   }
 
   setMusicPageNotice("", false);
+
+  // Back button — rendered directly above the results grid so it's always visible.
+  const navSlot = getMusicNavSlot();
+  if (navSlot) navSlot.innerHTML = "";
   if (state.homeMusicViewStack.length) {
     const backButton = document.createElement("button");
     backButton.className = "button ghost small";
@@ -11992,16 +12262,15 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
     const previousView = state.homeMusicViewStack[targetIndex];
     const previousIsLanding = !!previousView?.response?.landing_view;
     const previousHasAlbums = Array.isArray(previousView?.response?.albums) && previousView.response.albums.length > 0;
-    backButton.textContent = previousIsLanding ? "Back to Home" : (previousHasAlbums ? "Back to Albums" : "Back");
+    backButton.textContent = previousIsLanding ? "← Home" : (previousHasAlbums ? "← Albums" : "← Back");
     backButton.addEventListener("click", () => {
       const previous = state.homeMusicViewStack[targetIndex];
-      if (!previous) {
-        return;
-      }
+      if (!previous) return;
       state.homeMusicViewStack = state.homeMusicViewStack.slice(0, targetIndex);
       renderMusicModeResults(previous.response, previous.query, { pushHistory: false });
     });
-    renderMusicResultsControls({ artists: visibleArtists, albums, tracks, backButton });
+    if (navSlot) navSlot.appendChild(backButton);
+    renderMusicResultsControls({ artists: visibleArtists, albums, tracks });
   } else {
     renderMusicResultsControls({ artists: visibleArtists, albums, tracks });
   }
@@ -18401,7 +18670,13 @@ function bindEvents() {
   }
   $$(".music-app-nav").forEach((button) => {
     button.addEventListener("click", () => {
-      setMusicSection(button.dataset.musicSection || "browse");
+      const section = button.dataset.musicSection || "browse";
+      // Clicking Browse always returns to the top-level landing regardless of current state.
+      if (section === "browse") {
+        clearMusicHeaderSearch();
+        return;
+      }
+      setMusicSection(section);
     });
   });
   $$("[data-home-section]").forEach((button) => {
@@ -18416,19 +18691,10 @@ function bindEvents() {
   });
   const musicBottomToggle = $("#music-bottom-player-toggle");
   if (musicBottomToggle) {
-    musicBottomToggle.addEventListener("click", async () => {
-      const audio = $("#music-player-audio");
-      if (!audio) return;
-      if (audio.paused) {
-        try {
-          await audio.play();
-        } catch (_err) {
-          // browser gesture policy
-        }
-      } else {
-        audio.pause();
-      }
+    musicBottomToggle.addEventListener("click", () => {
+      if (activePlayerIsPaused()) activePlayerPlay(); else activePlayerPause();
       syncBottomPlayerShell();
+      updateMusicPlayerTransportUI();
     });
   }
   const musicBottomPrev = $("#music-bottom-player-prev");
@@ -18893,70 +19159,53 @@ function bindEvents() {
       handlePlayerHostClick(event).catch(() => {});
     });
   });
+  // Main transport controls — route through active-player abstraction so the same
+  // buttons work for both local <audio> and YouTube IFrame player.
+  $("#music-player-playpause")?.addEventListener("click", () => {
+    if (activePlayerIsPaused()) activePlayerPlay(); else activePlayerPause();
+    updateMusicPlayerTransportUI();
+    syncBottomPlayerShell();
+  });
+  $("#music-player-prev")?.addEventListener("click", () => { playPreviousPlayerItem().catch(() => {}); });
+  $("#music-player-next")?.addEventListener("click", () => { playNextPlayerItem().catch(() => {}); });
+  $("#music-player-shuffle")?.addEventListener("click", () => { togglePlayerShuffle(); });
+  $("#music-player-repeat")?.addEventListener("click", () => { cyclePlayerRepeatMode(); });
+  $("#music-player-video-toggle")?.addEventListener("click", () => {
+    if (!state.playerCurrentHasVideo) return;
+    state.playerVideoVisible = !state.playerVideoVisible;
+    syncMusicPlayerVideoShell();
+  });
+  $("#music-player-video-hide")?.addEventListener("click", () => {
+    state.playerVideoVisible = false;
+    syncMusicPlayerVideoShell();
+  });
+  const progress = $("#music-player-progress");
+  if (progress) {
+    progress.addEventListener("input", () => {
+      state.playerProgressDragging = true;
+      const duration = activePlayerDuration();
+      const value = Number(progress.value || 0);
+      const targetTime = duration > 0 ? (value / 1000) * duration : 0;
+      const el = $("#music-player-current-time");
+      if (el) el.textContent = formatPlayerTime(targetTime);
+    });
+    progress.addEventListener("change", () => {
+      const duration = activePlayerDuration();
+      const value = Number(progress.value || 0);
+      if (duration > 0) activePlayerSeek((value / 1000) * duration);
+      state.playerProgressDragging = false;
+      updateMusicPlayerTransportUI();
+    });
+  }
+  // <audio> element events — still needed for local-file playback.
   const playerAudio = $("#music-player-audio");
   if (playerAudio) {
-    const playerPlayPause = $("#music-player-playpause");
-    if (playerPlayPause) {
-      playerPlayPause.addEventListener("click", async () => {
-        if (playerAudio.paused) {
-          try {
-            await playerAudio.play();
-          } catch (_err) {
-            // browser gesture policy
-          }
-        } else {
-          playerAudio.pause();
-        }
-        updateMusicPlayerTransportUI();
-        syncBottomPlayerShell();
-      });
-    }
-    $("#music-player-prev")?.addEventListener("click", () => {
-      playPreviousPlayerItem().catch(() => {});
-    });
-    $("#music-player-next")?.addEventListener("click", () => {
-      playNextPlayerItem().catch(() => {});
-    });
-    $("#music-player-shuffle")?.addEventListener("click", () => {
-      togglePlayerShuffle();
-    });
-    $("#music-player-repeat")?.addEventListener("click", () => {
-      cyclePlayerRepeatMode();
-    });
-    $("#music-player-video-toggle")?.addEventListener("click", () => {
-      if (!state.playerCurrentHasVideo) return;
-      state.playerVideoVisible = !state.playerVideoVisible;
-      syncMusicPlayerVideoShell();
-    });
-    $("#music-player-video-hide")?.addEventListener("click", () => {
-      state.playerVideoVisible = false;
-      syncMusicPlayerVideoShell();
-    });
-    const progress = $("#music-player-progress");
-    if (progress) {
-      progress.addEventListener("input", () => {
-        state.playerProgressDragging = true;
-        const duration = Number.isFinite(playerAudio.duration) ? playerAudio.duration : 0;
-        const value = Number(progress.value || 0);
-        const targetTime = duration > 0 ? (value / 1000) * duration : 0;
-        $("#music-player-current-time").textContent = formatPlayerTime(targetTime);
-      });
-      progress.addEventListener("change", () => {
-        const duration = Number.isFinite(playerAudio.duration) ? playerAudio.duration : 0;
-        const value = Number(progress.value || 0);
-        if (duration > 0) {
-          playerAudio.currentTime = (value / 1000) * duration;
-        }
-        state.playerProgressDragging = false;
-        updateMusicPlayerTransportUI();
-      });
-    }
-    playerAudio.addEventListener("timeupdate", () => updateMusicPlayerTransportUI());
-    playerAudio.addEventListener("loadedmetadata", () => updateMusicPlayerTransportUI());
-    playerAudio.addEventListener("play", () => syncBottomPlayerShell());
-    playerAudio.addEventListener("pause", () => syncBottomPlayerShell());
+    playerAudio.addEventListener("timeupdate", () => { if (!activePlayerIsYT()) updateMusicPlayerTransportUI(); });
+    playerAudio.addEventListener("loadedmetadata", () => { if (!activePlayerIsYT()) updateMusicPlayerTransportUI(); });
+    playerAudio.addEventListener("play", () => { if (!activePlayerIsYT()) syncBottomPlayerShell(); });
+    playerAudio.addEventListener("pause", () => { if (!activePlayerIsYT()) syncBottomPlayerShell(); });
     playerAudio.addEventListener("ended", async () => {
-      await playNextPlayerItem({ autoAdvance: true });
+      if (!activePlayerIsYT()) await playNextPlayerItem({ autoAdvance: true });
     });
   }
   const moviesTvInlineTmdbSave = $("#movies-tv-inline-tmdb-save");
@@ -19589,6 +19838,8 @@ async function init() {
 }
 
 window.addEventListener("DOMContentLoaded", init);
+// Pre-load the YouTube IFrame API in the background so it's ready when the user first plays a track.
+window.addEventListener("DOMContentLoaded", () => { ensureYouTubeAPILoaded(); });
 
 // Add Enter key handler for home search input to trigger "Search Only"
 document.addEventListener("DOMContentLoaded", () => {
