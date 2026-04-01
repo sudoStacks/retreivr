@@ -152,24 +152,29 @@ from engine.arr_services import (
     test_sonarr_connection,
 )
 from engine.music_player import (
+    advance_station,
     add_history_entry,
     add_playlist_item,
-    build_station_preview,
     build_station_queue,
+    configure_search_db_path,
     create_playlist,
     create_station,
     delete_history_entry,
     delete_playlist,
     delete_station,
     ensure_music_player_tables,
+    get_station_detail,
     list_history,
     list_cached_matches,
     list_playlists,
     list_stations,
     playlist_items,
+    prime_station,
     reorder_playlist_items,
     scan_local_library,
     remove_playlist_item,
+    start_station,
+    STATION_TOTAL_TARGET,
     summarize_library,
 )
 from engine.stack_setup import (
@@ -3412,6 +3417,7 @@ async def startup():
     app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, startup_cfg)
     logging.info("Search DB path: %s", app.state.search_db_path)
     community_cache.configure_resolution_index_db_path(app.state.search_db_path)
+    configure_search_db_path(app.state.search_db_path)
     try:
         resolution_stats = rebuild_resolution_index_from_dataset(
             db_path=app.state.search_db_path,
@@ -11147,13 +11153,7 @@ async def api_player_stations():
     cfg = _current_loaded_config()
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
-        stations = [
-            {
-                **station,
-                "preview": build_station_preview(conn, cfg, station=station, limit=10),
-            }
-            for station in list_stations(conn)
-        ]
+        stations = [get_station_detail(conn, cfg, station_id=int(station.get("id") or 0), preview_limit=10) for station in list_stations(conn)]
     return safe_json({"stations": stations})
 
 
@@ -11164,9 +11164,12 @@ async def api_player_create_station(payload: dict = Body(...)):
     if seed_type != "favorites" and not seed_value:
         raise HTTPException(status_code=400, detail={"error": "seed_value is required"})
     name = str(payload.get("name") or seed_value).strip() or seed_value
+    station_mode = str(payload.get("station_mode") or "mix").strip().lower() or "mix"
+    seed_identity = payload.get("seed_identity") if isinstance(payload.get("seed_identity"), dict) else None
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
-        station = create_station(conn, name=name, seed_type=seed_type, seed_value=seed_value)
+        station = create_station(conn, name=name, seed_type=seed_type, seed_value=seed_value, station_mode=station_mode, seed_identity=seed_identity)
+        station = get_station_detail(conn, cfg := _current_loaded_config(), station_id=int(station.get("id") or 0), preview_limit=10) or station
     return safe_json({"station": station})
 
 
@@ -11177,13 +11180,65 @@ async def api_player_delete_station(station_id: int):
     return safe_json({"status": "deleted", "station_id": int(station_id)})
 
 
-@app.post("/api/player/stations/{station_id}/queue")
-async def api_player_station_queue(station_id: int, limit: int = Query(25, ge=1, le=100)):
+@app.get("/api/player/stations/{station_id}")
+async def api_player_station_detail(station_id: int, preview_limit: int = Query(10, ge=1, le=24)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        station = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=preview_limit)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+    return safe_json({"station": station})
+
+
+@app.post("/api/player/stations/{station_id}/start")
+async def api_player_station_start(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
     cfg = _current_loaded_config()
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         stations = list_stations(conn)
         station = next((entry for entry in stations if int(entry.get("id") or 0) == int(station_id)), None)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+        payload = start_station(conn, cfg, station=station, queue_target=queue_target)
+        detail = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
+    return safe_json({"station": detail or station, **payload})
+
+
+@app.post("/api/player/stations/{station_id}/next")
+async def api_player_station_next(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        stations = list_stations(conn)
+        station = next((entry for entry in stations if int(entry.get("id") or 0) == int(station_id)), None)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+        payload = advance_station(conn, cfg, station=station, queue_target=queue_target)
+        detail = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
+    return safe_json({"station": detail or station, **payload})
+
+
+@app.post("/api/player/stations/{station_id}/prime")
+async def api_player_station_prime(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        stations = list_stations(conn)
+        station = next((entry for entry in stations if int(entry.get("id") or 0) == int(station_id)), None)
+        if not station:
+            raise HTTPException(status_code=404, detail={"error": "station_not_found"})
+        payload = prime_station(conn, cfg, station=station, queue_target=queue_target)
+        detail = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
+    return safe_json({"station": detail or station, **payload})
+
+
+@app.post("/api/player/stations/{station_id}/queue")
+async def api_player_station_queue(station_id: int, limit: int = Query(25, ge=1, le=100)):
+    cfg = _current_loaded_config()
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        station = get_station_detail(conn, cfg, station_id=int(station_id), preview_limit=10)
         if not station:
             raise HTTPException(status_code=404, detail={"error": "station_not_found"})
         queue = build_station_queue(conn, cfg, station=station, limit=limit)
@@ -11192,7 +11247,7 @@ async def api_player_station_queue(station_id: int, limit: int = Query(25, ge=1,
 
 @app.get("/api/player/community-cache")
 async def api_player_community_cache(limit: int = Query(60, ge=1, le=120)):
-    with sqlite3.connect(app.state.paths.db_path) as conn:
+    with sqlite3.connect(app.state.search_db_path) as conn:
         conn.row_factory = sqlite3.Row
         items = list_cached_matches(conn, limit=limit)
     return safe_json({"items": items})

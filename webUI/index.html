@@ -345,6 +345,15 @@
                       <div id="music-player-now-context" class="meta music-player-now-context">Local-first playback with queue, playlists, and radio.</div>
                     </div>
                   </div>
+                  <div id="music-player-video-shell" class="music-player-video-shell hidden">
+                    <div class="music-player-video-toolbar">
+                      <div class="meta">Video companion</div>
+                      <button id="music-player-video-hide" class="button ghost small" type="button">Hide Video</button>
+                    </div>
+                    <div class="music-player-video-frame-wrap">
+                      <iframe id="music-player-video-frame" src="" title="Music radio video" allow="autoplay; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+                    </div>
+                  </div>
                   <audio id="music-player-audio" class="music-player-audio" preload="metadata"></audio>
                   <div class="music-player-transport">
                     <div class="music-player-transport-controls">
@@ -353,6 +362,7 @@
                       <button id="music-player-playpause" class="button primary small" type="button">Play</button>
                       <button id="music-player-next" class="button ghost small" type="button">Next</button>
                       <button id="music-player-repeat" class="button ghost small music-player-control-toggle" type="button" aria-pressed="false">Repeat: Off</button>
+                      <button id="music-player-video-toggle" class="button ghost small hidden" type="button">Show Video</button>
                     </div>
                     <div class="music-player-progress-row">
                       <span id="music-player-current-time" class="meta music-player-time">0:00</span>
@@ -366,19 +376,30 @@
                 <div id="music-player-library" class="music-player-view hidden"></div>
                 <div id="music-player-playlists" class="music-player-view hidden"></div>
                 <div id="music-player-radio" class="music-player-view hidden">
-                  <div class="group">
-                    <div class="group-title">Stations</div>
-                    <div class="meta">Stations are built from your downloaded library first, then filled with verified community-cache matches when available.</div>
+                  <div class="music-radio-hero">
+                    <div class="music-radio-hero-copy">
+                      <div class="music-radio-hero-title">Radio</div>
+                      <div class="music-radio-hero-sub">Stations play your library first, then pull from verified community matches. Create one below or pick from your existing stations.</div>
+                    </div>
                     <div class="music-player-station-create">
-                      <input id="music-player-station-name" type="text" placeholder="Station name">
-                      <select id="music-player-station-seed-type">
-                        <option value="artist">Artist</option>
-                        <option value="genre">Genre</option>
-                        <option value="album">Album</option>
-                        <option value="favorites">Favorites Mix</option>
-                      </select>
-                      <input id="music-player-station-seed-value" type="text" placeholder="Seed value">
-                      <button id="music-player-create-station" class="button primary" type="button">Create Station</button>
+                      <input id="music-player-station-name" type="text" placeholder="Station name (optional)">
+                      <input id="music-player-station-seed-value" type="text" placeholder="Artist, album, or genre name">
+                      <div class="music-station-create-selects">
+                        <select id="music-player-station-seed-type">
+                          <option value="artist">Artist</option>
+                          <option value="genre">Genre</option>
+                          <option value="album">Album</option>
+                          <option value="favorites">Favorites Mix</option>
+                        </select>
+                        <select id="music-player-station-mode">
+                          <option value="mix">Mix</option>
+                          <option value="essentials">Essentials</option>
+                          <option value="top_hits">Top Hits</option>
+                          <option value="latest">Latest</option>
+                          <option value="deep_cuts">Deep Cuts</option>
+                        </select>
+                        <button id="music-player-create-station" class="button primary" type="button">Create Station</button>
+                      </div>
                     </div>
                   </div>
                   <div id="music-player-stations"></div>

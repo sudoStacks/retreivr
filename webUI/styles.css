@@ -2312,6 +2312,158 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
   margin-top: 0;
 }
 
+.music-home-landing {
+  gap: 14px;
+}
+
+.music-home-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) auto;
+  align-items: end;
+  gap: 18px;
+  padding: 4px 2px 2px;
+}
+
+.music-home-title {
+  margin: 6px 0 0;
+  font-size: clamp(28px, 3vw, 40px);
+  line-height: 1.04;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.music-home-subtitle {
+  margin: 10px 0 0;
+  max-width: 720px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.58;
+}
+
+.music-home-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.music-home-summary-pill {
+  min-width: 148px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+:root[data-theme="light"] .music-home-summary-pill {
+  background: rgba(248, 250, 252, 0.94);
+  border-color: rgba(15, 23, 42, 0.08);
+}
+
+.music-home-summary-value {
+  display: block;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.music-home-summary-label {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.music-home-priority-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+  gap: 14px;
+}
+
+.music-home-module {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.84), rgba(11, 16, 24, 0.94));
+}
+
+:root[data-theme="light"] .music-home-module {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 248, 252, 0.98));
+  border-color: rgba(15, 23, 42, 0.08);
+}
+
+.music-home-module-header,
+.music-home-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.music-home-section-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.music-home-reentry-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.music-home-submodule {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.music-home-submodule-title {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.music-home-search-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.music-home-search-pill {
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.music-home-compact-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 196px), 1fr));
+  gap: 12px;
+}
+
+.music-home-reentry-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.music-home-landing .music-mode-section {
+  gap: 10px;
+}
+
+.music-home-landing .music-mode-section .music-meta-grid {
+  gap: 12px;
+}
+
 .music-browse-controls {
   display: flex;
   justify-content: flex-end;
@@ -3506,6 +3658,23 @@ body.home-page .home-candidate-source-tag {
 }
 
 @media (max-width: 900px) {
+  .music-home-intro {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .music-home-summary {
+    justify-content: flex-start;
+  }
+
+  .music-home-priority-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .music-home-reentry-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .music-discovery-hero {
     grid-template-columns: 1fr;
   }
@@ -3541,6 +3710,20 @@ body.home-page .home-candidate-source-tag {
 }
 
 @media (max-width: 640px) {
+  .music-home-module {
+    padding: 14px;
+  }
+
+  .music-home-section-header,
+  .music-home-module-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .music-home-summary-pill {
+    min-width: calc(50% - 5px);
+  }
+
   .music-discovery-hero {
     padding: 18px;
     gap: 16px;
@@ -3582,6 +3765,14 @@ body.home-page .home-candidate-source-tag {
 }
 
 @media (max-width: 560px) {
+  .music-home-summary-pill {
+    min-width: 100%;
+  }
+
+  .music-home-reentry-grid {
+    grid-template-columns: 1fr;
+  }
+
   .music-discovery-stat {
     min-width: 100%;
   }
@@ -7534,6 +7725,34 @@ body.home-page .home-search-actions {
   align-items: center;
 }
 
+.music-player-video-shell {
+  display: grid;
+  gap: 10px;
+}
+
+.music-player-video-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.music-player-video-frame-wrap {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: #000;
+}
+
+.music-player-video-frame-wrap iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+
 .music-player-now-art {
   width: 220px;
   height: 220px;
@@ -7626,9 +7845,21 @@ body.home-page .home-search-actions {
 
 .music-player-station-create {
   display: grid;
-  grid-template-columns: 1.2fr 180px 1fr auto;
+  grid-template-columns: 1.1fr 170px 190px 1fr auto;
   gap: 10px;
   align-items: center;
+}
+
+.music-player-station-create input,
+.music-player-station-create select,
+.music-player-station-create .button {
+  min-height: 42px;
+  height: 42px;
+}
+
+.music-player-station-create select {
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 .music-player-library-layout {
@@ -7827,6 +8058,12 @@ body.home-page .home-search-actions {
   color: #dbeafe;
 }
 
+.music-status-badge.is-warning {
+  background: rgba(251, 191, 36, 0.1);
+  border-color: rgba(251, 191, 36, 0.26);
+  color: #fde68a;
+}
+
 .music-library-detail-hero {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
@@ -7869,6 +8106,102 @@ body.home-page .home-search-actions {
   min-width: 0;
 }
 
+/* ── Radio hero ─────────────────────────────────────────────────────────── */
+.music-radio-hero {
+  display: grid;
+  gap: 20px;
+  padding: 28px 28px 24px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(248, 113, 113, 0.07) 0%, rgba(2, 6, 23, 0.3) 60%);
+  margin-bottom: 8px;
+}
+
+:root[data-theme="light"] .music-radio-hero {
+  background: linear-gradient(135deg, rgba(248, 113, 113, 0.06) 0%, rgba(255, 255, 255, 0.96) 60%);
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+.music-radio-hero-title {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.music-radio-hero-sub {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  max-width: 52ch;
+}
+
+.music-player-station-create {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.music-player-station-create input {
+  width: 100%;
+}
+
+.music-station-create-selects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.music-station-create-selects select {
+  flex: 1 1 120px;
+  min-width: 100px;
+}
+
+/* ── Station grid cards ─────────────────────────────────────────────────── */
+.music-station-grid {
+  margin-bottom: 8px;
+}
+
+.music-station-grid-card {
+  cursor: default;
+}
+
+.music-station-grid-card.is-active .music-card-thumb-shell {
+  box-shadow: 0 0 0 2px #f87171, 0 4px 20px rgba(248, 113, 113, 0.22);
+}
+
+.music-station-grid-card.is-active .home-candidate-title {
+  color: #fca5a5;
+}
+
+.music-station-active-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.38);
+  pointer-events: none;
+}
+
+/* reuse the pulse dot from before */
+.music-station-playing-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #f87171;
+  animation: music-station-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes music-station-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* legacy list-style station card — kept for any fallback references */
 .music-player-station-card {
   display: grid;
   gap: 10px;
