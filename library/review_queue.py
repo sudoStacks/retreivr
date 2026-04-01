@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import sqlite3
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 
@@ -443,6 +445,63 @@ def _record_review_isrc(item: dict[str, Any], final_path: str) -> None:
         return
 
 
+def _extract_video_id(url: str | None) -> str | None:
+    normalized = str(url or "").strip()
+    if not normalized:
+        return None
+    if "youtube.com" in normalized:
+        match = re.search(r"v=([a-zA-Z0-9_-]{6,})", normalized)
+        if match:
+            return match.group(1)
+    if "youtu.be" in normalized:
+        parsed = urllib.parse.urlparse(normalized)
+        if parsed.path:
+            return parsed.path.lstrip("/").split("/")[0]
+    return None
+
+
+def _backfill_resolution_for_accepted_review(db_path: str, item: dict[str, Any], final_path: str) -> dict[str, Any]:
+    from engine.resolution_api import upsert_local_acquired_mapping
+    from engine.search_engine import resolve_search_db_path
+
+    recording_mbid = str(item.get("recording_mbid") or "").strip()
+    candidate_url = str(item.get("candidate_url") or "").strip()
+    source = str(item.get("source") or "").strip().lower()
+    if not recording_mbid or not candidate_url or not source:
+        return {"status": "skipped", "reason": "missing_mapping_fields"}
+
+    duration_seconds = None
+    duration_ms = _safe_int(item.get("duration_ms"))
+    if duration_ms is not None and duration_ms > 0:
+        duration_seconds = max(1, duration_ms // 1000)
+    bitrate_kbps = _safe_int(item.get("bitrate_kbps"))
+    media_format = str(os.path.splitext(str(final_path or "").strip())[1] or "").lstrip(".").lower() or None
+    source_id = str(item.get("candidate_id") or "").strip() or _extract_video_id(candidate_url)
+    search_db_path = resolve_search_db_path(db_path, config=None)
+
+    result = upsert_local_acquired_mapping(
+        search_db_path,
+        mbid=recording_mbid,
+        source_url=candidate_url,
+        source=source,
+        node_id="review_accept",
+        duration_seconds=duration_seconds,
+        media_format=media_format,
+        bitrate_kbps=bitrate_kbps,
+        file_hash=None,
+        resolution_method="review_accept",
+        source_id=source_id or None,
+        raw_payload={
+            "accepted_from_review": True,
+            "review_parent_job_id": str(item.get("parent_job_id") or "").strip() or None,
+            "review_job_id": str(item.get("job_id") or "").strip() or None,
+            "candidate_id": str(item.get("candidate_id") or "").strip() or None,
+            "final_path": str(final_path or "").strip() or None,
+        },
+    )
+    return result if isinstance(result, dict) else {"status": "updated"}
+
+
 def accept_review_queue_items(db_path: str, item_ids: list[str]) -> dict[str, Any]:
     requested = [str(item_id or "").strip() for item_id in (item_ids or []) if str(item_id or "").strip()]
     if not requested:
@@ -470,6 +529,7 @@ def accept_review_queue_items(db_path: str, item_ids: list[str]) -> dict[str, An
                 _cleanup_empty_review_dirs(original_file_path, quarantine_root)
                 _record_history_for_accepted_review(db_path, item, final_path)
                 _record_review_isrc(item, final_path)
+                _backfill_resolution_for_accepted_review(db_path, item, final_path)
                 review_job_id = str(item.get("job_id") or "").strip()
                 parent_job_id = str(item.get("parent_job_id") or "").strip()
                 candidate_url = str(item.get("candidate_url") or "").strip() or None

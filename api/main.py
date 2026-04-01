@@ -82,7 +82,7 @@ from engine.job_queue import (
     _normalize_audio_format,
     _normalize_format,
 )
-from engine.json_utils import json_sanity_check, safe_json, safe_json_dump
+from engine.json_utils import json_sanity_check, safe_json, safe_json_dump, safe_json_dumps
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
 from engine.musicbrainz_binding import resolve_best_mb_pair, search_artists_by_genre, search_music_metadata
 from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
@@ -610,20 +610,21 @@ def _resolve_music_preview_candidate(
                 )
                 if isinstance(community_record, dict):
                     source = str(community_record.get("source") or "").strip().lower()
-                    video_id = str(community_record.get("video_id") or "").strip()
-                    source_url = _normalize_preview_source_url(
-                        source,
-                        community_record.get("candidate_url"),
-                        video_id,
-                    )
-                    if source and source_url:
-                        return {
-                            "source": source,
-                            "source_url": source_url,
-                            "title": track or "Preview",
-                            "resolved_via": "community_cache",
-                            "video_id": video_id or None,
-                        }
+                    if source in {"youtube", "youtube_music"}:
+                        video_id = str(community_record.get("video_id") or "").strip()
+                        source_url = _normalize_preview_source_url(
+                            source,
+                            community_record.get("candidate_url"),
+                            video_id,
+                        )
+                        if source and source_url:
+                            return {
+                                "source": source,
+                                "source_url": source_url,
+                                "title": track or "Preview",
+                                "resolved_via": "community_cache",
+                                "video_id": video_id or None,
+                            }
             except Exception:
                 logging.debug("music_preview_community_lookup_failed mbid=%s", recording_mbid, exc_info=True)
 
@@ -677,6 +678,8 @@ def _resolve_music_preview_candidate(
         if not isinstance(candidate, dict):
             continue
         source = str(candidate.get("source") or "").strip().lower()
+        if source not in {"youtube", "youtube_music"}:
+            continue
         source_url = _normalize_preview_source_url(
             source,
             candidate.get("url"),
@@ -1482,7 +1485,7 @@ def _get_music_artwork_cache_entry(cache_kind: str, cache_key: str) -> dict[str,
 
 def _set_music_artwork_cache_entry(cache_kind: str, cache_key: str, payload: dict[str, Any]) -> None:
     db_path = app.state.paths.db_path
-    serialized = safe_json_dump(payload if isinstance(payload, dict) else {}, sort_keys=True)
+    serialized = safe_json_dumps(payload if isinstance(payload, dict) else {}, sort_keys=True)
     now_ts = time.time()
     with sqlite3.connect(db_path) as conn:
         _ensure_music_artwork_cache_table(conn)
@@ -3423,7 +3426,7 @@ async def startup():
             db_path=app.state.search_db_path,
             dataset_root=str(DATA_DIR / "community_cache_dataset"),
         )
-        logging.info("Resolution index ready: %s", safe_json_dump(resolution_stats))
+        logging.info("Resolution index ready: %s", safe_json_dumps(resolution_stats))
     except Exception:
         logging.exception("Resolution index rebuild failed")
     app.state.search_service = SearchResolutionService(
@@ -9310,10 +9313,43 @@ def music_preview(data: dict = Body(...)):
         "source_url": source_url,
         "title": title,
         "resolved_via": str(preview.get("resolved_via") or "").strip() or None,
+        "video_id": str(preview.get("video_id") or extract_video_id(source_url) or "").strip() or None,
     }
     if media_mode != "music_video":
         response["stream_url"] = f"/api/music/preview/stream?url={quote(source_url, safe='')}"
     return response
+
+
+@app.post("/api/music/runtime-resolution")
+def music_runtime_resolution(data: dict = Body(...)):
+    payload = data if isinstance(data, dict) else {}
+    recording_mbid = str(payload.get("recording_mbid") or "").strip().lower()
+    source = str(payload.get("source") or "").strip().lower()
+    source_url = str(payload.get("source_url") or "").strip()
+    if not recording_mbid or not source_url or source not in {"youtube", "youtube_music"}:
+        raise HTTPException(status_code=400, detail="recording_mbid, source_url, and youtube-family source required")
+    source_id = str(payload.get("source_id") or payload.get("video_id") or extract_video_id(source_url) or "").strip() or None
+    raw_payload = payload.get("raw_payload") if isinstance(payload.get("raw_payload"), dict) else {}
+    if not raw_payload:
+        raw_payload = {
+            "artist": str(payload.get("artist") or "").strip() or None,
+            "track": str(payload.get("track") or "").strip() or None,
+            "album": str(payload.get("album") or "").strip() or None,
+            "video_id": source_id,
+            "source": source,
+            "resolved_via": str(payload.get("resolved_via") or "").strip() or None,
+        }
+    result = upsert_local_acquired_mapping(
+        app.state.search_db_path,
+        mbid=recording_mbid,
+        source_url=source_url,
+        source=source,
+        node_id="runtime_playback",
+        resolution_method="runtime_playback",
+        source_id=source_id,
+        raw_payload=raw_payload,
+    )
+    return safe_json({"status": "ok", "result": result})
 
 
 @app.get("/api/music/preview/stream")

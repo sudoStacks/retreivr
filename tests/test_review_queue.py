@@ -179,7 +179,14 @@ def test_accept_review_queue_item_moves_file_and_promotes_parent_job(tmp_path: P
     )
     review_queue.record_completed_review_item(db_path, review_job, str(file_path), meta={"title": "Song", "duration_sec": 201})
 
-    result = review_queue.accept_review_queue_items(db_path, ["review:rec-1:cand-1"])
+    recorded_backfill: list[tuple[str, dict, str]] = []
+    original_backfill = review_queue._backfill_resolution_for_accepted_review
+    review_queue._backfill_resolution_for_accepted_review = lambda path, item, final_path: recorded_backfill.append((path, dict(item), str(final_path))) or {"status": "updated"}
+
+    try:
+        result = review_queue.accept_review_queue_items(db_path, ["review:rec-1:cand-1"])
+    finally:
+        review_queue._backfill_resolution_for_accepted_review = original_backfill
     assert result["accepted"] == 1
     accepted_item = review_queue.get_review_queue_item(db_path, "review:rec-1:cand-1")
     assert accepted_item is not None
@@ -190,6 +197,10 @@ def test_accept_review_queue_item_moves_file_and_promotes_parent_job(tmp_path: P
     assert not file_path.exists()
     assert not (quarantine_root / "Artist" / "Album (2024)").exists()
     assert not (quarantine_root / "Artist").exists()
+    assert len(recorded_backfill) == 1
+    assert recorded_backfill[0][0] == db_path
+    assert recorded_backfill[0][1]["recording_mbid"] == "rec-1"
+    assert recorded_backfill[0][2] == str(final_path)
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

@@ -12,6 +12,11 @@ from typing import Any
 
 from engine.musicbrainz_binding import search_artists_by_genre
 
+try:
+    from mutagen import File as MutagenFile
+except Exception:  # pragma: no cover - optional dependency in some environments
+    MutagenFile = None
+
 
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".aac", ".ogg", ".opus", ".wav", ".alac"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -164,6 +169,68 @@ def _find_album_art(album_dir: Path, cache: dict[str, str | None]) -> str | None
     return found
 
 
+def _first_music_tag(tags: Any, *keys: str) -> str:
+    if not tags:
+        return ""
+    for key in keys:
+        try:
+            value = tags.get(key)
+        except Exception:
+            value = None
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    return text
+            continue
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _read_local_music_tags(path: Path) -> dict[str, Any]:
+    if MutagenFile is None:
+        return {}
+    try:
+        audio = MutagenFile(str(path), easy=False)
+    except Exception:
+        return {}
+    if audio is None:
+        return {}
+    tags = getattr(audio, "tags", None)
+    if not tags:
+        return {}
+    return {
+        "title": _first_music_tag(tags, "TIT2", "\xa9nam", "title"),
+        "artist": _first_music_tag(tags, "TPE1", "\xa9ART", "artist"),
+        "album": _first_music_tag(tags, "TALB", "\xa9alb", "album"),
+        "album_artist": _first_music_tag(tags, "TPE2", "aART", "albumartist", "album_artist"),
+        "recording_mbid": _first_music_tag(
+            tags,
+            "TXXX:MBID",
+            "----:com.apple.iTunes:MBID",
+            "musicbrainz_trackid",
+            "musicbrainz_recordingid",
+            "mbid",
+        ),
+        "mb_release_id": _first_music_tag(
+            tags,
+            "TXXX:MUSICBRAINZ_RELEASEID",
+            "----:com.apple.iTunes:MUSICBRAINZ_RELEASEID",
+            "musicbrainz_releaseid",
+        ),
+        "mb_release_group_id": _first_music_tag(
+            tags,
+            "TXXX:MUSICBRAINZ_RELEASEGROUPID",
+            "----:com.apple.iTunes:MUSICBRAINZ_RELEASEGROUPID",
+            "musicbrainz_releasegroupid",
+        ),
+    }
+
+
 def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -181,9 +248,14 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                 if resolved in seen:
                     continue
                 seen.add(resolved)
-                artist = path.parent.parent.name if len(path.parts) >= 3 else ""
-                album = path.parent.name
-                title = path.stem
+                tag_data = _read_local_music_tags(path)
+                artist = (
+                    str(tag_data.get("album_artist") or "").strip()
+                    or str(tag_data.get("artist") or "").strip()
+                    or (path.parent.parent.name if len(path.parts) >= 3 else "")
+                )
+                album = str(tag_data.get("album") or "").strip() or path.parent.name
+                title = str(tag_data.get("title") or "").strip() or path.stem
                 stat = path.stat()
                 artwork_local_path = _find_album_art(path.parent, artwork_cache)
                 items.append(
@@ -202,6 +274,9 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                         "file_ext": path.suffix.lower(),
                         "media_type": str(mimetypes.guess_type(resolved)[0] or "").strip() or None,
                         "artwork_local_path": artwork_local_path,
+                        "recording_mbid": str(tag_data.get("recording_mbid") or "").strip() or None,
+                        "mb_release_id": str(tag_data.get("mb_release_id") or "").strip() or None,
+                        "mb_release_group_id": str(tag_data.get("mb_release_group_id") or "").strip() or None,
                     }
                 )
         except Exception:
@@ -787,13 +862,18 @@ def _build_cached_candidates(conn: sqlite3.Connection, *, station: dict[str, Any
         seen_urls.add(url)
         payload = _safe_json_loads(row.get("source_payload_json"), default={})
         source = str(row.get("source") or payload.get("source") or "").strip().lower() or "cached"
+        if source not in YOUTUBE_SOURCE_KEYS:
+            continue
+        video_id = _extract_youtube_video_id(url)
+        if not video_id:
+            continue
         candidate = {
             "id": f"cached:{row.get('recording_mbid') or ''}:{url}",
             "title": str(payload.get("title") or payload.get("track") or row.get("recording_mbid") or "Cached Match").strip() or "Cached Match",
             "artist": str(payload.get("artist") or payload.get("uploader") or "").strip(),
             "album": str(payload.get("album") or "").strip(),
-            "kind": "cached",
-            "source_kind": "cached",
+            "kind": "youtube",
+            "source_kind": "youtube",
             "source": source,
             "source_url": url,
             "recording_mbid": str(row.get("recording_mbid") or "").strip() or None,
@@ -801,10 +881,11 @@ def _build_cached_candidates(conn: sqlite3.Connection, *, station: dict[str, Any
             "verification_count": _safe_int(row.get("verification_count"), 0),
             "artwork_url": str(payload.get("thumbnail") or payload.get("thumbnail_url") or "").strip() or None,
             "release_date": str(payload.get("release_date") or payload.get("release_year") or "").strip() or None,
-            "stream_url": f"/api/music/preview/stream?url={quote(url, safe='')}",
-            "playback_kind": "audio",
+            "stream_url": url,
+            "video_id": video_id,
+            "playback_kind": "youtube",
             "ready": True,
-            "video_embed_url": _build_youtube_embed_url(url) if source in YOUTUBE_SOURCE_KEYS else None,
+            "video_embed_url": _build_youtube_embed_url(url),
         }
         score = _score_station_candidate(candidate, station=station, context=context, artist_terms=artist_terms, free_terms=free_terms, local_artist_counts=local_artist_counts, favorite_artist_keys=favorite_artist_keys)
         if score <= 0:
@@ -1168,18 +1249,23 @@ def list_cached_matches(conn: sqlite3.Connection, *, limit: int = 60) -> list[di
         album = str(payload.get("album") or "").strip()
         title = str(payload.get("title") or payload.get("track") or row["recording_mbid"] or "Cached Match").strip() or "Cached Match"
         artwork_url = str(payload.get("thumbnail") or payload.get("thumbnail_url") or "").strip()
+        source = str(row["source"] or "").strip().lower()
+        if source not in YOUTUBE_SOURCE_KEYS:
+            continue
+        video_id = _extract_youtube_video_id(url)
+        if not video_id:
+            continue
         items.append(
             {
                 "id": f"cached:{row['recording_mbid']}:{url}",
                 "title": title,
                 "artist": artist,
                 "album": album,
-                "kind": "cached",
-                # Proxy through the preview stream endpoint so browser audio playback works for
-                # all source types (YouTube, etc.) the same way station queue items do.
-                "stream_url": f"/api/music/preview/stream?url={quote(url, safe='')}",
+                "kind": "youtube",
+                "stream_url": url,
+                "video_id": video_id,
                 "recording_mbid": str(row["recording_mbid"] or ""),
-                "source": str(row["source"] or ""),
+                "source": source,
                 "verification_status": str(row["verification_status"] or ""),
                 "verification_count": int(row["verification_count"] or 0),
                 "updated_at": str(row["updated_at"] or ""),
