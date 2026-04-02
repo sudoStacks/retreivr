@@ -1895,7 +1895,7 @@ function syncBottomPlayerShell() {
   if (!shell || !titleEl || !metaEl || !artEl || !toggleButton) return;
   const current = state.playerCurrent || {};
   const audioHasSource = !!(audio && (audio.currentSrc || audio.src));
-  const hasTrack = !!(current.stream_url && audioHasSource) || !!(current.video_id && activePlayerIsYT());
+  const hasTrack = !!(current.stream_url && audioHasSource) || !!(current.video_id && activePlayerIsYT()) || !!String(current.video_embed_url || "").trim();
   const shouldHide = !hasTrack || (state.currentPage === "music" && state.musicSection === "player");
   shell.classList.toggle("hidden", shouldHide);
   titleEl.textContent = String(current.title || "Nothing playing");
@@ -1953,6 +1953,17 @@ function openMusicPlayerModal() {
     modal.classList.remove("hidden");
     state.musicPlayerExpanded = true;
   }
+}
+
+function openMusicPlayerScreen({ showVideo = false } = {}) {
+  setPage("music");
+  setMusicSection("player");
+  setMusicPlayerView("queue");
+  if (showVideo && state.playerCurrentHasVideo) {
+    state.playerVideoVisible = true;
+  }
+  syncMusicPlayerVideoShell();
+  syncBottomPlayerShell();
 }
 
 function closeMusicPlayerModal() {
@@ -4138,7 +4149,11 @@ function normalizePlayableItem(item = {}) {
     artwork_url: String(item.artwork_url || "").trim() || null,
   };
   normalized.video_id = String(item.video_id || extractYouTubeVideoId(normalized.stream_url) || "").trim() || null;
+  normalized.video_embed_url = String(item.video_embed_url || "").trim() || null;
   normalized.kind = String(item.kind || item.source_kind || (normalized.local_path ? "local" : (normalized.video_id ? "youtube" : "unresolved"))).trim() || "unresolved";
+  if (!normalized.video_embed_url && normalized.video_id) {
+    normalized.video_embed_url = buildYouTubePlayerEmbedUrl(normalized.video_id);
+  }
   return normalized;
 }
 
@@ -4441,6 +4456,7 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
   if (!payload) return;
   payload = normalizePlayableItem(payload);
   if (!payload) return;
+  const messageEl = $("#music-player-message");
   if (!preserveStation) {
     clearActiveStationPlayback();
   }
@@ -4466,6 +4482,12 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
   const videoId = String(payload.video_id || extractYouTubeVideoId(payload.stream_url) || "").trim();
   const isYouTube = !!videoId;
 
+  state.playerCurrent = payload;
+  state.playerCurrentHasVideo = !!(isYouTube || String(payload.video_embed_url || "").trim());
+  if (state.musicSection === "player" && state.playerCurrentHasVideo) {
+    state.playerVideoVisible = true;
+  }
+
   if (isYouTube) {
     // Stop any audio playback and hand off to YT IFrame player.
     const audio = $("#music-player-audio");
@@ -4475,12 +4497,12 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
       await createYTPlayer(videoId);
     } catch (err) {
       console.warn("[YT] createYTPlayer failed:", err);
-      return;
-    }
-    state.playerCurrentHasVideo = true;
-    // Auto-show video when in the main player view; otherwise keep minimized.
-    if (state.musicSection === "player") {
-      state.playerVideoVisible = true;
+      payload = normalizePlayableItem({ ...payload, video_embed_url: payload.video_embed_url || buildYouTubePlayerEmbedUrl(videoId) });
+      state.playerCurrent = payload;
+      state.playerCurrentHasVideo = !!String(payload.video_embed_url || "").trim();
+      if (messageEl) {
+        setNotice(messageEl, "YouTube API transport failed; falling back to direct embed.", true);
+      }
     }
   } else {
     // Local file / direct stream — use <audio>.
@@ -4492,8 +4514,6 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
     state.playerCurrentHasVideo = !!String(payload.video_embed_url || "").trim();
     if (!state.playerCurrentHasVideo) state.playerVideoVisible = false;
   }
-
-  state.playerCurrent = payload;
   const titleEl = $("#music-player-now-title");
   const metaEl = $("#music-player-now-meta");
   const contextEl = $("#music-player-now-context");
@@ -12025,6 +12045,12 @@ function buildLocalPlayerStreamUrl(localPath) {
   return `/api/player/stream/local?path=${encodeURIComponent(raw)}`;
 }
 
+function buildYouTubePlayerEmbedUrl(videoId) {
+  const normalized = String(videoId || "").trim();
+  if (!normalized) return null;
+  return `https://www.youtube.com/embed/${encodeURIComponent(normalized)}?autoplay=1&rel=0&modestbranding=1&playsinline=1`;
+}
+
 function isYouTubeFamilySource(source, url = "") {
   const sourceKey = String(source || "").trim().toLowerCase();
   if (sourceKey === "youtube" || sourceKey === "youtube_music") return true;
@@ -12134,7 +12160,6 @@ async function playMusicSearchResult(result) {
     clearActiveStationPlayback();
     setPlayerQueue([item]);
     setMusicPlayerView("queue");
-    setMusicSection("player");
     await playMusicPlayerItem(item);
     return;
   }
@@ -12164,7 +12189,6 @@ async function playMusicSearchResult(result) {
   clearActiveStationPlayback();
   setPlayerQueue([item]);
   setMusicPlayerView("queue");
-  setMusicSection("player");
   await playMusicPlayerItem(item);
 }
 
@@ -12219,7 +12243,6 @@ async function playMusicAlbumFromSearch(albumItem) {
   clearActiveStationPlayback();
   setPlayerQueue(queueItems);
   setMusicPlayerView("queue");
-  setMusicSection("player");
   // Play first local item immediately if available; otherwise resolve via index → preview API.
   const firstLocalIndex = queueItems.findIndex((i) => i.kind === "local" && (i.stream_url || i.local_path));
   if (firstLocalIndex >= 0) {
@@ -18873,13 +18896,13 @@ function bindEvents() {
   const musicBottomExpand = $("#music-bottom-player-expand");
   if (musicBottomExpand) {
     musicBottomExpand.addEventListener("click", () => {
-      openMusicPlayerModal();
+      openMusicPlayerScreen({ showVideo: false });
     });
   }
   const musicBottomQueue = $("#music-bottom-player-queue");
   if (musicBottomQueue) {
     musicBottomQueue.addEventListener("click", () => {
-      setMusicSection("queue");
+      openMusicPlayerScreen({ showVideo: false });
     });
   }
   const musicPlayerModalClose = $("#music-player-modal-close");
@@ -18956,7 +18979,6 @@ function bindEvents() {
         state.playerShuffle = false;
         state.playerRepeatMode = "off";
         setMusicPlayerView("queue");
-        setMusicSection("player");
         // Prefer the explicit current_item from the server; fall back to queue[0] if absent
         // so playback always starts if any item is available.
         const firstCandidate = normalizePlayableItem(payload?.current_item || null);
@@ -19314,6 +19336,10 @@ function bindEvents() {
   $("#music-player-repeat")?.addEventListener("click", () => { cyclePlayerRepeatMode(); });
   $("#music-player-video-toggle")?.addEventListener("click", () => {
     if (!state.playerCurrentHasVideo) return;
+    if (state.musicSection !== "player") {
+      openMusicPlayerScreen({ showVideo: true });
+      return;
+    }
     state.playerVideoVisible = !state.playerVideoVisible;
     syncMusicPlayerVideoShell();
   });

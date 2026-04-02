@@ -400,6 +400,27 @@ def _mb_service():
     return get_musicbrainz_service()
 
 
+# Guardrail: api/main.py should not call musicbrainzngs request functions directly.
+# Route raw library calls through these wrappers so the shared service always sets the
+# required MusicBrainz user-agent first.
+def _mb_search_release_groups_raw(*, query: str, limit: int) -> dict[str, Any]:
+    mb = _mb_service()
+    mb._ensure_initialized()  # noqa: SLF001
+    return musicbrainzngs.search_release_groups(query=query, limit=limit)
+
+
+def _mb_get_release_by_id_raw(release_mbid: str, *, includes: list[str]) -> dict[str, Any]:
+    mb = _mb_service()
+    mb._ensure_initialized()  # noqa: SLF001
+    return musicbrainzngs.get_release_by_id(release_mbid, includes=includes)
+
+
+def _mb_get_release_group_by_id_raw(release_group_mbid: str, *, includes: list[str]) -> dict[str, Any]:
+    mb = _mb_service()
+    mb._ensure_initialized()  # noqa: SLF001
+    return musicbrainzngs.get_release_group_by_id(release_group_mbid, includes=includes)
+
+
 def _extract_mb_youtube_urls(entity: dict) -> list[str]:
     urls: list[str] = []
     rels = entity.get("url-relation-list") if isinstance(entity, dict) else None
@@ -1203,7 +1224,7 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
     normalized_artist_mbid = str(artist_mbid or "").strip()
     if not normalized_artist_mbid:
         return []
-    payload = musicbrainzngs.search_release_groups(
+    payload = _mb_search_release_groups_raw(
         query=f"arid:{normalized_artist_mbid}",
         limit=max(1, min(int(limit or 10), 100)),
     )
@@ -8459,10 +8480,7 @@ def _select_release_with_tracks(mb, release_group_mbid: str, release_dicts: list
             continue
         try:
             release_payload = mb._call_with_retry(  # noqa: SLF001
-                lambda rid=release_mbid: musicbrainzngs.get_release_by_id(
-                    rid,
-                    includes=release_includes,
-                )
+                lambda rid=release_mbid: _mb_get_release_by_id_raw(rid, includes=release_includes)
             )
         except Exception:
             logger.exception("[MUSIC] release fetch failed release_group=%s release=%s", release_group_mbid, release_mbid)
@@ -8520,7 +8538,7 @@ def download_full_album(data: dict):
     mb = _mb_service()
     try:
         release_group_payload = mb._call_with_retry(  # noqa: SLF001
-            lambda: musicbrainzngs.get_release_group_by_id(
+            lambda: _mb_get_release_group_by_id_raw(
                 release_group_mbid,
                 # release-group does not accept "genres" include in musicbrainzngs.
                 includes=["releases", "tags"],
@@ -8913,10 +8931,7 @@ def music_album_tracks(
     mb = _mb_service()
     try:
         release_group_payload = mb._call_with_retry(  # noqa: SLF001
-            lambda: musicbrainzngs.get_release_group_by_id(
-                group_id,
-                includes=["releases"],
-            )
+            lambda: _mb_get_release_group_by_id_raw(group_id, includes=["releases"])
         )
     except Exception:
         logging.exception("music_album_tracks release-group fetch failed release_group_mbid=%s", group_id)
