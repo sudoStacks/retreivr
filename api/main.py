@@ -2764,8 +2764,9 @@ class RunRequest(BaseModel):
     delivery_mode: str | None = None
 
 
-class DirectUrlPreviewRequest(BaseModel):
+class DirectUrlResolveRequest(BaseModel):
     url: str
+    media_mode: str | None = None
 
 
 # Cancel job API request model
@@ -7702,18 +7703,94 @@ async def api_run(request: RunRequest):
     return {"run_id": app.state.run_id, "status": "started"}
 
 
-@app.post("/api/direct_url_preview")
-async def api_direct_url_preview(request: DirectUrlPreviewRequest):
+def _normalize_direct_url_media_mode(value: str | None) -> str:
+    normalized = str(value or "video").strip().lower() or "video"
+    if normalized not in {"video", "music", "music_video"}:
+        raise HTTPException(status_code=400, detail="media_mode must be one of: video, music, music_video")
+    return normalized
+
+
+def _build_home_direct_resolve_payload(*, url: str, preview: dict, playlist_id: str | None = None) -> dict:
+    title = str(preview.get("playlist_title") or preview.get("title") or url).strip() or url
+    uploader = str(preview.get("uploader") or "").strip() or None
+    duration_sec = preview.get("duration_sec")
+    candidate = {
+        "title": title,
+        "artist_detected": uploader,
+        "album_detected": None,
+        "track_detected": None,
+        "final_score": None,
+        "source": str(preview.get("source") or "direct").strip() or "direct",
+        "url": str(preview.get("url") or url).strip() or url,
+        "thumbnail_url": str(preview.get("thumbnail_url") or "").strip() or None,
+        "allow_download": True,
+        "job_status": "",
+        "duration_sec": duration_sec if isinstance(duration_sec, (int, float)) else None,
+        "playlist_id": str(playlist_id or "").strip() or None,
+    }
+    item = {
+        "status": "candidate_found",
+        "allow_download": True,
+        "media_type": "video",
+        "artist": uploader,
+        "album": None,
+        "track": title,
+        "duration_sec": duration_sec if isinstance(duration_sec, (int, float)) else None,
+        "transient_kind": "playlist_url" if playlist_id else "direct_url",
+        "source_url": candidate["url"],
+    }
+    return {"home_item": item, "home_candidates": [candidate]}
+
+
+def _build_music_track_resolve_payload(*, url: str, preview: dict, media_mode: str) -> dict:
+    duration_sec = preview.get("duration_sec")
+    return {
+        "music_track": {
+            "direct_result_key": f"direct:{url}",
+            "direct_url": str(preview.get("url") or url).strip() or url,
+            "source_url": str(preview.get("url") or url).strip() or url,
+            "source": str(preview.get("source") or "direct").strip() or "direct",
+            "track": str(preview.get("title") or url).strip() or url,
+            "artist": str(preview.get("uploader") or "").strip() or None,
+            "album": "",
+            "duration_ms": int(float(duration_sec) * 1000) if isinstance(duration_sec, (int, float)) and duration_sec else None,
+            "artwork_url": str(preview.get("thumbnail_url") or "").strip() or None,
+            "media_mode": media_mode,
+            "is_direct_url_result": True,
+        }
+    }
+
+
+def _build_music_album_resolve_payload(*, url: str, playlist_id: str, preview: dict) -> dict:
+    first_video_id = str(preview.get("first_video_id") or "").strip() or None
+    thumbnail_url = str(preview.get("thumbnail_url") or "").strip() or (
+        f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg" if first_video_id else None
+    )
+    return {
+        "music_album": {
+            "title": str(preview.get("playlist_title") or f"YouTube Playlist ({playlist_id})").strip() or f"YouTube Playlist ({playlist_id})",
+            "artist": "YouTube Playlist",
+            "artwork_url": thumbnail_url,
+            "direct_playlist_url": url,
+            "playlist_id": playlist_id,
+            "first_video_id": first_video_id,
+            "is_direct_url_result": True,
+        }
+    }
+
+
+@app.post("/api/direct-url/resolve")
+async def api_direct_url_resolve(request: DirectUrlResolveRequest):
     url = request.url.strip() if request.url else ""
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
-    if _looks_like_playlist_url(url):
-        raise HTTPException(status_code=400, detail=DIRECT_URL_PLAYLIST_ERROR)
     if not _is_http_url(url):
         raise HTTPException(
             status_code=400,
             detail="This search result is not directly downloadable."
         )
+    media_mode = _normalize_direct_url_media_mode(request.media_mode)
+    playlist_id = extract_playlist_id(url) if _looks_like_playlist_url(url) else None
     try:
         normalize_search_payload(
             {"query": url, "search_only": True},
@@ -7736,52 +7813,34 @@ async def api_direct_url_preview(request: DirectUrlPreviewRequest):
             sort_keys=True,
         )
     )
+    if playlist_id:
+        preview, _fallback_error = get_playlist_preview_fallback(
+            playlist_id,
+            cookie_file=resolve_cookie_file(runtime_config),
+        )
+        resolved_preview = {
+            "playlist_title": str((preview or {}).get("playlist_title") or f"YouTube Playlist ({playlist_id})").strip() or f"YouTube Playlist ({playlist_id})",
+            "thumbnail_url": str((preview or {}).get("thumbnail_url") or "").strip() or None,
+            "first_video_id": str((preview or {}).get("first_video_id") or "").strip() or None,
+            "url": url,
+            "source": "youtube",
+        }
+        if media_mode in {"music", "music_video"}:
+            payload = _build_music_album_resolve_payload(url=url, playlist_id=playlist_id, preview=resolved_preview)
+            return safe_json({"result_type": "music_album", "playlist_id": playlist_id, "preview": resolved_preview, **payload})
+        payload = _build_home_direct_resolve_payload(url=url, preview=resolved_preview, playlist_id=playlist_id)
+        return safe_json({"result_type": "home_result", "playlist_id": playlist_id, "preview": resolved_preview, **payload})
     try:
         preview = preview_direct_url(url, runtime_config)
     except Exception as exc:
-        logging.exception("Direct URL preview failed: %s", exc)
+        logging.exception("Direct URL resolve failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return safe_json({"preview": preview})
-
-
-@app.get("/api/playlist/preview")
-async def api_playlist_preview(playlist_id: str = Query(..., min_length=2, max_length=200)):
-    normalized_playlist_id = extract_playlist_id(playlist_id) or str(playlist_id or "").strip()
-    if not normalized_playlist_id:
-        raise HTTPException(status_code=400, detail="playlist_id_required")
-    config = get_loaded_config() or _read_config_or_404()
-    cookie_file = resolve_cookie_file(config)
-    preview, _fallback_error = get_playlist_preview_fallback(
-        normalized_playlist_id,
-        cookie_file=cookie_file,
-    )
-    first_video_id = str((preview or {}).get("first_video_id") or "").strip()
-    thumbnail_url = str((preview or {}).get("thumbnail_url") or "").strip() or None
-    playlist_title = str((preview or {}).get("playlist_title") or "").strip() or None
-    if not first_video_id:
-        videos, _videos_fallback_error = get_playlist_videos_fallback(
-            normalized_playlist_id,
-            cookie_file=cookie_file,
-        )
-        if isinstance(videos, list):
-            for entry in videos:
-                if not isinstance(entry, dict):
-                    continue
-                candidate = str(entry.get("videoId") or "").strip()
-                if candidate:
-                    first_video_id = candidate
-                    break
-        if not thumbnail_url and first_video_id:
-            thumbnail_url = f"https://i.ytimg.com/vi/{first_video_id}/hqdefault.jpg"
-    return safe_json(
-        {
-            "playlist_id": normalized_playlist_id,
-            "playlist_title": playlist_title,
-            "first_video_id": first_video_id or None,
-            "thumbnail_url": thumbnail_url,
-        }
-    )
-
+    preview["url"] = str(preview.get("url") or url).strip() or url
+    if media_mode in {"music", "music_video"}:
+        payload = _build_music_track_resolve_payload(url=url, preview=preview, media_mode=media_mode)
+        return safe_json({"result_type": "music_track", "preview": preview, **payload})
+    payload = _build_home_direct_resolve_payload(url=url, preview=preview)
+    return safe_json({"result_type": "home_result", "preview": preview, **payload})
 
 @app.post("/api/cancel")
 async def api_cancel():

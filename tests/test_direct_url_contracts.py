@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture()
@@ -488,3 +489,58 @@ def test_server_direct_url_destination_escape_is_rejected(
             stop_event=threading.Event(),
             status=None,
         )
+
+
+def test_direct_url_resolve_returns_home_result_for_single_video(api_module, monkeypatch) -> None:
+    module = api_module
+    monkeypatch.setattr(module, "get_loaded_config", lambda: {"final_format": "mkv"})
+    monkeypatch.setattr(
+        module,
+        "preview_direct_url",
+        lambda url, _config: {
+            "title": "Resolved Video",
+            "uploader": "Resolved Channel",
+            "thumbnail_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+            "url": url,
+            "source": "youtube",
+            "duration_sec": 95,
+        },
+    )
+    client = TestClient(module.app)
+
+    response = client.post("/api/direct-url/resolve", json={"url": "https://www.youtube.com/watch?v=stub123", "media_mode": "video"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["result_type"] == "home_result"
+    assert payload["home_item"]["track"] == "Resolved Video"
+    assert payload["home_candidates"][0]["title"] == "Resolved Video"
+
+
+def test_direct_url_resolve_returns_music_album_for_playlist(api_module, monkeypatch) -> None:
+    module = api_module
+    monkeypatch.setattr(module, "get_loaded_config", lambda: {"final_format": "mkv"})
+    monkeypatch.setattr(
+        module,
+        "get_playlist_preview_fallback",
+        lambda playlist_id, cookie_file=None: (
+            {
+                "playlist_title": f"Playlist {playlist_id}",
+                "thumbnail_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+                "first_video_id": "stub123",
+            },
+            None,
+        ),
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/api/direct-url/resolve",
+        json={"url": "https://www.youtube.com/playlist?list=PLstub", "media_mode": "music"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["result_type"] == "music_album"
+    assert payload["music_album"]["playlist_id"] == "PLstub"
+    assert payload["music_album"]["title"] == "Playlist PLstub"

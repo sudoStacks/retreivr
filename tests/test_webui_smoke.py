@@ -71,27 +71,122 @@ def _build_webui_test_app() -> FastAPI:
     def api_run(_payload: dict[str, Any]) -> dict[str, Any]:
         return {"run_id": state["run_id"], "status": "started"}
 
-    @app.post("/api/direct_url_preview")
-    def api_direct_url_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    @app.post("/api/direct-url/resolve")
+    def api_direct_url_resolve(payload: dict[str, Any]) -> dict[str, Any]:
         url = str(payload.get("url") or "https://www.youtube.com/watch?v=stub123")
-        return {
-            "preview": {
-                "title": "Stub Direct Preview",
-                "uploader": "Stub Channel",
+        media_mode = str(payload.get("media_mode") or "video")
+        is_playlist = "list=" in url
+        preview = {
+            "title": "Stub Direct Preview",
+            "uploader": "Stub Channel",
+            "thumbnail_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+            "url": url,
+            "source": "youtube",
+            "duration_sec": 123,
+        }
+        if is_playlist:
+            preview = {
+                "playlist_title": "Stub Playlist",
                 "thumbnail_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+                "first_video_id": "stub123",
                 "url": url,
                 "source": "youtube",
-                "duration_sec": 123,
             }
-        }
-
-    @app.get("/api/playlist/preview")
-    def api_playlist_preview(playlist_id: str) -> dict[str, Any]:
+            if media_mode in {"music", "music_video"}:
+                return {
+                    "result_type": "music_album",
+                    "playlist_id": "PLstub",
+                    "preview": preview,
+                    "music_album": {
+                        "title": "Stub Playlist",
+                        "artist": "YouTube Playlist",
+                        "artwork_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+                        "direct_playlist_url": url,
+                        "playlist_id": "PLstub",
+                        "first_video_id": "stub123",
+                        "is_direct_url_result": True,
+                    },
+                }
+            return {
+                "result_type": "home_result",
+                "playlist_id": "PLstub",
+                "preview": preview,
+                "home_item": {
+                    "status": "candidate_found",
+                    "allow_download": True,
+                    "media_type": "video",
+                    "artist": "Stub Channel",
+                    "album": None,
+                    "track": "Stub Playlist",
+                    "duration_sec": None,
+                    "transient_kind": "playlist_url",
+                    "source_url": url,
+                },
+                "home_candidates": [
+                    {
+                        "title": "Stub Playlist",
+                        "artist_detected": "Stub Channel",
+                        "album_detected": None,
+                        "track_detected": None,
+                        "final_score": None,
+                        "source": "youtube",
+                        "url": url,
+                        "thumbnail_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+                        "allow_download": True,
+                        "job_status": "",
+                        "duration_sec": None,
+                        "playlist_id": "PLstub",
+                    }
+                ],
+            }
+        if media_mode in {"music", "music_video"}:
+            return {
+                "result_type": "music_track",
+                "preview": preview,
+                "music_track": {
+                    "direct_result_key": f"direct:{url}",
+                    "direct_url": url,
+                    "source_url": url,
+                    "source": "youtube",
+                    "track": "Stub Direct Preview",
+                    "artist": "Stub Channel",
+                    "album": "",
+                    "duration_ms": 123000,
+                    "artwork_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+                    "media_mode": media_mode,
+                    "is_direct_url_result": True,
+                },
+            }
         return {
-            "playlist_id": playlist_id,
-            "playlist_title": "Stub Playlist",
-            "first_video_id": "stub123",
-            "thumbnail_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+            "result_type": "home_result",
+            "preview": preview,
+            "home_item": {
+                "status": "candidate_found",
+                "allow_download": True,
+                "media_type": "video",
+                "artist": "Stub Channel",
+                "album": None,
+                "track": "Stub Direct Preview",
+                "duration_sec": 123,
+                "transient_kind": "direct_url",
+                "source_url": url,
+            },
+            "home_candidates": [
+                {
+                    "title": "Stub Direct Preview",
+                    "artist_detected": "Stub Channel",
+                    "album_detected": None,
+                    "track_detected": None,
+                    "final_score": None,
+                    "source": "youtube",
+                    "url": url,
+                    "thumbnail_url": "https://i.ytimg.com/vi/stub123/hqdefault.jpg",
+                    "allow_download": True,
+                    "job_status": "",
+                    "duration_sec": 123,
+                    "playlist_id": None,
+                }
+            ],
         }
 
     @app.get("/api/spotify/status")
@@ -367,7 +462,7 @@ def test_webui_home_direct_url_preview_uses_standard_result_card(webui_server: s
 
     page.wait_for_selector("#home-results .home-result-card", timeout=10000)
     page.wait_for_selector("#home-results .home-candidate-row", timeout=10000)
-    page.wait_for_selector('#home-results button[data-action="home-direct-download"]', timeout=10000)
+    page.wait_for_selector('#home-results button[data-action="home-download"]', timeout=10000)
     page.wait_for_function(
         """() => {
           const text = document.querySelector("#home-results .home-result-card strong")?.textContent || "";
