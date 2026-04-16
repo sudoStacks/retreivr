@@ -10626,6 +10626,28 @@ function normalizeMusicSearchResults(rawResults) {
   }
   return rawResults
     .map((item) => {
+      if (item?.is_direct_url_result) {
+        const directUrl = String(item?.direct_url || item?.source_url || "").trim();
+        const artist = String(item?.artist || "").trim();
+        const track = String(item?.track || "").trim();
+        if (!directUrl || !artist || !track) {
+          return null;
+        }
+        const durationMs = Number(item?.duration_ms);
+        return {
+          direct_result_key: String(item?.direct_result_key || `direct:${directUrl}`).trim(),
+          direct_url: directUrl,
+          source_url: directUrl,
+          source: String(item?.source || "direct").trim() || "direct",
+          artist,
+          track,
+          album: String(item?.album || "").trim(),
+          duration_ms: Number.isFinite(durationMs) ? durationMs : null,
+          artwork_url: typeof item?.artwork_url === "string" ? item.artwork_url : null,
+          media_mode: String(item?.media_mode || "").trim() || null,
+          is_direct_url_result: true,
+        };
+      }
       const recordingMbid = String(item?.recording_mbid || "").trim();
       const releaseMbid = String(item?.release_mbid || item?.mb_release_id || "").trim();
       const releaseGroupMbid = String(item?.release_group_mbid || item?.mb_release_group_id || "").trim();
@@ -11534,6 +11556,7 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
       const result = releaseGroupMbidValue
         ? await enqueueAlbum(releaseGroupMbidValue)
         : await queueDirectMusicPlaylist(albumItem);
+      const isDirectRun = !releaseGroupMbidValue && result?.run_id;
       const count = Number.isFinite(Number(result?.tracks_enqueued))
         ? Number(result.tracks_enqueued)
         : 1;
@@ -11544,7 +11567,11 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
         button.textContent = "Download";
       }
       console.info("[MUSIC UI] album queued", { release_group_mbid: releaseGroupMbidValue, tracks_enqueued: count });
-      renderAlbumQueueSummary(result, { albumTitle: albumItem?.title || "Album" });
+      if (isDirectRun) {
+        setMusicPageNotice(`Playlist queued — each track downloading in background.`, false);
+      } else {
+        renderAlbumQueueSummary(result, { albumTitle: albumItem?.title || "Album" });
+      }
       if (typeof onQueued === "function") {
         onQueued(result, albumItem);
       }
@@ -12522,7 +12549,7 @@ async function handleMusicDirectUrlPreview(url) {
   const data = await resolveDirectUrl(url, mediaMode);
   const track = data?.music_track || buildDirectMusicTrackResult(data?.preview || {}, url);
   renderMusicModeResults({ artists: [], albums: [], tracks: [track], mode_used: "track" }, track.track || url, { pushHistory: false });
-  setMusicPageNotice("Direct URL ready. Review the card and click Download.", false);
+  setMusicPageNotice("", false);
 }
 
 async function handleMusicDirectPlaylistPreview(url, playlistId) {
@@ -12536,7 +12563,7 @@ async function handleMusicDirectPlaylistPreview(url, playlistId) {
   const data = await resolveDirectUrl(url, mediaMode);
   const albumItem = data?.music_album || buildDirectMusicPlaylistAlbum(data?.preview || {}, url, playlistId);
   renderMusicModeResults({ artists: [], albums: [albumItem], tracks: [], mode_used: "album" }, albumItem.title || url, { pushHistory: false });
-  setMusicPageNotice("Playlist ready. Review the card and click Download.", false);
+  setMusicPageNotice("", false);
 }
 
 function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeText = "MusicBrainz" } = {}) {
@@ -12546,7 +12573,7 @@ function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeT
   ).trim();
   state.homeMusicResultMap[key] = result;
   const card = document.createElement("article");
-  card.className = "home-result-card music-meta-card";
+  card.className = `home-result-card music-meta-card${result?.is_direct_url_result ? " music-grid-card" : ""}`;
   card.dataset.recordingMbid = String(result.recording_mbid || "").trim();
   card.dataset.releaseMbid = String(result.mb_release_id || "").trim();
   card.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
@@ -12752,7 +12779,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
   }
 
   const rawTopMatch = getMusicTopMatchCandidate({ artists: visibleArtists, albums, tracks }, query);
-  const topMatch = rawTopMatch?.kind === "track" ? rawTopMatch : null;
+  const topMatch = rawTopMatch?.kind === "track" && !rawTopMatch?.item?.is_direct_url_result ? rawTopMatch : null;
   const filteredArtists = topMatch?.kind === "artist"
     ? visibleArtists.filter((artist) => String(artist?.artist_mbid || artist?.name || "") !== String(topMatch.key || ""))
     : visibleArtists;
@@ -12797,7 +12824,8 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
   });
 
   if (filteredTracks.length) {
-    const trackStack = appendSection("Tracks", "stack");
+    const directOnlyTracks = filteredTracks.every((result) => !!result?.is_direct_url_result);
+    const trackStack = appendSection("Tracks", directOnlyTracks ? "grid" : "stack");
     const orderedTracks = [...filteredTracks].sort((a, b) => {
       const discA = Number.isFinite(Number(a?.disc_number)) ? Number(a.disc_number) : Number.MAX_SAFE_INTEGER;
       const discB = Number.isFinite(Number(b?.disc_number)) ? Number(b.disc_number) : Number.MAX_SAFE_INTEGER;
@@ -14370,7 +14398,7 @@ function buildHomeTransientResolvedResult(resolved) {
     title: String(itemPayload?.track || rawCandidate?.title || sourceUrl || "Direct URL").trim() || "Direct URL",
     duration_sec: Number(itemPayload?.duration_sec) || null,
     is_transient_resolved: true,
-    transient_kind,
+    transient_kind: transientKind,
     source_url: sourceUrl,
     candidates: [],
   };
@@ -15044,9 +15072,7 @@ async function submitHomeSearch(autoEnqueue) {
       );
       setNotice(
         messageEl,
-        isPlaylist
-          ? "Playlist URL detected. Click Download to enqueue all playlist videos."
-          : "Direct URL ready. Review the card and click Download.",
+        "",
         false
       );
       setHomeSearchControlsEnabled(true);

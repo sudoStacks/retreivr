@@ -1560,7 +1560,39 @@ def get_playlist_videos(youtube, playlist_id):
     return videos
 
 
+_YT_VIDEO_ID_RE = re.compile(r'^[A-Za-z0-9_-]{11}$')
+
+
+def _extract_rd_seed_video(playlist_id):
+    """Return the seed video ID embedded in a YouTube Radio Mix playlist ID, or None.
+
+    YouTube Radio Mix IDs have two known formats:
+      - RD<videoId>   (standard mix seeded from a video)
+      - RDMM<videoId> (My Mix)
+    Both are session-bound and always "unviewable" via the playlist API.
+    """
+    if not playlist_id or not playlist_id.startswith("RD"):
+        return None
+    suffix = playlist_id[2:]
+    # RDMM<videoId>
+    if suffix.startswith("MM") and _YT_VIDEO_ID_RE.match(suffix[2:]):
+        return suffix[2:]
+    # RD<videoId>
+    if _YT_VIDEO_ID_RE.match(suffix):
+        return suffix
+    return None
+
+
 def get_playlist_videos_fallback(playlist_id, *, cookie_file=None):
+    seed_video = _extract_rd_seed_video(playlist_id)
+    if seed_video:
+        logging.warning(
+            "Playlist %s is a YouTube Radio Mix (unviewable); returning seed video %s",
+            playlist_id,
+            seed_video,
+        )
+        return [{"videoId": seed_video, "playlist_index": 1}], False
+
     playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
     opts = {
         "skip_download": True,
@@ -1589,6 +1621,19 @@ def get_playlist_videos_fallback(playlist_id, *, cookie_file=None):
 
 
 def get_playlist_preview_fallback(playlist_id, *, cookie_file=None):
+    seed_video = _extract_rd_seed_video(playlist_id)
+    if seed_video:
+        logging.warning(
+            "Playlist %s is a YouTube Radio Mix (unviewable); returning seed video %s for preview",
+            playlist_id,
+            seed_video,
+        )
+        return {
+            "playlist_title": None,
+            "first_video_id": seed_video,
+            "thumbnail_url": f"https://i.ytimg.com/vi/{seed_video}/hqdefault.jpg",
+        }, False
+
     playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
     opts = {
         "skip_download": True,

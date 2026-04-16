@@ -3337,6 +3337,21 @@ async def basic_auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def webui_cache_control_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = str(request.url.path or "")
+    if request.method in {"GET", "HEAD"} and (
+        path in {"/", "/index.html", "/app.js", "/styles.css"}
+        or path.endswith(".js")
+        or path.endswith(".css")
+    ):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @app.on_event("startup")
 async def startup():
     _log_transition("APP_STARTUP", phase="begin")
@@ -3995,11 +4010,26 @@ def _run_immediate_download_to_client(
                     }
                 },
             }
-            ensure_mb_bound_music_track(
-                binding_payload,
-                config=config,
-                country_preference=str(config.get("country") or "US"),
-            )
+            mb_bound = False
+            try:
+                ensure_mb_bound_music_track(
+                    binding_payload,
+                    config=config,
+                    country_preference=str(config.get("country") or "US"),
+                )
+                mb_bound = True
+            except (ValueError, Exception) as _mb_exc:
+                logging.warning(
+                    json.dumps(
+                        safe_json(
+                            {
+                                "message": "mb_binding_skipped_fallback_to_source_tags",
+                                "job_id": job_id,
+                                "reason": str(_mb_exc),
+                            }
+                        )
+                    )
+                )
             canonical = (
                 binding_payload.get("output_template", {}).get("canonical_metadata")
                 if isinstance(binding_payload.get("output_template", {}), dict)
@@ -4008,16 +4038,16 @@ def _run_immediate_download_to_client(
             if isinstance(canonical, dict):
                 meta["artist"] = canonical.get("artist") or meta.get("artist")
                 meta["album_artist"] = canonical.get("artist") or meta.get("album_artist") or meta.get("artist")
-                meta["album"] = canonical.get("album")
+                meta["album"] = canonical.get("album") or meta.get("album")
                 meta["track"] = canonical.get("track") or meta.get("track") or meta.get("title")
-                meta["release_date"] = canonical.get("release_date")
-                meta["track_number"] = canonical.get("track_number")
-                meta["disc_number"] = canonical.get("disc_number")
-                meta["disc"] = canonical.get("disc_number")
-                meta["recording_mbid"] = canonical.get("recording_mbid")
-                meta["mb_recording_id"] = canonical.get("recording_mbid")
-                meta["mb_release_id"] = canonical.get("mb_release_id")
-                meta["mb_release_group_id"] = canonical.get("mb_release_group_id")
+                meta["release_date"] = canonical.get("release_date") or meta.get("release_date")
+                meta["track_number"] = canonical.get("track_number") or meta.get("track_number")
+                meta["disc_number"] = canonical.get("disc_number") or meta.get("disc_number")
+                meta["disc"] = canonical.get("disc_number") or meta.get("disc")
+                meta["recording_mbid"] = canonical.get("recording_mbid") or meta.get("recording_mbid")
+                meta["mb_recording_id"] = canonical.get("recording_mbid") or meta.get("mb_recording_id")
+                meta["mb_release_id"] = canonical.get("mb_release_id") or meta.get("mb_release_id")
+                meta["mb_release_group_id"] = canonical.get("mb_release_group_id") or meta.get("mb_release_group_id")
 
         video_id = meta.get("video_id") or job_id
         template = audio_template if audio_mode else filename_template
@@ -4031,7 +4061,7 @@ def _run_immediate_download_to_client(
             template=template,
             paths=paths,
             config=config,
-            enforce_music_contract=bool(audio_mode and str(resolved_media_intent or "").strip().lower() == "music_track"),
+            enforce_music_contract=bool(audio_mode and str(resolved_media_intent or "").strip().lower() == "music_track" and mb_bound),
             enqueue_audio_metadata=bool(audio_mode),
         )
 
@@ -4228,11 +4258,26 @@ def _run_direct_url_with_cli(
                     }
                 },
             }
-            ensure_mb_bound_music_track(
-                binding_payload,
-                config=config,
-                country_preference=str(config.get("country") or "US"),
-            )
+            mb_bound = False
+            try:
+                ensure_mb_bound_music_track(
+                    binding_payload,
+                    config=config,
+                    country_preference=str(config.get("country") or "US"),
+                )
+                mb_bound = True
+            except (ValueError, Exception) as _mb_exc:
+                logging.warning(
+                    json.dumps(
+                        safe_json(
+                            {
+                                "message": "mb_binding_skipped_fallback_to_source_tags",
+                                "job_id": job_id,
+                                "reason": str(_mb_exc),
+                            }
+                        )
+                    )
+                )
             canonical = (
                 binding_payload.get("output_template", {}).get("canonical_metadata")
                 if isinstance(binding_payload.get("output_template", {}), dict)
@@ -4241,16 +4286,16 @@ def _run_direct_url_with_cli(
             if isinstance(canonical, dict):
                 meta["artist"] = canonical.get("artist") or meta.get("artist")
                 meta["album_artist"] = canonical.get("artist") or meta.get("album_artist") or meta.get("artist")
-                meta["album"] = canonical.get("album")
+                meta["album"] = canonical.get("album") or meta.get("album")
                 meta["track"] = canonical.get("track") or meta.get("track") or meta.get("title")
-                meta["release_date"] = canonical.get("release_date")
-                meta["track_number"] = canonical.get("track_number")
-                meta["disc_number"] = canonical.get("disc_number")
-                meta["disc"] = canonical.get("disc_number")
-                meta["recording_mbid"] = canonical.get("recording_mbid")
-                meta["mb_recording_id"] = canonical.get("recording_mbid")
-                meta["mb_release_id"] = canonical.get("mb_release_id")
-                meta["mb_release_group_id"] = canonical.get("mb_release_group_id")
+                meta["release_date"] = canonical.get("release_date") or meta.get("release_date")
+                meta["track_number"] = canonical.get("track_number") or meta.get("track_number")
+                meta["disc_number"] = canonical.get("disc_number") or meta.get("disc_number")
+                meta["disc"] = canonical.get("disc_number") or meta.get("disc")
+                meta["recording_mbid"] = canonical.get("recording_mbid") or meta.get("recording_mbid")
+                meta["mb_recording_id"] = canonical.get("recording_mbid") or meta.get("mb_recording_id")
+                meta["mb_release_id"] = canonical.get("mb_release_id") or meta.get("mb_release_id")
+                meta["mb_release_group_id"] = canonical.get("mb_release_group_id") or meta.get("mb_release_group_id")
 
         filename_template = (
             config.get("audio_filename_template") or config.get("music_filename_template")
@@ -4267,7 +4312,7 @@ def _run_direct_url_with_cli(
             template=filename_template,
             paths=paths,
             config=config,
-            enforce_music_contract=bool(audio_mode and str(cli_media_intent or "").strip().lower() == "music_track"),
+            enforce_music_contract=bool(audio_mode and str(cli_media_intent or "").strip().lower() == "music_track" and mb_bound),
             enqueue_audio_metadata=bool(audio_mode),
         )
         moved = [final_path]
