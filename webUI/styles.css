@@ -5378,6 +5378,12 @@ a[aria-disabled="true"] {
   color: var(--danger);
 }
 
+.input-error-flash {
+  border-color: var(--danger) !important;
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.72), 0 0 0 6px rgba(248, 113, 113, 0.12) !important;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
 .app-toast-region {
   position: fixed;
   top: 78px;
