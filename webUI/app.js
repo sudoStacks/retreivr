@@ -94,6 +94,7 @@ const state = {
   arrSort: "best_match",
   arrCardSize: 260,
   arrExpandedIds: new Set(),
+  arrSavingIds: new Set(),
   arrDetailsItemId: null,
   arrCastCache: {},
   arrGenres: {
@@ -647,11 +648,27 @@ function notify(options = {}) {
   toast.dataset.scope = scope;
   toast.dataset.toastId = id;
   toast.setAttribute("role", kind === "error" ? "alert" : "status");
+  const actionLabel = String(options.actionLabel || "").trim();
+  const actionHref = String(options.actionHref || "").trim();
+  const hasAction = !!actionLabel;
   toast.innerHTML = `
     <div class="app-toast-copy">${escapeHtml(message)}</div>
+    ${hasAction ? `<div class="app-toast-actions">${actionHref
+      ? `<a class="app-toast-action" href="${escapeHtml(actionHref)}" target="_blank" rel="noopener">${escapeHtml(actionLabel)}</a>`
+      : `<button class="app-toast-action" type="button">${escapeHtml(actionLabel)}</button>`}</div>` : ""}
     <button class="app-toast-close" type="button" aria-label="Dismiss notification">×</button>
   `;
   toast.querySelector(".app-toast-close")?.addEventListener("click", () => dismissNotification(id));
+  if (hasAction && !actionHref && typeof options.actionHandler === "function") {
+    toast.querySelector(".app-toast-action")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      try {
+        options.actionHandler();
+      } finally {
+        dismissNotification(id);
+      }
+    });
+  }
   host.appendChild(toast);
   if (!sticky) {
     const timer = window.setTimeout(() => dismissNotification(id), ttlMs);
@@ -1210,21 +1227,17 @@ function triggerClientDeliveryDownload(downloadUrl, filename = "") {
 }
 
 function setClientDeliveryNotice(messageEl, baseMessage, downloadUrl, filename = "") {
-  setNotice(messageEl, baseMessage, false);
-  if (!messageEl || !downloadUrl) {
-    return;
+  if (messageEl) {
+    setNotice(messageEl, "", false);
   }
-  const spacer = document.createTextNode(" ");
-  const link = document.createElement("a");
-  link.href = downloadUrl;
-  link.rel = "noopener";
-  link.target = "_blank";
-  link.textContent = "Download file";
-  if (filename) {
-    link.download = filename;
-  }
-  messageEl.appendChild(spacer);
-  messageEl.appendChild(link);
+  notify({
+    kind: "success",
+    message: baseMessage,
+    scope: "video-download",
+    actionLabel: "Download file",
+    actionHref: downloadUrl || "",
+    ttlMs: 4200,
+  });
 }
 
 function clearConfigNotice() {
@@ -9989,6 +10002,88 @@ function updateArrItemById(nextItem) {
   });
 }
 
+function getArrSavedShelf(kind) {
+  const normalized = kind === "tv" ? "tv" : "movie";
+  const bucket = state.arrEditorial?.[normalized];
+  if (!bucket || !Array.isArray(bucket.shelves)) {
+    return null;
+  }
+  return bucket.shelves.find((shelf) => String(shelf?.id || "") === "saved_for_later") || null;
+}
+
+function ensureArrSavedShelf(kind) {
+  const normalized = kind === "tv" ? "tv" : "movie";
+  state.arrEditorial = state.arrEditorial || {};
+  if (!state.arrEditorial[normalized] || !Array.isArray(state.arrEditorial[normalized].shelves)) {
+    state.arrEditorial[normalized] = { shelves: [] };
+  }
+  let shelf = getArrSavedShelf(normalized);
+  if (shelf) {
+    return shelf;
+  }
+  shelf = {
+    id: "saved_for_later",
+    title: "Saved for Later",
+    subtitle: normalized === "tv"
+      ? "Shows you bookmarked so they stay visible until you are ready to act."
+      : "Titles you bookmarked to revisit without sending them to ARR yet.",
+    provider: "local",
+    results: [],
+  };
+  state.arrEditorial[normalized].shelves.unshift(shelf);
+  return shelf;
+}
+
+function syncArrSavedShelfItem(item, saved) {
+  const normalizedKind = String(item?.kind || getArrKind()).trim().toLowerCase() === "tv" ? "tv" : "movie";
+  const tmdbKey = String(item?.tmdb_id || "").trim();
+  if (!tmdbKey) {
+    return;
+  }
+  const shelf = ensureArrSavedShelf(normalizedKind);
+  const existing = Array.isArray(shelf.results) ? shelf.results : [];
+  const without = existing.filter((entry) => String(entry?.tmdb_id || "") !== tmdbKey);
+  shelf.results = saved
+    ? [{ ...item, kind: normalizedKind, saved: true }, ...without].slice(0, 10)
+    : without;
+}
+
+async function toggleArrSavedItem(tmdbId, shouldSave) {
+  const key = String(tmdbId || "").trim();
+  const item = getArrItemById(key);
+  if (!item) {
+    throw new Error("Title not found");
+  }
+  const normalizedKind = String(item.kind || getArrKind()).trim().toLowerCase() === "tv" ? "tv" : "movie";
+  const response = await fetchJson("/api/arr/saved/toggle", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind: normalizedKind,
+      saved: shouldSave,
+      item: {
+        tmdb_id: item.tmdb_id,
+        title: item.title,
+        original_title: item.original_title,
+        year: item.year,
+        poster_url: item.poster_url,
+        overview: item.overview,
+        tmdb_url: item.tmdb_url,
+        language: item.language,
+        popularity: item.popularity,
+        rating: item.rating,
+      },
+    }),
+  });
+  const nextItem = shouldSave
+    ? { ...item, ...(response?.item || {}), kind: normalizedKind, saved: true }
+    : { ...item, kind: normalizedKind, saved: false };
+  updateArrItemById(nextItem);
+  syncArrSavedShelfItem(nextItem, shouldSave);
+  renderArrResults();
+  return nextItem;
+}
+
 function applyArrCardSize(size) {
   const numeric = Number.parseInt(size, 10);
   const nextSize = Number.isFinite(numeric)
@@ -10125,8 +10220,13 @@ function renderArrCardGridMarkup(items) {
     const popularity = Number.isFinite(Number(item.popularity)) ? Number(item.popularity).toFixed(1) : "";
     const rating = Number.isFinite(Number(item.rating)) ? Number(item.rating).toFixed(1) : "";
     const tmdbId = escapeHtml(String(item.tmdb_id || ""));
+    const tmdbIdRaw = String(item.tmdb_id || "").trim();
     const buttonDisabled = !serviceStatus.reachable;
     const buttonLabel = buttonDisabled ? `${serviceName} unavailable` : `Add to ${serviceName}`;
+    const saved = !!item.saved;
+    const saving = state.arrSavingIds.has(tmdbIdRaw);
+    const saveLabel = saved ? "Remove from Saved" : "Save for Later";
+    const saveGlyph = saved ? "✓" : "+";
     const trailer = item.trailer && typeof item.trailer === "object" ? item.trailer : null;
     const trailerButton = trailer?.available && trailer.embed_url
       ? `
@@ -10144,6 +10244,16 @@ function renderArrCardGridMarkup(items) {
       <article class="home-result-card music-meta-card music-grid-card movies-tv-card" data-arr-tmdb-id="${tmdbId}" tabindex="0">
         <div class="home-candidate-artwork movies-tv-artwork" data-action="arr-artwork-preview" data-tmdb-id="${tmdbId}">
           <img src="${escapeHtml(posterUrl)}" alt="${title} poster" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
+          <button
+            class="button ghost small movies-tv-save-toggle ${saved ? "active" : ""}"
+            type="button"
+            data-action="arr-save-toggle"
+            data-tmdb-id="${tmdbId}"
+            aria-pressed="${saved ? "true" : "false"}"
+            aria-label="${escapeHtml(saveLabel)}"
+            title="${escapeHtml(saveLabel)}"
+            ${saving ? "disabled" : ""}
+          >${escapeHtml(saveGlyph)}</button>
           <div class="movies-tv-overlay">
             <div class="home-candidate-main movies-tv-main">
               <div class="home-candidate-title-row">
@@ -10198,7 +10308,7 @@ function renderArrEditorialShelves() {
       ? shelves.map((shelf) => `
         <section class="home-results movies-tv-editorial-shelf" data-editorial-shelf="${escapeHtml(String(shelf?.id || ""))}">
           <div class="home-results-header">
-            <span>${escapeHtml(String(shelf?.title || "Editorial"))}</span>
+            <span class="movies-tv-section-title">${escapeHtml(String(shelf?.title || "Editorial"))}</span>
             <div class="home-results-header-actions">
               <span class="meta">${Array.isArray(shelf?.results) && shelf.results.length ? `Showing ${shelf.results.length}` : "Loading titles"}</span>
             </div>
@@ -10225,8 +10335,9 @@ async function loadArrEditorialShelves({ force = false } = {}) {
     const defaultShelves = (Array.isArray(shelfMeta?.shelves) ? shelfMeta.shelves : []).filter((entry) => entry?.default_visible).slice(0, 4);
     const shelfPayloads = await Promise.all(
       defaultShelves.map(async (entry) => {
+        const shelfLimit = Number.isFinite(Number(entry?.limit)) ? Number(entry.limit) : 10;
         const payload = await fetchJson(
-          `/api/arr/editorial/shelf?kind=${encodeURIComponent(kind)}&shelf=${encodeURIComponent(String(entry.id || ""))}&limit=10`
+          `/api/arr/editorial/shelf?kind=${encodeURIComponent(kind)}&shelf=${encodeURIComponent(String(entry.id || ""))}&limit=${encodeURIComponent(String(shelfLimit))}`
         );
         return {
           id: String(entry.id || ""),
@@ -10249,6 +10360,10 @@ async function loadArrEditorialShelves({ force = false } = {}) {
 function wireArrCardInteractions(host) {
   if (!host) return;
   host.addEventListener("click", async (event) => {
+    const saveButton = event.target.closest('button[data-action="arr-save-toggle"]');
+    if (saveButton) {
+      return;
+    }
     const trailerButton = event.target.closest('button[data-action="arr-trailer"]');
     if (trailerButton) {
       let embedUrl = String(trailerButton.dataset.embedUrl || "").trim();
@@ -10300,6 +10415,28 @@ function wireArrCardInteractions(host) {
     } finally {
       button.disabled = false;
       button.textContent = originalText;
+    }
+    return;
+  });
+  host.addEventListener("click", async (event) => {
+    const saveButton = event.target.closest('button[data-action="arr-save-toggle"]');
+    if (!saveButton) return;
+    event.stopPropagation();
+    const tmdbId = String(saveButton.dataset.tmdbId || "").trim();
+    if (!tmdbId || state.arrSavingIds.has(tmdbId)) return;
+    const item = getArrItemById(tmdbId);
+    if (!item) return;
+    const shouldSave = !item.saved;
+    state.arrSavingIds.add(tmdbId);
+    renderArrResults();
+    try {
+      await toggleArrSavedItem(tmdbId, shouldSave);
+      setNotice($("#movies-tv-message"), shouldSave ? "Saved for Later updated." : "Removed from Saved for Later.", false);
+    } catch (err) {
+      setNotice($("#movies-tv-message"), `Could not update saved titles: ${toUserErrorMessage(err)}`, true);
+    } finally {
+      state.arrSavingIds.delete(tmdbId);
+      renderArrResults();
     }
   });
   host.addEventListener("mouseover", async (event) => {
@@ -10426,10 +10563,14 @@ async function refreshArrStatuses() {
       }),
     });
     const statuses = data?.statuses || {};
-    state.arrResults = state.arrResults.map((item) => ({
-      ...item,
-      arr_status: statuses[String(item.tmdb_id)] || item.arr_status || { added: false, downloaded: false, status: "not_added" },
-    }));
+    state.arrResults = state.arrResults.map((item) => {
+      const nextItem = {
+        ...item,
+        arr_status: statuses[String(item.tmdb_id)] || item.arr_status || { added: false, downloaded: false, status: "not_added" },
+      };
+      updateArrItemById(nextItem);
+      return nextItem;
+    });
     renderArrResults();
   } catch {
     // keep stale status until next successful refresh
@@ -10521,9 +10662,10 @@ async function addArrItem(tmdbId) {
       body: JSON.stringify({ tmdb_id: tmdbId }),
     });
     const nextStatus = data?.status || { added: true, downloaded: false, status: "added" };
-    state.arrResults = state.arrResults.map((item) => (
-      String(item.tmdb_id) === String(tmdbId) ? { ...item, arr_status: nextStatus } : item
-    ));
+    const current = getArrItemById(tmdbId);
+    if (current) {
+      updateArrItemById({ ...current, arr_status: nextStatus });
+    }
     renderArrResults();
     startArrStatusPolling();
     setNotice(messageEl, `Sent to ${serviceName}.`, false);
@@ -10617,8 +10759,8 @@ function stopHomeResultPolling() {
 function setHomeResultsStatus(text) {
   const statusEl = $("#home-results-status-text");
   if (statusEl) {
-    if (state.currentPage === "video" && String(text || "").trim() === "Searching sources…") {
-      statusEl.textContent = "Results";
+    if (state.currentPage === "video" && String(text || "").trim().toLowerCase().startsWith("searching sources")) {
+      statusEl.textContent = "";
       return;
     }
     statusEl.textContent = text;
@@ -13576,6 +13718,67 @@ function updateHomeCandidateRowState(row, candidate, item, job) {
   }
 }
 
+function buildHomeDownloadLocationAction(filePath, fileId = "") {
+  const pathValue = String(filePath || "").trim();
+  const fileIdValue = String(fileId || "").trim();
+  if (!pathValue && !fileIdValue) {
+    return null;
+  }
+  return () => {
+    const downloadsRoot = String(BROWSE_DEFAULTS.mediaRoot || "").trim();
+    if (downloadsRoot && pathValue && pathValue.startsWith(downloadsRoot)) {
+      const relativeDir = String(pathValue.slice(downloadsRoot.length) || "")
+        .replace(/^[/\\]+/, "")
+        .split(/[/\\]/)
+        .slice(0, -1)
+        .join("/");
+      openBrowser(null, "downloads", "dir", "", relativeDir);
+      return;
+    }
+    if (fileIdValue) {
+      window.open(downloadUrl(fileIdValue), "_blank", "noopener");
+    }
+  };
+}
+
+function maybeNotifyHomeJobTransition(candidate, item, job, previousStatus) {
+  const nextStatus = String(job?.status || "").trim().toLowerCase();
+  const prevStatus = String(previousStatus || "").trim().toLowerCase();
+  if (!candidate?.id || !nextStatus || nextStatus === prevStatus) {
+    return;
+  }
+  const toastScope = `video-download-${candidate.id}`;
+  const label = String(candidate.title || item?.title || item?.track || item?.artist || "Download").trim() || "Download";
+  if (nextStatus === "downloading" || nextStatus === "postprocessing") {
+    notify({
+      kind: "info",
+      message: `Download started: ${label}`,
+      scope: toastScope,
+      ttlMs: 3200,
+    });
+    return;
+  }
+  if (nextStatus === "completed") {
+    notify({
+      kind: "success",
+      message: `Download completed: ${label}`,
+      scope: toastScope,
+      ttlMs: 5200,
+      actionLabel: job?.file_path || job?.file_id ? "Open file location" : "",
+      actionHandler: buildHomeDownloadLocationAction(job?.file_path, job?.file_id),
+    });
+    return;
+  }
+  if (nextStatus === "failed") {
+    notify({
+      kind: "error",
+      message: `Download failed: ${job?.last_error || label}`,
+      scope: toastScope,
+      ttlMs: 5200,
+    });
+  }
+}
+
 function stopHomeJobPolling() {
   if (state.homeJobTimer) {
     clearInterval(state.homeJobTimer);
@@ -13661,6 +13864,7 @@ async function refreshHomeJobStatuses(requestId) {
         }
       } catch (_err) {}
     }
+    maybeNotifyHomeJobTransition(candidate, item, job, candidate.job_status);
     if (job?.status) {
       candidate.job_status = String(job.status || "").trim();
     }
@@ -14685,14 +14889,12 @@ async function refreshHomeResults(requestId) {
     });
     if (!items.length) {
       container.textContent = "";
-      const placeholder = document.createElement("div");
-      placeholder.className = "home-results-empty";
       if (["completed", "completed_with_skips", "failed"].includes(requestStatus)) {
+        const placeholder = document.createElement("div");
+        placeholder.className = "home-results-empty";
         placeholder.textContent = requestStatus === "failed" ? "Search failed." : "No results found.";
-      } else {
-        placeholder.textContent = "Searching sources…";
+        container.appendChild(placeholder);
       }
-      container.appendChild(placeholder);
       const terminal = ["completed", "completed_with_skips", "failed"].includes(requestStatus);
       setHomeResultsState({ hasResults: true, terminal });
       if (terminal) {
@@ -15072,7 +15274,9 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
     const item = transientEntry.item;
     const payload = buildHomeTransientRunPayload(item, candidate);
     try {
-      setNotice(messageEl, `Enqueuing candidate ${candidateId}...`, false);
+      if (messageEl) {
+        setNotice(messageEl, "", false);
+      }
       const data = await startRun(payload);
       if (!data?.run_id) {
         throw new Error("Run failed");
@@ -15086,12 +15290,22 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
       setHomeResultsState({ hasResults: true, terminal: false });
       rerenderHomeResultCards();
       startHomeJobPolling(null);
-      setNotice(messageEl, "Download queued.", false);
+      notify({
+        kind: "info",
+        message: `Download queued: ${candidate.title || item.title || "Result"}`,
+        scope: `video-download-${candidate.id}`,
+        ttlMs: 3200,
+      });
       return;
     } catch (err) {
       const rawMessage = String(err && err.message ? err.message : "");
       if (rawMessage.includes("music_mode_mb_binding_failed")) {
-        setNotice(messageEl, "Music Mode rejected — No canonical album release found", true);
+        notify({
+          kind: "error",
+          message: "Music Mode rejected — No canonical album release found",
+          scope: "video-download",
+          ttlMs: 5200,
+        });
         return;
       }
       throw err;
@@ -15104,7 +15318,9 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
     payload.final_format = finalFormat;
   }
   try {
-    setNotice(messageEl, `Enqueuing candidate ${candidateId}...`, false);
+    if (messageEl) {
+      setNotice(messageEl, "", false);
+    }
     const data = await fetchJson(`/api/search/items/${encodeURIComponent(itemId)}/enqueue`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -15117,12 +15333,29 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
       if (started) {
         setClientDeliveryNotice(messageEl, msg, data.delivery_url, data.filename || "");
       } else {
-        setNotice(messageEl, "Client delivery ready. Click Download file.", false);
+        notify({
+          kind: "success",
+          message: "Client delivery ready.",
+          scope: "video-download",
+          actionLabel: "Download file",
+          actionHref: data.delivery_url,
+          ttlMs: 4200,
+        });
       }
     } else if (data.created) {
-      setNotice(messageEl, `Enqueued job ${data.job_id}`, false);
+      notify({
+        kind: "info",
+        message: "Download queued.",
+        scope: `video-download-${candidateId}`,
+        ttlMs: 3200,
+      });
     } else {
-      setNotice(messageEl, "Job already queued", false);
+      notify({
+        kind: "info",
+        message: "Job already queued.",
+        scope: `video-download-${candidateId}`,
+        ttlMs: 3200,
+      });
     }
 
     await refreshSearchRequestDetails(state.searchSelectedRequestId);
@@ -15130,10 +15363,20 @@ async function enqueueSearchCandidate(itemId, candidateId, options = {}) {
   } catch (err) {
     const rawMessage = String(err && err.message ? err.message : "");
     if (rawMessage.includes("music_mode_mb_binding_failed")) {
-      setNotice(messageEl, "Music Mode rejected — No canonical album release found", true);
+      notify({
+        kind: "error",
+        message: "Music Mode rejected — No canonical album release found",
+        scope: "video-download",
+        ttlMs: 5200,
+      });
       return;
     }
-    setNotice(messageEl, `Enqueue failed: ${rawMessage}`, true);
+    notify({
+      kind: "error",
+      message: `Enqueue failed: ${rawMessage}`,
+      scope: "video-download",
+      ttlMs: 5200,
+    });
   }
 }
 async function cancelSearchRequest(requestId) {
@@ -17201,17 +17444,23 @@ async function reconcileLibrary() {
 async function startRun(payload, opts = {}) {
   const messageEl = opts.messageEl || $("#home-search-message");
   try {
-    setNotice(messageEl, "Starting run...", false);
     const data = await fetchJson("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    setNotice(messageEl, "Run started", false);
+    if (messageEl) {
+      setNotice(messageEl, "", false);
+    }
     await refreshStatus();
     return data;
   } catch (err) {
-    setNotice(messageEl, `Run failed: ${err.message}`, true);
+    notify({
+      kind: "error",
+      message: `Run failed: ${err.message}`,
+      scope: "video-download",
+      ttlMs: 5200,
+    });
     return null;
   }
 }

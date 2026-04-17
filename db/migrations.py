@@ -73,3 +73,36 @@ def rollback_downloaded_music_tracks_table(conn: sqlite3.Connection) -> None:
     cur.execute("DROP INDEX IF EXISTS uq_downloaded_music_tracks_playlist_isrc")
     cur.execute("DROP TABLE IF EXISTS downloaded_music_tracks")
     conn.commit()
+
+
+def ensure_saved_titles_table(conn: sqlite3.Connection) -> None:
+    """Create saved Movies & TV titles table and indexes."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saved_titles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            tmdb_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            original_title TEXT,
+            year TEXT,
+            poster_url TEXT,
+            overview TEXT,
+            tmdb_url TEXT,
+            language TEXT,
+            popularity REAL,
+            rating REAL,
+            saved_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_titles_kind_tmdb "
+        "ON saved_titles (kind, tmdb_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saved_titles_kind_saved_at "
+        "ON saved_titles (kind, saved_at DESC)"
+    )
+    conn.commit()

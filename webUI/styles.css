@@ -963,7 +963,7 @@ body.topbar-hidden .topbar {
   background: rgba(11, 15, 20, 0.96);
   border: 1px solid var(--border);
   border-radius: 16px;
-  overflow: clip;
+  overflow: hidden;
   box-shadow: var(--shadow);
   box-sizing: border-box;
   isolation: isolate;
@@ -978,7 +978,7 @@ body.topbar-hidden .topbar {
 .music-header-search-bar:focus-within,
 .movies-tv-search-row:focus-within {
   border-color: rgba(89, 176, 255, 0.62);
-  box-shadow: var(--shadow), 0 0 0 1px rgba(89, 176, 255, 0.56);
+  box-shadow: var(--shadow), 0 0 0 2px rgba(89, 176, 255, 0.24);
   z-index: 12;
 }
 
@@ -991,7 +991,7 @@ body.topbar-hidden .topbar {
   border-radius: inherit;
   border: 1px solid rgba(89, 176, 255, 0.56);
   pointer-events: none;
-  z-index: 20;
+  z-index: 12;
 }
 
 .video-header-searchbar .home-search-input,
@@ -1048,9 +1048,7 @@ body.topbar-hidden .topbar {
   height: 40px;
   min-height: 40px;
   border-radius: 0;
-  border-top: 0;
-  border-bottom: 0;
-  border-right: 0;
+  border: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1060,12 +1058,13 @@ body.topbar-hidden .topbar {
   min-width: 78px;
   font-weight: 700;
   letter-spacing: 0.01em;
-  background: rgba(255, 255, 255, 0.02);
+  background: transparent;
   line-height: 1;
   box-sizing: border-box;
   position: relative;
-  z-index: 1;
+  z-index: 2;
   margin: 0;
+  box-shadow: none;
 }
 
 .topbar-search-host .home-source-toggle {
@@ -1074,9 +1073,8 @@ body.topbar-hidden .topbar {
   padding: 0 9px;
   min-width: 80px;
   border: 0;
-  border-right: 1px solid var(--border);
   border-radius: 15px 0 0 15px;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 255, 255, 0.03);
   font-weight: 700;
   display: inline-flex;
   align-items: center;
@@ -1086,7 +1084,7 @@ body.topbar-hidden .topbar {
   line-height: 1;
   box-sizing: border-box;
   position: relative;
-  z-index: 1;
+  z-index: 2;
   letter-spacing: 0;
   white-space: nowrap;
   overflow: hidden;
@@ -1100,6 +1098,8 @@ body.topbar-hidden .topbar {
   margin: 0;
   align-self: stretch;
   display: flex;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 15px 0 0 15px;
 }
 
 .topbar-search-host .home-source-panel {
@@ -1116,11 +1116,11 @@ body.topbar-hidden .topbar {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-right: 1px solid var(--border);
+  border-right: 0;
   color: var(--muted);
   pointer-events: none;
   position: relative;
-  z-index: 1;
+  z-index: 2;
   align-self: stretch;
   margin: 0;
 }
@@ -1139,12 +1139,6 @@ body.topbar-hidden .topbar {
 .topbar-search-host .music-header-search-bar > .button:last-child,
 .topbar-search-host .movies-tv-search-row > .button:last-child {
   border-radius: 0 16px 16px 0;
-}
-
-.topbar-search-host .video-header-searchbar > .button,
-.topbar-search-host .music-header-search-bar > .button,
-.topbar-search-host .movies-tv-search-row > .button {
-  border-left: 1px solid var(--border);
 }
 
 .topbar-search-host .button.primary,
@@ -1167,12 +1161,12 @@ body.topbar-hidden .topbar {
   content: "";
   position: absolute;
   left: 0;
-  top: 0;
-  bottom: 0;
+  top: 8px;
+  bottom: 8px;
   width: 1px;
   background: var(--border);
   pointer-events: none;
-  z-index: 2;
+  z-index: 1;
 }
 
 .topbar-search-host .video-header-searchbar:focus-within > *::before,
@@ -1204,13 +1198,13 @@ body.topbar-hidden .topbar {
 .topbar-search-host .video-header-searchbar > *:hover,
 .topbar-search-host .music-header-search-bar > *:hover,
 .topbar-search-host .movies-tv-search-row > *:hover {
-  z-index: 3;
+  z-index: 4;
 }
 
 .topbar-search-host .video-header-searchbar:focus-within > *,
 .topbar-search-host .music-header-search-bar:focus-within > *,
 .topbar-search-host .movies-tv-search-row:focus-within > * {
-  z-index: 4;
+  z-index: 3;
 }
 
 .topbar-search-host .button.primary:last-child,
@@ -1227,11 +1221,13 @@ body.topbar-hidden .topbar {
   font-weight: 500;
   color: var(--muted);
   line-height: 1;
+  background: transparent;
 }
 
 .topbar-search-host .searchbar-clear-button:hover,
 .topbar-search-host .searchbar-clear-button:focus-visible {
   color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 :root[data-theme="light"] .video-header-searchbar,
@@ -1243,15 +1239,12 @@ body.topbar-hidden .topbar {
 
 :root[data-theme="light"] .searchbar-leading-icon {
   color: #6b7280;
-  border-right-color: rgba(15, 23, 42, 0.12);
 }
 
 :root[data-theme="light"] .topbar-search-host .button,
 :root[data-theme="light"] .topbar-search-host .home-source-toggle {
-  background: rgba(248, 250, 252, 0.92);
+  background: transparent;
   color: #1f2937;
-  border-left-color: rgba(15, 23, 42, 0.12);
-  border-right-color: rgba(15, 23, 42, 0.12);
 }
 
 :root[data-theme="light"] .topbar-search-host .button:hover,
@@ -1259,14 +1252,31 @@ body.topbar-hidden .topbar {
   background: #eef3fb;
 }
 
-:root[data-theme="light"] .topbar-search-host .button.primary {
-  background: var(--accent);
-  color: #ffffff;
+:root[data-theme="light"] .topbar-search-host .home-source-filters,
+:root[data-theme="light"] .topbar-search-host .home-source-toggle {
+  background: rgba(248, 250, 252, 0.92);
 }
 
 :root[data-theme="light"] .topbar-search-host .searchbar-clear-button {
   background: transparent;
   color: #6b7280;
+}
+
+.topbar-search-host .button.primary,
+.topbar-search-host .button.primary.small {
+  background: var(--accent);
+  color: #ffffff;
+  font-weight: 800;
+}
+
+.topbar-search-host .button.primary:hover,
+.topbar-search-host .button.primary.small:hover {
+  background: color-mix(in srgb, var(--accent) 88%, #ffffff 12%);
+}
+
+:root[data-theme="light"] .topbar-search-host .button.primary {
+  background: var(--accent);
+  color: #ffffff;
 }
 
 .topbar-subbar-host .home-advanced-panel,
@@ -1988,6 +1998,12 @@ body.video-page .home-results {
   align-items: center;
   margin-bottom: 0;
   gap: 12px;
+}
+
+.movies-tv-section-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 body.video-page .video-results-limit-control select,
@@ -3420,6 +3436,48 @@ body.home-page .music-search-header-row .panel-title {
   pointer-events: none;
   background:
     linear-gradient(180deg, rgba(6, 10, 15, 0.02) 18%, rgba(6, 10, 15, 0.36) 48%, rgba(6, 10, 15, 0.92) 100%);
+}
+
+.movies-tv-save-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+  min-width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(7, 12, 18, 0.78);
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1;
+  border-color: transparent !important;
+  box-shadow: 0 12px 32px rgba(5, 8, 14, 0.32);
+  backdrop-filter: blur(12px);
+}
+
+:root[data-theme="light"] .movies-tv-save-toggle {
+  background: rgba(255, 255, 255, 0.92);
+  color: rgba(15, 23, 42, 0.9);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+}
+
+.movies-tv-save-toggle:hover,
+.movies-tv-save-toggle:focus-visible {
+  background: rgba(19, 29, 42, 0.96);
+  color: #ffffff;
+}
+
+.movies-tv-save-toggle.active {
+  background: rgba(37, 99, 235, 0.94);
+  color: #ffffff;
+}
+
+.movies-tv-save-toggle.active:hover,
+.movies-tv-save-toggle.active:focus-visible {
+  background: rgba(59, 130, 246, 0.98);
 }
 
 .movies-tv-main {
@@ -5491,6 +5549,32 @@ a[aria-disabled="true"] {
   color: var(--text);
   font-size: 0.93rem;
   line-height: 1.4;
+}
+
+.app-toast-actions {
+  grid-column: 1 / 2;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.app-toast-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(89, 176, 255, 0.28);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.app-toast-action:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .app-toast-close {
@@ -8460,5 +8544,249 @@ body[data-page="music"] #music-panel .music-page-shell {
 
   .music-bottom-player {
     width: calc(100% - 28px);
+  }
+}
+
+/* ===== TOPBAR SEARCH COMPONENT AUTHORITY ===== */
+:root {
+  --topbar-search-accent: #2b6ff7;
+  --topbar-search-accent-hover: #4a86ff;
+  --topbar-search-shell-bg: rgba(11, 15, 20, 0.96);
+  --topbar-search-segment-bg: rgba(255, 255, 255, 0.035);
+  --topbar-search-hover-bg: rgba(255, 255, 255, 0.06);
+}
+
+:root[data-theme="light"] {
+  --topbar-search-shell-bg: rgba(255, 255, 255, 0.98);
+  --topbar-search-segment-bg: rgba(248, 250, 252, 0.96);
+  --topbar-search-hover-bg: rgba(232, 240, 255, 0.96);
+}
+
+.topbar-search-host .video-header-searchbar,
+.topbar-search-host .music-header-search-bar,
+.topbar-search-host .movies-tv-search-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 52px;
+  margin: 0 !important;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--topbar-search-shell-bg);
+  box-shadow: 0 12px 28px rgba(4, 6, 12, 0.34);
+  box-sizing: border-box;
+  overflow: visible;
+  isolation: isolate;
+}
+
+.topbar-search-host .video-header-searchbar:focus-within,
+.topbar-search-host .music-header-search-bar:focus-within,
+.topbar-search-host .movies-tv-search-row:focus-within {
+  border-color: rgba(43, 111, 247, 0.62);
+  box-shadow:
+    0 12px 28px rgba(4, 6, 12, 0.34),
+    0 0 0 3px rgba(43, 111, 247, 0.18);
+}
+
+.topbar-search-host .video-header-searchbar:focus-within::after,
+.topbar-search-host .music-header-search-bar:focus-within::after,
+.topbar-search-host .movies-tv-search-row:focus-within::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(43, 111, 247, 0.56);
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.topbar-search-host .video-header-searchbar > *,
+.topbar-search-host .music-header-search-bar > *,
+.topbar-search-host .movies-tv-search-row > * {
+  position: relative;
+  z-index: 2;
+}
+
+.topbar-search-host .video-header-searchbar > *::before,
+.topbar-search-host .music-header-search-bar > *::before,
+.topbar-search-host .movies-tv-search-row > *::before {
+  display: none !important;
+}
+
+.topbar-search-host .home-source-filters {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-self: stretch;
+  margin: 0;
+  border-radius: 14px;
+  background: var(--topbar-search-segment-bg);
+}
+
+.topbar-search-host .home-source-toggle,
+.topbar-search-host .button,
+.topbar-search-host .button.primary,
+.topbar-search-host .button.primary.small,
+.topbar-search-host .button.ghost.small,
+.topbar-search-host .searchbar-clear-button,
+.topbar-search-host .searchbar-leading-icon,
+.topbar-search-host .home-search-input,
+.topbar-search-host .music-header-query,
+.topbar-search-host .movies-tv-search-row input {
+  font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif !important;
+}
+
+.topbar-search-host .home-source-toggle,
+.topbar-search-host .button,
+.topbar-search-host .button.primary,
+.topbar-search-host .button.primary.small,
+.topbar-search-host .button.ghost.small,
+.topbar-search-host .searchbar-clear-button,
+.topbar-search-host .searchbar-leading-icon {
+  height: 44px;
+  min-height: 44px;
+  align-self: stretch;
+  margin: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  border-radius: 14px;
+}
+
+.topbar-search-host .home-source-toggle,
+.topbar-search-host .button,
+.topbar-search-host .button.primary,
+.topbar-search-host .button.primary.small,
+.topbar-search-host .button.ghost.small {
+  min-width: auto;
+  padding: 0 18px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  background: transparent;
+  color: var(--text);
+}
+
+.topbar-search-host .home-source-toggle {
+  background: var(--topbar-search-segment-bg);
+  color: var(--text) !important;
+}
+
+.topbar-search-host .button:not(.primary):hover,
+.topbar-search-host .button:not(.primary):focus-visible,
+.topbar-search-host .home-source-toggle:hover,
+.topbar-search-host .home-source-toggle:focus-visible,
+.topbar-search-host .searchbar-clear-button:hover,
+.topbar-search-host .searchbar-clear-button:focus-visible {
+  background: var(--topbar-search-hover-bg) !important;
+}
+
+.topbar-search-host .searchbar-leading-icon {
+  flex: 0 0 40px;
+  width: 40px;
+  min-width: 40px;
+  justify-content: center;
+  color: var(--muted);
+  background: transparent;
+  pointer-events: none;
+}
+
+.topbar-search-host .home-search-input,
+.topbar-search-host .music-header-query,
+.topbar-search-host .movies-tv-search-row input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  height: 44px !important;
+  min-height: 44px !important;
+  margin: 0 !important;
+  padding: 0 14px !important;
+  border: 0 !important;
+  border-radius: 14px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  align-self: stretch;
+  font-size: 15px !important;
+  font-weight: 500 !important;
+  line-height: 44px !important;
+  letter-spacing: 0 !important;
+  color: var(--text) !important;
+}
+
+.topbar-search-host .home-search-input::placeholder,
+.topbar-search-host .music-header-query::placeholder,
+.topbar-search-host .movies-tv-search-row input::placeholder {
+  font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif !important;
+  font-size: 15px !important;
+  font-weight: 500 !important;
+  line-height: 44px !important;
+  color: var(--muted) !important;
+  letter-spacing: 0 !important;
+}
+
+.topbar-search-host .home-search-input:focus,
+.topbar-search-host .music-header-query:focus,
+.topbar-search-host .movies-tv-search-row input:focus {
+  outline: none;
+}
+
+.topbar-search-host .searchbar-clear-button {
+  flex: 0 0 44px;
+  width: 44px;
+  min-width: 44px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.topbar-search-host .button.primary,
+.topbar-search-host .button.primary.small,
+#home-search-only.button.primary,
+#music-header-search-submit.button.primary,
+#movies-tv-search-button.button.primary {
+  background: var(--topbar-search-accent) !important;
+  color: #ffffff !important;
+  font-weight: 800;
+}
+
+.topbar-search-host .button.primary:hover,
+.topbar-search-host .button.primary.small:hover,
+#home-search-only.button.primary:hover,
+#music-header-search-submit.button.primary:hover,
+#movies-tv-search-button.button.primary:hover {
+  background: var(--topbar-search-accent-hover) !important;
+}
+
+.topbar-search-host .button.primary:last-child,
+.topbar-search-host .button.ghost.small:last-child,
+.topbar-search-host .button.primary.small:last-child {
+  border-radius: 14px;
+}
+
+.topbar-search-host .movies-tv-search-row {
+  margin: 0 !important;
+}
+
+@media (max-width: 980px) {
+  .topbar-search-host .video-header-searchbar,
+  .topbar-search-host .music-header-search-bar,
+  .topbar-search-host .movies-tv-search-row {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 760px) {
+  .topbar-search-host .home-source-toggle,
+  .topbar-search-host .button,
+  .topbar-search-host .button.primary,
+  .topbar-search-host .button.primary.small,
+  .topbar-search-host .button.ghost.small {
+    width: 100%;
   }
 }

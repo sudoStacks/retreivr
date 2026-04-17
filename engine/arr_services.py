@@ -48,6 +48,13 @@ _EDITORIAL_CACHE_LOCK = threading.Lock()
 MDBLIST_PUBLIC_SHELVES: dict[str, list[dict[str, Any]]] = {
     "movie": [
         {
+            "id": "saved_for_later",
+            "title": "Saved for Later",
+            "subtitle": "Titles you bookmarked to revisit without sending them to ARR yet.",
+            "provider": "local",
+            "default_visible": True,
+        },
+        {
             "id": "trending_now",
             "title": "Trending Now",
             "subtitle": "What is bubbling up right now across public list activity.",
@@ -62,6 +69,15 @@ MDBLIST_PUBLIC_SHELVES: dict[str, list[dict[str, Any]]] = {
             "provider": "mdblist",
             "list_path": "linaspurinis/latest-releases",
             "default_visible": True,
+        },
+        {
+            "id": "in_theaters_now",
+            "title": "In Theaters Now",
+            "subtitle": "Current theatrical releases that are playing right now.",
+            "provider": "tmdb",
+            "fallback": "in_theaters_now",
+            "default_visible": True,
+            "limit": 8,
         },
         {
             "id": "highly_rated",
@@ -114,6 +130,13 @@ MDBLIST_PUBLIC_SHELVES: dict[str, list[dict[str, Any]]] = {
         },
     ],
     "tv": [
+        {
+            "id": "saved_for_later",
+            "title": "Saved for Later",
+            "subtitle": "Shows you bookmarked so they stay visible until you are ready to act.",
+            "provider": "local",
+            "default_visible": True,
+        },
         {
             "id": "trending_now",
             "title": "Trending Now",
@@ -1289,6 +1312,13 @@ def _build_tmdb_editorial_fallback(
                 genre_id=int(genre_entry["id"]),
                 limit=limit,
             )
+    elif shelf_key == "in_theaters_now" and normalized == "movie":
+        payload = _tmdb_request(config, "/movie/now_playing", params={"page": "1", "language": "en-US", "region": "US"})
+        raw_results = payload.get("results") or []
+        for raw in raw_results:
+            row = _movie_result_row(raw)
+            if row:
+                rows.append(row)
     elif shelf_key in {"popular", "trending_now", "popular_on_streaming", "highly_rated", "hidden_gems", "award_winners"}:
         payload = _tmdb_request(config, f"/{normalized}/popular", params={"page": "1", "language": "en-US"})
         raw_results = payload.get("results") or []
@@ -1354,9 +1384,10 @@ def build_arr_editorial_response(
         return _build_tmdb_editorial_fallback(config, kind=normalized, shelf=shelf_key, limit=limit)
     if not shelf_def:
         raise ArrServiceError("Unsupported ARR editorial shelf")
+    resolved_limit = int(shelf_def.get("limit") or limit)
 
     ttl_seconds = _editorial_cache_ttl_seconds(config)
-    cache_key = _editorial_cache_key("editorial_shelf", normalized, shelf_key, int(limit))
+    cache_key = _editorial_cache_key("editorial_shelf", normalized, shelf_key, int(resolved_limit))
     cached = _get_editorial_cache(cache_key, ttl_seconds)
     if isinstance(cached, dict):
         return cached
@@ -1377,9 +1408,9 @@ def build_arr_editorial_response(
                 except Exception:
                     continue
                 tmdb_ids.append(tmdb_id)
-                if len(tmdb_ids) >= max(int(limit) * 2, int(limit)):
+                if len(tmdb_ids) >= max(int(resolved_limit) * 2, int(resolved_limit)):
                     break
-            rows = _hydrate_tmdb_rows(config, kind=normalized, tmdb_ids=tmdb_ids, limit=limit)
+            rows = _hydrate_tmdb_rows(config, kind=normalized, tmdb_ids=tmdb_ids, limit=resolved_limit)
             connection = test_radarr_connection(config) if normalized == "movie" else test_sonarr_connection(config)
             payload = {
                 "kind": normalized,
@@ -1398,7 +1429,7 @@ def build_arr_editorial_response(
         config,
         kind=normalized,
         shelf=fallback_shelf,
-        limit=limit,
+        limit=resolved_limit,
         genre_name=_trimmed(shelf_def.get("genre_name")) or None,
     )
     payload["shelf"] = shelf_key

@@ -203,6 +203,7 @@ from spotify.oauth_client import SPOTIFY_TOKEN_URL, build_auth_url
 from spotify.client import SpotifyPlaylistClient
 from spotify.oauth_store import SpotifyOAuthStore, SpotifyOAuthToken
 from db.playlist_snapshots import PlaylistSnapshotStore
+from db.saved_titles import SavedTitleStore
 from scheduler.jobs.spotify_playlist_watch import (
     normalize_spotify_playlist_identifier,
     playlist_watch_job,
@@ -10510,7 +10511,7 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
         cur = conn.cursor()
         query = (
             "SELECT id, origin, origin_id, url, source, media_intent, status, attempts, created_at, updated_at, last_error, output_template, "
-            "progress_downloaded_bytes, progress_total_bytes, progress_percent, progress_speed_bps, progress_eta_seconds, progress_updated_at "
+            "progress_downloaded_bytes, progress_total_bytes, progress_percent, progress_speed_bps, progress_eta_seconds, progress_updated_at, file_path "
             "FROM download_jobs"
         )
         params = []
@@ -10581,12 +10582,14 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
                 "progress_downloaded_bytes": row[12],
                 "progress_total_bytes": row[13],
                 "progress_percent": row[14],
-                "progress_speed_bps": row[15],
-                "progress_eta_seconds": row[16],
-                "progress_updated_at": row[17],
-            }
-            for row in cur.fetchall()
-        ]
+                    "progress_speed_bps": row[15],
+                    "progress_eta_seconds": row[16],
+                    "progress_updated_at": row[17],
+                    "file_path": row[18],
+                    "file_id": _file_id_from_path(row[18]) if row[18] else None,
+                }
+                for row in cur.fetchall()
+            ]
     finally:
         conn.close()
     return safe_json({"jobs": rows})
@@ -11899,6 +11902,72 @@ async def api_arr_sonarr_health():
     return safe_json(test_sonarr_connection(_current_loaded_config()))
 
 
+def _normalize_arr_saved_kind(kind: str) -> str:
+    normalized = str(kind or "").strip().lower()
+    if normalized in {"movie", "movies"}:
+        return "movie"
+    if normalized in {"tv", "show", "shows", "series"}:
+        return "tv"
+    raise HTTPException(status_code=400, detail={"error": "kind must be movie or tv"})
+
+
+def _saved_title_store() -> SavedTitleStore:
+    return SavedTitleStore(app.state.paths.db_path)
+
+
+def _attach_saved_titles_to_results(results: list[dict[str, Any]], *, kind: str) -> list[dict[str, Any]]:
+    items = [item for item in (results or []) if isinstance(item, dict)]
+    if not items:
+        return items
+    status_map = _saved_title_store().get_saved_status_map(kind, [item.get("tmdb_id") for item in items])
+    normalized_kind = _normalize_arr_saved_kind(kind)
+    annotated: list[dict[str, Any]] = []
+    for item in items:
+        tmdb_key = str(item.get("tmdb_id") or "").strip()
+        annotated.append(
+            {
+                **item,
+                "kind": str(item.get("kind") or normalized_kind),
+                "saved": bool(status_map.get(tmdb_key)),
+            }
+        )
+    return annotated
+
+
+def _attach_saved_titles_to_payload(payload: dict[str, Any], *, kind: str | None = None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    normalized_kind = _normalize_arr_saved_kind(kind or str(payload.get("kind") or "movie"))
+    next_payload = dict(payload)
+    next_payload["results"] = _attach_saved_titles_to_results(
+        list(payload.get("results") or []),
+        kind=normalized_kind,
+    )
+    if "kind" not in next_payload:
+        next_payload["kind"] = normalized_kind
+    return next_payload
+
+
+def _build_saved_titles_shelf(kind: str, *, limit: int) -> dict[str, Any]:
+    normalized_kind = _normalize_arr_saved_kind(kind)
+    store = _saved_title_store()
+    results = store.list_saved_titles(normalized_kind, limit=limit)
+    tmdb_ids = [item["tmdb_id"] for item in results if item.get("tmdb_id") is not None]
+    statuses = get_bulk_status(_current_loaded_config(), normalized_kind, tmdb_ids) if tmdb_ids else {}
+    connection = test_radarr_connection(_current_loaded_config()) if normalized_kind == "movie" else test_sonarr_connection(_current_loaded_config())
+    for item in results:
+        item["kind"] = normalized_kind
+        item["saved"] = True
+        item["arr_status"] = statuses.get(str(item.get("tmdb_id"))) or {"status": "not_added", "added": False, "downloaded": False, "arr_id": None}
+    return {
+        "kind": normalized_kind,
+        "shelf": "saved_for_later",
+        "provider": "local",
+        "results": results,
+        "connection": connection,
+    }
+
+
 @app.get("/api/arr/search/movies")
 async def api_arr_search_movies(
     q: str = Query("", min_length=1),
@@ -11906,7 +11975,8 @@ async def api_arr_search_movies(
     year: int | None = Query(None, ge=1888, le=2100),
 ):
     try:
-        return safe_json(build_movie_search_response(_current_loaded_config(), q, limit=limit, year=year))
+        payload = build_movie_search_response(_current_loaded_config(), q, limit=limit, year=year)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind="movie"))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
@@ -11927,7 +11997,8 @@ async def api_arr_genre_browse(
     year: int | None = Query(None, ge=1888, le=2100),
 ):
     try:
-        return safe_json(build_arr_genre_browse_response(_current_loaded_config(), kind=kind, genre_id=genre_id, limit=limit, year=year))
+        payload = build_arr_genre_browse_response(_current_loaded_config(), kind=kind, genre_id=genre_id, limit=limit, year=year)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind=kind))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
@@ -11939,7 +12010,11 @@ async def api_arr_editorial(
     limit: int = Query(12, ge=1, le=24),
 ):
     try:
-        return safe_json(build_arr_editorial_response(_current_loaded_config(), kind=kind, shelf=shelf, limit=limit))
+        normalized_kind = _normalize_arr_saved_kind(kind)
+        if str(shelf or "").strip().lower() == "saved_for_later":
+            return safe_json(_build_saved_titles_shelf(normalized_kind, limit=limit))
+        payload = build_arr_editorial_response(_current_loaded_config(), kind=normalized_kind, shelf=shelf, limit=limit)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind=normalized_kind))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
@@ -11969,7 +12044,11 @@ async def api_arr_editorial_shelf(
     limit: int = Query(12, ge=1, le=24),
 ):
     try:
-        return safe_json(build_arr_editorial_response(_current_loaded_config(), kind=kind, shelf=shelf, limit=limit))
+        normalized_kind = _normalize_arr_saved_kind(kind)
+        if str(shelf or "").strip().lower() == "saved_for_later":
+            return safe_json(_build_saved_titles_shelf(normalized_kind, limit=limit))
+        payload = build_arr_editorial_response(_current_loaded_config(), kind=normalized_kind, shelf=shelf, limit=limit)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind=normalized_kind))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
@@ -11981,7 +12060,8 @@ async def api_arr_search_tv(
     year: int | None = Query(None, ge=1888, le=2100),
 ):
     try:
-        return safe_json(build_tv_search_response(_current_loaded_config(), q, limit=limit, year=year))
+        payload = build_tv_search_response(_current_loaded_config(), q, limit=limit, year=year)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind="tv"))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
@@ -12025,6 +12105,36 @@ async def api_arr_status_bulk(payload: dict = Body(...)):
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
+@app.get("/api/arr/saved")
+async def api_arr_saved_titles(kind: str = Query(...), limit: int = Query(10, ge=1, le=24)):
+    normalized_kind = _normalize_arr_saved_kind(kind)
+    return safe_json(_build_saved_titles_shelf(normalized_kind, limit=limit))
+
+
+@app.post("/api/arr/saved/toggle")
+async def api_arr_saved_toggle(payload: dict = Body(...)):
+    normalized_kind = _normalize_arr_saved_kind(str(payload.get("kind") or ""))
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        raise HTTPException(status_code=400, detail={"error": "item is required"})
+    should_save = bool(payload.get("saved", True))
+    store = _saved_title_store()
+    try:
+        if should_save:
+            saved_item = store.save_title(normalized_kind, item)
+            tmdb_id = saved_item["tmdb_id"]
+            status_map = get_bulk_status(_current_loaded_config(), normalized_kind, [tmdb_id])
+            saved_item["kind"] = normalized_kind
+            saved_item["saved"] = True
+            saved_item["arr_status"] = status_map.get(str(tmdb_id)) or {"status": "not_added", "added": False, "downloaded": False, "arr_id": None}
+            return safe_json({"saved": True, "item": saved_item})
+        tmdb_id = int(item.get("tmdb_id"))
+        removed = store.remove_title(normalized_kind, tmdb_id)
+        return safe_json({"saved": False, "removed": removed, "tmdb_id": tmdb_id, "kind": normalized_kind})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
 @app.get("/api/arr/trailer")
 async def api_arr_trailer(kind: str = Query(...), tmdb_id: int = Query(...)):
     try:
@@ -12044,7 +12154,8 @@ async def api_arr_cast(kind: str = Query(...), tmdb_id: int = Query(...), limit:
 @app.get("/api/arr/person")
 async def api_arr_person_titles(person_id: int = Query(...), kind: str = Query(...), limit: int = Query(24, ge=1, le=50)):
     try:
-        return safe_json(get_tmdb_person_titles(_current_loaded_config(), person_id, kind=kind, limit=limit))
+        payload = get_tmdb_person_titles(_current_loaded_config(), person_id, kind=kind, limit=limit)
+        return safe_json(_attach_saved_titles_to_payload(payload, kind=kind))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
