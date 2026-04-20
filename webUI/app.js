@@ -122,6 +122,10 @@ const state = {
   setupWizard: null,
   servicesHealth: null,
   lastAutoConfigureResults: {},
+  servicesHealthCacheAt: 0,
+  servicesHealthFailures: 0,
+  servicesHealthBackoffUntil: 0,
+  servicesHealthInFlight: null,
   adminSecurity: {
     admin_pin_enabled: false,
     admin_pin_session_minutes: 30,
@@ -148,6 +152,7 @@ const state = {
   playerCurrent: null,
   playerCurrentHasVideo: false,
   playerVideoVisible: false,
+  playerPrefetchInFlightRecordings: new Set(),
   playerYT: null,           // active YT.Player instance, or null when using <audio>
   playerYTReady: false,     // IFrame API script loaded and YT.Player can be instantiated
   playerYTProgressTimer: null,
@@ -217,6 +222,15 @@ const VERSION_LATEST_URL = "/api/version/latest";
 const VERSION_REFERENCE_PAGE = "https://github.com/sudoStacks/retreivr/pkgs/container/retreivr";
 const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at_v2";
 const RELEASE_CACHE_KEY = "yt_archiver_release_cache_v2";
+const CONNECTIONS_HEALTH_TTL_MS = 15000;
+const STACK_PATH_DEFAULTS = {
+  env_path: ".env",
+  media_root: "./media",
+  movies_root: "./media/movies",
+  tv_root: "./media/tv",
+  downloads_root: "./downloads",
+  books_root: "./media/books",
+};
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version_v2";
 const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
 const APP_SIDEBAR_COLLAPSED_KEY = "retreivr.app.sidebar_collapsed";
@@ -828,6 +842,24 @@ function runPrioritizedThumbnailJobs(jobs, renderToken, options = {}) {
   const normalizedOptions = typeof options === "number"
     ? { immediateConcurrency: options }
     : (options && typeof options === "object" ? options : {});
+  const getTaskViewportScore = (task) => {
+    const element = task && task.__priorityElement;
+    if (!element || typeof element.getBoundingClientRect !== "function") {
+      return Number.MAX_SAFE_INTEGER;
+    }
+    const rect = element.getBoundingClientRect();
+    const viewport = Math.max(1, window.innerHeight || document.documentElement?.clientHeight || 900);
+    if (rect.bottom >= 0 && rect.top <= viewport) {
+      return Math.max(0, rect.top);
+    }
+    if (rect.top > viewport) {
+      return viewport + (rect.top - viewport);
+    }
+    return viewport + Math.abs(rect.bottom);
+  };
+  if (normalizedOptions.prioritizeVisible !== false) {
+    tasks.sort((a, b) => getTaskViewportScore(a) - getTaskViewportScore(b));
+  }
   const visibleCount = Math.max(0, Number.parseInt(normalizedOptions.visibleCount, 10) || 12);
   const immediateTasks = tasks.slice(0, visibleCount || tasks.length);
   const deferredTasks = tasks.slice(immediateTasks.length);
@@ -878,6 +910,45 @@ function prefetchMusicAlbumsForArtists(artists = [], { limit = 6 } = {}) {
   items.forEach((artist) => {
     fetchMusicAlbumsByArtist(artist).catch(() => {});
   });
+}
+
+function openMusicImportFilePicker() {
+  const inputEl = $("#home-import-file");
+  if (!inputEl) {
+    setMusicPageNotice("Import file input is unavailable.", true);
+    return;
+  }
+  if (state.playlistImportInProgress) {
+    openImportProgressModal();
+    return;
+  }
+  inputEl.dataset.autoSubmit = "1";
+  inputEl.value = "";
+  inputEl.click();
+}
+
+function renderMusicImportToolbarButton(actionsContainer) {
+  if (!actionsContainer) return;
+  const importButton = document.createElement("button");
+  importButton.className = "button ghost small music-import-toolbar-button";
+  importButton.type = "button";
+  importButton.textContent = "Import from File";
+  importButton.disabled = !!state.playlistImportInProgress;
+  importButton.addEventListener("click", openMusicImportFilePicker);
+  actionsContainer.appendChild(importButton);
+}
+
+function renderMusicToolbarImportOnly() {
+  const toolbarSlot = getMusicToolbarSlot();
+  if (!toolbarSlot) return;
+  toolbarSlot.innerHTML = "";
+  const toolbar = document.createElement("div");
+  toolbar.className = "music-results-toolbar music-results-toolbar-import-only";
+  const actions = document.createElement("div");
+  actions.className = "music-results-toolbar-actions";
+  renderMusicImportToolbarButton(actions);
+  toolbar.appendChild(actions);
+  toolbarSlot.appendChild(toolbar);
 }
 
 function scheduleAlbumCardArtworkLoads(cards = [], candidates = [], { visibleCount = 10 } = {}) {
@@ -2004,7 +2075,7 @@ function setMusicSection(section) {
     reviewRegion.classList.toggle("hidden", normalized !== "browse");
   }
   if (toolbarSlot && normalized !== "browse") {
-    toolbarSlot.innerHTML = "";
+    renderMusicToolbarImportOnly();
   }
   if (navSlot && normalized !== "browse") {
     navSlot.innerHTML = "";
@@ -2173,10 +2244,15 @@ function buildSetupWizardDraft() {
     existing_qbittorrent_enabled: !!existingServices.qbittorrent?.configured || !!arr.qbittorrent?.base_url,
     existing_jellyfin_enabled: !!existingServices.jellyfin?.configured || !!arr.jellyfin?.base_url,
     existing_radarr_base_url: String(arr.radarr?.base_url || ""),
+    existing_radarr_api_key: String(arr.radarr?.api_key || ""),
     existing_sonarr_base_url: String(arr.sonarr?.base_url || ""),
+    existing_sonarr_api_key: String(arr.sonarr?.api_key || ""),
     existing_readarr_base_url: String(arr.readarr?.base_url || ""),
+    existing_readarr_api_key: String(arr.readarr?.api_key || ""),
     existing_prowlarr_base_url: String(arr.prowlarr?.base_url || ""),
+    existing_prowlarr_api_key: String(arr.prowlarr?.api_key || ""),
     existing_bazarr_base_url: String(arr.bazarr?.base_url || ""),
+    existing_bazarr_api_key: String(arr.bazarr?.api_key || ""),
     existing_qbittorrent_base_url: String(arr.qbittorrent?.base_url || ""),
     existing_qbittorrent_username: String(arr.qbittorrent?.username || ""),
     existing_qbittorrent_password: String(arr.qbittorrent?.password || ""),
@@ -2193,6 +2269,8 @@ function ensureSetupWizardState() {
       jellyfinDiscovery: null,
       jellyfinDiscoveryLoading: false,
       jellyfinDiscoveryError: "",
+      preflight: null,
+      preflightLoading: false,
     };
     return;
   }
@@ -2211,11 +2289,23 @@ function ensureSetupWizardState() {
   if (typeof state.setupWizard.jellyfinDiscoveryError !== "string") {
     state.setupWizard.jellyfinDiscoveryError = "";
   }
+  if (typeof state.setupWizard.preflight !== "object") {
+    state.setupWizard.preflight = state.setupStatus?.preflight || null;
+  }
+  if (typeof state.setupWizard.preflightLoading !== "boolean") {
+    state.setupWizard.preflightLoading = false;
+  }
 }
 
 function getSetupWizardSteps() {
   const draft = state.setupWizard?.draft || buildSetupWizardDraft();
   const steps = [
+    {
+      id: "paths",
+      title: "Where should Retreivr keep your files?",
+      subtitle: "Set your core Retreivr path mappings first. These drive managed env values and optional ARR/Jellyfin folder targets.",
+      required: true,
+    },
     {
       id: "arr-mode",
       title: "Do you want help setting up movie, show, and book automation?",
@@ -2277,9 +2367,9 @@ function getSetupWizardSteps() {
       required: false,
     },
     {
-      id: "paths",
-      title: "Where should Retreivr keep your files?",
-      subtitle: "Choose the folders Retreivr will use for your media, downloads, and books. You can change them later if needed.",
+      id: "preflight",
+      title: "Preflight checks before apply",
+      subtitle: "Retreivr checks Docker/Compose availability, compose paths, and host port conflicts before any apply step.",
       required: true,
     },
     {
@@ -2290,6 +2380,19 @@ function getSetupWizardSteps() {
     }
   );
   return steps;
+}
+
+function isValidHttpUrl(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch (_err) {
+    return false;
+  }
+}
+
+function getSetupPreflight() {
+  return state.setupWizard?.preflight || state.setupStatus?.preflight || null;
 }
 
 function getSetupWizardStepState(step, draft = state.setupWizard?.draft || buildSetupWizardDraft()) {
@@ -2331,7 +2434,7 @@ function getSetupWizardStepState(step, draft = state.setupWizard?.draft || build
       draft.existing_jellyfin_enabled,
     ].filter(Boolean).length;
     if (!enabled) return { tone: "warning", label: "Choose services", message: "Pick at least one existing service to connect." };
-    return { tone: "success", label: `${enabled} selected`, message: "Retreivr will probe the services you selected and connect what it can." };
+    return { tone: "success", label: `${enabled} selected`, message: "Retreivr will probe and validate the services you selected before connecting." };
   }
   if (step.id === "tmdb") {
     if (draft.wants_tmdb === false) return { tone: "skipped", label: "Skipped", message: "Movies & TV discovery will stay limited until you add a TMDb key later." };
@@ -2374,6 +2477,17 @@ function getSetupWizardStepState(step, draft = state.setupWizard?.draft || build
       ? { tone: "success", label: "Ready", message: "Your file locations are set." }
       : { tone: "warning", label: "Paths needed", message: "Add all file locations before moving on." };
   }
+  if (step.id === "preflight") {
+    const preflight = getSetupPreflight();
+    if (!preflight) return { tone: "pending", label: "Run checks", message: "Run preflight checks to detect blocking conflicts before apply." };
+    if (preflight.ok && !(preflight.warnings || []).length) {
+      return { tone: "success", label: "Ready", message: "No blocking preflight issues were found." };
+    }
+    if (preflight.ok) {
+      return { tone: "warning", label: "Warnings", message: "Preflight passed with warnings. Review hints before apply." };
+    }
+    return { tone: "error", label: "Blocking issues", message: "Preflight found blocking issues. Resolve them before apply." };
+  }
   if (step.id === "review") {
     return { tone: "success", label: "Ready", message: "You can save your choices now and prepare the next restart step." };
   }
@@ -2411,14 +2525,26 @@ function validateSetupWizardStep(step, draft = state.setupWizard?.draft || build
     ].some(Boolean);
     if (!enabled) return "Choose at least one existing service to connect.";
     if (draft.existing_radarr_enabled && !nonEmpty(draft.existing_radarr_base_url)) return "Add your Radarr app address to continue.";
+    if (draft.existing_radarr_enabled && !isValidHttpUrl(draft.existing_radarr_base_url)) return "Radarr app address must start with http:// or https://.";
+    if (draft.existing_radarr_enabled && !nonEmpty(draft.existing_radarr_api_key)) return "Add your Radarr API key to continue.";
     if (draft.existing_sonarr_enabled && !nonEmpty(draft.existing_sonarr_base_url)) return "Add your Sonarr app address to continue.";
+    if (draft.existing_sonarr_enabled && !isValidHttpUrl(draft.existing_sonarr_base_url)) return "Sonarr app address must start with http:// or https://.";
+    if (draft.existing_sonarr_enabled && !nonEmpty(draft.existing_sonarr_api_key)) return "Add your Sonarr API key to continue.";
     if (draft.existing_readarr_enabled && !nonEmpty(draft.existing_readarr_base_url)) return "Add your Readarr app address to continue.";
+    if (draft.existing_readarr_enabled && !isValidHttpUrl(draft.existing_readarr_base_url)) return "Readarr app address must start with http:// or https://.";
+    if (draft.existing_readarr_enabled && !nonEmpty(draft.existing_readarr_api_key)) return "Add your Readarr API key to continue.";
     if (draft.existing_prowlarr_enabled && !nonEmpty(draft.existing_prowlarr_base_url)) return "Add your Prowlarr app address to continue.";
+    if (draft.existing_prowlarr_enabled && !isValidHttpUrl(draft.existing_prowlarr_base_url)) return "Prowlarr app address must start with http:// or https://.";
+    if (draft.existing_prowlarr_enabled && !nonEmpty(draft.existing_prowlarr_api_key)) return "Add your Prowlarr API key to continue.";
     if (draft.existing_bazarr_enabled && !nonEmpty(draft.existing_bazarr_base_url)) return "Add your Bazarr app address to continue.";
+    if (draft.existing_bazarr_enabled && !isValidHttpUrl(draft.existing_bazarr_base_url)) return "Bazarr app address must start with http:// or https://.";
+    if (draft.existing_bazarr_enabled && !nonEmpty(draft.existing_bazarr_api_key)) return "Add your Bazarr API key to continue.";
     if (draft.existing_qbittorrent_enabled && (!nonEmpty(draft.existing_qbittorrent_base_url) || !nonEmpty(draft.existing_qbittorrent_username) || !nonEmpty(draft.existing_qbittorrent_password))) {
       return "Add the qBittorrent address, username, and password to continue.";
     }
+    if (draft.existing_qbittorrent_enabled && !isValidHttpUrl(draft.existing_qbittorrent_base_url)) return "qBittorrent app address must start with http:// or https://.";
     if (draft.existing_jellyfin_enabled && !nonEmpty(draft.existing_jellyfin_base_url)) return "Add your Jellyfin app address to continue.";
+    if (draft.existing_jellyfin_enabled && !isValidHttpUrl(draft.existing_jellyfin_base_url)) return "Jellyfin app address must start with http:// or https://.";
   }
   if (step.id === "tmdb") {
     if (draft.wants_tmdb == null) return "Choose Yes or No before moving on.";
@@ -2456,6 +2582,9 @@ function validateSetupWizardStep(step, draft = state.setupWizard?.draft || build
     ];
     const missing = required.find(([, value]) => !nonEmpty(value));
     if (missing) return `${missing[0]} is required before moving on.`;
+  }
+  if (step.id === "preflight") {
+    if (!getSetupPreflight()) return "Run preflight checks before moving on.";
   }
   return null;
 }
@@ -2562,11 +2691,11 @@ async function saveSetupWizardConfig() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        radarr: { enabled: !!draft.existing_radarr_enabled, base_url: draft.existing_radarr_base_url, api_key: "" },
-        sonarr: { enabled: !!draft.existing_sonarr_enabled, base_url: draft.existing_sonarr_base_url, api_key: "" },
-        readarr: { enabled: !!draft.existing_readarr_enabled, base_url: draft.existing_readarr_base_url, api_key: "" },
-        prowlarr: { enabled: !!draft.existing_prowlarr_enabled, base_url: draft.existing_prowlarr_base_url, api_key: "" },
-        bazarr: { enabled: !!draft.existing_bazarr_enabled, base_url: draft.existing_bazarr_base_url, api_key: "" },
+        radarr: { enabled: !!draft.existing_radarr_enabled, base_url: draft.existing_radarr_base_url, api_key: draft.existing_radarr_api_key },
+        sonarr: { enabled: !!draft.existing_sonarr_enabled, base_url: draft.existing_sonarr_base_url, api_key: draft.existing_sonarr_api_key },
+        readarr: { enabled: !!draft.existing_readarr_enabled, base_url: draft.existing_readarr_base_url, api_key: draft.existing_readarr_api_key },
+        prowlarr: { enabled: !!draft.existing_prowlarr_enabled, base_url: draft.existing_prowlarr_base_url, api_key: draft.existing_prowlarr_api_key },
+        bazarr: { enabled: !!draft.existing_bazarr_enabled, base_url: draft.existing_bazarr_base_url, api_key: draft.existing_bazarr_api_key },
         qbittorrent: { enabled: !!draft.existing_qbittorrent_enabled, base_url: draft.existing_qbittorrent_base_url, username: draft.existing_qbittorrent_username, password: draft.existing_qbittorrent_password },
         jellyfin: { enabled: !!draft.existing_jellyfin_enabled, base_url: draft.existing_jellyfin_base_url, api_key: draft.existing_jellyfin_api_key },
       }),
@@ -2695,10 +2824,15 @@ function renderSetupWizard() {
       </div>
       <div class="setup-wizard-fields two">
         ${draft.existing_radarr_enabled ? `<label class="field full"><span>Radarr app address</span><input data-setup-input="existing_radarr_base_url" type="text" value="${escapeAttr(draft.existing_radarr_base_url || "")}" placeholder="For example: http://radarr:7878"></label>` : ""}
+        ${draft.existing_radarr_enabled ? `<label class="field full"><span>Radarr API key</span><input data-setup-input="existing_radarr_api_key" type="password" value="${escapeAttr(draft.existing_radarr_api_key || "")}" placeholder="Required"></label>` : ""}
         ${draft.existing_sonarr_enabled ? `<label class="field full"><span>Sonarr app address</span><input data-setup-input="existing_sonarr_base_url" type="text" value="${escapeAttr(draft.existing_sonarr_base_url || "")}" placeholder="For example: http://sonarr:8989"></label>` : ""}
+        ${draft.existing_sonarr_enabled ? `<label class="field full"><span>Sonarr API key</span><input data-setup-input="existing_sonarr_api_key" type="password" value="${escapeAttr(draft.existing_sonarr_api_key || "")}" placeholder="Required"></label>` : ""}
         ${draft.existing_readarr_enabled ? `<label class="field full"><span>Readarr app address</span><input data-setup-input="existing_readarr_base_url" type="text" value="${escapeAttr(draft.existing_readarr_base_url || "")}" placeholder="For example: http://readarr:8787"></label>` : ""}
+        ${draft.existing_readarr_enabled ? `<label class="field full"><span>Readarr API key</span><input data-setup-input="existing_readarr_api_key" type="password" value="${escapeAttr(draft.existing_readarr_api_key || "")}" placeholder="Required"></label>` : ""}
         ${draft.existing_prowlarr_enabled ? `<label class="field full"><span>Prowlarr app address</span><input data-setup-input="existing_prowlarr_base_url" type="text" value="${escapeAttr(draft.existing_prowlarr_base_url || "")}" placeholder="For example: http://prowlarr:9696"></label>` : ""}
+        ${draft.existing_prowlarr_enabled ? `<label class="field full"><span>Prowlarr API key</span><input data-setup-input="existing_prowlarr_api_key" type="password" value="${escapeAttr(draft.existing_prowlarr_api_key || "")}" placeholder="Required"></label>` : ""}
         ${draft.existing_bazarr_enabled ? `<label class="field full"><span>Bazarr app address</span><input data-setup-input="existing_bazarr_base_url" type="text" value="${escapeAttr(draft.existing_bazarr_base_url || "")}" placeholder="For example: http://bazarr:6767"></label>` : ""}
+        ${draft.existing_bazarr_enabled ? `<label class="field full"><span>Bazarr API key</span><input data-setup-input="existing_bazarr_api_key" type="password" value="${escapeAttr(draft.existing_bazarr_api_key || "")}" placeholder="Required"></label>` : ""}
         ${draft.existing_qbittorrent_enabled ? `<label class="field full"><span>qBittorrent app address</span><input data-setup-input="existing_qbittorrent_base_url" type="text" value="${escapeAttr(draft.existing_qbittorrent_base_url || "")}" placeholder="For example: http://qbittorrent:8080"></label>` : ""}
         ${draft.existing_qbittorrent_enabled ? `<label class="field full"><span>qBittorrent username</span><input data-setup-input="existing_qbittorrent_username" type="text" value="${escapeAttr(draft.existing_qbittorrent_username || "")}" placeholder="Username"></label>` : ""}
         ${draft.existing_qbittorrent_enabled ? `<label class="field full"><span>qBittorrent password</span><input data-setup-input="existing_qbittorrent_password" type="password" value="${escapeAttr(draft.existing_qbittorrent_password || "")}" placeholder="Password"></label>` : ""}
@@ -2885,14 +3019,94 @@ function renderSetupWizard() {
     `;
   } else if (step.id === "paths") {
     body = `
-      <div class="setup-wizard-fields two">
-        <label class="field full"><span>App settings file</span><input data-setup-input="env_path" type="text" value="${escapeAttr(draft.env_path || ".env")}"></label>
-        <label class="field full"><span>Main media folder</span><input data-setup-input="media_root" type="text" value="${escapeAttr(draft.media_root || "./media")}"></label>
-        <label class="field full"><span>Movies folder</span><input data-setup-input="movies_root" type="text" value="${escapeAttr(draft.movies_root || "./media/movies")}"></label>
-        <label class="field full"><span>TV folder</span><input data-setup-input="tv_root" type="text" value="${escapeAttr(draft.tv_root || "./media/tv")}"></label>
-        <label class="field full"><span>Downloads folder</span><input data-setup-input="downloads_root" type="text" value="${escapeAttr(draft.downloads_root || "./downloads")}"></label>
-        <label class="field full"><span>Books folder</span><input data-setup-input="books_root" type="text" value="${escapeAttr(draft.books_root || "./media/books")}"></label>
+      <div class="setup-wizard-note">These folders control how Retreivr and managed services map storage inside Docker. Choose paths once here, then reuse them from Settings → Retreivr Paths anytime.</div>
+      <div class="setup-wizard-chip-grid">
+        <button type="button" class="button ghost" data-setup-path-preset="defaults">Use Retreivr Defaults</button>
+        <button type="button" class="button ghost" data-setup-path-preset="downloads-media">Use Downloads-As-Media</button>
       </div>
+      <div class="setup-wizard-fields two">
+        <label class="field full">
+          <span>App settings file</span>
+          <div class="row path-picker">
+            <input data-setup-input="env_path" type="text" value="${escapeAttr(draft.env_path || ".env")}">
+            <button type="button" class="button ghost small" data-setup-browse="env_path">Browse</button>
+          </div>
+        </label>
+        <label class="field full">
+          <span>Main media folder</span>
+          <div class="row path-picker">
+            <input data-setup-input="media_root" type="text" value="${escapeAttr(draft.media_root || "./media")}">
+            <button type="button" class="button ghost small" data-setup-browse="media_root">Browse</button>
+          </div>
+        </label>
+        <label class="field full">
+          <span>Movies folder</span>
+          <div class="row path-picker">
+            <input data-setup-input="movies_root" type="text" value="${escapeAttr(draft.movies_root || "./media/movies")}">
+            <button type="button" class="button ghost small" data-setup-browse="movies_root">Browse</button>
+          </div>
+        </label>
+        <label class="field full">
+          <span>TV folder</span>
+          <div class="row path-picker">
+            <input data-setup-input="tv_root" type="text" value="${escapeAttr(draft.tv_root || "./media/tv")}">
+            <button type="button" class="button ghost small" data-setup-browse="tv_root">Browse</button>
+          </div>
+        </label>
+        <label class="field full">
+          <span>Downloads folder</span>
+          <div class="row path-picker">
+            <input data-setup-input="downloads_root" type="text" value="${escapeAttr(draft.downloads_root || "./downloads")}">
+            <button type="button" class="button ghost small" data-setup-browse="downloads_root">Browse</button>
+          </div>
+        </label>
+        <label class="field full">
+          <span>Books folder</span>
+          <div class="row path-picker">
+            <input data-setup-input="books_root" type="text" value="${escapeAttr(draft.books_root || "./media/books")}">
+            <button type="button" class="button ghost small" data-setup-browse="books_root">Browse</button>
+          </div>
+        </label>
+      </div>
+    `;
+  } else if (step.id === "preflight") {
+    const preflight = getSetupPreflight();
+    const checks = preflight?.checks || {};
+    const conflicts = Array.isArray(preflight?.conflicts) ? preflight.conflicts : [];
+    const warnings = Array.isArray(preflight?.warnings) ? preflight.warnings : [];
+    const hints = Array.isArray(preflight?.fix_hints) ? preflight.fix_hints : [];
+    const loading = !!state.setupWizard?.preflightLoading;
+    body = `
+      <div class="setup-wizard-note">Run this before apply to catch Docker/Compose and host-port issues early.</div>
+      <div class="setup-wizard-link-grid">
+        <button type="button" class="button ${loading ? "ghost" : "primary"}" data-setup-action="run-preflight" ${loading ? "disabled" : ""}>${loading ? "Running checks..." : "Run preflight checks"}</button>
+      </div>
+      ${preflight ? `
+        <div class="setup-wizard-step-list">
+          <div>Docker Compose: ${escapeHtml(String(checks?.docker_compose?.status || "unknown"))}</div>
+          <div>Compose file: ${checks?.compose_file?.ok ? escapeHtml(String(checks?.compose_file?.path || "found")) : "missing"}</div>
+          <div>Blocking conflicts: ${conflicts.length}</div>
+          <div>Warnings: ${warnings.length}</div>
+        </div>
+        ${conflicts.length ? `
+          <div class="setup-wizard-note warning">Blocking issues</div>
+          <div class="setup-wizard-step-list">
+            ${conflicts.map((item) => `<div>${escapeHtml(String(item.message || item.type || "conflict"))}</div>`).join("")}
+          </div>
+        ` : ""}
+        ${warnings.length ? `
+          <div class="setup-wizard-note warning">Warnings</div>
+          <div class="setup-wizard-step-list">
+            ${warnings.map((item) => `<div>${escapeHtml(String(item || ""))}</div>`).join("")}
+          </div>
+        ` : ""}
+        ${hints.length ? `
+          <div class="setup-wizard-note">Suggested fixes</div>
+          <div class="setup-wizard-step-list">
+            ${hints.map((item) => `<div>${escapeHtml(String(item || ""))}</div>`).join("")}
+          </div>
+        ` : ""}
+      ` : ""}
     `;
   } else if (step.id === "review") {
     body = `
@@ -2934,7 +3148,7 @@ function renderSetupWizard() {
           <div class="setup-wizard-actions-group">
             <button type="button" class="button ghost" data-setup-action="start-over">Start Over</button>
             <button type="button" class="button ghost" data-setup-action="save-progress">Save Progress</button>
-            <button type="button" class="button primary" data-setup-action="apply-env">Prepare Setup</button>
+            <button type="button" class="button primary" data-setup-action="apply-env" ${getSetupPreflight() && getSetupPreflight().ok === false ? "disabled" : ""}>Prepare Setup</button>
           </div>
         </div>
       </div>
@@ -2984,12 +3198,7 @@ async function refreshSetupStatus() {
     if ($("#setup-enable-qbittorrent")) $("#setup-enable-qbittorrent").checked = !!stack.enable_qbittorrent;
     if ($("#setup-enable-vpn")) $("#setup-enable-vpn").checked = !!stack.enable_vpn;
     if ($("#setup-enable-jellyfin")) $("#setup-enable-jellyfin").checked = !!stack.enable_jellyfin;
-    if ($("#setup-env-path")) $("#setup-env-path").value = stack.env_path || ".env";
-    if ($("#setup-media-root")) $("#setup-media-root").value = stack.media_root || "./media";
-    if ($("#setup-movies-root")) $("#setup-movies-root").value = stack.movies_root || "./media/movies";
-    if ($("#setup-tv-root")) $("#setup-tv-root").value = stack.tv_root || "./media/tv";
-    if ($("#setup-downloads-root")) $("#setup-downloads-root").value = stack.downloads_root || "./downloads";
-    if ($("#setup-books-root")) $("#setup-books-root").value = stack.books_root || "./media/books";
+    syncRetreivrPathEditors(stack);
     if (!state.setupWizard?.draft || !state.setupWizard?.draft.__hydrated) {
       state.setupWizard = {
         stepIndex: state.setupWizard?.stepIndex || 0,
@@ -2997,7 +3206,11 @@ async function refreshSetupStatus() {
           ...buildSetupWizardDraft(),
           __hydrated: true,
         },
+        preflight: payload?.preflight || null,
+        preflightLoading: false,
       };
+    } else if (state.setupWizard) {
+      state.setupWizard.preflight = payload?.preflight || state.setupWizard.preflight || null;
     }
     renderSetupWizard();
     if (modulesEl) {
@@ -3086,6 +3299,61 @@ async function refreshSetupStatus() {
   }
 }
 
+function _readStackPathField(inputId, fallback) {
+  return String($(`#${inputId}`)?.value || fallback).trim() || fallback;
+}
+
+function collectRetreivrPathPayloadFromSetupInputs() {
+  return {
+    env_path: _readStackPathField("setup-env-path", STACK_PATH_DEFAULTS.env_path),
+    media_root: _readStackPathField("setup-media-root", STACK_PATH_DEFAULTS.media_root),
+    movies_root: _readStackPathField("setup-movies-root", STACK_PATH_DEFAULTS.movies_root),
+    tv_root: _readStackPathField("setup-tv-root", STACK_PATH_DEFAULTS.tv_root),
+    downloads_root: _readStackPathField("setup-downloads-root", STACK_PATH_DEFAULTS.downloads_root),
+    books_root: _readStackPathField("setup-books-root", STACK_PATH_DEFAULTS.books_root),
+  };
+}
+
+function collectRetreivrPathPayloadFromSettingsInputs() {
+  return {
+    env_path: _readStackPathField("cfg-stack-env-path", STACK_PATH_DEFAULTS.env_path),
+    media_root: _readStackPathField("cfg-stack-media-root", STACK_PATH_DEFAULTS.media_root),
+    movies_root: _readStackPathField("cfg-stack-movies-root", STACK_PATH_DEFAULTS.movies_root),
+    tv_root: _readStackPathField("cfg-stack-tv-root", STACK_PATH_DEFAULTS.tv_root),
+    downloads_root: _readStackPathField("cfg-stack-downloads-root", STACK_PATH_DEFAULTS.downloads_root),
+    books_root: _readStackPathField("cfg-stack-books-root", STACK_PATH_DEFAULTS.books_root),
+  };
+}
+
+function syncRetreivrPathEditors(source = {}) {
+  const paths = {
+    env_path: String(source?.env_path || STACK_PATH_DEFAULTS.env_path),
+    media_root: String(source?.media_root || STACK_PATH_DEFAULTS.media_root),
+    movies_root: String(source?.movies_root || STACK_PATH_DEFAULTS.movies_root),
+    tv_root: String(source?.tv_root || STACK_PATH_DEFAULTS.tv_root),
+    downloads_root: String(source?.downloads_root || STACK_PATH_DEFAULTS.downloads_root),
+    books_root: String(source?.books_root || STACK_PATH_DEFAULTS.books_root),
+  };
+  const bindings = [
+    ["setup-env-path", "env_path"],
+    ["setup-media-root", "media_root"],
+    ["setup-movies-root", "movies_root"],
+    ["setup-tv-root", "tv_root"],
+    ["setup-downloads-root", "downloads_root"],
+    ["setup-books-root", "books_root"],
+    ["cfg-stack-env-path", "env_path"],
+    ["cfg-stack-media-root", "media_root"],
+    ["cfg-stack-movies-root", "movies_root"],
+    ["cfg-stack-tv-root", "tv_root"],
+    ["cfg-stack-downloads-root", "downloads_root"],
+    ["cfg-stack-books-root", "books_root"],
+  ];
+  bindings.forEach(([id, key]) => {
+    const el = $(`#${id}`);
+    if (el) el.value = String(paths[key] || "");
+  });
+}
+
 function collectSetupStackPayload() {
   return {
     enable_arr_stack: !!$("#setup-enable-arr-stack")?.checked,
@@ -3097,12 +3365,7 @@ function collectSetupStackPayload() {
     enable_qbittorrent: !!$("#setup-enable-qbittorrent")?.checked,
     enable_vpn: !!$("#setup-enable-vpn")?.checked,
     enable_jellyfin: !!$("#setup-enable-jellyfin")?.checked,
-    env_path: String($("#setup-env-path")?.value || ".env").trim() || ".env",
-    media_root: String($("#setup-media-root")?.value || "./media").trim() || "./media",
-    movies_root: String($("#setup-movies-root")?.value || "./media/movies").trim() || "./media/movies",
-    tv_root: String($("#setup-tv-root")?.value || "./media/tv").trim() || "./media/tv",
-    downloads_root: String($("#setup-downloads-root")?.value || "./downloads").trim() || "./downloads",
-    books_root: String($("#setup-books-root")?.value || "./media/books").trim() || "./media/books",
+    ...collectRetreivrPathPayloadFromSetupInputs(),
   };
 }
 
@@ -3144,6 +3407,27 @@ async function applySetupStack() {
   }
 }
 
+async function saveSettingsRetreivrPaths() {
+  const messageEl = $("#cfg-stack-paths-message");
+  if (!(await ensureAdminPinSession())) return;
+  setNotice(messageEl, "Saving path mappings...", false);
+  const payload = collectRetreivrPathPayloadFromSettingsInputs();
+  await fetchJson("/api/setup/stack", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  syncRetreivrPathEditors(payload);
+  await refreshSetupStatus();
+  setNotice(messageEl, "Saved. Path mappings will take effect after apply/restart.", false);
+}
+
+function resetSettingsRetreivrPaths() {
+  syncRetreivrPathEditors(STACK_PATH_DEFAULTS);
+  const messageEl = $("#cfg-stack-paths-message");
+  setNotice(messageEl, "Defaults restored in the form. Click Save Path Mappings to persist.", false);
+}
+
 function updateSetupWizardDraftField(key, value) {
   ensureSetupWizardState();
   state.setupWizard.draft[key] = value;
@@ -3169,9 +3453,31 @@ function updateSetupWizardDraftField(key, value) {
     state.setupWizard.jellyfinDiscovery = [];
     state.setupWizard.jellyfinDiscoveryLoading = false;
     state.setupWizard.jellyfinDiscoveryError = "";
+    state.setupWizard.preflight = null;
   }
   if (key === "managed_downloader" && !value) {
     state.setupWizard.draft.managed_vpn = false;
+  }
+}
+
+function applySetupPathPreset(preset) {
+  ensureSetupWizardState();
+  const draft = state.setupWizard?.draft || {};
+  const normalized = String(preset || "").trim().toLowerCase();
+  if (normalized === "downloads-media") {
+    draft.env_path = ".env";
+    draft.media_root = "./downloads/media";
+    draft.movies_root = "./downloads/media/movies";
+    draft.tv_root = "./downloads/media/tv";
+    draft.downloads_root = "./downloads";
+    draft.books_root = "./downloads/media/books";
+  } else {
+    draft.env_path = STACK_PATH_DEFAULTS.env_path;
+    draft.media_root = STACK_PATH_DEFAULTS.media_root;
+    draft.movies_root = STACK_PATH_DEFAULTS.movies_root;
+    draft.tv_root = STACK_PATH_DEFAULTS.tv_root;
+    draft.downloads_root = STACK_PATH_DEFAULTS.downloads_root;
+    draft.books_root = STACK_PATH_DEFAULTS.books_root;
   }
 }
 
@@ -3190,6 +3496,8 @@ function resetSetupWizardDraft() {
     jellyfinDiscovery: [],
     jellyfinDiscoveryLoading: false,
     jellyfinDiscoveryError: "",
+    preflight: null,
+    preflightLoading: false,
   };
   syncSetupWizardToLegacyFields();
 }
@@ -3210,6 +3518,69 @@ async function discoverJellyfinForSetup() {
     state.setupWizard.jellyfinDiscoveryError = toUserErrorMessage(err, "Jellyfin discovery failed");
   } finally {
     state.setupWizard.jellyfinDiscoveryLoading = false;
+    renderSetupWizard();
+  }
+}
+
+function buildSetupWizardPreflightPayload() {
+  ensureSetupWizardState();
+  syncSetupWizardToLegacyFields();
+  const draft = state.setupWizard?.draft || buildSetupWizardDraft();
+  const mode = String(draft.arr_setup_mode || "none");
+  const stack = {
+    enable_arr_stack: false,
+    enable_radarr: false,
+    enable_sonarr: false,
+    enable_readarr: false,
+    enable_prowlarr: false,
+    enable_bazarr: false,
+    enable_qbittorrent: false,
+    enable_vpn: false,
+    enable_jellyfin: false,
+    enable_hostctl: false,
+    env_path: String(draft.env_path || ".env"),
+    media_root: String(draft.media_root || "./media"),
+    movies_root: String(draft.movies_root || "./media/movies"),
+    tv_root: String(draft.tv_root || "./media/tv"),
+    downloads_root: String(draft.downloads_root || "./downloads"),
+    books_root: String(draft.books_root || "./media/books"),
+  };
+  if (mode === "managed") {
+    stack.enable_radarr = !!draft.managed_movies;
+    stack.enable_sonarr = !!draft.managed_tv;
+    stack.enable_readarr = !!draft.managed_books;
+    stack.enable_prowlarr = !!(draft.managed_movies || draft.managed_tv || draft.managed_books);
+    stack.enable_bazarr = !!draft.managed_subtitles;
+    stack.enable_qbittorrent = !!draft.managed_downloader;
+    stack.enable_vpn = !!draft.managed_vpn;
+    stack.enable_jellyfin = !!draft.managed_jellyfin;
+    stack.enable_hostctl = !!draft.direct_manage;
+    stack.enable_arr_stack = !!(stack.enable_radarr || stack.enable_sonarr || stack.enable_readarr || stack.enable_prowlarr || stack.enable_bazarr);
+  }
+  return { mode, stack };
+}
+
+async function runSetupPreflight({ persistDraft = false } = {}) {
+  ensureSetupWizardState();
+  if (!(await ensureAdminPinSession())) {
+    throw new Error("Admin PIN unlock is required before running preflight.");
+  }
+  if (persistDraft) await saveSetupWizardConfig();
+  state.setupWizard.preflightLoading = true;
+  renderSetupWizard();
+  try {
+    const payload = await fetchJson("/api/setup/preflight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildSetupWizardPreflightPayload()),
+    });
+    state.setupWizard.preflight = payload?.preflight || null;
+    if (state.setupStatus && typeof state.setupStatus === "object") {
+      state.setupStatus.preflight = state.setupWizard.preflight;
+    }
+    return state.setupWizard.preflight;
+  } finally {
+    state.setupWizard.preflightLoading = false;
     renderSetupWizard();
   }
 }
@@ -3235,6 +3606,11 @@ async function saveSetupWizardProgress() {
 
 async function applySetupWizardEnv() {
   syncSetupWizardToLegacyFields();
+  const preflight = await runSetupPreflight({ persistDraft: false });
+  if (preflight && preflight.ok === false) {
+    const conflicts = Array.isArray(preflight.conflicts) ? preflight.conflicts : [];
+    throw new Error(`Preflight found ${conflicts.length} blocking issue${conflicts.length === 1 ? "" : "s"}. Resolve them before apply.`);
+  }
   await saveSetupWizardConfig();
   const mode = state.setupWizard?.draft?.arr_setup_mode || "none";
   if (mode === "managed") {
@@ -3245,11 +3621,11 @@ async function applySetupWizardEnv() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        radarr: { enabled: !!state.setupWizard.draft.existing_radarr_enabled, base_url: state.setupWizard.draft.existing_radarr_base_url, api_key: "" },
-        sonarr: { enabled: !!state.setupWizard.draft.existing_sonarr_enabled, base_url: state.setupWizard.draft.existing_sonarr_base_url, api_key: "" },
-        readarr: { enabled: !!state.setupWizard.draft.existing_readarr_enabled, base_url: state.setupWizard.draft.existing_readarr_base_url, api_key: "" },
-        prowlarr: { enabled: !!state.setupWizard.draft.existing_prowlarr_enabled, base_url: state.setupWizard.draft.existing_prowlarr_base_url, api_key: "" },
-        bazarr: { enabled: !!state.setupWizard.draft.existing_bazarr_enabled, base_url: state.setupWizard.draft.existing_bazarr_base_url, api_key: "" },
+        radarr: { enabled: !!state.setupWizard.draft.existing_radarr_enabled, base_url: state.setupWizard.draft.existing_radarr_base_url, api_key: state.setupWizard.draft.existing_radarr_api_key },
+        sonarr: { enabled: !!state.setupWizard.draft.existing_sonarr_enabled, base_url: state.setupWizard.draft.existing_sonarr_base_url, api_key: state.setupWizard.draft.existing_sonarr_api_key },
+        readarr: { enabled: !!state.setupWizard.draft.existing_readarr_enabled, base_url: state.setupWizard.draft.existing_readarr_base_url, api_key: state.setupWizard.draft.existing_readarr_api_key },
+        prowlarr: { enabled: !!state.setupWizard.draft.existing_prowlarr_enabled, base_url: state.setupWizard.draft.existing_prowlarr_base_url, api_key: state.setupWizard.draft.existing_prowlarr_api_key },
+        bazarr: { enabled: !!state.setupWizard.draft.existing_bazarr_enabled, base_url: state.setupWizard.draft.existing_bazarr_base_url, api_key: state.setupWizard.draft.existing_bazarr_api_key },
         qbittorrent: { enabled: !!state.setupWizard.draft.existing_qbittorrent_enabled, base_url: state.setupWizard.draft.existing_qbittorrent_base_url, username: state.setupWizard.draft.existing_qbittorrent_username, password: state.setupWizard.draft.existing_qbittorrent_password },
         jellyfin: { enabled: !!state.setupWizard.draft.existing_jellyfin_enabled, base_url: state.setupWizard.draft.existing_jellyfin_base_url, api_key: state.setupWizard.draft.existing_jellyfin_api_key },
       }),
@@ -3336,14 +3712,53 @@ async function saveAdminPinSettings() {
   }
 }
 
-async function refreshConnectionsStatus() {
+function _healthBackoffRemainingMs() {
+  const remaining = Number(state.servicesHealthBackoffUntil || 0) - Date.now();
+  return Math.max(0, remaining);
+}
+
+async function fetchConnectionsHealth({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && state.servicesHealth && Number(state.servicesHealthCacheAt || 0) > 0 && now - Number(state.servicesHealthCacheAt || 0) < CONNECTIONS_HEALTH_TTL_MS) {
+    return { services: state.servicesHealth, cached: true };
+  }
+  const backoffMs = _healthBackoffRemainingMs();
+  if (!force && backoffMs > 0) {
+    const seconds = Math.ceil(backoffMs / 1000);
+    throw new Error(`Connections check is throttled. Retry in ${seconds}s.`);
+  }
+  if (state.servicesHealthInFlight && !force) {
+    return await state.servicesHealthInFlight;
+  }
+  const task = (async () => {
+    try {
+      const payload = await fetchJson("/api/services/health");
+      state.servicesHealthFailures = 0;
+      state.servicesHealthBackoffUntil = 0;
+      state.servicesHealthCacheAt = Date.now();
+      return payload;
+    } catch (err) {
+      const failures = Number(state.servicesHealthFailures || 0) + 1;
+      state.servicesHealthFailures = failures;
+      const delayMs = Math.min(60000, 1000 * (2 ** (failures - 1)));
+      state.servicesHealthBackoffUntil = Date.now() + delayMs;
+      throw err;
+    } finally {
+      state.servicesHealthInFlight = null;
+    }
+  })();
+  state.servicesHealthInFlight = task;
+  return await task;
+}
+
+async function refreshConnectionsStatus(force = false) {
   const grid = $("#connections-grid");
   const messageEl = $("#connections-message");
   if (grid) {
     grid.innerHTML = `<div class="home-results-empty">Checking service connections…</div>`;
   }
   try {
-    const payload = await fetchJson("/api/services/health");
+    const payload = await fetchConnectionsHealth({ force });
     state.servicesHealth = payload?.services || {};
     if (grid) {
       grid.innerHTML = Object.entries(state.servicesHealth).map(([name, entry]) => `
@@ -3366,16 +3781,12 @@ async function refreshConnectionsStatus() {
         </div>
       `).join("");
     }
-    if (messageEl) {
-      setNotice(messageEl, "Connections refreshed.", false);
-    }
+    if (messageEl) setNotice(messageEl, "Connections refreshed.", false);
   } catch (err) {
     if (grid) {
       grid.innerHTML = `<div class="home-results-empty">Connection check failed: ${escapeHtml(toUserErrorMessage(err))}</div>`;
     }
-    if (messageEl) {
-      setNotice(messageEl, `Connection check failed: ${toUserErrorMessage(err)}`, true);
-    }
+    if (messageEl) setNotice(messageEl, `Connection check failed: ${toUserErrorMessage(err)}`, true);
   }
 }
 
@@ -3393,7 +3804,7 @@ async function autoConfigureConnections() {
       ? `Configured ${configured} services. ${attention} service${attention === 1 ? "" : "s"} still need attention.`
       : `Configured ${configured} services successfully.`;
     setNotice(messageEl, summary, false);
-    await refreshConnectionsStatus();
+    await refreshConnectionsStatus(true);
   } catch (err) {
     setNotice(messageEl, `Auto configure failed: ${toUserErrorMessage(err)}`, true);
   }
@@ -4194,7 +4605,7 @@ function renderMusicPlayerHistory() {
           const artistKey = String(artistName).trim().toLowerCase();
           const downloadedArtist = (Array.isArray(state.playerLibrarySummary?.artists) ? state.playerLibrarySummary.artists : []).find((entry) => String(entry.artist_key || "").trim().toLowerCase() === artistKey) || null;
           return `
-            <article class="music-player-browser-card music-player-browser-card-rich">
+            <article class="music-player-browser-card music-player-browser-card-rich music-player-favorite-card">
               <div class="music-player-browser-card-art">
                 <img src="${escapeAttr(getMusicLibraryArtworkUrl(downloadedArtist || artist))}" alt="${escapeAttr(artistName)}" loading="lazy">
               </div>
@@ -4367,10 +4778,19 @@ async function playPlayerQueueIndex(index) {
 // Background-resolve the next unresolved queue item so playback can start instantly.
 function _prefetchNextUnresolved(fromIndex) {
   const queue = Array.isArray(state.playerQueue) ? state.playerQueue : [];
-  for (let i = fromIndex; i < Math.min(fromIndex + 3, queue.length); i++) {
+  const prefetchLimit = 3;
+  const searchWindow = 8;
+  let scheduled = 0;
+  for (let i = fromIndex; i < Math.min(fromIndex + searchWindow, queue.length); i++) {
+    if (scheduled >= prefetchLimit) break;
     const item = normalizePlayableItem(queue[i]);
     if (!item?.stream_url && !item?.video_id && String(item?.kind || "") === "unresolved" && item?.recording_mbid) {
+      if (state.playerPrefetchInFlightRecordings.has(item.recording_mbid)) {
+        continue;
+      }
       const capturedIndex = i;
+      const capturedMbid = item.recording_mbid;
+      state.playerPrefetchInFlightRecordings.add(capturedMbid);
       resolveRecordingStreamUrl(item.recording_mbid, {
         artist: item.artist, track: item.title, album: item.album, release_group_mbid: item.mb_release_group_id,
       }).then((resolved) => {
@@ -4378,8 +4798,10 @@ function _prefetchNextUnresolved(fromIndex) {
         if (Array.isArray(state.playerQueue) && state.playerQueue[capturedIndex]?.recording_mbid === item.recording_mbid) {
           state.playerQueue[capturedIndex] = normalizePlayableItem({ ...state.playerQueue[capturedIndex], ...resolved, kind: resolved.video_id ? "youtube" : "cached" });
         }
-      }).catch(() => {});
-      break; // one at a time
+      }).catch(() => {}).finally(() => {
+        state.playerPrefetchInFlightRecordings.delete(capturedMbid);
+      });
+      scheduled += 1;
     }
   }
 }
@@ -5761,6 +6183,29 @@ function streamUrl(fileId) {
   return `/api/files/${encodeURIComponent(fileId)}/stream`;
 }
 
+async function openFileLocation({ fileId = "", filePath = "" } = {}) {
+  const fileIdValue = String(fileId || "").trim();
+  const filePathValue = String(filePath || "").trim();
+  if (!fileIdValue && !filePathValue) return;
+  const payload = {};
+  if (fileIdValue) payload.file_id = fileIdValue;
+  if (filePathValue) payload.path = filePathValue;
+  try {
+    await fetchJson("/api/files/open-location", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    notify({
+      kind: "warning",
+      message: `Open file location failed: ${toUserErrorMessage(err)}`,
+      ttlMs: 5200,
+      scope: `open-location-${fileIdValue || filePathValue}`,
+    });
+  }
+}
+
 const PLAYBACK_PRESETS = {
   none: {
     mode: "none",
@@ -6378,6 +6823,33 @@ function getMusicLibraryFilteredTracks() {
   });
 }
 
+function normalizeMusicLibrarySelectionState() {
+  const artists = Array.isArray(state.playerLibrarySummary?.artists) ? state.playerLibrarySummary.artists : [];
+  const albums = Array.isArray(state.playerLibrarySummary?.albums) ? state.playerLibrarySummary.albums : [];
+  const artistKey = String(state.playerSelectedArtistKey || "").trim().toLowerCase();
+  const albumKey = String(state.playerSelectedAlbumKey || "").trim().toLowerCase();
+  if (artistKey) {
+    const artistExists = artists.some((entry) => String(entry.artist_key || "").trim().toLowerCase() === artistKey);
+    if (!artistExists) {
+      state.playerSelectedArtistKey = "";
+      state.playerSelectedAlbumKey = "";
+      return;
+    }
+  }
+  if (albumKey) {
+    const albumExists = albums.some((entry) => {
+      const entryAlbum = String(entry.album_key || "").trim().toLowerCase();
+      const entryArtist = String(entry.artist_key || "").trim().toLowerCase();
+      if (entryAlbum !== albumKey) return false;
+      if (!artistKey) return true;
+      return entryArtist === artistKey;
+    });
+    if (!albumExists) {
+      state.playerSelectedAlbumKey = "";
+    }
+  }
+}
+
 function getVideoLibrarySourceBadge(item) {
   const source = String(item?.source || "").trim();
   if (!source) return "Video";
@@ -6842,6 +7314,7 @@ function renderMusicLibrarySection() {
   const artists = Array.isArray(summary.artists) ? summary.artists : [];
   const albums = Array.isArray(summary.albums) ? summary.albums : [];
   const tracks = Array.isArray(summary.tracks) ? summary.tracks : [];
+  normalizeMusicLibrarySelectionState();
   const total = artists.length + albums.length + tracks.length;
   const shouldShowSection = total > 0 && state.currentPage === "music" && state.musicSection === "library";
   section.classList.toggle("hidden", !shouldShowSection);
@@ -6908,7 +7381,7 @@ function renderMusicLibrarySection() {
           <button class="button ghost small" type="button" data-action="music-library-info" data-library-type="artist" data-artist-key="${escapeAttr(artist.artist_key || "")}">More Info</button>
         </div>
       </article>
-    `).join("");
+    `).join("") || `<div class="home-results-empty">No artists available for this selection.</div>`;
   } else if (mode === "albums") {
     const filteredAlbums = getMusicLibraryFilteredAlbums();
     grid.innerHTML = filteredAlbums.slice(0, 24).map((album) => `
@@ -6943,6 +7416,7 @@ function renderMusicLibrarySection() {
         </div>
         <div class="home-candidate-action home-candidate-action-primary-stack">
           <button class="button ghost small" type="button" data-action="music-library-play-track" data-track-id="${escapeAttr(track.id || "")}">Play</button>
+          <button class="button ghost small" type="button" data-action="music-library-open-location" data-file-id="${escapeAttr(track.file_id || "")}" data-file-path="${escapeAttr(track.local_path || "")}">Open file location</button>
           <button class="button ghost small" type="button" data-action="music-library-info" data-library-type="track" data-track-id="${escapeAttr(track.id || "")}">More Info</button>
         </div>
       </article>
@@ -6979,6 +7453,7 @@ function renderVideoLibrarySection() {
         </div>
         <div class="home-candidate-action home-candidate-action-primary-stack">
           <a class="button ghost small home-candidate-download-primary" href="${downloadHref}">Download File</a>
+          <button class="button ghost small" type="button" data-action="video-library-open-location" data-file-id="${escapeAttr(item.file_id || "")}" data-file-path="${escapeAttr(item.filepath || "")}">Open file location</button>
           <button class="button ghost small" type="button" data-action="video-library-info" data-file-id="${escapeAttr(item.file_id || "")}">More Info</button>
         </div>
       </article>
@@ -7032,6 +7507,7 @@ function renderVideoDiscoveryDefault() {
         <div class="home-candidate-meta">${escapeHtml([formatTimestamp(item.downloaded_at), formatBytes(item.size_bytes)].filter(Boolean).join(" • "))}</div>
       </div>
       <div class="home-candidate-action home-candidate-action-primary-stack">
+        <button class="button ghost small" type="button" data-action="video-library-open-location" data-file-id="${escapeAttr(item.file_id || "")}" data-file-path="${escapeAttr(item.filepath || "")}">Open file location</button>
         <button class="button ghost small" type="button" data-action="video-library-info" data-file-id="${escapeAttr(item.file_id || "")}">More Info</button>
       </div>
     </article>
@@ -7384,6 +7860,9 @@ function setPlaylistImportControlsEnabled(enabled) {
   if (importButton) {
     importButton.disabled = !enabled;
   }
+  document.querySelectorAll(".music-import-toolbar-button").forEach((button) => {
+    button.disabled = !enabled;
+  });
   const importFile = $("#home-import-file");
   if (importFile) {
     importFile.disabled = !enabled;
@@ -8957,10 +9436,6 @@ function renderMusicResultsControls({ artists = [], albums = [], tracks = [], ba
   const hasTracks = Array.isArray(tracks) && tracks.length > 0;
   const showSize = hasArtists || hasAlbums;
   const showSort = hasArtists || hasAlbums;
-  if (!showSize && !showSort && !backButton) {
-    toolbarSlot.innerHTML = "";
-    return;
-  }
 
   const toolbar = document.createElement("div");
   toolbar.className = "music-results-toolbar";
@@ -8972,6 +9447,7 @@ function renderMusicResultsControls({ artists = [], albums = [], tracks = [], ba
   }
   const actions = document.createElement("div");
   actions.className = "music-results-toolbar-actions";
+  renderMusicImportToolbarButton(actions);
 
   if (showSize) {
     const sizeLabel = document.createElement("label");
@@ -11106,7 +11582,7 @@ function queueGenreArtworkJob(genre, tile, thumbnailJobs, renderToken) {
   if (Object.prototype.hasOwnProperty.call(state.homeGenreCoverCache, genreKey.toLowerCase()) && state.homeGenreCoverCache[genreKey.toLowerCase()] === null) {
     return;
   }
-  thumbnailJobs.push(async (activeToken) => {
+  const thumbTask = async (activeToken) => {
     if (state.homeMusicRenderToken !== activeToken) return;
     try {
       const persistent = await fetchPersistentGenreCoverEntry(genreKey);
@@ -11198,7 +11674,9 @@ function queueGenreArtworkJob(genre, tile, thumbnailJobs, renderToken) {
     } catch (_err) {
       state.homeGenreCoverCache[genreKey.toLowerCase()] = null;
     }
-  });
+  };
+  thumbTask.__priorityElement = tile;
+  thumbnailJobs.push(thumbTask);
 }
 
 function createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible = false } = {}) {
@@ -11539,7 +12017,7 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
     } else if (Object.prototype.hasOwnProperty.call(state.homeArtistCoverCache, artistMbidValue) && state.homeArtistCoverCache[artistMbidValue] === null) {
       artistThumb.setNoArt();
     } else {
-      thumbnailJobs.push(async (activeToken) => {
+      const thumbTask = async (activeToken) => {
         if (state.homeMusicRenderToken !== activeToken) {
           return;
         }
@@ -11584,7 +12062,9 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
             artistThumb.setNoArt();
           }
         }
-      });
+      };
+      thumbTask.__priorityElement = card;
+      thumbnailJobs.push(thumbTask);
     }
   } else {
     artistThumb.setNoArt();
@@ -11768,7 +12248,7 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
     } else if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
       albumThumb.setNoArt();
     } else {
-      thumbnailJobs.push(async (activeToken) => {
+      const thumbTask = async (activeToken) => {
         const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
         if (!coverUrl || state.homeMusicRenderToken !== activeToken) {
           if (!coverUrl && state.homeMusicRenderToken === activeToken) {
@@ -11777,7 +12257,9 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
           return;
         }
         albumThumb.setImage(coverUrl);
-      });
+      };
+      thumbTask.__priorityElement = card;
+      thumbnailJobs.push(thumbTask);
     }
   } else if (albumItem?.artwork_url) {
     albumThumb.setImage(albumItem.artwork_url);
@@ -11844,7 +12326,7 @@ function createMusicLandingTrackRow(item) {
 
 function renderMusicLanding() {
   const toolbarSlot = getMusicToolbarSlot();
-  if (toolbarSlot) toolbarSlot.innerHTML = "";
+  if (toolbarSlot) renderMusicToolbarImportOnly();
   const navSlot = getMusicNavSlot();
   if (navSlot) navSlot.innerHTML = "";
   const container = document.getElementById("music-results-container");
@@ -12666,7 +13148,13 @@ function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeT
   previewButton.textContent = "Preview";
   const playButton = document.createElement("button");
   playButton.className = "button primary small music-search-play-btn home-candidate-download-primary";
+  playButton.dataset.action = "player-play";
   playButton.dataset.musicResultKey = key;
+  playButton.dataset.recordingMbid = String(result.recording_mbid || "").trim();
+  playButton.dataset.title = String(result.track || "").trim();
+  playButton.dataset.artist = String(result.artist || "").trim();
+  playButton.dataset.album = String(result.album || "").trim();
+  playButton.dataset.releaseGroupMbid = String(result.mb_release_group_id || "").trim();
   playButton.textContent = "Play";
   const button = document.createElement("button");
   button.className = "button ghost small music-download-btn";
@@ -12688,7 +13176,7 @@ function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeT
     } else if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
       trackThumb.setNoArt();
     } else {
-      thumbnailJobs.push(async (activeToken) => {
+      const thumbTask = async (activeToken) => {
         const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
         if (!coverUrl || state.homeMusicRenderToken !== activeToken) {
           if (!coverUrl && state.homeMusicRenderToken === activeToken) {
@@ -12697,7 +13185,9 @@ function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeT
           return;
         }
         trackThumb.setImage(coverUrl);
-      });
+      };
+      thumbTask.__priorityElement = card;
+      thumbnailJobs.push(thumbTask);
     }
   } else if (result.artwork_url) {
     trackThumb.setImage(result.artwork_url);
@@ -13724,20 +14214,8 @@ function buildHomeDownloadLocationAction(filePath, fileId = "") {
   if (!pathValue && !fileIdValue) {
     return null;
   }
-  return () => {
-    const downloadsRoot = String(BROWSE_DEFAULTS.mediaRoot || "").trim();
-    if (downloadsRoot && pathValue && pathValue.startsWith(downloadsRoot)) {
-      const relativeDir = String(pathValue.slice(downloadsRoot.length) || "")
-        .replace(/^[/\\]+/, "")
-        .split(/[/\\]/)
-        .slice(0, -1)
-        .join("/");
-      openBrowser(null, "downloads", "dir", "", relativeDir);
-      return;
-    }
-    if (fileIdValue) {
-      window.open(downloadUrl(fileIdValue), "_blank", "noopener");
-    }
+  return async () => {
+    await openFileLocation({ fileId: fileIdValue, filePath: pathValue });
   };
 }
 
@@ -17699,6 +18177,13 @@ function bindEvents() {
         closeLibraryDetailsModal();
         return;
       }
+      if (actionName === "music-library-open-location") {
+        await openFileLocation({
+          fileId: String(action.dataset.fileId || "").trim(),
+          filePath: String(action.dataset.filePath || "").trim(),
+        });
+        return;
+      }
       if (actionName === "music-library-info") {
         const type = String(action.dataset.libraryType || "");
         if (type === "artist") {
@@ -17795,6 +18280,13 @@ function bindEvents() {
         return;
       }
       const actionName = String(action.dataset.action || "");
+      if (actionName === "video-library-open-location") {
+        void openFileLocation({
+          fileId: String(action.dataset.fileId || "").trim(),
+          filePath: String(action.dataset.filePath || "").trim(),
+        });
+        return;
+      }
       if (actionName === "video-library-info") {
         const fileId = String(action.dataset.fileId || "").trim();
         const item = state.videoLibraryItems.find((entry) => String(entry.file_id || "") === fileId);
@@ -17977,6 +18469,21 @@ function bindEvents() {
   const homeImportButton = $("#home-import-button");
   if (homeImportButton) {
     homeImportButton.addEventListener("click", importHomePlaylistFile);
+  }
+  const homeImportFileInput = $("#home-import-file");
+  if (homeImportFileInput) {
+    homeImportFileInput.addEventListener("change", () => {
+      const shouldAutoSubmit = homeImportFileInput.dataset.autoSubmit === "1";
+      homeImportFileInput.dataset.autoSubmit = "0";
+      if (!shouldAutoSubmit || !homeImportFileInput.files?.length) {
+        return;
+      }
+      importHomePlaylistFile()
+        .catch(() => {})
+        .finally(() => {
+          homeImportFileInput.value = "";
+        });
+    });
   }
   const moviesTvSearchButton = $("#movies-tv-search-button");
   if (moviesTvSearchButton) {
@@ -18564,6 +19071,12 @@ function bindEvents() {
     ["browse-setup-tv-root", "setup-tv-root", "downloads", "dir", ""],
     ["browse-setup-downloads-root", "setup-downloads-root", "downloads", "dir", ""],
     ["browse-setup-books-root", "setup-books-root", "downloads", "dir", ""],
+    ["browse-cfg-stack-env-path", "cfg-stack-env-path", "config", "file", ""],
+    ["browse-cfg-stack-media-root", "cfg-stack-media-root", "downloads", "dir", ""],
+    ["browse-cfg-stack-movies-root", "cfg-stack-movies-root", "downloads", "dir", ""],
+    ["browse-cfg-stack-tv-root", "cfg-stack-tv-root", "downloads", "dir", ""],
+    ["browse-cfg-stack-downloads-root", "cfg-stack-downloads-root", "downloads", "dir", ""],
+    ["browse-cfg-stack-books-root", "cfg-stack-books-root", "downloads", "dir", ""],
     ["browse-cfg-arr-movies-root", "cfg-arr-movies-root", "downloads", "dir", ""],
     ["browse-cfg-arr-tv-root", "cfg-arr-tv-root", "downloads", "dir", ""],
     ["browse-cfg-arr-books-root", "cfg-arr-books-root", "downloads", "dir", ""],
@@ -18696,6 +19209,18 @@ function bindEvents() {
       applySetupStack().catch((err) => setNotice($("#setup-command-helper"), toUserErrorMessage(err), true));
     });
   }
+  const cfgStackPathsSave = $("#cfg-stack-paths-save");
+  if (cfgStackPathsSave) {
+    cfgStackPathsSave.addEventListener("click", () => {
+      saveSettingsRetreivrPaths().catch((err) => setNotice($("#cfg-stack-paths-message"), toUserErrorMessage(err), true));
+    });
+  }
+  const cfgStackPathsReset = $("#cfg-stack-paths-reset");
+  if (cfgStackPathsReset) {
+    cfgStackPathsReset.addEventListener("click", () => {
+      resetSettingsRetreivrPaths();
+    });
+  }
   const setupWizard = $("#setup-wizard");
   if (setupWizard) {
     setupWizard.addEventListener("click", async (event) => {
@@ -18799,6 +19324,18 @@ function bindEvents() {
         }
         return;
       }
+      const pathPresetButton = event.target.closest("[data-setup-path-preset]");
+      if (pathPresetButton) {
+        applySetupPathPreset(pathPresetButton.dataset.setupPathPreset);
+        syncSetupWizardToLegacyFields();
+        state.setupWizard.feedback = {
+          stepId: getSetupWizardSteps()[Math.max(0, Number(state.setupWizard?.stepIndex || 0))]?.id || "",
+          tone: "success",
+          text: "Path preset applied. You can edit any field before continuing.",
+        };
+        renderSetupWizard();
+        return;
+      }
       const actionButton = event.target.closest("[data-setup-action]");
       if (actionButton) {
         const messageEl = $("#setup-wizard-message");
@@ -18809,6 +19346,17 @@ function bindEvents() {
             setNotice($("#setup-wizard-message"), "Setup guide reset to your saved defaults.", false);
           } else if (actionButton.dataset.setupAction === "discover-jellyfin") {
             await discoverJellyfinForSetup();
+          } else if (actionButton.dataset.setupAction === "run-preflight") {
+            setNotice(messageEl, "Running preflight checks...", false);
+            await runSetupPreflight({ persistDraft: false });
+            const preflight = getSetupPreflight();
+            if (preflight?.ok === false) {
+              setNotice(messageEl, "Preflight found blocking issues. Resolve them before apply.", true);
+            } else if ((preflight?.warnings || []).length) {
+              setNotice(messageEl, "Preflight passed with warnings. Review suggested fixes.", false);
+            } else {
+              setNotice(messageEl, "Preflight passed with no blocking issues.", false);
+            }
           } else if (actionButton.dataset.setupAction === "save-progress") {
             setNotice(messageEl, "Saving your setup choices...", false);
             await saveSetupWizardProgress();
@@ -18832,6 +19380,24 @@ function bindEvents() {
           const targetInput = setupWizard.querySelector('[data-setup-input="yt_dlp_cookies"]');
           const start = resolveBrowseStart("tokens", state.setupWizard?.draft?.yt_dlp_cookies || "");
           openBrowser(targetInput, "tokens", "file", ".txt", start);
+          return;
+        }
+        const browseSpec = {
+          env_path: { root: "config", mode: "file", ext: "" },
+          media_root: { root: "downloads", mode: "dir", ext: "" },
+          movies_root: { root: "downloads", mode: "dir", ext: "" },
+          tv_root: { root: "downloads", mode: "dir", ext: "" },
+          downloads_root: { root: "downloads", mode: "dir", ext: "" },
+          books_root: { root: "downloads", mode: "dir", ext: "" },
+        };
+        const spec = browseSpec[key];
+        if (spec) {
+          const selector = `[data-setup-input="${key}"]`;
+          const targetInput = setupWizard.querySelector(selector);
+          if (targetInput) {
+            const start = resolveBrowseStart(spec.root, state.setupWizard?.draft?.[key] || "");
+            openBrowser(targetInput, spec.root, spec.mode, spec.ext, start);
+          }
         }
       }
     });
@@ -18857,7 +19423,7 @@ function bindEvents() {
   const connectionsRefresh = $("#connections-refresh");
   if (connectionsRefresh) {
     connectionsRefresh.addEventListener("click", () => {
-      refreshConnectionsStatus().catch(() => {});
+      refreshConnectionsStatus(true).catch(() => {});
     });
   }
   const connectionsAutoconfigure = $("#connections-autoconfigure");
@@ -19373,6 +19939,9 @@ function bindEvents() {
       }
       const playButton = event.target.closest('[data-action="player-play"]');
       if (playButton) {
+        if (playButton.classList.contains("music-search-play-btn")) {
+          return;
+        }
         const payload = buildPlayableItemFromButton(playButton);
         const preserveStation = !!playButton.closest("#music-player-queue") && Number(state.playerActiveStationId || 0) > 0;
         if (!preserveStation) {

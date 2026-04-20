@@ -59,6 +59,7 @@ from apscheduler.triggers.date import DateTrigger
 from google.auth.exceptions import RefreshError
 from yt_dlp import YoutubeDL
 
+from api.intent_queue import IntentQueueAdapter
 from engine.job_queue import (
     DownloadJobStore,
     DownloadWorkerEngine,
@@ -185,6 +186,7 @@ from engine.stack_setup import (
     auto_configure_services,
     apply_managed_service_defaults,
     build_stack_apply_summary,
+    build_stack_preflight,
     build_compose_command,
     build_connections_status,
     build_existing_status,
@@ -2034,6 +2036,19 @@ def _record_telegram_delivery(
         _mutate()
 
 
+def _send_watcher_batch_telegram(config: dict, message: str) -> dict:
+    """Send a watcher batch notification via Telegram. Returns {'sent': bool, 'message_id': int|None}."""
+    try:
+        result = telegram_notify_result(config, message)
+        if isinstance(result, dict):
+            return {"sent": bool(result.get("ok")), "message_id": result.get("message_id")}
+        sent = bool(telegram_notify(config, message))
+        return {"sent": sent, "message_id": None}
+    except Exception:
+        logging.exception("Watcher telegram notify failed")
+        return {"sent": False, "message_id": None}
+
+
 def _telegram_preflight_error(config) -> str | None:
     telegram_cfg = config.get("telegram") if isinstance(config, dict) else None
     if not isinstance(telegram_cfg, dict):
@@ -2920,311 +2935,11 @@ def _build_music_track_canonical_id(
     )
 
 
-class _IntentQueueAdapter:
-    """Queue adapter that writes intent payloads into the unified download queue."""
+class _IntentQueueAdapter(IntentQueueAdapter):
+    """Backwards-compatible wrapper bound to FastAPI app state."""
 
-    def enqueue(self, payload: dict) -> dict[str, object]:
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="intent_enqueue_invalid_payload")
-        engine = getattr(app.state, "worker_engine", None)
-        store = getattr(engine, "store", None) if engine is not None else None
-        if store is None:
-            raise HTTPException(status_code=503, detail="intent_queue_store_unavailable")
-        try:
-            runtime_config = load_config(app.state.config_path)
-        except Exception:
-            runtime_config = {}
-        base_dir = app.state.paths.single_downloads_dir
-
-        media_intent = str(payload.get("media_intent") or "").strip() or "track"
-        origin = str(payload.get("origin") or "").strip() or ("spotify_playlist" if payload.get("playlist_id") else "intent")
-        origin_id = str(
-            payload.get("origin_id")
-            or payload.get("playlist_id")
-            or payload.get("spotify_track_id")
-            or "manual"
-        ).strip() or "manual"
-        destination = str(payload.get("destination") or "").strip() or None
-        final_format = str(payload.get("final_format") or "").strip() or None
-        force_redownload = bool(payload.get("force_redownload"))
-        canonical_metadata = payload.get("canonical_metadata") if isinstance(payload.get("canonical_metadata"), dict) else {}
-        # Heuristic for Music Mode-origin payloads:
-        # explicit music flags OR MusicBrainz identifiers already present in payload/canonical metadata.
-        is_music_mode_origin = bool(payload.get("music_mode")) or str(payload.get("media_type") or "").strip().lower() == "music" or any(
-            bool(str(payload.get(key) or "").strip())
-            for key in (
-                "recording_mbid",
-                "mb_recording_id",
-                "mb_release_id",
-                "mb_release_group_id",
-                "release_id",
-                "release_group_id",
-            )
-        ) or any(
-            bool(str(canonical_metadata.get(key) or "").strip())
-            for key in (
-                "recording_mbid",
-                "mb_recording_id",
-                "mb_release_id",
-                "mb_release_group_id",
-                "release_id",
-                "release_group_id",
-            )
-        )
-
-        def _to_dict(value):
-            if isinstance(value, dict):
-                return dict(value)
-            if value is None:
-                return {}
-            out = {}
-            for key in (
-                "title",
-                "artist",
-                "album",
-                "album_artist",
-                "track_num",
-                "disc_num",
-                "date",
-                "genre",
-                "isrc",
-                "mbid",
-                "lyrics",
-            ):
-                if hasattr(value, key):
-                    out[key] = getattr(value, key)
-            return out
-
-        def _enqueue_music_query_job(
-            artist: str,
-            track: str,
-            album: str | None = None,
-            *,
-            recording_mbid: str | None = None,
-            mb_release_id: str | None = None,
-            mb_release_group_id: str | None = None,
-            media_mode: str | None = None,
-        ) -> dict[str, object]:
-            def _optional_pos_int(value):
-                if value is None or str(value).strip() == "":
-                    return None
-                try:
-                    parsed = int(value)
-                except (TypeError, ValueError):
-                    return None
-                return parsed if parsed > 0 else None
-
-            normalized_artist = str(artist or "").strip()
-            normalized_track = str(track or "").strip()
-            normalized_album = str(album or "").strip() or None
-            normalized_album_artist = str(payload.get("album_artist") or "").strip() or None
-            normalized_recording_mbid = str(recording_mbid or "").strip() or None
-            normalized_release_mbid = str(mb_release_id or "").strip() or None
-            normalized_release_group_mbid = str(mb_release_group_id or "").strip() or None
-            normalized_track_number = _optional_pos_int(payload.get("track_number"))
-            normalized_disc_number = _optional_pos_int(payload.get("disc_number"))
-            normalized_track_total = _optional_pos_int(payload.get("track_total"))
-            normalized_disc_total = _optional_pos_int(payload.get("disc_total"))
-            normalized_release_date = str(payload.get("release_date") or "").strip() or None
-            normalized_artwork_url = str(payload.get("artwork_url") or "").strip() or None
-            normalized_genre = str(payload.get("genre") or "").strip() or None
-            normalized_release_primary_type = str(payload.get("release_primary_type") or "").strip() or None
-            release_secondary_raw = payload.get("release_secondary_types")
-            normalized_release_secondary_types = []
-            if isinstance(release_secondary_raw, (list, tuple, set)):
-                for value in release_secondary_raw:
-                    text = str(value or "").strip()
-                    if text:
-                        normalized_release_secondary_types.append(text)
-            normalized_mb_youtube_urls = (
-                list(payload.get("mb_youtube_urls"))
-                if isinstance(payload.get("mb_youtube_urls"), (list, tuple, set))
-                else []
-            )
-            if not normalized_artist or not normalized_track:
-                raise HTTPException(status_code=400, detail="intent_enqueue_missing_artist_or_track")
-            query = quote(f"{normalized_artist} {normalized_track}".strip())
-            url = f"https://music.youtube.com/search?q={query}"
-            normalized_media_mode = str(media_mode or "").strip().lower()
-            target_media_type = "video" if normalized_media_mode == "music_video" else "music"
-            canonical_metadata = {
-                "artist": normalized_artist,
-                "track": normalized_track,
-                "album": normalized_album,
-                "album_artist": normalized_album_artist,
-                "release_date": normalized_release_date,
-                "track_number": normalized_track_number,
-                "disc_number": normalized_disc_number,
-                "track_total": normalized_track_total,
-                "disc_total": normalized_disc_total,
-                "artwork_url": normalized_artwork_url,
-                "genre": normalized_genre,
-                "duration_ms": payload.get("duration_ms"),
-                "recording_mbid": normalized_recording_mbid,
-                "mb_recording_id": normalized_recording_mbid,
-                "mb_release_id": normalized_release_mbid,
-                "mb_release_group_id": normalized_release_group_mbid,
-                "mb_youtube_urls": normalized_mb_youtube_urls,
-                "release_primary_type": normalized_release_primary_type,
-                "release_secondary_types": normalized_release_secondary_types,
-            }
-            canonical_id = _build_music_track_canonical_id(
-                normalized_artist,
-                normalized_album,
-                payload.get("track_number"),
-                normalized_track,
-                recording_mbid=normalized_recording_mbid,
-                mb_release_id=normalized_release_mbid,
-                mb_release_group_id=normalized_release_group_mbid,
-                disc_number=payload.get("disc_number"),
-            )
-            enqueue_payload = build_download_job_payload(
-                config=runtime_config,
-                origin=origin,
-                origin_id=origin_id,
-                media_type=target_media_type,
-                media_intent="music_track",
-                source="youtube_music",
-                url=url,
-                input_url=url,
-                destination=destination,
-                base_dir=base_dir,
-                final_format_override=final_format,
-                resolved_metadata=canonical_metadata,
-                output_template_overrides={
-                    "audio_mode": target_media_type == "music",
-                    "album_artist": normalized_album_artist,
-                    "track_number": normalized_track_number,
-                    "disc_number": normalized_disc_number,
-                    "track_total": normalized_track_total,
-                    "disc_total": normalized_disc_total,
-                    "release_date": normalized_release_date,
-                    "duration_ms": payload.get("duration_ms"),
-                    "artwork_url": normalized_artwork_url,
-                    "genre": normalized_genre,
-                    "recording_mbid": normalized_recording_mbid,
-                    "mb_recording_id": normalized_recording_mbid,
-                    "mb_release_id": normalized_release_mbid,
-                    "mb_release_group_id": normalized_release_group_mbid,
-                    "mb_youtube_urls": normalized_mb_youtube_urls,
-                    "release_primary_type": normalized_release_primary_type,
-                    "release_secondary_types": normalized_release_secondary_types,
-                },
-                canonical_id=canonical_id,
-            )
-            job_id, created, dedupe_reason = store.enqueue_job(
-                **enqueue_payload,
-                force_requeue=force_redownload,
-            )
-            logging.info(
-                "Intent payload queued playlist_id=%s spotify_track_id=%s job_id=%s created=%s dedupe_reason=%s",
-                payload.get("playlist_id"),
-                payload.get("spotify_track_id"),
-                job_id,
-                bool(created),
-                dedupe_reason,
-            )
-            return {
-                "job_id": job_id,
-                "created": bool(created),
-                "dedupe_reason": dedupe_reason,
-            }
-
-        if media_intent == "music_track":
-            recording_mbid = str(
-                payload.get("recording_mbid")
-                or payload.get("mb_recording_id")
-                or ""
-            ).strip()
-            if not recording_mbid:
-                logging.error("[MUSIC] enqueue_rejected missing_recording_mbid")
-                raise HTTPException(status_code=400, detail="recording_mbid required for music_track enqueue")
-            return _enqueue_music_query_job(
-                str(payload.get("artist") or ""),
-                str(payload.get("track") or payload.get("title") or ""),
-                str(payload.get("album") or ""),
-                recording_mbid=recording_mbid,
-                mb_release_id=str(payload.get("mb_release_id") or payload.get("release_id") or ""),
-                mb_release_group_id=str(payload.get("mb_release_group_id") or payload.get("release_group_id") or ""),
-                media_mode=str(payload.get("media_mode") or ""),
-            )
-
-        resolved_media = payload.get("resolved_media") if isinstance(payload.get("resolved_media"), dict) else {}
-        media_url = str(resolved_media.get("media_url") or payload.get("url") or "").strip()
-        if not media_url:
-            if is_music_mode_origin:
-                logging.warning("[MUSIC] enqueue_rejected music_mode_requires_mbid")
-                raise HTTPException(status_code=400, detail="music_mode_requires_mbid")
-            fallback_artist = str(payload.get("artist") or "").strip()
-            fallback_track = str(payload.get("track") or payload.get("title") or "").strip()
-            fallback_album = str(payload.get("album") or "").strip() or None
-            if fallback_artist and fallback_track:
-                return _enqueue_music_query_job(
-                    fallback_artist,
-                    fallback_track,
-                    fallback_album,
-                    media_mode=str(payload.get("media_mode") or ""),
-                )
-            logging.warning("Intent enqueue skipped: no media URL or searchable artist/title available")
-            raise HTTPException(status_code=400, detail="intent_enqueue_missing_media_url")
-        source = str(resolved_media.get("source_id") or payload.get("source") or resolve_source(media_url)).strip() or "unknown"
-        music_metadata = _to_dict(payload.get("music_metadata"))
-        external_ids = music_metadata.get("external_ids") if isinstance(music_metadata.get("external_ids"), dict) else {}
-        canonical_id = str(
-            music_metadata.get("isrc")
-            or music_metadata.get("mbid")
-            or ""
-        ).strip() or extract_external_track_canonical_id(
-            external_ids,
-            fallback_spotify_id=payload.get("spotify_track_id"),
-        )
-        requested_media_type = str(payload.get("media_type") or "").strip().lower()
-        if requested_media_type in {"music", "audio"}:
-            target_media_type = "music"
-        elif requested_media_type == "video":
-            target_media_type = "video"
-        elif music_metadata or is_music_mode_origin:
-            target_media_type = "music"
-        else:
-            target_media_type = resolve_media_type(runtime_config, url=media_url)
-        enqueue_payload = build_download_job_payload(
-            config=runtime_config,
-            origin=origin,
-            origin_id=origin_id,
-            media_type=target_media_type,
-            media_intent=media_intent,
-            source=source,
-            url=media_url,
-            input_url=media_url,
-            destination=destination,
-            base_dir=base_dir,
-            final_format_override=final_format,
-            resolved_metadata=music_metadata,
-            output_template_overrides={
-                "audio_mode": target_media_type == "music",
-                "duration_ms": resolved_media.get("duration_ms"),
-                "kind": payload.get("kind"),
-            },
-            canonical_id=canonical_id,
-            external_id=str(payload.get("external_id") or "").strip() or None,
-        )
-        job_id, created, dedupe_reason = store.enqueue_job(
-            **enqueue_payload,
-            force_requeue=force_redownload,
-        )
-        logging.info(
-            "Intent payload queued playlist_id=%s spotify_track_id=%s job_id=%s created=%s dedupe_reason=%s",
-            payload.get("playlist_id"),
-            payload.get("spotify_track_id"),
-            job_id,
-            bool(created),
-            dedupe_reason,
-        )
-        return {
-            "job_id": job_id,
-            "created": bool(created),
-            "dedupe_reason": dedupe_reason,
-        }
+    def __init__(self) -> None:
+        super().__init__(state=app.state)
 
 
 class SafeJSONResponse(JSONResponse):
@@ -3805,6 +3520,77 @@ def _file_id_from_path(path):
     return _encode_file_id(rel)
 
 
+def _open_location_allowed_roots():
+    roots = {os.path.realpath(str(DOWNLOADS_DIR))}
+    browse_roots = getattr(app.state, "browse_roots", None)
+    if isinstance(browse_roots, dict):
+        for base in browse_roots.values():
+            if base:
+                roots.add(os.path.realpath(str(base)))
+    single_downloads_dir = getattr(getattr(app.state, "paths", None), "single_downloads_dir", "")
+    if single_downloads_dir:
+        roots.add(os.path.realpath(str(single_downloads_dir)))
+    return [root for root in roots if root]
+
+
+def _resolve_open_location_target(file_id: str | None, requested_path: str | None) -> tuple[str, bool]:
+    file_id_value = str(file_id or "").strip()
+    path_value = str(requested_path or "").strip()
+    candidate = ""
+    if file_id_value:
+        try:
+            rel = _decode_file_id(file_id_value)
+        except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+            raise HTTPException(status_code=400, detail="Invalid file id") from exc
+        candidate = os.path.abspath(os.path.join(DOWNLOADS_DIR, rel))
+    elif path_value:
+        candidate = path_value if os.path.isabs(path_value) else os.path.join(DOWNLOADS_DIR, path_value)
+        candidate = os.path.abspath(candidate)
+    else:
+        raise HTTPException(status_code=400, detail="file_id or path is required")
+
+    allowed_roots = _open_location_allowed_roots()
+    if not _path_allowed(candidate, allowed_roots):
+        raise HTTPException(status_code=403, detail="Path not allowed")
+
+    if not os.path.exists(candidate):
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    if os.path.isfile(candidate):
+        return os.path.realpath(candidate), True
+    if os.path.isdir(candidate):
+        return os.path.realpath(candidate), False
+    raise HTTPException(status_code=404, detail="Path not found")
+
+
+def _launch_os_location(path: str, *, select_file: bool) -> None:
+    target = os.path.realpath(path)
+    if sys.platform == "darwin":
+        command = ["open", "-R", target] if select_file else ["open", target]
+    elif os.name == "nt":
+        normalized = os.path.normpath(target)
+        command = ["explorer", f"/select,{normalized}"] if select_file else ["explorer", normalized]
+    else:
+        open_target = os.path.dirname(target) if select_file else target
+        command = ["xdg-open", open_target]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"File manager command unavailable: {command[0]}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Failed to open location: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip() or f"exit code {completed.returncode}"
+        raise RuntimeError(f"Failed to open location: {detail}")
+
+
 def _iter_file(path, chunk_size=1024 * 1024):
     with open(path, "rb") as handle:
         while True:
@@ -3949,6 +3735,7 @@ def _run_immediate_download_to_client(
         fallback_destination=str(getattr(paths, "single_downloads_dir", "") or DOWNLOADS_DIR).strip() or str(DOWNLOADS_DIR),
     )
     normalized_format = _normalize_format(effective_defaults.get("final_format"))
+    _audio_only_formats = {"mp3", "m4a", "flac"}
     if audio_mode:
         final_format = (
             _normalize_audio_format(effective_defaults.get("final_format"))
@@ -3956,8 +3743,11 @@ def _run_immediate_download_to_client(
             or "mp3"
         )
     else:
+        # For video mode, discard audio-only format overrides so they don't
+        # coerce the download into audio mode.
+        _video_format_candidate = normalized_format if normalized_format not in _audio_only_formats else None
         final_format = (
-            normalized_format
+            _video_format_candidate
             or _normalize_format(config.get("video_final_format"))
             or "mkv"
         )
@@ -4205,7 +3995,7 @@ def _run_direct_url_with_cli(
     )
 
     try:
-        resolved_final_format = effective_defaults.get("final_format")
+        _audio_only_fmts = {"mp3", "m4a", "flac"}
         if audio_mode:
             resolved_final_format = (
                 _normalize_audio_format(effective_defaults.get("final_format"))
@@ -4213,8 +4003,12 @@ def _run_direct_url_with_cli(
                 or "mp3"
             )
         else:
+            # For video mode, ignore audio-only format overrides so they don't
+            # coerce the download into an audio-only container.
+            _raw_fmt = _normalize_format(effective_defaults.get("final_format"))
+            _video_fmt = _raw_fmt if _raw_fmt not in _audio_only_fmts else None
             resolved_final_format = (
-                _normalize_format(effective_defaults.get("final_format"))
+                _video_fmt
                 or _normalize_format(config.get("video_final_format"))
                 or "mkv"
             )
@@ -6404,7 +6198,7 @@ async def _poll_single_playlist(config, now, policy, pl, watch, yt_clients, batc
     logging.debug("Watcher polled playlist_id=%s items=%s", playlist_id, len(videos))
 
     with sqlite3.connect(app.state.paths.db_path) as conn:
-        if subscribe_mode and not playlist_has_seen(conn, playlist_id):
+        if subscribe_mode and not playlist_has_seen(conn, playlist_id) and not watch.get("last_checked_at"):
             # First watcher pass for subscribe mode marks items as seen without downloading.
             for entry in videos:
                 vid = entry.get("videoId") or entry.get("id")
@@ -9386,14 +9180,11 @@ def music_video_availability(data: dict = Body(...)):
     if include_youtube_probe:
         precheck = _quick_youtube_mv_precheck(artist, track, album=album)
         signals["youtube_precheck"] = precheck
-        _log_event(
-            logging.INFO,
-            "music_video_precheck_result",
-            recording_mbid=recording_mbid or None,
-            matched=bool(precheck.get("matched")) if isinstance(precheck, dict) else False,
-            reason=(precheck.get("reason") if isinstance(precheck, dict) else None),
-            title=(precheck.get("title") if isinstance(precheck, dict) else None),
-            query=(precheck.get("query") if isinstance(precheck, dict) else None),
+        logging.info(
+            "music_video_precheck_result recording_mbid=%s matched=%s reason=%s",
+            recording_mbid or None,
+            bool(precheck.get("matched")) if isinstance(precheck, dict) else False,
+            precheck.get("reason") if isinstance(precheck, dict) else None,
         )
         if isinstance(precheck, dict) and bool(precheck.get("matched")):
             score += 1
@@ -10924,6 +10715,7 @@ async def api_setup_managed_plan(request: Request, payload: dict = Body(...)):
     )
     persisted = _persist_config_payload(updated_cfg)
     summary = build_stack_apply_summary(persisted, normalize_stack_config(persisted))
+    preflight = build_stack_preflight(persisted, normalize_stack_config(persisted), project_dir=str(_repo_root()))
     return safe_json(
         {
             "status": "planned",
@@ -10931,6 +10723,7 @@ async def api_setup_managed_plan(request: Request, payload: dict = Body(...)):
             "managed_stack": build_managed_status(persisted),
             "stack": normalize_stack_config(persisted),
             "apply_summary": summary,
+            "preflight": preflight,
         }
     )
 
@@ -10944,6 +10737,9 @@ async def api_setup_managed_apply(request: Request):
     if not managed_cfg:
         raise HTTPException(status_code=400, detail={"error": "managed_plan_missing"})
     plan = normalize_managed_plan(cfg, {**(managed_cfg.get("enabled_features") or {}), "direct_manage": bool(managed_cfg.get("direct_manage_requested"))})
+    preflight = build_stack_preflight(cfg, normalize_stack_config({"setup": {"stack": plan.get("stack") or {}}}), project_dir=str(_repo_root()))
+    if not bool(preflight.get("ok")):
+        raise HTTPException(status_code=409, detail={"error": "preflight_failed", "preflight": preflight})
     prepared_cfg = _managed_setup_config_update(
         cfg,
         plan,
@@ -10966,6 +10762,30 @@ async def api_setup_managed_apply(request: Request):
     next_steps = [f"Run `{summary['compose_command']}` from the Retreivr project root."]
     direct_attempt = {"status": "not_attempted"}
     if str(plan.get("apply_mode")) == "direct" and normalize_stack_config(prepared_cfg).get("enable_hostctl"):
+        try:
+            _hostctl_request("GET", "/health", timeout=8.0)
+        except Exception as exc:  # noqa: BLE001
+            prepared_cfg = _managed_setup_config_update(
+                prepared_cfg,
+                plan,
+                phase="waiting_for_restart",
+                phase_message="Direct management is unavailable. Verify Host Control and retry.",
+                last_error=str(exc),
+                resume_ready=True,
+                apply_result="direct_unavailable",
+            )
+            persisted = _persist_config_payload(prepared_cfg)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "hostctl_unreachable",
+                    "message": "Direct management was requested but Retreivr Host Control is unreachable.",
+                    "hint": "Enable the hostctl profile and ensure RETREIVR_HOSTCTL_URL points to a reachable hostctl service.",
+                    "managed_stack": build_managed_status(persisted),
+                    "compose_command": str(summary.get("compose_command") or ""),
+                    "preflight": preflight,
+                },
+            ) from exc
         try:
             direct_attempt = _hostctl_request(
                 "POST",
@@ -10991,13 +10811,46 @@ async def api_setup_managed_apply(request: Request):
                 prepared_cfg,
                 plan,
                 phase="waiting_for_restart",
-                phase_message="Direct management is not available yet. One restart/apply step is still needed.",
+                phase_message="Direct management failed. Resolve hostctl access and retry.",
                 last_error=str(exc),
                 resume_ready=True,
-                apply_result="manual_fallback",
+                apply_result="direct_failed",
             )
-            next_steps.append("Direct management was not available yet, so Retreivr prepared a one-step fallback.")
+            persisted = _persist_config_payload(prepared_cfg)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "hostctl_apply_failed",
+                    "message": "Direct management apply failed.",
+                    "hint": "Review Retreivr Host Control status and retry direct apply, or switch to manual apply mode.",
+                    "managed_stack": build_managed_status(persisted),
+                    "compose_command": str(summary.get("compose_command") or ""),
+                    "preflight": preflight,
+                },
+            ) from exc
     else:
+        if str(plan.get("apply_mode")) == "direct":
+            prepared_cfg = _managed_setup_config_update(
+                prepared_cfg,
+                plan,
+                phase="waiting_for_restart",
+                phase_message="Direct management requested but hostctl profile is disabled.",
+                last_error="hostctl_profile_not_enabled",
+                resume_ready=True,
+                apply_result="direct_unavailable",
+            )
+            persisted = _persist_config_payload(prepared_cfg)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "hostctl_profile_not_enabled",
+                    "message": "Direct management requires the hostctl profile.",
+                    "hint": "Enable hostctl in managed stack features, then retry apply.",
+                    "managed_stack": build_managed_status(persisted),
+                    "compose_command": str(summary.get("compose_command") or ""),
+                    "preflight": preflight,
+                },
+            )
         prepared_cfg = _managed_setup_config_update(
             prepared_cfg,
             plan,
@@ -11015,6 +10868,7 @@ async def api_setup_managed_apply(request: Request):
             "env_path": str(written),
             "compose_command": str(summary.get("compose_command") or ""),
             "profiles": summary.get("profiles") or [],
+            "preflight": preflight,
             "direct_attempt": direct_attempt,
             "managed_stack": build_managed_status(persisted),
             "next_steps": next_steps,
@@ -11153,21 +11007,33 @@ async def api_setup_existing_discover(request: Request, payload: dict = Body(...
             continue
         base_url = str(service_cfg.get("base_url") or "").strip().rstrip("/")
         if not base_url:
-            discovered[service_name] = {"configured": False, "reachable": False, "status": "address_needed"}
+            discovered[service_name] = {"configured": False, "reachable": False, "status": "address_needed", "reason_code": "address_needed", "state": "needs_attention", "retry_hint": "Add a base URL and retry discovery."}
+            continue
+        if not _valid_http_url(base_url):
+            discovered[service_name] = {"configured": False, "reachable": False, "status": "invalid_base_url", "base_url": base_url, "reason_code": "invalid_base_url", "state": "needs_attention", "retry_hint": "Use a full http/https base URL."}
             continue
         if service_name == "qbittorrent":
             try:
                 session = _qbit_login_session(base_url, str(service_cfg.get("username") or "").strip(), str(service_cfg.get("password") or "").strip())
                 _qbit_request(session, base_url, "GET", "app/version")
-                discovered[service_name] = {"configured": True, "reachable": True, "status": "reachable", "base_url": base_url}
+                discovered[service_name] = {"configured": True, "reachable": True, "status": "reachable", "base_url": base_url, "reason_code": "reachable", "state": "connected", "retry_hint": ""}
             except Exception as exc:  # noqa: BLE001
-                discovered[service_name] = {"configured": True, "reachable": False, "status": str(exc), "base_url": base_url}
+                discovered[service_name] = {"configured": True, "reachable": False, "status": str(exc), "base_url": base_url, "reason_code": "unreachable", "state": "failed", "retry_hint": "Verify qBittorrent URL and login credentials, then retry."}
             continue
         api_key = str(service_cfg.get("api_key") or "").strip()
         headers = {"X-Api-Key": api_key} if api_key else {}
         endpoint = "/System/Info" if service_name == "jellyfin" else f"/api/{'v1' if service_name == 'prowlarr' else 'v3'}/system/status"
         reachable, message = _probe_json(f"{base_url}{endpoint}", headers=headers)
-        discovered[service_name] = {"configured": True, "reachable": reachable, "status": message, "base_url": base_url}
+        reason_code = "reachable" if reachable else ("credentials_missing" if service_name in {"radarr", "sonarr", "readarr", "prowlarr", "bazarr"} and not api_key else "unreachable")
+        discovered[service_name] = {
+            "configured": True,
+            "reachable": reachable,
+            "status": message,
+            "base_url": base_url,
+            "reason_code": reason_code,
+            "state": "connected" if reachable else ("needs_attention" if reason_code == "credentials_missing" else "failed"),
+            "retry_hint": "" if reachable else ("Add an API key and retry discovery." if reason_code == "credentials_missing" else "Verify URL/API key and retry discovery."),
+        }
     cfg = dict(_current_loaded_config())
     setup_cfg = dict(cfg.get("setup") or {})
     service_mgmt = dict(setup_cfg.get("service_management") or {})
@@ -11184,6 +11050,9 @@ async def api_setup_existing_discover(request: Request, payload: dict = Body(...
 async def api_setup_existing_connect(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
     normalized = normalize_existing_stack_payload(payload)
+    errors = _existing_stack_validation_errors(normalized)
+    if errors:
+        raise HTTPException(status_code=400, detail={"error": "validation_failed", "errors": errors})
     cfg = dict(_current_loaded_config())
     arr_cfg = dict(cfg.get("arr") or {})
     selected_services: list[str] = []
@@ -11250,8 +11119,9 @@ async def api_setup_stack_update(request: Request, payload: dict = Body(...)):
     setup_cfg["stack"] = next_stack
     setup_cfg["restart_required"] = True
     cfg["setup"] = setup_cfg
-    _persist_config_payload(cfg)
-    return safe_json({**_build_stack_payload(cfg), "security": _admin_security_status(cfg, request=request)})
+    persisted = _persist_config_payload(cfg)
+    preflight = build_stack_preflight(persisted, normalize_stack_config(persisted), project_dir=str(_repo_root()))
+    return safe_json({**_build_stack_payload(persisted), "preflight": preflight, "security": _admin_security_status(persisted, request=request)})
 
 
 @app.get("/api/setup/command")
@@ -11259,7 +11129,24 @@ async def api_setup_command():
     cfg = _current_loaded_config()
     stack = normalize_stack_config(cfg)
     summary = build_stack_apply_summary(cfg, stack)
-    return safe_json({"env_path": str(_default_env_path(cfg)), **summary})
+    preflight = build_stack_preflight(cfg, stack, project_dir=str(_repo_root()))
+    return safe_json({"env_path": str(_default_env_path(cfg)), **summary, "preflight": preflight})
+
+
+@app.get("/api/setup/preflight")
+async def api_setup_preflight():
+    cfg = _current_loaded_config()
+    stack = normalize_stack_config(cfg)
+    return safe_json({"preflight": build_stack_preflight(cfg, stack, project_dir=str(_repo_root()))})
+
+
+@app.post("/api/setup/preflight")
+async def api_setup_preflight_with_draft(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    cfg = _current_loaded_config()
+    stack_payload = payload.get("stack") if isinstance(payload.get("stack"), dict) else {}
+    stack = normalize_stack_config({"setup": {"stack": stack_payload}} if stack_payload else cfg)
+    return safe_json({"preflight": build_stack_preflight(cfg, stack, project_dir=str(_repo_root())), "stack": stack})
 
 
 @app.post("/api/setup/apply-stack")
@@ -11267,6 +11154,9 @@ async def api_setup_apply_stack(request: Request):
     _require_admin_session(request)
     cfg = _current_loaded_config()
     stack = normalize_stack_config(cfg)
+    preflight = build_stack_preflight(cfg, stack, project_dir=str(_repo_root()))
+    if not bool(preflight.get("ok")):
+        raise HTTPException(status_code=409, detail={"error": "preflight_failed", "preflight": preflight})
     env_path = _default_env_path(cfg)
     written = write_managed_env_block(env_path, managed_env_values(cfg, stack))
     summary = build_stack_apply_summary(cfg, stack)
@@ -11283,6 +11173,7 @@ async def api_setup_apply_stack(request: Request):
             "status": "written",
             "env_path": str(written),
             **summary,
+            "preflight": preflight,
             "next_steps": [
                 f"Run `{summary['compose_command']}` from the Retreivr project root.",
                 "Return to Retreivr after restart and refresh Connections/Setup status.",
@@ -11293,14 +11184,27 @@ async def api_setup_apply_stack(request: Request):
 
 @app.get("/api/services/health")
 async def api_services_health():
-    return safe_json({"services": _service_health_summary(_current_loaded_config())})
+    services = _service_health_summary(_current_loaded_config())
+    summary = {
+        "connected": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "connected"),
+        "needs_attention": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "needs_attention"),
+        "failed": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "failed"),
+        "unknown": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "unknown"),
+    }
+    return safe_json({"services": services, "summary": summary})
 
 
 @app.post("/api/services/autoconfigure")
 async def api_services_autoconfigure(request: Request):
     _require_admin_session(request)
     cfg = _current_loaded_config()
-    return safe_json({"status": "completed", "services": auto_configure_services(cfg)})
+    services = auto_configure_services(cfg)
+    summary = {
+        "connected": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "connected"),
+        "needs_attention": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "needs_attention"),
+        "failed": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "failed"),
+    }
+    return safe_json({"status": "completed", "services": services, "summary": summary})
 
 
 @app.get("/api/player/library")
@@ -11739,12 +11643,44 @@ def _discover_and_persist_managed_keys(cfg: dict) -> dict:
 
 def _build_stack_payload(config: dict | None = None) -> dict[str, Any]:
     cfg = config if isinstance(config, dict) else _current_loaded_config()
-    return build_setup_status(cfg)
+    payload = build_setup_status(cfg)
+    stack = normalize_stack_config(cfg)
+    payload["preflight"] = build_stack_preflight(cfg, stack, project_dir=str(_repo_root()))
+    return payload
 
 
 def _service_health_summary(config: dict | None = None) -> dict[str, Any]:
     cfg = config if isinstance(config, dict) else _current_loaded_config()
     return build_connections_status(cfg)
+
+
+def _valid_http_url(value: str) -> bool:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return False
+    parsed = urlparse(candidate)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _existing_stack_validation_errors(normalized: dict[str, Any]) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    services = normalized.get("services") if isinstance(normalized.get("services"), dict) else {}
+    for service_name, service_cfg in services.items():
+        if not isinstance(service_cfg, dict) or not bool(service_cfg.get("enabled")):
+            continue
+        base_url = str(service_cfg.get("base_url") or "").strip()
+        if not base_url:
+            errors.append({"service": str(service_name), "field": "base_url", "message": "Base URL is required."})
+        elif not _valid_http_url(base_url):
+            errors.append({"service": str(service_name), "field": "base_url", "message": "Base URL must be an absolute http/https URL."})
+        if service_name in {"radarr", "sonarr", "readarr", "prowlarr", "bazarr"} and not str(service_cfg.get("api_key") or "").strip():
+            errors.append({"service": str(service_name), "field": "api_key", "message": "API key is required."})
+        if service_name == "qbittorrent":
+            if not str(service_cfg.get("username") or "").strip():
+                errors.append({"service": "qbittorrent", "field": "username", "message": "Username is required."})
+            if not str(service_cfg.get("password") or "").strip():
+                errors.append({"service": "qbittorrent", "field": "password", "message": "Password is required."})
+    return errors
 
 
 def _security_config(config: dict | None = None) -> dict[str, Any]:
@@ -12434,6 +12370,23 @@ async def api_video_library(limit: int = Query(24, ge=1, le=200)):
 @app.get("/api/files")
 async def api_files():
     return _list_download_files(DOWNLOADS_DIR)
+
+
+class FileLocationOpenRequest(BaseModel):
+    file_id: str | None = None
+    path: str | None = None
+
+
+@app.post("/api/files/open-location")
+async def api_files_open_location(payload: FileLocationOpenRequest):
+    target, select_file = _resolve_open_location_target(payload.file_id, payload.path)
+    try:
+        await anyio.to_thread.run_sync(
+            functools.partial(_launch_os_location, target, select_file=select_file)
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "target": target, "select_file": select_file}
 
 
 @app.get("/api/files/{file_id}/download")
