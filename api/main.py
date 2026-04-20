@@ -7398,6 +7398,14 @@ async def api_update_ytdlp():
 @app.get("/api/paths")
 async def api_paths():
     import pathlib
+    compose_dir = ""
+    host_browse_start = ""
+    try:
+        hw = _hostctl_request("GET", "/workspace", timeout=2.0)
+        compose_dir = str(hw.get("workspace") or "")
+        host_browse_start = str(hw.get("browse_start") or "")
+    except Exception:
+        pass
     return {
         "config_dir": CONFIG_DIR,
         "data_dir": DATA_DIR,
@@ -7405,7 +7413,8 @@ async def api_paths():
         "log_dir": LOG_DIR,
         "tokens_dir": TOKENS_DIR,
         "home_dir": str(pathlib.Path.home()),
-        "compose_dir": str(_repo_root()),
+        "compose_dir": compose_dir,
+        "host_browse_start": host_browse_start,
         "browse_roots": app.state.browse_roots,
     }
 
@@ -12518,6 +12527,19 @@ async def api_browse(
     ext = ext.strip().lower()
     if ext and not ext.startswith("."):
         ext = f".{ext}"
+
+    if root == "host":
+        from urllib.parse import urlencode
+        qs = urlencode({"path": path, "mode": mode, "ext": ext, **({"limit": limit} if limit else {})})
+        try:
+            result = _hostctl_request("GET", f"/browse?{qs}")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Host filesystem browser requires Retreivr Host Control to be running. "
+                       "Enable the hostctl profile or type your paths manually.",
+            ) from exc
+        return result
 
     base = roots[root]
     rel_path, target = _resolve_browse_path(base, path)
