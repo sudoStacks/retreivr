@@ -7405,6 +7405,7 @@ async def api_paths():
         "log_dir": LOG_DIR,
         "tokens_dir": TOKENS_DIR,
         "home_dir": str(pathlib.Path.home()),
+        "compose_dir": str(_repo_root()),
         "browse_roots": app.state.browse_roots,
     }
 

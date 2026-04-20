@@ -211,6 +211,7 @@ const previewState = {
   durationText: "",
 };
 const BROWSE_DEFAULTS = {
+  composeDir: "",
   configDir: "",
   homeDir: "",
   libraryExportsRoot: "",
@@ -7678,6 +7679,7 @@ async function refreshVersion() {
 async function loadPaths() {
   try {
     const data = await fetchJson("/api/paths");
+    BROWSE_DEFAULTS.composeDir = data.compose_dir || "";
     BROWSE_DEFAULTS.configDir = data.config_dir || "";
     BROWSE_DEFAULTS.homeDir = data.home_dir || "";
     BROWSE_DEFAULTS.libraryExportsRoot = data.browse_roots?.library_exports || "";
@@ -19407,6 +19409,8 @@ function bindEvents() {
             let start = "";
             if (currentValue.startsWith("/")) {
               start = currentValue.replace(/^\//, "");
+            } else if (BROWSE_DEFAULTS.composeDir) {
+              start = BROWSE_DEFAULTS.composeDir.replace(/^\//, "");
             } else if (BROWSE_DEFAULTS.homeDir) {
               start = BROWSE_DEFAULTS.homeDir.replace(/^\//, "");
             }
