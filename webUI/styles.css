@@ -7303,7 +7303,9 @@ body.home-page .home-search-actions {
   font-size: 0.96rem !important;
   font-weight: 800;
   justify-content: center;
-  border-width: 1.5px;
+  background: transparent;
+  border: 1.5px solid rgba(148, 163, 184, 0.35);
+  color: var(--text);
 }
 
 .setup-wizard-choice.active {
