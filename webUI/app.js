@@ -213,6 +213,7 @@ const previewState = {
 const BROWSE_DEFAULTS = {
   configDir: "",
   homeDir: "",
+  hostBrowseStart: "",
   libraryExportsRoot: "",
   mediaRoot: "",
   tokensDir: "",
@@ -7680,6 +7681,7 @@ async function loadPaths() {
     const data = await fetchJson("/api/paths");
     BROWSE_DEFAULTS.configDir = data.config_dir || "";
     BROWSE_DEFAULTS.homeDir = data.home_dir || "";
+    BROWSE_DEFAULTS.hostBrowseStart = data.host_browse_start || "";
     BROWSE_DEFAULTS.libraryExportsRoot = data.browse_roots?.library_exports || "";
     BROWSE_DEFAULTS.mediaRoot = data.downloads_dir || "";
     BROWSE_DEFAULTS.tokensDir = data.tokens_dir || "";
@@ -19404,7 +19406,9 @@ function bindEvents() {
           const targetInput = setupWizard.querySelector(selector);
           if (targetInput) {
             const currentValue = (state.setupWizard?.draft?.[key] || "").trim();
-            const start = currentValue.startsWith("/") ? currentValue.replace(/^\//, "") : "";
+            const start = currentValue.startsWith("/")
+              ? currentValue.replace(/^\//, "")
+              : (BROWSE_DEFAULTS.hostBrowseStart || "");
             openBrowser(targetInput, spec.root, spec.mode, spec.ext, start);
           }
         }

@@ -7400,6 +7400,15 @@ async def api_update_ytdlp():
 @app.get("/api/paths")
 async def api_paths():
     import pathlib
+    host_browse_start = ""
+    if os.path.isdir("/hostfs"):
+        hostfs_root = os.environ.get("RETREIVR_HOSTFS_ROOT", "").rstrip("/") or "/"
+        host_workspace = os.environ.get("RETREIVR_HOST_WORKSPACE", "").strip()
+        if host_workspace:
+            if hostfs_root == "/":
+                host_browse_start = host_workspace.lstrip("/")
+            elif host_workspace.startswith(hostfs_root + "/"):
+                host_browse_start = host_workspace[len(hostfs_root) + 1:]
     return {
         "config_dir": CONFIG_DIR,
         "data_dir": DATA_DIR,
@@ -7407,6 +7416,7 @@ async def api_paths():
         "log_dir": LOG_DIR,
         "tokens_dir": TOKENS_DIR,
         "home_dir": str(pathlib.Path.home()),
+        "host_browse_start": host_browse_start,
         "browse_roots": app.state.browse_roots,
     }
 

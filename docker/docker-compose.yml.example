@@ -29,6 +29,8 @@ services:
       RETREIVR_ENV_FILE: /workspace/.env
       RETREIVR_WORKSPACE: /workspace
       RETREIVR_HOSTCTL_URL: ${RETREIVR_HOSTCTL_URL:-http://retreivr-hostctl:8010}
+      RETREIVR_HOSTFS_ROOT: ${RETREIVR_HOSTFS_ROOT:-/Users}
+      RETREIVR_HOST_WORKSPACE: ${PWD}
     volumes:
       - ./:/workspace
       - ./downloads:/downloads
@@ -37,7 +39,7 @@ services:
       - ./logs:/logs
       - ./tokens:/tokens
       - ${RETREIVR_MEDIA_ROOT:-./media}:/media
-      - ${RETREIVR_HOSTFS_ROOT:-/}:/hostfs:ro
+      - ${RETREIVR_HOSTFS_ROOT:-/Users}:/hostfs:ro
     restart: unless-stopped
     networks:
       - retreivr
