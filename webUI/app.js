@@ -2365,8 +2365,8 @@ function getSetupWizardSteps() {
     },
     {
       id: "jellyfin",
-      title: "Do you want to connect Jellyfin too?",
-      subtitle: "Jellyfin is optional. Retreivr can still acquire and organize media without it, but you can connect it now if you want playback in the same ecosystem.",
+      title: "Do you want to connect an existing Jellyfin?",
+      subtitle: "Jellyfin is optional. Retreivr can still acquire and organize media without it, but you can connect an existing Jellyfin instance now if you want playback in the same ecosystem.",
       required: false,
     },
     {
@@ -2602,8 +2602,10 @@ function syncSetupWizardToLegacyFields() {
   draft.enable_prowlarr = !!(draft.managed_movies || draft.managed_tv || draft.managed_books);
   draft.enable_bazarr = !!draft.managed_subtitles;
   draft.enable_qbittorrent = !!draft.managed_downloader;
-  draft.enable_vpn = !!draft.managed_vpn;
-  draft.enable_jellyfin = !!draft.managed_jellyfin;
+  if (draft.arr_setup_mode === "managed") {
+    draft.enable_vpn = !!draft.managed_vpn;
+    draft.enable_jellyfin = !!draft.managed_jellyfin;
+  }
   draft.enable_hostctl = !!draft.direct_manage;
   const mappings = [
     ["setup-enable-arr-stack", !!draft.enable_arr_stack, "checked"],
@@ -3086,7 +3088,7 @@ function renderSetupWizard() {
       </div>
       ${preflight ? `
         <div class="setup-wizard-step-list">
-          <div>Docker Compose: ${escapeHtml(String(checks?.docker_compose?.status || "unknown"))}</div>
+          <div>Docker Compose: ${escapeHtml(checks?.docker_compose?.status === "assumed_containerized" ? "ok (running containerized)" : String(checks?.docker_compose?.status || "unknown"))}</div>
           <div>Compose file: ${checks?.compose_file?.ok ? escapeHtml(String(checks?.compose_file?.path || "found")) : "missing"}</div>
           <div>Blocking conflicts: ${conflicts.length}</div>
           <div>Warnings: ${warnings.length}</div>

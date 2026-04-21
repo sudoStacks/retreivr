@@ -340,9 +340,15 @@ def _resolve_compose_file(project_dir: Path) -> Path | None:
     return None
 
 
+def _running_in_container() -> bool:
+    return Path("/.dockerenv").exists()
+
+
 def _docker_compose_available() -> tuple[bool, str]:
     docker_bin = shutil.which("docker")
     if not docker_bin:
+        if _running_in_container():
+            return True, "assumed_containerized"
         return False, "docker_not_found"
     try:
         proc = subprocess.run(

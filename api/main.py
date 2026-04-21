@@ -11590,6 +11590,9 @@ def _current_loaded_config() -> dict:
 
 
 def _repo_root() -> Path:
+    workspace = os.environ.get("RETREIVR_WORKSPACE", "").strip()
+    if workspace:
+        return Path(workspace).resolve()
     return Path(__file__).resolve().parents[1]
 
 
