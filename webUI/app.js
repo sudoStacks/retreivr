@@ -2274,6 +2274,7 @@ function ensureSetupWizardState() {
       jellyfinDiscoveryError: "",
       preflight: null,
       preflightLoading: false,
+      applied: false,
     };
     return;
   }
@@ -3114,6 +3115,9 @@ function renderSetupWizard() {
       ` : ""}
     `;
   } else if (step.id === "review") {
+    const applied = !!state.setupWizard?.applied;
+    const applyCommand = String(state.setupStatus?.stack?.compose_command || "docker compose up -d").trim();
+    const workspaceDir = String(state.setupStatus?.stack?.project_dir || "your compose directory").trim();
     body = `
       <div class="setup-wizard-summary-grid">
         ${buildSetupWizardSummaryRows().map(([label, value]) => `
@@ -3123,7 +3127,19 @@ function renderSetupWizard() {
           </div>
         `).join("")}
       </div>
-      <div class="setup-wizard-note">Save your choices first. When you are ready, let Retreivr prepare the stack settings it manages and show you the exact restart step to run next.</div>
+      ${applied ? `
+        <div class="setup-wizard-note success">Setup prepared. Run the command below in your terminal to apply changes.</div>
+        <div class="setup-wizard-step-list">
+          <div>Directory: <code>${escapeHtml(workspaceDir)}</code></div>
+        </div>
+        <div class="setup-wizard-command-block">
+          <code class="setup-command-code">${escapeHtml(applyCommand)}</code>
+          <button type="button" class="button ghost small" data-setup-action="copy-command" data-command="${escapeAttr(applyCommand)}">Copy</button>
+        </div>
+        <div class="setup-wizard-note">This stops and restarts your Retreivr stack with the new configuration. Run it in the same directory as your docker-compose.yml file.</div>
+      ` : `
+        <div class="setup-wizard-note">Save your choices first. When you are ready, click <strong>Prepare Setup</strong> and Retreivr will show you the exact restart command to run.</div>
+      `}
     `;
   }
 
@@ -19383,7 +19399,20 @@ function bindEvents() {
             setNotice(messageEl, "Preparing your setup...", false);
             await applySetupWizardEnv();
             await refreshSetupStatus();
-            setNotice(messageEl, "Setup prepared. Follow the restart step shown below.", false);
+            if (state.setupWizard) state.setupWizard.applied = true;
+            renderSetupWizard();
+            setNotice(messageEl, "Setup prepared. Run the command shown above in your terminal.", false);
+          } else if (actionButton.dataset.setupAction === "copy-command") {
+            const cmd = String(actionButton.dataset.command || "").trim();
+            if (cmd) {
+              try {
+                await navigator.clipboard.writeText(cmd);
+                actionButton.textContent = "Copied!";
+                setTimeout(() => { actionButton.textContent = "Copy"; }, 2000);
+              } catch (_err) {
+                actionButton.textContent = "Copy failed";
+              }
+            }
           }
         } catch (err) {
           setNotice(messageEl, toUserErrorMessage(err), true);

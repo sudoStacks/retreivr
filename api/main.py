@@ -11671,7 +11671,9 @@ def _build_stack_payload(config: dict | None = None) -> dict[str, Any]:
     cfg = config if isinstance(config, dict) else _current_loaded_config()
     payload = build_setup_status(cfg)
     stack = normalize_stack_config(cfg)
-    payload["preflight"] = build_stack_preflight(cfg, stack, project_dir=str(_repo_root()))
+    root = str(_repo_root())
+    payload["preflight"] = build_stack_preflight(cfg, stack, project_dir=root)
+    payload["stack"]["project_dir"] = root
     return payload
 
 

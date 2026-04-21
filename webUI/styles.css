@@ -7339,6 +7339,12 @@ body.home-page .home-search-actions {
   color: #f4d6a3;
 }
 
+.setup-wizard-note.success {
+  border-color: rgba(52, 211, 153, 0.28);
+  background: rgba(16, 185, 129, 0.1);
+  color: #86efcb;
+}
+
 .setup-wizard-helper-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -7540,6 +7546,18 @@ body.home-page .home-search-actions {
   color: #f4f7fb;
   white-space: normal;
   word-break: break-word;
+}
+
+.setup-wizard-command-block {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.setup-wizard-command-block .setup-command-code {
+  flex: 1 1 0;
+  margin-top: 0;
 }
 
 .setup-path-summary {
