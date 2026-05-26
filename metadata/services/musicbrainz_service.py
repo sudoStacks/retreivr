@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import socket
 import threading
 import time
 import urllib.parse
@@ -22,6 +23,7 @@ _DEFAULT_CACHE_TTL_SECONDS = 6 * 60 * 60
 _DEFAULT_COVER_CACHE_TTL_SECONDS = 24 * 60 * 60
 _DEFAULT_MIN_INTERVAL_SECONDS = 1.0
 _DEFAULT_RETRY_CAP_SECONDS = 8.0
+_DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
 _RETRY_JITTER_FACTORS = (1.00, 1.15, 0.95, 1.25, 1.05, 1.20)
 _SEARCH_TTL_SECONDS = 24 * 60 * 60
 _RELEASE_GROUP_TTL_SECONDS = 24 * 60 * 60
@@ -245,6 +247,11 @@ class MusicBrainzService:
     def _call_with_retry(self, fn, *, attempts=3, base_delay=0.3):
         self._ensure_initialized()
         effective_attempts = max(int(attempts or 1), 1)
+        try:
+            request_timeout = float(os.environ.get("RETREIVR_MUSICBRAINZ_REQUEST_TIMEOUT_SECONDS", _DEFAULT_REQUEST_TIMEOUT_SECONDS))
+        except (TypeError, ValueError):
+            request_timeout = _DEFAULT_REQUEST_TIMEOUT_SECONDS
+        request_timeout = max(1.0, min(request_timeout, 60.0))
 
         last_error = None
         attempt = 1
@@ -252,7 +259,12 @@ class MusicBrainzService:
             try:
                 self._respect_rate_limit()
                 self._inc_metric("total_requests")
-                return fn()
+                previous_timeout = socket.getdefaulttimeout()
+                socket.setdefaulttimeout(request_timeout)
+                try:
+                    return fn()
+                finally:
+                    socket.setdefaulttimeout(previous_timeout)
             except Exception as exc:
                 last_error = exc
                 error_class, transient = self._classify_retry_error(exc)
