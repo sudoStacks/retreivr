@@ -241,7 +241,7 @@ def test_integration_full_music_pipeline(
     assert "spotify" not in output_file.name.lower()
     assert "youtube" not in output_file.name.lower()
     assert "abc123" not in output_file.name.lower()
-    assert output_file.name == "My Song.mp3"
+    assert output_file.name == "01 - My Song.mp3"
     assert Path(captured_tags["path"]).name == "tmp-yt-source-abc123.mp3"
     assert captured_tags["title"] == "My Song"
     assert captured_tags["artist"] == "The Artist"
@@ -285,11 +285,11 @@ def test_integration_full_music_pipeline(
 
     assert history_row is not None
     assert history_row[0] == "My Song"
-    assert history_row[1] == "My Song.mp3"
+    assert history_row[1] == "01 - My Song.mp3"
     assert history_row[2] == "youtube_music"
     assert history_row[3] == "completed"
 
     assert downloaded_row is not None
     assert downloaded_row[0] == "integration_playlist"
     assert downloaded_row[1] == "USABC1234567"
-    assert downloaded_row[2].endswith("My Song.mp3")
+    assert downloaded_row[2].endswith("01 - My Song.mp3")

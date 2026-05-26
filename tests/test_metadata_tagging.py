@@ -220,11 +220,12 @@ def test_apply_tags_writes_track_and_disc_totals_for_mp4(monkeypatch, tmp_path: 
 
     import metadata.tagger as tagging
 
+    shared_tags = {}
     instances = []
 
     class FakeMP4:
         def __init__(self, _file_path: str) -> None:
-            self.tags = {}
+            self.tags = shared_tags
             self.saved = False
             instances.append(self)
 
@@ -248,3 +249,61 @@ def test_apply_tags_writes_track_and_disc_totals_for_mp4(monkeypatch, tmp_path: 
     audio = instances[0]
     assert audio.tags.get("trkn", [(0, 0)])[0] == (1, 10)
     assert audio.tags.get("disk", [(0, 0)])[0] == (1, 2)
+
+
+def test_apply_tags_fails_when_title_did_not_embed(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "track.mp3"
+    path.write_bytes(b"")
+
+    import pytest
+    import metadata.tagger as tagging
+
+    class FakeAudio:
+        def __init__(self) -> None:
+            self.frames = []
+
+        def add(self, frame) -> None:
+            # Simulate a failed title frame write while other frames can be added.
+            if frame.name != "TIT2":
+                self.frames.append(frame)
+
+        def getall(self, frame_id: str):
+            return [frame for frame in self.frames if frame.name == frame_id]
+
+        def delall(self, frame_id: str) -> None:
+            self.frames = [frame for frame in self.frames if frame.name != frame_id]
+
+        def save(self, _save_path: str) -> None:
+            pass
+
+    class FakeFrame:
+        def __init__(self, name: str, **kwargs) -> None:
+            self.name = name
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    def _factory(name: str):
+        def _ctor(**kwargs):
+            return FakeFrame(name, **kwargs)
+
+        return _ctor
+
+    audio = FakeAudio()
+    monkeypatch.setattr(tagging, "ID3", lambda *_args, **_kwargs: audio)
+    monkeypatch.setattr(tagging, "TIT2", _factory("TIT2"))
+    monkeypatch.setattr(tagging, "TPE1", _factory("TPE1"))
+    monkeypatch.setattr(tagging, "TALB", _factory("TALB"))
+    monkeypatch.setattr(tagging, "TPE2", _factory("TPE2"))
+    monkeypatch.setattr(tagging, "TRCK", _factory("TRCK"))
+    monkeypatch.setattr(tagging, "TPOS", _factory("TPOS"))
+    monkeypatch.setattr(tagging, "TDRC", _factory("TDRC"))
+    monkeypatch.setattr(tagging, "TCON", _factory("TCON"))
+    monkeypatch.setattr(tagging, "TXXX", _factory("TXXX"))
+
+    with pytest.raises(RuntimeError, match="title"):
+        tagging.apply_tags(
+            str(path),
+            {"artist": "Artist", "album": "Album", "title": "Clean Title", "track_number": 1},
+            artwork=None,
+            allow_overwrite=True,
+        )

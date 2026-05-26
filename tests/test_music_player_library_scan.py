@@ -93,7 +93,7 @@ def test_scan_local_library_falls_back_to_path_when_tags_unavailable(tmp_path: P
     item = items[0]
     assert item["artist"] == "Fallback Artist"
     assert item["album"] == "Fallback Album"
-    assert item["title"] == "02 - Song"
+    assert item["title"] == "Song"
     assert item["recording_mbid"] is None
 
 

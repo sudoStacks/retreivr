@@ -7,9 +7,9 @@ def test_sanitize_component_strips_unsafe_chars_and_trailing_dot_space() -> None
     assert sanitize_component('  A<>:"/\\|?*rtist.  ') == "Artist"
 
 
-def test_build_track_filename_uses_clean_title_only() -> None:
+def test_build_track_filename_prefixes_track_number() -> None:
     filename = build_track_filename({"title": "Song", "track_num": 7, "ext": "mp3"})
-    assert filename == "Song.mp3"
+    assert filename == "07 - Song.mp3"
 
 
 def test_build_track_filename_ignores_missing_track_number() -> None:

@@ -23,7 +23,7 @@ def test_worker_moves_to_canonical_path_and_returns_it(tmp_path, monkeypatch) ->
     def _capture_tag_file(path, _metadata, **_kwargs):
         tagged["path"] = path
         tagged["exists_during_tag"] = Path(path).exists()
-        tagged["final_exists_during_tag"] = (root / "Artist" / "Album (2020)" / "Disc 2" / "Song.mp3").exists()
+        tagged["final_exists_during_tag"] = (root / "Artist" / "Album (2020)" / "Disc 2" / "03 - Song.mp3").exists()
 
     monkeypatch.setattr("download.worker.tag_file", _capture_tag_file)
 
@@ -48,7 +48,7 @@ def test_worker_moves_to_canonical_path_and_returns_it(tmp_path, monkeypatch) ->
 
     result = worker.process_job(job)
 
-    expected = root / "Artist" / "Album (2020)" / "Disc 2" / "Song.mp3"
+    expected = root / "Artist" / "Album (2020)" / "Disc 2" / "03 - Song.mp3"
     assert result == {"status": JOB_STATUS_COMPLETED, "file_path": str(expected)}
     assert tagged["path"] == str(temp_file)
     assert tagged["exists_during_tag"] is True

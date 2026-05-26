@@ -32,10 +32,16 @@ def build_album_directory(metadata: Any) -> str:
 
 
 def build_track_filename(metadata: Any) -> str:
-    """Build canonical track filename from the clean track title only."""
+    """Build canonical track filename with track number for filesystem sorting."""
     title = sanitize_component(_get_field(metadata, "title") or "Unknown Title")
+    track_num = _get_field(metadata, "track_num") or _get_field(metadata, "track_number")
     ext = str(_get_field(metadata, "ext") or "").lstrip(".")
-    filename = title
+    try:
+        track_int = int(str(track_num).split("/", 1)[0])
+    except (TypeError, ValueError):
+        track_int = 0
+    prefix = f"{track_int:02d} - " if track_int > 0 else ""
+    filename = f"{prefix}{title}"
     if ext:
         return f"{filename}.{ext}"
     return filename

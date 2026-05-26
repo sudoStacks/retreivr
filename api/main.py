@@ -95,6 +95,7 @@ from engine.spotify_playlist_importer import (
 )
 from engine.download_defaults import resolve_effective_download_settings
 from metadata.services.musicbrainz_service import get_musicbrainz_service
+from metadata.tag_repair import repair_music_library_tags
 
 from engine.core import (
     EngineStatus,
@@ -11259,6 +11260,16 @@ async def api_player_library_summary(limit: int = Query(1000, ge=1, le=5000)):
             if artwork_local_path:
                 item["artwork_url"] = f"/api/player/art/local?path={quote(artwork_local_path, safe='')}"
     return safe_json({"summary": summary})
+
+
+@app.post("/api/player/library/repair-tags")
+async def api_player_library_repair_tags(
+    limit: int = Query(500, ge=1, le=5000),
+    dry_run: bool = Query(True),
+):
+    cfg = _current_loaded_config()
+    result = repair_music_library_tags(cfg, db_path=app.state.paths.db_path, limit=limit, dry_run=dry_run)
+    return safe_json(result)
 
 
 @app.get("/api/player/stations")

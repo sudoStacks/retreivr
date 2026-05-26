@@ -4,6 +4,7 @@ import calendar
 import mimetypes
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -33,6 +34,7 @@ PREFERRED_ART_NAMES = (
 STATION_READY_TARGET = 3
 STATION_PRIME_TAIL_TARGET = 12
 STATION_TOTAL_TARGET = 18
+_TRACK_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3})(?:\s*/\s*\d{1,3})?\s*[-._)]\s+")
 STATION_CANDIDATE_LIMIT = 240
 YOUTUBE_SOURCE_KEYS = {"youtube", "youtube_music"}
 
@@ -251,6 +253,12 @@ def _first_music_tag(tags: Any, *keys: str) -> str:
     return ""
 
 
+def _clean_display_title(value: Any) -> str:
+    text = str(value or "").strip()
+    cleaned = _TRACK_PREFIX_RE.sub("", text).strip()
+    return cleaned or text
+
+
 def _read_local_music_tags(path: Path) -> dict[str, Any]:
     if MutagenFile is None:
         return {}
@@ -318,7 +326,7 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                     or (path.parent.parent.name if len(path.parts) >= 3 else "")
                 )
                 album = str(tag_data.get("album") or "").strip() or path.parent.name
-                title = str(tag_data.get("title") or "").strip() or path.stem
+                title = _clean_display_title(str(tag_data.get("title") or "").strip() or path.stem)
                 stat = resolved_path.stat()
                 artwork_local_path = _find_album_art(resolved_path.parent, artwork_cache, [root])
                 items.append(

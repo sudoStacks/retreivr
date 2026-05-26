@@ -164,6 +164,8 @@ const state = {
   moviesTvSection: "search",
   musicLibraryMode: "albums",
   musicLibraryLoaded: false,
+  musicLibraryRepairInProgress: false,
+  musicLibraryRepairLast: null,
   videoLibraryItems: [],
   videoLibraryLoaded: false,
   libraryModalPayload: null,
@@ -7334,6 +7336,8 @@ function renderMusicLibrarySection() {
   const breadcrumbs = $("#music-library-breadcrumbs");
   const missingSection = $("#music-library-missing");
   const missingGrid = $("#music-library-missing-grid");
+  const repairScanButton = $("#music-library-repair-scan");
+  const repairApplyButton = $("#music-library-repair-apply");
   if (!section || !grid || !breadcrumbs) return;
   const summary = state.playerLibrarySummary || { artists: [], albums: [], tracks: [] };
   const artists = Array.isArray(summary.artists) ? summary.artists : [];
@@ -7343,6 +7347,16 @@ function renderMusicLibrarySection() {
   const total = artists.length + albums.length + tracks.length;
   const shouldShowSection = total > 0 && state.currentPage === "music" && state.musicSection === "library";
   section.classList.toggle("hidden", !shouldShowSection);
+  if (repairScanButton) {
+    repairScanButton.disabled = !!state.musicLibraryRepairInProgress;
+    repairScanButton.textContent = state.musicLibraryRepairInProgress ? "Scanning..." : "Scan Tags";
+  }
+  if (repairApplyButton) {
+    const repairCount = Number(state.musicLibraryRepairLast?.repaired || 0) || 0;
+    repairApplyButton.classList.toggle("hidden", repairCount <= 0 || !!state.musicLibraryRepairLast?.applied);
+    repairApplyButton.disabled = !!state.musicLibraryRepairInProgress;
+    repairApplyButton.textContent = state.musicLibraryRepairInProgress ? "Repairing..." : `Repair ${repairCount} Tags`;
+  }
   if (!total) {
     grid.innerHTML = `<div class="home-results-empty">No local music library files found yet.</div>`;
     breadcrumbs.innerHTML = "";
@@ -7569,6 +7583,41 @@ async function loadMusicLibrarySection({ force = false } = {}) {
     setMediaLibraryNotice(messageEl, "", false);
   } catch (err) {
     setMediaLibraryNotice(messageEl, `Music library failed to load: ${toUserErrorMessage(err)}`, true);
+  }
+}
+
+async function runMusicLibraryTagRepair({ dryRun = true } = {}) {
+  const messageEl = $("#music-library-message");
+  state.musicLibraryRepairInProgress = true;
+  renderMusicLibrarySection();
+  setMediaLibraryNotice(messageEl, dryRun ? "Scanning music tags..." : "Repairing music tags...", false);
+  try {
+    const payload = await fetchJson(`/api/player/library/repair-tags?limit=5000&dry_run=${dryRun ? "true" : "false"}`, {
+      method: "POST",
+    });
+    state.musicLibraryRepairLast = { ...(payload || {}), applied: !dryRun };
+    const repaired = Number(payload?.repaired || 0) || 0;
+    const scanned = Number(payload?.scanned || 0) || 0;
+    const failed = Number(payload?.failed || 0) || 0;
+    if (dryRun) {
+      const message = repaired
+        ? `Tag scan found ${repaired} repairable files out of ${scanned} scanned.`
+        : `Tag scan completed: ${scanned} files scanned, no title repairs needed.`;
+      setMediaLibraryNotice(messageEl, failed ? `${message} ${failed} files could not be checked.` : message, failed ? { kind: "warning" } : false);
+    } else {
+      await loadMusicLibrarySection({ force: true });
+      setMediaLibraryNotice(messageEl, `Tag repair completed: ${repaired} files repaired${failed ? `, ${failed} failed` : ""}.`, {
+        kind: failed ? "warning" : "success",
+        toast: true,
+        scope: "music-library",
+        preserveInline: true,
+      });
+    }
+  } catch (err) {
+    setMediaLibraryNotice(messageEl, `Tag repair failed: ${toUserErrorMessage(err)}`, true);
+  } finally {
+    state.musicLibraryRepairInProgress = false;
+    renderMusicLibrarySection();
   }
 }
 
@@ -18134,6 +18183,18 @@ function bindEvents() {
   if (musicLibraryRefresh) {
     musicLibraryRefresh.addEventListener("click", () => {
       loadMusicLibrarySection({ force: true }).catch(() => {});
+    });
+  }
+  const musicLibraryRepairScan = $("#music-library-repair-scan");
+  if (musicLibraryRepairScan) {
+    musicLibraryRepairScan.addEventListener("click", () => {
+      runMusicLibraryTagRepair({ dryRun: true }).catch(() => {});
+    });
+  }
+  const musicLibraryRepairApply = $("#music-library-repair-apply");
+  if (musicLibraryRepairApply) {
+    musicLibraryRepairApply.addEventListener("click", () => {
+      runMusicLibraryTagRepair({ dryRun: false }).catch(() => {});
     });
   }
   $$("[data-music-library-mode]").forEach((button) => {
