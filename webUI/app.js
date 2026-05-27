@@ -5648,10 +5648,10 @@ function getAllowedSettingsSectionIds() {
 function updateSettingsSectionNavState(activeSectionId = "") {
   const normalizedActive = String(activeSectionId || "").trim();
   const advancedEnabled = isSettingsAdvancedModeEnabled();
-  $$(".settings-nav-link[data-settings-link]").forEach((link) => {
+  $$("#settings-nav .settings-nav-link[data-settings-link]").forEach((link) => {
     const href = String(link.getAttribute("href") || "");
     const sectionId = href.startsWith("#") ? href.slice(1) : href;
-    const isAdvanced = String(link.dataset.settingsLevel || "").trim().toLowerCase() === "advanced";
+    const isAdvanced = link.classList.contains("settings-advanced-link");
     link.classList.toggle("hidden", isAdvanced && !advancedEnabled);
     link.classList.toggle("active", normalizedActive && sectionId === normalizedActive);
   });
@@ -5840,7 +5840,7 @@ function syncSettingsMainWidthLock() {
   if (!panel || !layout) {
     return;
   }
-  const isStacked = window.matchMedia("(max-width: 1200px)").matches;
+  const isStacked = window.matchMedia("(max-width: 760px)").matches;
   let width = 0;
   if (isStacked) {
     width = Math.floor(layout.clientWidth || 0);

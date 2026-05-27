@@ -4704,6 +4704,13 @@ body.home-page .home-footer-brand .sudostacks-logo {
   background: transparent;
 }
 
+#config-panel .app-page-sidebar {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-content: stretch;
+}
+
 :root[data-theme="light"] #config-panel .settings-sidebar {
   background: transparent;
 }
@@ -4762,6 +4769,10 @@ body.home-page .home-footer-brand .sudostacks-logo {
   flex: 0 0 auto;
   width: 100%;
   box-sizing: border-box;
+}
+
+#config-panel .app-page-sidebar .settings-nav-link {
+  width: 100%;
 }
 
 #config-panel .settings-nav-link:hover {
