@@ -3551,13 +3551,9 @@ def _run_direct_url_with_cli(
     if not url or not isinstance(url, str):
         raise ValueError("single_url is required")
 
-    # Resolve destination (default to configured DOWNLOADS_DIR).
-    # Relative paths are resolved against DOWNLOADS_DIR, matching the job queue path.
-    if destination:
-        raw = destination.strip()
-        dest_dir = raw if os.path.isabs(raw) else os.path.join(str(DOWNLOADS_DIR), raw)
-    else:
-        dest_dir = str(DOWNLOADS_DIR)
+    # Match the queue path: resolve_dir handles empty/relative/absolute and rejects
+    # destinations that escape the base via inputs like "../etc".
+    dest_dir = resolve_dir((destination or "").strip(), paths.single_downloads_dir)
     ensure_dir(dest_dir)
 
     # Direct URL runs are intentionally NOT persisted into the unified download_jobs queue.

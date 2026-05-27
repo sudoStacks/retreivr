@@ -7,3 +7,4 @@
 .DS_Store
 .vscode/
 _project_management/
+.venv/

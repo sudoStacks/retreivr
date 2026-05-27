@@ -31,6 +31,7 @@ def api_module(monkeypatch, tmp_path: Path):
         db_path=str(db_path),
         temp_downloads_dir=str(temp_dir),
         thumbs_dir=str(thumbs_dir),
+        single_downloads_dir=str(tmp_path),
     )
     module.app.state.state = "idle"
     module.app.state.current_download_proc = None
@@ -143,6 +144,89 @@ def test_server_direct_url_video_mode_uses_video_template_and_container_policy(
     assert len(files) == 1
     assert files[0].startswith("VID-Video Title__Channel Name.")
     assert files[0].endswith(".mkv")
+
+
+def test_server_direct_url_relative_destination_resolves_under_downloads_dir(
+    api_module, monkeypatch, tmp_path: Path
+) -> None:
+    module = api_module
+    module.app.state.paths.single_downloads_dir = str(tmp_path / "downloads_root")
+    Path(module.app.state.paths.single_downloads_dir).mkdir(parents=True, exist_ok=True)
+    config = {
+        "final_format": "mkv",
+        "filename_template": "VID-%(title)s.%(ext)s",
+    }
+
+    def _fake_download_with_ytdlp(url, temp_dir, config_arg, **kwargs):
+        _ = config_arg, kwargs
+        output = Path(temp_dir) / "payload.mkv"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"video")
+        return {
+            "id": "abc123xyz99",
+            "title": "Video Title",
+            "uploader": "Channel",
+            "webpage_url": url,
+        }, str(output)
+
+    monkeypatch.setattr(module, "get_loaded_config", lambda: config)
+    monkeypatch.setattr(module, "download_with_ytdlp", _fake_download_with_ytdlp)
+    monkeypatch.setattr(module, "embed_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_record_direct_url_history", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "ensure_mb_bound_music_track", lambda *args, **kwargs: None)
+
+    module._run_direct_url_with_cli(
+        url="https://youtu.be/-LI8X-GhFA8",
+        paths=module.app.state.paths,
+        config=config,
+        destination="Singles",
+        final_format_override="mkv",
+        media_type="video",
+        media_intent="episode",
+        music_mode=False,
+        stop_event=threading.Event(),
+        status=None,
+    )
+
+    singles_dir = Path(module.app.state.paths.single_downloads_dir) / "Singles"
+    files = [p.name for p in singles_dir.glob("*") if p.is_file()]
+    assert len(files) == 1
+    assert files[0].startswith("VID-Video Title.")
+    assert files[0].endswith(".mkv")
+
+
+def test_server_direct_url_escape_destination_is_rejected(
+    api_module, monkeypatch, tmp_path: Path
+) -> None:
+    module = api_module
+    module.app.state.paths.single_downloads_dir = str(tmp_path / "downloads_root")
+    Path(module.app.state.paths.single_downloads_dir).mkdir(parents=True, exist_ok=True)
+    config = {"final_format": "mkv"}
+
+    called = {"download": False}
+
+    def _fake_download_with_ytdlp(*args, **kwargs):
+        called["download"] = True
+        raise AssertionError("download_with_ytdlp should not be called for escape destinations")
+
+    monkeypatch.setattr(module, "get_loaded_config", lambda: config)
+    monkeypatch.setattr(module, "download_with_ytdlp", _fake_download_with_ytdlp)
+
+    with pytest.raises(ValueError, match="within base directory"):
+        module._run_direct_url_with_cli(
+            url="https://youtu.be/-LI8X-GhFA8",
+            paths=module.app.state.paths,
+            config=config,
+            destination="../../etc",
+            final_format_override="mkv",
+            media_type="video",
+            media_intent="episode",
+            music_mode=False,
+            stop_event=threading.Event(),
+            status=None,
+        )
+
+    assert called["download"] is False
 
 
 def test_client_direct_url_music_mode_is_rejected(api_module) -> None:
