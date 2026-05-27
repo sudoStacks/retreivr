@@ -198,6 +198,7 @@ from engine.stack_setup import (
     build_managed_status,
     build_setup_status,
     discover_managed_service_keys,
+    discover_local_service_keys,
     managed_env_values,
     normalize_existing_stack_payload,
     normalize_managed_plan,
@@ -237,7 +238,9 @@ from library.review_queue import (
 )
 from engine.community_publish_worker import (
     CommunityPublishWorker,
+    append_publish_proposal_to_outbox,
     apply_community_publish_defaults,
+    normalize_community_publish_source,
     summarize_publish_runtime,
     community_publish_worker_enabled,
 )
@@ -9314,15 +9317,79 @@ def music_runtime_resolution(data: dict = Body(...)):
         source_id=source_id,
         raw_payload=raw_payload,
     )
+    publish_mode = "off"
+    publish_status = "skipped"
+    publish_reason = "community_publish_disabled"
+    publish_outbox_path: str | None = None
+    try:
+        cfg = apply_community_publish_defaults(app.state.config if isinstance(app.state.config, dict) else {})
+        publish_mode = str(cfg.get("community_cache_publish_mode") or "off").strip().lower() or "off"
+        if publish_mode == "write_outbox":
+            selected_score_raw = payload.get("selected_score")
+            try:
+                selected_score = float(selected_score_raw)
+            except Exception:
+                selected_score = 1.0
+            selected_score = max(0.0, min(1.0, selected_score))
+            proposal = {
+                "schema_version": 1,
+                "proposal_type": "community_cache_publish_proposal",
+                "proposal_id": uuid4().hex,
+                "emitted_at": utc_now(),
+                "recording_mbid": recording_mbid,
+                "release_mbid": str(payload.get("release_mbid") or payload.get("mb_release_id") or "").strip() or None,
+                "release_group_mbid": str(payload.get("release_group_mbid") or payload.get("mb_release_group_id") or "").strip() or None,
+                "video_id": source_id,
+                "source": normalize_community_publish_source(source),
+                "candidate_url": source_url,
+                "candidate_id": str(payload.get("candidate_id") or source_id or "").strip() or None,
+                "duration_ms": payload.get("duration_ms"),
+                "selected_score": selected_score,
+                "duration_delta_ms": payload.get("duration_delta_ms"),
+                "final_path": None,
+                "retreivr_version": str(payload.get("retreivr_version") or "runtime_playback"),
+            }
+            outbox_result = append_publish_proposal_to_outbox(
+                config=cfg,
+                db_path=app.state.search_db_path,
+                proposal=proposal,
+            )
+            publish_status = str(outbox_result.get("status") or "error")
+            publish_reason = str(outbox_result.get("reason") or "outbox_append_failed")
+            publish_outbox_path = str(outbox_result.get("outbox_path") or "").strip() or None
+        elif publish_mode == "dry_run":
+            publish_status = "dry_run"
+            publish_reason = "community_publish_dry_run"
+        else:
+            publish_status = "skipped"
+            publish_reason = "community_publish_off"
+    except Exception as exc:
+        publish_status = "error"
+        publish_reason = f"community_publish_runtime_error:{exc}"
+        logging.warning("music_runtime_resolution community publish emit failed mbid=%s error=%s", recording_mbid, exc)
     logging.info(
-        "music_runtime_resolution_recorded recording_mbid=%s source=%s source_url=%s resolved_via=%s status=%s",
+        "music_runtime_resolution_recorded recording_mbid=%s source=%s source_url=%s resolved_via=%s status=%s publish_mode=%s publish_status=%s publish_reason=%s",
         recording_mbid,
         source,
         source_url,
         str(raw_payload.get("resolved_via") or payload.get("resolved_via") or "runtime_playback"),
         str((result or {}).get("status") or "updated"),
+        publish_mode,
+        publish_status,
+        publish_reason,
     )
-    return safe_json({"status": "ok", "result": result})
+    return safe_json(
+        {
+            "status": "ok",
+            "result": result,
+            "community_publish": {
+                "mode": publish_mode,
+                "status": publish_status,
+                "reason": publish_reason,
+                "outbox_path": publish_outbox_path,
+            },
+        }
+    )
 
 
 @app.get("/api/music/preview/stream")
@@ -11092,6 +11159,31 @@ async def api_setup_existing_discover(request: Request, payload: dict = Body(...
 async def api_setup_existing_connect(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
     normalized = normalize_existing_stack_payload(payload)
+    key_discovery_policy = _key_discovery_policy(_current_loaded_config())
+    services_payload = normalized.get("services") if isinstance(normalized.get("services"), dict) else {}
+    requested_services = [
+        str(name or "").strip().lower()
+        for name, service_cfg in services_payload.items()
+        if isinstance(service_cfg, dict) and bool(service_cfg.get("enabled"))
+    ]
+    discovery_scope = set(str(item or "").strip().lower() for item in (key_discovery_policy.get("scope") or []))
+    allowed_services = [name for name in requested_services if not discovery_scope or name in discovery_scope]
+    discovered_local_keys = discover_local_service_keys(allowed_services) if bool(key_discovery_policy.get("enabled")) else {}
+    preview = []
+    for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"):
+        service_cfg = services_payload.get(service_name) if isinstance(services_payload.get(service_name), dict) else None
+        if not isinstance(service_cfg, dict) or not bool(service_cfg.get("enabled")):
+            continue
+        if str(service_cfg.get("api_key") or "").strip():
+            continue
+        discovered = str(discovered_local_keys.get(service_name) or "").strip()
+        if discovered:
+            service_cfg["api_key"] = discovered
+            preview.append({"service": service_name, "status": "discovered", "masked_key": f"{discovered[:4]}…{discovered[-4:]}" if len(discovered) > 8 else "••••"})
+        else:
+            preview.append({"service": service_name, "status": "not_found", "masked_key": None})
+    if bool(payload.get("preview_only")):
+        return safe_json({"status": "preview", "key_discovery": {"enabled": bool(key_discovery_policy.get("enabled")), "results": preview}})
     errors = _existing_stack_validation_errors(normalized)
     if errors:
         raise HTTPException(status_code=400, detail={"error": "validation_failed", "errors": errors})
@@ -11128,10 +11220,19 @@ async def api_setup_existing_connect(request: Request, payload: dict = Body(...)
         "selected_services": selected_services,
         "discovered_health": build_connections_status({**cfg, "arr": arr_cfg}),
     }
+    _append_key_discovery_audit(
+        cfg,
+        {
+            "scope": "existing",
+            "action": "discover_apply",
+            "discovered_services": [entry["service"] for entry in preview if entry.get("status") == "discovered"],
+            "saved": True,
+        },
+    )
     cfg["setup"] = setup_cfg
     cfg = _persist_config_payload(cfg)
     configure_result = auto_configure_services(cfg)
-    return safe_json({"status": "connected", "existing_stack": build_existing_status(cfg), "configure_result": configure_result})
+    return safe_json({"status": "connected", "existing_stack": build_existing_status(cfg), "configure_result": configure_result, "key_discovery": {"enabled": bool(key_discovery_policy.get("enabled")), "results": preview}})
 
 
 @app.post("/api/setup/stack")
@@ -11222,6 +11323,74 @@ async def api_setup_apply_stack(request: Request):
             ],
         }
     )
+
+
+@app.get("/api/setup/key-discovery")
+async def api_setup_key_discovery_status():
+    cfg = _current_loaded_config()
+    return safe_json({"key_discovery": _key_discovery_policy(cfg)})
+
+
+@app.post("/api/setup/key-discovery")
+async def api_setup_key_discovery_update(request: Request, payload: dict = Body(...)):
+    _require_admin_session(request)
+    cfg = dict(_current_loaded_config())
+    setup_cfg = dict(cfg.get("setup") or {})
+    current = _key_discovery_policy(cfg)
+    requested_scope = payload.get("scope") if isinstance(payload.get("scope"), list) else current.get("scope") or []
+    normalized_scope = [str(item or "").strip().lower() for item in requested_scope if str(item or "").strip()]
+    if not normalized_scope:
+        normalized_scope = ["radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"]
+    next_cfg = {
+        "enabled": bool(payload.get("enabled", current.get("enabled", False))),
+        "scope": normalized_scope,
+        "audit": list((setup_cfg.get("key_discovery") or {}).get("audit") or []),
+    }
+    setup_cfg["key_discovery"] = next_cfg
+    cfg["setup"] = setup_cfg
+    _append_key_discovery_audit(
+        cfg,
+        {
+            "scope": "global",
+            "action": "settings_update",
+            "enabled": next_cfg["enabled"],
+            "scope_services": normalized_scope,
+        },
+    )
+    persisted = _persist_config_payload(cfg)
+    return safe_json({"status": "updated", "key_discovery": _key_discovery_policy(persisted)})
+
+
+@app.post("/api/setup/key-discovery/disable-clear")
+async def api_setup_key_discovery_disable_clear(request: Request):
+    _require_admin_session(request)
+    cfg = dict(_current_loaded_config())
+    arr_cfg = dict(cfg.get("arr") or {})
+    cleared_services: list[str] = []
+    for service_name in ("radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"):
+        service_cfg = dict(arr_cfg.get(service_name) or {})
+        if str(service_cfg.get("api_key") or "").strip():
+            cleared_services.append(service_name)
+        service_cfg["api_key"] = ""
+        arr_cfg[service_name] = service_cfg
+    cfg["arr"] = arr_cfg
+    setup_cfg = dict(cfg.get("setup") or {})
+    key_cfg = dict(setup_cfg.get("key_discovery") or {})
+    key_cfg["enabled"] = False
+    key_cfg["scope"] = key_cfg.get("scope") or ["radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"]
+    setup_cfg["key_discovery"] = key_cfg
+    cfg["setup"] = setup_cfg
+    _append_key_discovery_audit(
+        cfg,
+        {
+            "scope": "global",
+            "action": "disable_and_clear",
+            "cleared_services": cleared_services,
+            "enabled": False,
+        },
+    )
+    persisted = _persist_config_payload(cfg)
+    return safe_json({"status": "updated", "cleared_services": cleared_services, "key_discovery": _key_discovery_policy(persisted)})
 
 
 @app.get("/api/services/health")
@@ -11676,9 +11845,21 @@ def _managed_setup_config_update(cfg: dict, plan: dict[str, Any], *, phase: str,
 
 
 def _discover_and_persist_managed_keys(cfg: dict) -> dict:
+    policy = _key_discovery_policy(cfg)
+    if not bool(policy.get("enabled")):
+        return cfg
     updated = dict(cfg)
     arr_cfg = dict(updated.get("arr") or {})
     discovered = discover_managed_service_keys(updated)
+    _append_key_discovery_audit(
+        updated,
+        {
+            "scope": "managed",
+            "action": "discover",
+            "discovered_services": sorted(list(discovered.keys())),
+            "saved": True,
+        },
+    )
     for service_name, api_key in discovered.items():
         service_cfg = dict(arr_cfg.get(service_name) or {})
         if api_key:
@@ -11695,7 +11876,45 @@ def _build_stack_payload(config: dict | None = None) -> dict[str, Any]:
     root = str(_repo_root())
     payload["preflight"] = build_stack_preflight(cfg, stack, project_dir=root)
     payload["stack"]["project_dir"] = root
+    payload["key_discovery"] = _key_discovery_policy(cfg)
     return payload
+
+
+def _key_discovery_policy(cfg: dict | None = None) -> dict[str, Any]:
+    source = cfg if isinstance(cfg, dict) else _current_loaded_config()
+    setup_cfg = source.get("setup") if isinstance(source.get("setup"), dict) else {}
+    key_cfg = setup_cfg.get("key_discovery") if isinstance(setup_cfg.get("key_discovery"), dict) else {}
+    enabled = bool(key_cfg.get("enabled", False))
+    scope = key_cfg.get("scope") if isinstance(key_cfg.get("scope"), list) else ["radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"]
+    normalized_scope = [str(item or "").strip().lower() for item in scope if str(item or "").strip()]
+    if not normalized_scope:
+        normalized_scope = ["radarr", "sonarr", "readarr", "prowlarr", "bazarr", "jellyfin"]
+    audit = key_cfg.get("audit") if isinstance(key_cfg.get("audit"), list) else []
+    return {
+        "enabled": enabled,
+        "scope": normalized_scope,
+        "audit": audit[-20:],
+        "scope_disclosure": "Retreivr scans local service config files only for selected services under the workspace config directory.",
+        "data_handling_disclosure": "Discovered keys are stored locally in Retreivr config and never sent externally unless separately configured by you.",
+    }
+
+
+def _append_key_discovery_audit(cfg: dict, event: dict[str, Any]) -> None:
+    if not isinstance(cfg, dict):
+        return
+    setup_cfg = dict(cfg.get("setup") or {})
+    key_cfg = dict(setup_cfg.get("key_discovery") or {})
+    audit = list(key_cfg.get("audit") or [])
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **(event if isinstance(event, dict) else {}),
+    }
+    audit.append(entry)
+    key_cfg["audit"] = audit[-100:]
+    if "enabled" not in key_cfg:
+        key_cfg["enabled"] = False
+    setup_cfg["key_discovery"] = key_cfg
+    cfg["setup"] = setup_cfg
 
 
 def _service_health_summary(config: dict | None = None) -> dict[str, Any]:

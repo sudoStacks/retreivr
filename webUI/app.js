@@ -152,6 +152,7 @@ const state = {
   playerCurrent: null,
   playerCurrentHasVideo: false,
   playerVideoVisible: false,
+  playerRuntimePublishStatus: null,
   playerPrefetchInFlightRecordings: new Set(),
   playerYT: null,           // active YT.Player instance, or null when using <audio>
   playerYTReady: false,     // IFrame API script loaded and YT.Player can be instantiated
@@ -2187,6 +2188,7 @@ function buildSetupWizardDraft() {
   const serviceManagement = state.setupStatus?.service_management || cfg?.setup?.service_management || {};
   const managedStack = state.setupStatus?.managed_stack || cfg?.setup?.managed_stack || {};
   const existingStack = state.setupStatus?.existing_stack || cfg?.setup?.existing_stack || {};
+  const keyDiscovery = state.setupStatus?.key_discovery || cfg?.setup?.key_discovery || {};
   const arr = cfg.arr && typeof cfg.arr === "object" ? cfg.arr : {};
   const vpn = arr.vpn && typeof arr.vpn === "object" ? arr.vpn : {};
   const jellyfin = arr.jellyfin && typeof arr.jellyfin === "object" ? arr.jellyfin : {};
@@ -2263,6 +2265,13 @@ function buildSetupWizardDraft() {
     existing_qbittorrent_password: String(arr.qbittorrent?.password || ""),
     existing_jellyfin_base_url: String(arr.jellyfin?.base_url || ""),
     existing_jellyfin_api_key: String(arr.jellyfin?.api_key || ""),
+    key_discovery_enabled: !!keyDiscovery.enabled,
+    key_discovery_scope_radarr: Array.isArray(keyDiscovery.scope) ? keyDiscovery.scope.includes("radarr") : true,
+    key_discovery_scope_sonarr: Array.isArray(keyDiscovery.scope) ? keyDiscovery.scope.includes("sonarr") : true,
+    key_discovery_scope_readarr: Array.isArray(keyDiscovery.scope) ? keyDiscovery.scope.includes("readarr") : true,
+    key_discovery_scope_prowlarr: Array.isArray(keyDiscovery.scope) ? keyDiscovery.scope.includes("prowlarr") : true,
+    key_discovery_scope_bazarr: Array.isArray(keyDiscovery.scope) ? keyDiscovery.scope.includes("bazarr") : true,
+    key_discovery_scope_jellyfin: Array.isArray(keyDiscovery.scope) ? keyDiscovery.scope.includes("jellyfin") : true,
   };
 }
 
@@ -2301,6 +2310,36 @@ function ensureSetupWizardState() {
   if (typeof state.setupWizard.preflightLoading !== "boolean") {
     state.setupWizard.preflightLoading = false;
   }
+  if (!state.setupWizard.keyDiscovery || typeof state.setupWizard.keyDiscovery !== "object") {
+    state.setupWizard.keyDiscovery = { policy: state.setupStatus?.key_discovery || null, preview: null, loading: false };
+  }
+  if (typeof state.setupWizard.keyDiscovery.loading !== "boolean") {
+    state.setupWizard.keyDiscovery.loading = false;
+  }
+}
+
+function getSetupKeyDiscoveryScopeFromDraft(draft = state.setupWizard?.draft || buildSetupWizardDraft()) {
+  return [
+    draft.key_discovery_scope_radarr ? "radarr" : null,
+    draft.key_discovery_scope_sonarr ? "sonarr" : null,
+    draft.key_discovery_scope_readarr ? "readarr" : null,
+    draft.key_discovery_scope_prowlarr ? "prowlarr" : null,
+    draft.key_discovery_scope_bazarr ? "bazarr" : null,
+    draft.key_discovery_scope_jellyfin ? "jellyfin" : null,
+  ].filter(Boolean);
+}
+
+function buildSetupExistingConnectPayload(draft = state.setupWizard?.draft || buildSetupWizardDraft(), { previewOnly = false } = {}) {
+  return {
+    ...(previewOnly ? { preview_only: true } : {}),
+    radarr: { enabled: !!draft.existing_radarr_enabled, base_url: draft.existing_radarr_base_url, api_key: draft.existing_radarr_api_key },
+    sonarr: { enabled: !!draft.existing_sonarr_enabled, base_url: draft.existing_sonarr_base_url, api_key: draft.existing_sonarr_api_key },
+    readarr: { enabled: !!draft.existing_readarr_enabled, base_url: draft.existing_readarr_base_url, api_key: draft.existing_readarr_api_key },
+    prowlarr: { enabled: !!draft.existing_prowlarr_enabled, base_url: draft.existing_prowlarr_base_url, api_key: draft.existing_prowlarr_api_key },
+    bazarr: { enabled: !!draft.existing_bazarr_enabled, base_url: draft.existing_bazarr_base_url, api_key: draft.existing_bazarr_api_key },
+    qbittorrent: { enabled: !!draft.existing_qbittorrent_enabled, base_url: draft.existing_qbittorrent_base_url, username: draft.existing_qbittorrent_username, password: draft.existing_qbittorrent_password },
+    jellyfin: { enabled: !!draft.existing_jellyfin_enabled, base_url: draft.existing_jellyfin_base_url, api_key: draft.existing_jellyfin_api_key },
+  };
 }
 
 function getSetupWizardSteps() {
@@ -2338,6 +2377,14 @@ function getSetupWizardSteps() {
       id: "arr-existing-services",
       title: "Which services do you already have?",
       subtitle: "Choose only the apps you want Retreivr to connect to. You only need to enter their app addresses on this path.",
+      required: false,
+    });
+  }
+  if (draft.arr_setup_mode === "managed" || draft.arr_setup_mode === "existing") {
+    steps.push({
+      id: "key-discovery",
+      title: "Credential Discovery",
+      subtitle: "Optional: let Retreivr scan local service config files for API keys to reduce manual copy/paste.",
       required: false,
     });
   }
@@ -2430,6 +2477,8 @@ function getSetupWizardStepState(step, draft = state.setupWizard?.draft || build
     return { tone: "pending", label: "Choose one", message: "Choose whether Retreivr should manage the bundled services directly on this device." };
   }
   if (step.id === "arr-existing-services") {
+    const discoveryScope = new Set(getSetupKeyDiscoveryScopeFromDraft(draft));
+    const canUseDiscovery = (service) => !!draft.key_discovery_enabled && discoveryScope.has(String(service || "").toLowerCase());
     const enabled = [
       draft.existing_radarr_enabled,
       draft.existing_sonarr_enabled,
@@ -2441,6 +2490,21 @@ function getSetupWizardStepState(step, draft = state.setupWizard?.draft || build
     ].filter(Boolean).length;
     if (!enabled) return { tone: "warning", label: "Choose services", message: "Pick at least one existing service to connect." };
     return { tone: "success", label: `${enabled} selected`, message: "Retreivr will probe and validate the services you selected before connecting." };
+  }
+  if (step.id === "key-discovery") {
+    if (!draft.key_discovery_enabled) {
+      return { tone: "skipped", label: "Manual keys", message: "Key discovery is off. You can paste keys manually and continue." };
+    }
+    const scope = getSetupKeyDiscoveryScopeFromDraft(draft);
+    if (!scope.length) {
+      return { tone: "warning", label: "Select scope", message: "Choose at least one service scope or disable key discovery." };
+    }
+    const preview = state.setupWizard?.keyDiscovery?.preview;
+    if (preview && Array.isArray(preview.results)) {
+      const found = preview.results.filter((item) => item.status === "discovered").length;
+      return { tone: "success", label: `Preview ready (${found} found)`, message: "Preview shows what can be discovered before saving connection changes." };
+    }
+    return { tone: "success", label: "Enabled", message: "Run preview to confirm discovered keys before apply." };
   }
   if (step.id === "tmdb") {
     if (draft.wants_tmdb === false) return { tone: "skipped", label: "Skipped", message: "Movies & TV discovery will stay limited until you add a TMDb key later." };
@@ -2532,25 +2596,30 @@ function validateSetupWizardStep(step, draft = state.setupWizard?.draft || build
     if (!enabled) return "Choose at least one existing service to connect.";
     if (draft.existing_radarr_enabled && !nonEmpty(draft.existing_radarr_base_url)) return "Add your Radarr app address to continue.";
     if (draft.existing_radarr_enabled && !isValidHttpUrl(draft.existing_radarr_base_url)) return "Radarr app address must start with http:// or https://.";
-    if (draft.existing_radarr_enabled && !nonEmpty(draft.existing_radarr_api_key)) return "Add your Radarr API key to continue.";
+    if (draft.existing_radarr_enabled && !nonEmpty(draft.existing_radarr_api_key) && !canUseDiscovery("radarr")) return "Add your Radarr API key to continue, or enable key discovery for Radarr.";
     if (draft.existing_sonarr_enabled && !nonEmpty(draft.existing_sonarr_base_url)) return "Add your Sonarr app address to continue.";
     if (draft.existing_sonarr_enabled && !isValidHttpUrl(draft.existing_sonarr_base_url)) return "Sonarr app address must start with http:// or https://.";
-    if (draft.existing_sonarr_enabled && !nonEmpty(draft.existing_sonarr_api_key)) return "Add your Sonarr API key to continue.";
+    if (draft.existing_sonarr_enabled && !nonEmpty(draft.existing_sonarr_api_key) && !canUseDiscovery("sonarr")) return "Add your Sonarr API key to continue, or enable key discovery for Sonarr.";
     if (draft.existing_readarr_enabled && !nonEmpty(draft.existing_readarr_base_url)) return "Add your Readarr app address to continue.";
     if (draft.existing_readarr_enabled && !isValidHttpUrl(draft.existing_readarr_base_url)) return "Readarr app address must start with http:// or https://.";
-    if (draft.existing_readarr_enabled && !nonEmpty(draft.existing_readarr_api_key)) return "Add your Readarr API key to continue.";
+    if (draft.existing_readarr_enabled && !nonEmpty(draft.existing_readarr_api_key) && !canUseDiscovery("readarr")) return "Add your Readarr API key to continue, or enable key discovery for Readarr.";
     if (draft.existing_prowlarr_enabled && !nonEmpty(draft.existing_prowlarr_base_url)) return "Add your Prowlarr app address to continue.";
     if (draft.existing_prowlarr_enabled && !isValidHttpUrl(draft.existing_prowlarr_base_url)) return "Prowlarr app address must start with http:// or https://.";
-    if (draft.existing_prowlarr_enabled && !nonEmpty(draft.existing_prowlarr_api_key)) return "Add your Prowlarr API key to continue.";
+    if (draft.existing_prowlarr_enabled && !nonEmpty(draft.existing_prowlarr_api_key) && !canUseDiscovery("prowlarr")) return "Add your Prowlarr API key to continue, or enable key discovery for Prowlarr.";
     if (draft.existing_bazarr_enabled && !nonEmpty(draft.existing_bazarr_base_url)) return "Add your Bazarr app address to continue.";
     if (draft.existing_bazarr_enabled && !isValidHttpUrl(draft.existing_bazarr_base_url)) return "Bazarr app address must start with http:// or https://.";
-    if (draft.existing_bazarr_enabled && !nonEmpty(draft.existing_bazarr_api_key)) return "Add your Bazarr API key to continue.";
+    if (draft.existing_bazarr_enabled && !nonEmpty(draft.existing_bazarr_api_key) && !canUseDiscovery("bazarr")) return "Add your Bazarr API key to continue, or enable key discovery for Bazarr.";
     if (draft.existing_qbittorrent_enabled && (!nonEmpty(draft.existing_qbittorrent_base_url) || !nonEmpty(draft.existing_qbittorrent_username) || !nonEmpty(draft.existing_qbittorrent_password))) {
       return "Add the qBittorrent address, username, and password to continue.";
     }
     if (draft.existing_qbittorrent_enabled && !isValidHttpUrl(draft.existing_qbittorrent_base_url)) return "qBittorrent app address must start with http:// or https://.";
     if (draft.existing_jellyfin_enabled && !nonEmpty(draft.existing_jellyfin_base_url)) return "Add your Jellyfin app address to continue.";
     if (draft.existing_jellyfin_enabled && !isValidHttpUrl(draft.existing_jellyfin_base_url)) return "Jellyfin app address must start with http:// or https://.";
+  }
+  if (step.id === "key-discovery") {
+    if (draft.key_discovery_enabled && !getSetupKeyDiscoveryScopeFromDraft(draft).length) {
+      return "Choose at least one service in scope, or disable key discovery.";
+    }
   }
   if (step.id === "tmdb") {
     if (draft.wants_tmdb == null) return "Choose Yes or No before moving on.";
@@ -2667,6 +2736,7 @@ async function saveSetupWizardConfig() {
     body: JSON.stringify(base),
   });
   state.config = base;
+  await saveSetupKeyDiscoveryPolicy();
 
   if (draft.arr_setup_mode === "managed") {
     await fetchJson("/api/setup/managed/plan", {
@@ -2699,13 +2769,7 @@ async function saveSetupWizardConfig() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        radarr: { enabled: !!draft.existing_radarr_enabled, base_url: draft.existing_radarr_base_url, api_key: draft.existing_radarr_api_key },
-        sonarr: { enabled: !!draft.existing_sonarr_enabled, base_url: draft.existing_sonarr_base_url, api_key: draft.existing_sonarr_api_key },
-        readarr: { enabled: !!draft.existing_readarr_enabled, base_url: draft.existing_readarr_base_url, api_key: draft.existing_readarr_api_key },
-        prowlarr: { enabled: !!draft.existing_prowlarr_enabled, base_url: draft.existing_prowlarr_base_url, api_key: draft.existing_prowlarr_api_key },
-        bazarr: { enabled: !!draft.existing_bazarr_enabled, base_url: draft.existing_bazarr_base_url, api_key: draft.existing_bazarr_api_key },
-        qbittorrent: { enabled: !!draft.existing_qbittorrent_enabled, base_url: draft.existing_qbittorrent_base_url, username: draft.existing_qbittorrent_username, password: draft.existing_qbittorrent_password },
-        jellyfin: { enabled: !!draft.existing_jellyfin_enabled, base_url: draft.existing_jellyfin_base_url, api_key: draft.existing_jellyfin_api_key },
+        ...buildSetupExistingConnectPayload(draft),
       }),
     });
   }
@@ -2846,6 +2910,65 @@ function renderSetupWizard() {
         ${draft.existing_qbittorrent_enabled ? `<label class="field full"><span>qBittorrent password</span><input data-setup-input="existing_qbittorrent_password" type="password" value="${escapeAttr(draft.existing_qbittorrent_password || "")}" placeholder="Password"></label>` : ""}
         ${draft.existing_jellyfin_enabled ? `<label class="field full"><span>Jellyfin app address</span><input data-setup-input="existing_jellyfin_base_url" type="text" value="${escapeAttr(draft.existing_jellyfin_base_url || "")}" placeholder="For example: http://jellyfin:8096"></label>` : ""}
         ${draft.existing_jellyfin_enabled ? `<label class="field full"><span>Jellyfin API key</span><input data-setup-input="existing_jellyfin_api_key" type="password" value="${escapeAttr(draft.existing_jellyfin_api_key || "")}" placeholder="Only if you already use one"></label>` : ""}
+      </div>
+    `;
+  } else if (step.id === "key-discovery") {
+    const keyPolicy = state.setupWizard?.keyDiscovery?.policy || state.setupStatus?.key_discovery || {};
+    const keyPreview = state.setupWizard?.keyDiscovery?.preview || null;
+    const keyLoading = !!state.setupWizard?.keyDiscovery?.loading;
+    const scope = getSetupKeyDiscoveryScopeFromDraft(draft);
+    const audit = Array.isArray(keyPolicy.audit) ? keyPolicy.audit.slice().reverse().slice(0, 8) : [];
+    const previewRows = Array.isArray(keyPreview?.results) ? keyPreview.results : [];
+    body = `
+      <div class="setup-wizard-note">
+        Retreivr can optionally discover local API keys from service config files. This is disabled by default and requires explicit opt-in.
+      </div>
+      <div class="setup-wizard-fields">
+        <label class="field checkbox">
+          <input data-setup-toggle="key_discovery_enabled" type="checkbox" ${draft.key_discovery_enabled ? "checked" : ""}>
+          <span>Enable local credential discovery</span>
+        </label>
+      </div>
+      <div class="setup-wizard-step-list">
+        <div><strong>Scope:</strong> ${escapeHtml(String(keyPolicy.scope_disclosure || "Retreivr scans local service config files only for selected services under the workspace config directory."))}</div>
+        <div><strong>Data handling:</strong> ${escapeHtml(String(keyPolicy.data_handling_disclosure || "Discovered keys are stored locally in Retreivr config and never sent externally unless separately configured by you."))}</div>
+      </div>
+      ${draft.key_discovery_enabled ? `
+        <div class="setup-wizard-note">Choose scope for local scanning:</div>
+        <div class="setup-wizard-fields two">
+          <label class="field checkbox"><input data-setup-toggle="key_discovery_scope_radarr" type="checkbox" ${draft.key_discovery_scope_radarr ? "checked" : ""}><span>Radarr</span></label>
+          <label class="field checkbox"><input data-setup-toggle="key_discovery_scope_sonarr" type="checkbox" ${draft.key_discovery_scope_sonarr ? "checked" : ""}><span>Sonarr</span></label>
+          <label class="field checkbox"><input data-setup-toggle="key_discovery_scope_readarr" type="checkbox" ${draft.key_discovery_scope_readarr ? "checked" : ""}><span>Readarr</span></label>
+          <label class="field checkbox"><input data-setup-toggle="key_discovery_scope_prowlarr" type="checkbox" ${draft.key_discovery_scope_prowlarr ? "checked" : ""}><span>Prowlarr</span></label>
+          <label class="field checkbox"><input data-setup-toggle="key_discovery_scope_bazarr" type="checkbox" ${draft.key_discovery_scope_bazarr ? "checked" : ""}><span>Bazarr</span></label>
+          <label class="field checkbox"><input data-setup-toggle="key_discovery_scope_jellyfin" type="checkbox" ${draft.key_discovery_scope_jellyfin ? "checked" : ""}><span>Jellyfin</span></label>
+        </div>
+        <div class="setup-wizard-actions" style="margin-top:12px;">
+          <div class="setup-wizard-actions-group">
+            <button type="button" class="button ghost" data-setup-action="key-discovery-save" ${keyLoading ? "disabled" : ""}>Save Discovery Settings</button>
+            <button type="button" class="button ghost" data-setup-action="key-discovery-preview" ${keyLoading || draft.arr_setup_mode !== "existing" ? "disabled" : ""}>Preview Found Keys</button>
+          </div>
+        </div>
+        ${scope.length ? "" : `<div class="setup-wizard-note warning">Select at least one service scope, or disable key discovery.</div>`}
+      ` : ""}
+      <div class="setup-wizard-actions" style="margin-top:12px;">
+        <div class="setup-wizard-actions-group">
+          <button type="button" class="button ghost" data-setup-action="key-discovery-disable-clear" ${keyLoading ? "disabled" : ""}>Disable and Clear Saved API Keys</button>
+        </div>
+      </div>
+      ${previewRows.length ? `
+        <div class="setup-wizard-note ${draft.arr_setup_mode === "existing" ? "success" : ""}">Preview results (before connect/save):</div>
+        <div class="setup-wizard-step-list">
+          ${previewRows.map((item) => `
+            <div>${escapeHtml(String(item.service || "").toUpperCase())}: ${escapeHtml(item.status === "discovered" ? `found ${String(item.masked_key || "").trim()}` : "not found")}</div>
+          `).join("")}
+        </div>
+      ` : ""}
+      <div class="setup-wizard-note">Recent audit events:</div>
+      <div class="setup-wizard-step-list">
+        ${(audit.length ? audit : [{ timestamp: "", action: "none", scope: "global" }]).map((entry) => `
+          <div>${escapeHtml(String(entry.timestamp || "No events yet"))} · ${escapeHtml(String(entry.action || "update"))}${entry.scope_services ? ` · scope: ${escapeHtml(String(entry.scope_services.join(", ")))}` : ""}</div>
+        `).join("")}
       </div>
     `;
   } else if (step.id === "tmdb") {
@@ -3608,6 +3731,64 @@ async function runSetupPreflight({ persistDraft = false } = {}) {
   }
 }
 
+async function refreshSetupKeyDiscoveryPolicy() {
+  ensureSetupWizardState();
+  const payload = await fetchJson("/api/setup/key-discovery");
+  const policy = payload?.key_discovery || {};
+  state.setupWizard.keyDiscovery.policy = policy;
+  const draft = state.setupWizard?.draft;
+  if (draft) {
+    draft.key_discovery_enabled = !!policy.enabled;
+    const scope = Array.isArray(policy.scope) ? policy.scope : [];
+    draft.key_discovery_scope_radarr = scope.includes("radarr");
+    draft.key_discovery_scope_sonarr = scope.includes("sonarr");
+    draft.key_discovery_scope_readarr = scope.includes("readarr");
+    draft.key_discovery_scope_prowlarr = scope.includes("prowlarr");
+    draft.key_discovery_scope_bazarr = scope.includes("bazarr");
+    draft.key_discovery_scope_jellyfin = scope.includes("jellyfin");
+  }
+  return policy;
+}
+
+async function saveSetupKeyDiscoveryPolicy() {
+  ensureSetupWizardState();
+  const draft = state.setupWizard?.draft || buildSetupWizardDraft();
+  const payload = await fetchJson("/api/setup/key-discovery", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled: !!draft.key_discovery_enabled,
+      scope: getSetupKeyDiscoveryScopeFromDraft(draft),
+    }),
+  });
+  state.setupWizard.keyDiscovery.policy = payload?.key_discovery || null;
+  return payload;
+}
+
+async function previewSetupKeyDiscovery() {
+  ensureSetupWizardState();
+  const response = await fetchJson("/api/setup/existing/connect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(buildSetupExistingConnectPayload(state.setupWizard?.draft, { previewOnly: true })),
+  });
+  const preview = response?.key_discovery || null;
+  state.setupWizard.keyDiscovery.preview = preview;
+  return preview;
+}
+
+async function disableAndClearSetupKeyDiscovery() {
+  ensureSetupWizardState();
+  const response = await fetchJson("/api/setup/key-discovery/disable-clear", { method: "POST" });
+  state.setupWizard.keyDiscovery.policy = response?.key_discovery || null;
+  state.setupWizard.keyDiscovery.preview = null;
+  if (state.setupWizard?.draft) {
+    state.setupWizard.draft.key_discovery_enabled = false;
+  }
+  await refreshSetupStatus();
+  return response;
+}
+
 async function saveSetupWizardProgress() {
   syncSetupWizardToLegacyFields();
   await saveSetupWizardConfig();
@@ -3640,18 +3821,13 @@ async function applySetupWizardEnv() {
     await fetchJson("/api/setup/managed/apply", { method: "POST" });
     await refreshSetupStatus();
   } else if (mode === "existing") {
+    if (state.setupWizard?.draft?.key_discovery_enabled) {
+      await previewSetupKeyDiscovery();
+    }
     await fetchJson("/api/setup/existing/connect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        radarr: { enabled: !!state.setupWizard.draft.existing_radarr_enabled, base_url: state.setupWizard.draft.existing_radarr_base_url, api_key: state.setupWizard.draft.existing_radarr_api_key },
-        sonarr: { enabled: !!state.setupWizard.draft.existing_sonarr_enabled, base_url: state.setupWizard.draft.existing_sonarr_base_url, api_key: state.setupWizard.draft.existing_sonarr_api_key },
-        readarr: { enabled: !!state.setupWizard.draft.existing_readarr_enabled, base_url: state.setupWizard.draft.existing_readarr_base_url, api_key: state.setupWizard.draft.existing_readarr_api_key },
-        prowlarr: { enabled: !!state.setupWizard.draft.existing_prowlarr_enabled, base_url: state.setupWizard.draft.existing_prowlarr_base_url, api_key: state.setupWizard.draft.existing_prowlarr_api_key },
-        bazarr: { enabled: !!state.setupWizard.draft.existing_bazarr_enabled, base_url: state.setupWizard.draft.existing_bazarr_base_url, api_key: state.setupWizard.draft.existing_bazarr_api_key },
-        qbittorrent: { enabled: !!state.setupWizard.draft.existing_qbittorrent_enabled, base_url: state.setupWizard.draft.existing_qbittorrent_base_url, username: state.setupWizard.draft.existing_qbittorrent_username, password: state.setupWizard.draft.existing_qbittorrent_password },
-        jellyfin: { enabled: !!state.setupWizard.draft.existing_jellyfin_enabled, base_url: state.setupWizard.draft.existing_jellyfin_base_url, api_key: state.setupWizard.draft.existing_jellyfin_api_key },
-      }),
+      body: JSON.stringify(buildSetupExistingConnectPayload(state.setupWizard.draft)),
     });
     await refreshSetupStatus();
   } else {
@@ -4472,14 +4648,15 @@ function destroyYTPlayer() {
 function createYTPlayer(videoId) {
   return new Promise((resolve, reject) => {
     if (!state.playerYTReady || !window.YT || !window.YT.Player) {
-      // API not loaded yet — wait up to 8 seconds
+      // API not loaded yet — wait briefly, then let caller fall back to direct embed.
       let waited = 0;
+      const maxWaitMs = 1400;
       const poll = setInterval(() => {
         waited += 200;
         if (window.YT && window.YT.Player && state.playerYTReady) {
           clearInterval(poll);
           _doCreate();
-        } else if (waited >= 8000) {
+        } else if (waited >= maxWaitMs) {
           clearInterval(poll);
           reject(new Error("YouTube IFrame API failed to load"));
         }
@@ -4765,6 +4942,23 @@ function setPlayerQueue(items = [], { preserveCurrent = false } = {}) {
   renderMusicPlayerQueue();
 }
 
+function markQueueItemUnresolved(index, item, reason = "unresolved") {
+  if (!Array.isArray(state.playerQueue)) return;
+  const targetIndex = Number.parseInt(String(index), 10);
+  if (!Number.isFinite(targetIndex) || targetIndex < 0 || targetIndex >= state.playerQueue.length) return;
+  const base = normalizePlayableItem(item || state.playerQueue[targetIndex] || {});
+  if (!base) return;
+  state.playerQueue[targetIndex] = normalizePlayableItem({
+    ...base,
+    kind: "unresolved",
+    stream_url: null,
+    video_id: null,
+    video_embed_url: null,
+    unresolved_reason: String(reason || "unresolved"),
+  });
+  renderMusicPlayerQueue();
+}
+
 async function playPlayerQueueIndex(index) {
   if (!Array.isArray(state.playerQueue) || !state.playerQueue.length) return;
   const targetIndex = Number.parseInt(String(index), 10);
@@ -4782,11 +4976,31 @@ async function playPlayerQueueIndex(index) {
     if (resolved?.stream_url || resolved?.video_id) {
       const readyItem = normalizePlayableItem({ ...item, ...resolved, kind: resolved.video_id ? "youtube" : "cached" });
       state.playerQueue[targetIndex] = readyItem;
-      await playMusicPlayerItem(readyItem);
+      try {
+        await playMusicPlayerItem(readyItem);
+      } catch (_err) {
+        markQueueItemUnresolved(targetIndex, item, "playback_init_failed");
+        setMusicPlayerStatus(`Skipped "${item.title || "Track"}" (playback unavailable).`, {
+          kind: "warning",
+          toast: true,
+          preserveInline: true,
+        });
+        const nextIndex = targetIndex + 1;
+        if (nextIndex < state.playerQueue.length) {
+          await playPlayerQueueIndex(nextIndex);
+        }
+        return;
+      }
       // Pre-resolve the next unresolved item in the background so it's ready when needed.
       _prefetchNextUnresolved(targetIndex + 1);
       return;
     }
+    markQueueItemUnresolved(targetIndex, item, "resolution_failed");
+    setMusicPlayerStatus(`Skipped "${item.title || "Track"}" (no source match yet).`, {
+      kind: "warning",
+      toast: true,
+      preserveInline: true,
+    });
     // Could not resolve — skip to next track.
     const nextIndex = targetIndex + 1;
     if (nextIndex < state.playerQueue.length) {
@@ -4794,7 +5008,21 @@ async function playPlayerQueueIndex(index) {
     }
     return;
   }
-  await playMusicPlayerItem(item);
+  try {
+    await playMusicPlayerItem(item);
+  } catch (_err) {
+    markQueueItemUnresolved(targetIndex, item, "playback_failed");
+    setMusicPlayerStatus(`Skipped "${item.title || "Track"}" (not playable right now).`, {
+      kind: "warning",
+      toast: true,
+      preserveInline: true,
+    });
+    const nextIndex = targetIndex + 1;
+    if (nextIndex < state.playerQueue.length) {
+      await playPlayerQueueIndex(nextIndex);
+    }
+    return;
+  }
   _prefetchNextUnresolved(targetIndex + 1);
 }
 
@@ -5023,11 +5251,15 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
   if (!payload) return;
   payload = normalizePlayableItem(payload);
   if (!payload) return;
+  state.playerRuntimePublishStatus = null;
+  const previousCurrent = normalizePlayableItem(state.playerCurrent || null);
   const messageEl = $("#music-player-message");
   if (!preserveStation) {
     clearActiveStationPlayback();
   }
-  if (!payload.stream_url && !payload.video_id && !payload.local_path && payload.recording_mbid) {
+  const hasDirectVideo = !!String(payload.video_id || extractYouTubeVideoId(payload.stream_url) || "").trim();
+  const isLocalOnlyPayload = !hasDirectVideo && (isLocalPlayerStreamUrl(payload.stream_url) || !!payload.local_path);
+  if (payload.recording_mbid && (!hasDirectVideo || isLocalOnlyPayload)) {
     const resolved = await resolveRecordingStreamUrl(payload.recording_mbid, {
       artist: payload.artist,
       track: payload.title,
@@ -5036,7 +5268,11 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
       release_group_mbid: payload.mb_release_group_id,
     });
     if (resolved?.stream_url || resolved?.video_id) {
-      payload = normalizePlayableItem({ ...payload, ...resolved, kind: resolved.video_id ? "youtube" : payload.kind });
+      payload = normalizePlayableItem({
+        ...payload,
+        ...resolved,
+        kind: resolved.video_id ? "youtube" : (payload.kind || "cached"),
+      });
     }
   }
   if (!payload.stream_url && payload.local_path) {
@@ -5048,6 +5284,10 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
 
   const videoId = String(payload.video_id || extractYouTubeVideoId(payload.stream_url) || "").trim();
   const isYouTube = !!videoId;
+  const sameAsCurrent = !!(previousCurrent && playerItemsMatch(previousCurrent, payload));
+  const currentAudio = $("#music-player-audio");
+  const currentAudioActive = !!String(currentAudio?.src || "").trim();
+  const currentYTActive = activePlayerIsYT();
   if (!isYouTube && !payload.stream_url) {
     setMusicPlayerStatus("No playable source found for this track.", {
       kind: "error",
@@ -5059,8 +5299,28 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
 
   state.playerCurrent = payload;
   state.playerCurrentHasVideo = !!(isYouTube || String(payload.video_embed_url || "").trim());
-  if (state.musicSection === "player" && state.playerCurrentHasVideo) {
+  if (state.musicSection === "player" && state.playerCurrentHasVideo && !sameAsCurrent) {
     state.playerVideoVisible = true;
+  }
+
+  // Runtime sync endpoints can emit the current track repeatedly. Avoid tearing down and
+  // recreating active playback for the same item, which causes black iframe flashes and
+  // can undo an explicit "Hide Video" action.
+  if (sameAsCurrent && (currentYTActive || currentAudioActive)) {
+    const titleEl = $("#music-player-now-title");
+    const metaEl = $("#music-player-now-meta");
+    const contextEl = $("#music-player-now-context");
+    const nowArt = $("#music-player-now-art");
+    if (titleEl) titleEl.textContent = payload.title || "Now Playing";
+    if (metaEl) metaEl.textContent = [payload.artist, payload.album].filter(Boolean).join(" • ") || "Playing";
+    if (contextEl) {
+      contextEl.textContent = buildPlayerNowContextText(payload, { isYouTube });
+    }
+    if (nowArt) nowArt.src = getMusicLibraryArtworkUrl(payload);
+    syncBottomPlayerShell();
+    updateMusicPlayerTransportUI();
+    syncMusicPlayerVideoShell();
+    return;
   }
 
   if (isYouTube) {
@@ -5100,10 +5360,7 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
   if (titleEl) titleEl.textContent = payload.title || "Now Playing";
   if (metaEl) metaEl.textContent = [payload.artist, payload.album].filter(Boolean).join(" • ") || "Playing";
   if (contextEl) {
-    const kindLabel = isYouTube ? "Streaming via YouTube"
-      : payload.kind === "local" ? "Playing from your library"
-      : "Streaming from cached match";
-    contextEl.textContent = [kindLabel, payload.source || ""].filter(Boolean).join(" • ");
+    contextEl.textContent = buildPlayerNowContextText(payload, { isYouTube });
   }
   if (nowArt) nowArt.src = getMusicLibraryArtworkUrl(payload);
 
@@ -5144,6 +5401,7 @@ function clearMusicPlayerCurrentState() {
   if (nowArt) nowArt.src = "assets/no_artwork.png";
   state.playerCurrentHasVideo = false;
   state.playerVideoVisible = false;
+  state.playerRuntimePublishStatus = null;
   syncMusicPlayerVideoShell();
   updateMusicPlayerTransportUI();
   syncBottomPlayerShell();
@@ -6913,6 +7171,73 @@ function getMusicLibraryArtworkUrl(item) {
     if (matchingAlbum?.artwork_url) return String(matchingAlbum.artwork_url).trim();
   }
   return "assets/no_artwork.png";
+}
+
+function getFastLocalArtistArtwork(artistItem = {}) {
+  const artistKey = String(artistItem?.artist_key || "").trim().toLowerCase();
+  const artistName = String(artistItem?.name || artistItem?.artist || "").trim().toLowerCase();
+  const artists = Array.isArray(state.playerLibrarySummary?.artists) ? state.playerLibrarySummary.artists : [];
+  const albums = Array.isArray(state.playerLibrarySummary?.albums) ? state.playerLibrarySummary.albums : [];
+  const tracks = Array.isArray(state.playerLibrarySummary?.tracks) ? state.playerLibrarySummary.tracks : [];
+
+  const byArtist = artists.find((entry) => {
+    const entryKey = String(entry?.artist_key || "").trim().toLowerCase();
+    const entryName = String(entry?.artist || "").trim().toLowerCase();
+    return (artistKey && entryKey === artistKey) || (artistName && entryName === artistName);
+  });
+  const direct = String(byArtist?.artwork_url || "").trim();
+  if (direct) return direct;
+
+  const byAlbum = albums.find((entry) => {
+    const entryKey = String(entry?.artist_key || "").trim().toLowerCase();
+    const entryName = String(entry?.artist || "").trim().toLowerCase();
+    return ((artistKey && entryKey === artistKey) || (artistName && entryName === artistName))
+      && String(entry?.artwork_url || "").trim();
+  });
+  if (byAlbum?.artwork_url) return String(byAlbum.artwork_url).trim();
+
+  const byTrack = tracks.find((entry) => {
+    const entryKey = String(entry?.artist_key || "").trim().toLowerCase();
+    const entryName = String(entry?.artist || "").trim().toLowerCase();
+    return ((artistKey && entryKey === artistKey) || (artistName && entryName === artistName))
+      && String(entry?.artwork_url || "").trim();
+  });
+  if (byTrack?.artwork_url) return String(byTrack.artwork_url).trim();
+
+  return "";
+}
+
+function getFastLocalAlbumArtwork(albumItem = {}) {
+  const albumKey = String(albumItem?.album_key || "").trim().toLowerCase();
+  const artistKey = String(albumItem?.artist_key || "").trim().toLowerCase();
+  const albumName = String(albumItem?.title || albumItem?.album || "").trim().toLowerCase();
+  const artistName = String(albumItem?.artist || "").trim().toLowerCase();
+  const albums = Array.isArray(state.playerLibrarySummary?.albums) ? state.playerLibrarySummary.albums : [];
+  const tracks = Array.isArray(state.playerLibrarySummary?.tracks) ? state.playerLibrarySummary.tracks : [];
+
+  const byAlbum = albums.find((entry) => {
+    const entryAlbumKey = String(entry?.album_key || "").trim().toLowerCase();
+    const entryArtistKey = String(entry?.artist_key || "").trim().toLowerCase();
+    const entryAlbumName = String(entry?.album || "").trim().toLowerCase();
+    const entryArtistName = String(entry?.artist || "").trim().toLowerCase();
+    const keyMatch = albumKey && entryAlbumKey === albumKey && (!artistKey || entryArtistKey === artistKey);
+    const nameMatch = albumName && entryAlbumName === albumName && (!artistName || entryArtistName === artistName);
+    return (keyMatch || nameMatch) && String(entry?.artwork_url || "").trim();
+  });
+  if (byAlbum?.artwork_url) return String(byAlbum.artwork_url).trim();
+
+  const byTrack = tracks.find((entry) => {
+    const entryAlbumKey = String(entry?.album_key || "").trim().toLowerCase();
+    const entryArtistKey = String(entry?.artist_key || "").trim().toLowerCase();
+    const entryAlbumName = String(entry?.album || "").trim().toLowerCase();
+    const entryArtistName = String(entry?.artist || "").trim().toLowerCase();
+    const keyMatch = albumKey && entryAlbumKey === albumKey && (!artistKey || entryArtistKey === artistKey);
+    const nameMatch = albumName && entryAlbumName === albumName && (!artistName || entryArtistName === artistName);
+    return (keyMatch || nameMatch) && String(entry?.artwork_url || "").trim();
+  });
+  if (byTrack?.artwork_url) return String(byTrack.artwork_url).trim();
+
+  return "";
 }
 
 function isMusicArtistFavorited(artistName = "", artistKey = "") {
@@ -11977,6 +12302,10 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
   const artistThumb = createMusicCardThumb(
     artistItem?.name ? `${artistItem.name} artwork` : "Artist artwork"
   );
+  const immediateLocalArtistArt = getFastLocalArtistArtwork(artistItem);
+  if (immediateLocalArtistArt) {
+    artistThumb.setImage(immediateLocalArtistArt);
+  }
   card.appendChild(artistThumb.shell);
   if (dismissible) {
     const dismissButton = document.createElement("button");
@@ -12096,7 +12425,10 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
     button.textContent = "Loading...";
     setMusicPageNotice(`Loading albums for ${nextQuery}...`, false);
     try {
-      const albums = await fetchMusicAlbumsByArtist({ name: nextQuery, artist_mbid: nextArtistMbid });
+      const albums = await fetchMusicAlbumsByArtist(
+        { name: nextQuery, artist_mbid: nextArtistMbid },
+        { limit: 48, bypassInFlight: true }
+      );
       renderMusicModeResults(
         { artists: [], albums, tracks: [], mode_used: "album" },
         nextQuery,
@@ -12131,7 +12463,9 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
     if (cachedCover) {
       artistThumb.setImage(cachedCover);
     } else if (Object.prototype.hasOwnProperty.call(state.homeArtistCoverCache, artistMbidValue) && state.homeArtistCoverCache[artistMbidValue] === null) {
-      artistThumb.setNoArt();
+      if (!immediateLocalArtistArt) {
+        artistThumb.setNoArt();
+      }
     } else {
       const thumbTask = async (activeToken) => {
         if (state.homeMusicRenderToken !== activeToken) {
@@ -12148,10 +12482,13 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
               return;
             }
           }
-          const albums = await fetchMusicAlbumsByArtist({
-            name: String(artistItem?.name || "").trim(),
-            artist_mbid: artistMbidValue,
-          });
+          const albums = await fetchMusicAlbumsByArtist(
+            {
+              name: String(artistItem?.name || "").trim(),
+              artist_mbid: artistMbidValue,
+            },
+            { limit: 8 }
+          );
           const firstAlbum = Array.isArray(albums) ? albums[0] : null;
           const firstReleaseGroup = String(firstAlbum?.release_group_mbid || "").trim();
           if (!firstReleaseGroup) {
@@ -12182,7 +12519,7 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
       thumbTask.__priorityElement = card;
       thumbnailJobs.push(thumbTask);
     }
-  } else {
+  } else if (!immediateLocalArtistArt) {
     artistThumb.setNoArt();
   }
   return card;
@@ -12197,6 +12534,10 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   const albumThumb = createMusicCardThumb(
     albumItem?.title ? `${albumItem.title} cover` : "Album cover"
   );
+  const immediateLocalAlbumArt = String(albumItem?.artwork_url || "").trim() || getFastLocalAlbumArtwork(albumItem);
+  if (immediateLocalAlbumArt) {
+    albumThumb.setImage(immediateLocalAlbumArt);
+  }
   card.appendChild(albumThumb.shell);
   const content = document.createElement("div");
   content.className = "music-meta-main";
@@ -12362,7 +12703,9 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
     if (cachedCover) {
       albumThumb.setImage(cachedCover);
     } else if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
-      albumThumb.setNoArt();
+      if (!immediateLocalAlbumArt) {
+        albumThumb.setNoArt();
+      }
     } else {
       const thumbTask = async (activeToken) => {
         const coverUrl = await fetchHomeAlbumCoverUrl(releaseGroupMbid);
@@ -12377,9 +12720,7 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
       thumbTask.__priorityElement = card;
       thumbnailJobs.push(thumbTask);
     }
-  } else if (albumItem?.artwork_url) {
-    albumThumb.setImage(albumItem.artwork_url);
-  } else {
+  } else if (!immediateLocalAlbumArt) {
     albumThumb.setNoArt();
   }
 
@@ -12963,10 +13304,30 @@ function buildYouTubePlayerEmbedUrl(videoId) {
   return `https://www.youtube.com/embed/${encodeURIComponent(normalized)}?autoplay=1&rel=0&modestbranding=1&playsinline=1`;
 }
 
+function isLocalPlayerStreamUrl(url) {
+  const value = String(url || "").trim();
+  return value.startsWith("/api/player/stream/local?path=");
+}
+
 function isYouTubeFamilySource(source, url = "") {
   const sourceKey = String(source || "").trim().toLowerCase();
   if (sourceKey === "youtube" || sourceKey === "youtube_music") return true;
   return !!extractYouTubeVideoId(url);
+}
+
+function buildPlayerNowContextText(payload, { isYouTube = false } = {}) {
+  const kindLabel = isYouTube ? "Streaming via YouTube"
+    : payload?.kind === "local" ? "Playing from your library"
+    : "Streaming from cached match";
+  const parts = [kindLabel, payload?.source || ""].filter(Boolean);
+  const publish = state.playerRuntimePublishStatus;
+  if (publish && (publish.status || publish.mode)) {
+    const status = String(publish.status || "").trim();
+    if (status) {
+      parts.push(`Publish: ${status}`);
+    }
+  }
+  return parts.join(" • ");
 }
 
 async function recordRuntimeResolution(payload = {}) {
@@ -12975,7 +13336,7 @@ async function recordRuntimeResolution(payload = {}) {
   const source = String(payload.source || "").trim().toLowerCase();
   if (!recordingMbid || !sourceUrl || !isYouTubeFamilySource(source, sourceUrl)) return;
   try {
-    await fetchJson("/api/music/runtime-resolution", {
+    const response = await fetchJson("/api/music/runtime-resolution", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -12989,6 +13350,17 @@ async function recordRuntimeResolution(payload = {}) {
         resolved_via: String(payload.resolved_via || "").trim() || null,
       }),
     });
+    const publish = response?.community_publish && typeof response.community_publish === "object"
+      ? response.community_publish
+      : null;
+    state.playerRuntimePublishStatus = publish;
+    if (state.playerCurrent && String(state.playerCurrent.recording_mbid || "").trim() === recordingMbid) {
+      const contextEl = $("#music-player-now-context");
+      if (contextEl) {
+        const currentVideo = !!String(state.playerCurrent.video_id || extractYouTubeVideoId(state.playerCurrent.stream_url) || "").trim();
+        contextEl.textContent = buildPlayerNowContextText(state.playerCurrent, { isYouTube: currentVideo });
+      }
+    }
   } catch (_err) {}
 }
 
@@ -13001,7 +13373,15 @@ function extractYouTubeVideoId(url) {
   try {
     const u = new URL(s);
     if (u.hostname === "youtu.be") return u.pathname.slice(1) || null;
-    if (u.hostname.includes("youtube.com")) return u.searchParams.get("v") || null;
+    if (u.hostname.includes("youtube.com")) {
+      const watchId = String(u.searchParams.get("v") || "").trim();
+      if (watchId) return watchId;
+      const segments = u.pathname.split("/").filter(Boolean);
+      const markerIndex = segments.findIndex((segment) => ["embed", "shorts", "live"].includes(String(segment || "").toLowerCase()));
+      if (markerIndex >= 0 && segments[markerIndex + 1]) {
+        return String(segments[markerIndex + 1] || "").trim() || null;
+      }
+    }
   } catch (_e) {}
   return null;
 }
@@ -13011,30 +13391,28 @@ function extractYouTubeVideoId(url) {
 // video_id is populated for YouTube sources — playMusicPlayerItem uses it to trigger
 // the YT IFrame player path instead of the <audio> element.
 async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
-  // 1. Resolution index (local DB — fast, no external calls required)
-  if (recordingMbid) {
+  const runIndexResolve = async () => {
+    if (!recordingMbid) return null;
     try {
       const resolution = await fetchJson(`/resolve/recording/${encodeURIComponent(recordingMbid)}`);
       const selectedUrl = String(resolution?.selection?.selected_url || "").trim();
       const source = String(resolution?.best_source?.source || "").toLowerCase();
-      if (selectedUrl && isYouTubeFamilySource(source, selectedUrl)) {
-        const videoId = extractYouTubeVideoId(selectedUrl);
-        if (videoId) {
-          // YouTube URL — no proxy needed, use IFrame player directly.
-          return { stream_url: selectedUrl, video_id: videoId, source: source || "youtube", resolved_via: "resolution_index" };
-        }
-      }
+      if (!selectedUrl || !isYouTubeFamilySource(source, selectedUrl)) return null;
+      const videoId = extractYouTubeVideoId(selectedUrl);
+      if (!videoId) return null;
+      return { stream_url: selectedUrl, video_id: videoId, source: source || "youtube", resolved_via: "resolution_index" };
     } catch (_err) {
-      // index miss — fall through
+      return null;
     }
-  }
-  // 2. Preview endpoint (community cache + YouTube fallback, may take a few seconds)
-  try {
-    const response = await fetchMusicTrackPreview({ recording_mbid: recordingMbid, ...trackMeta });
-    const sourceUrl = String(response?.source_url || "").trim();
-    const source = String(response?.source || "").trim().toLowerCase();
-    const videoId = String(response?.video_id || extractYouTubeVideoId(sourceUrl) || "").trim() || null;
-    if (sourceUrl && videoId && isYouTubeFamilySource(source, sourceUrl)) {
+  };
+
+  const runPreviewResolve = async () => {
+    try {
+      const response = await fetchMusicTrackPreview({ recording_mbid: recordingMbid, ...trackMeta });
+      const sourceUrl = String(response?.source_url || "").trim();
+      const source = String(response?.source || "").trim().toLowerCase();
+      const videoId = String(response?.video_id || extractYouTubeVideoId(sourceUrl) || "").trim() || null;
+      if (!sourceUrl || !videoId || !isYouTubeFamilySource(source, sourceUrl)) return null;
       await recordRuntimeResolution({
         recording_mbid: recordingMbid,
         source_url: sourceUrl,
@@ -13046,11 +13424,32 @@ async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
         resolved_via: "preview_api",
       });
       return { stream_url: sourceUrl, video_id: videoId, source: source || "youtube", resolved_via: "preview_api" };
+    } catch (_err) {
+      return null;
     }
-  } catch (_err) {
-    // preview unavailable
-  }
-  return null;
+  };
+
+  // Resolve against local index + preview in parallel and use whichever valid result
+  // returns first. This removes avoidable tail latency on first-track playback.
+  return await new Promise((resolve) => {
+    let settled = false;
+    let pending = 2;
+    const done = (result) => {
+      if (settled) return;
+      if (result?.stream_url || result?.video_id) {
+        settled = true;
+        resolve(result);
+        return;
+      }
+      pending -= 1;
+      if (pending <= 0) {
+        settled = true;
+        resolve(null);
+      }
+    };
+    runIndexResolve().then(done).catch(() => done(null));
+    runPreviewResolve().then(done).catch(() => done(null));
+  });
 }
 
 // Resolve a search-result track to a stream and play it in the main player.
@@ -13108,7 +13507,10 @@ async function playMusicArtistFromBrowse(artistItem) {
   const nextQuery = String(artistItem?.name || artistItem?.artist || "").trim();
   const nextArtistMbid = String(artistItem?.artist_mbid || artistItem?.id || "").trim();
   if (!nextQuery) throw new Error("Artist identity unknown.");
-  const albums = await fetchMusicAlbumsByArtist({ name: nextQuery, artist_mbid: nextArtistMbid });
+  const albums = await fetchMusicAlbumsByArtist(
+    { name: nextQuery, artist_mbid: nextArtistMbid },
+    { limit: 48, bypassInFlight: true }
+  );
   if (!Array.isArray(albums) || !albums.length) throw new Error("No playable albums found for this artist.");
   await playMusicAlbumFromSearch(albums[0]);
 }
@@ -13158,13 +13560,13 @@ async function playMusicAlbumFromSearch(albumItem) {
   // Play first local item immediately if available; otherwise resolve via index → preview API.
   const firstLocalIndex = queueItems.findIndex((i) => i.kind === "local" && (i.stream_url || i.local_path));
   if (firstLocalIndex >= 0) {
-    await playMusicPlayerItem(queueItems[firstLocalIndex]);
-    _prefetchNextUnresolved(firstLocalIndex + 1);
+    await playPlayerQueueIndex(firstLocalIndex);
     return;
   }
   // No local files — resolve first unresolved track and start playback.
   const firstUnresolved = queueItems[0];
   if (!firstUnresolved?.recording_mbid) return;
+  _prefetchNextUnresolved(1);
   const resolved = await resolveRecordingStreamUrl(firstUnresolved.recording_mbid, {
     artist: firstUnresolved.artist, track: firstUnresolved.title, album: albumTitle, release_group_mbid: releaseGroupMbid,
   });
@@ -13172,8 +13574,7 @@ async function playMusicAlbumFromSearch(albumItem) {
   const firstItem = normalizePlayableItem({ ...firstUnresolved, ...resolved, kind: resolved.video_id ? "youtube" : "cached" });
   queueItems[0] = firstItem;
   setPlayerQueue(queueItems);
-  await playMusicPlayerItem(firstItem);
-  _prefetchNextUnresolved(1);
+  await playPlayerQueueIndex(0);
 }
 
 async function resolveDirectUrl(url, mediaMode = "video") {
@@ -13466,18 +13867,19 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
   focusMusicResults();
 }
 
-async function fetchMusicAlbumsByArtist(artist) {
+async function fetchMusicAlbumsByArtist(artist, { limit = 32, bypassInFlight = false } = {}) {
   const query = typeof artist === "object" && artist !== null
     ? String(artist.name || "").trim()
     : String(artist || "").trim();
   const artistMbid = typeof artist === "object" && artist !== null
     ? String(artist.artist_mbid || "").trim()
     : "";
+  const cappedLimit = Number.isFinite(Number(limit)) ? Math.min(100, Math.max(1, Number(limit))) : 32;
   const cacheKey = getMusicArtistAlbumsCacheKey(artist);
   if (cacheKey && Array.isArray(state.musicArtistAlbumsCache[cacheKey])) {
     return state.musicArtistAlbumsCache[cacheKey].map((item) => ({ ...item }));
   }
-  if (cacheKey && state.musicArtistAlbumsInFlight[cacheKey]) {
+  if (!bypassInFlight && cacheKey && state.musicArtistAlbumsInFlight[cacheKey]) {
     const pending = await state.musicArtistAlbumsInFlight[cacheKey];
     return Array.isArray(pending) ? pending.map((item) => ({ ...item })) : [];
   }
@@ -13486,7 +13888,7 @@ async function fetchMusicAlbumsByArtist(artist) {
   }
   const params = new URLSearchParams();
   params.set("q", query);
-  params.set("limit", "50");
+  params.set("limit", String(cappedLimit));
   if (artistMbid) {
     params.set("artist_mbid", artistMbid);
   }
@@ -19472,6 +19874,26 @@ function bindEvents() {
             resetSetupWizardDraft();
             renderSetupWizard();
             setNotice($("#setup-wizard-message"), "Setup guide reset to your saved defaults.", false);
+          } else if (actionButton.dataset.setupAction === "key-discovery-save") {
+            state.setupWizard.keyDiscovery.loading = true;
+            setNotice(messageEl, "Saving key discovery settings...", false);
+            renderSetupWizard();
+            await saveSetupKeyDiscoveryPolicy();
+            setNotice(messageEl, "Key discovery settings saved.", false);
+          } else if (actionButton.dataset.setupAction === "key-discovery-preview") {
+            state.setupWizard.keyDiscovery.loading = true;
+            setNotice(messageEl, "Running key discovery preview...", false);
+            renderSetupWizard();
+            const preview = await previewSetupKeyDiscovery();
+            const found = Array.isArray(preview?.results) ? preview.results.filter((item) => item.status === "discovered").length : 0;
+            setNotice(messageEl, `Preview complete. Found keys for ${found} service${found === 1 ? "" : "s"}.`, false);
+          } else if (actionButton.dataset.setupAction === "key-discovery-disable-clear") {
+            state.setupWizard.keyDiscovery.loading = true;
+            setNotice(messageEl, "Disabling discovery and clearing saved API keys...", false);
+            renderSetupWizard();
+            const result = await disableAndClearSetupKeyDiscovery();
+            const clearedCount = Array.isArray(result?.cleared_services) ? result.cleared_services.length : 0;
+            setNotice(messageEl, `Discovery disabled. Cleared saved keys for ${clearedCount} service${clearedCount === 1 ? "" : "s"}.`, false);
           } else if (actionButton.dataset.setupAction === "discover-jellyfin") {
             await discoverJellyfinForSetup();
           } else if (actionButton.dataset.setupAction === "run-preflight") {
@@ -19511,6 +19933,9 @@ function bindEvents() {
           }
         } catch (err) {
           setNotice(messageEl, toUserErrorMessage(err), true);
+        } finally {
+          if (state.setupWizard?.keyDiscovery) state.setupWizard.keyDiscovery.loading = false;
+          renderSetupWizard();
         }
         return;
       }

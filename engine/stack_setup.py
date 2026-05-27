@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -563,6 +565,56 @@ def _discover_servarr_api_key(service_name: str) -> str:
     return text[start + len(marker_start):end].strip()
 
 
+def _discover_text_api_key(paths: list[Path], patterns: list[re.Pattern[str]]) -> str:
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for pattern in patterns:
+            match = pattern.search(text)
+            if not match:
+                continue
+            value = _trimmed(match.group(1) if match.groups() else "")
+            if value:
+                return value
+    return ""
+
+
+def _discover_bazarr_api_key() -> str:
+    root = _managed_config_root("bazarr")
+    candidates = [
+        root / "config" / "config.ini",
+        root / "config.ini",
+    ]
+    return _discover_text_api_key(
+        candidates,
+        [
+            re.compile(r"(?im)^\s*apikey\s*=\s*([^\r\n#;]+)\s*$"),
+            re.compile(r"(?im)^\s*api_key\s*=\s*([^\r\n#;]+)\s*$"),
+        ],
+    )
+
+
+def _discover_jellyfin_api_key() -> str:
+    root = _managed_config_root("jellyfin")
+    candidates = [
+        root / "config" / "system.xml",
+        root / "config" / "config" / "system.xml",
+        root / "system.xml",
+    ]
+    return _discover_text_api_key(
+        candidates,
+        [
+            re.compile(r"(?is)<ApiKey>\s*([^<\s][^<]*)\s*</ApiKey>"),
+            re.compile(r"(?im)^\s*ApiKey\s*=\s*([^\r\n#;]+)\s*$"),
+            re.compile(r'(?im)"ApiKey"\s*:\s*"([^"]+)"'),
+        ],
+    )
+
+
 def discover_managed_service_keys(config: dict[str, Any]) -> dict[str, str]:
     keys: dict[str, str] = {}
     stack = normalize_stack_config(config)
@@ -576,6 +628,35 @@ def discover_managed_service_keys(config: dict[str, Any]) -> dict[str, str]:
             api_key = _discover_servarr_api_key(service_name)
             if api_key:
                 keys[service_name] = api_key
+    if stack.get("enable_bazarr"):
+        bazarr_key = _discover_bazarr_api_key()
+        if bazarr_key:
+            keys["bazarr"] = bazarr_key
+    if stack.get("enable_jellyfin"):
+        jellyfin_key = _discover_jellyfin_api_key()
+        if jellyfin_key:
+            keys["jellyfin"] = jellyfin_key
+    return keys
+
+
+def discover_local_service_keys(service_names: list[str] | None = None) -> dict[str, str]:
+    requested = {str(name or "").strip().lower() for name in (service_names or []) if str(name or "").strip()}
+    keys: dict[str, str] = {}
+    servarr_names = ("radarr", "sonarr", "readarr", "prowlarr")
+    for service_name in servarr_names:
+        if requested and service_name not in requested:
+            continue
+        api_key = _discover_servarr_api_key(service_name)
+        if api_key:
+            keys[service_name] = api_key
+    if not requested or "bazarr" in requested:
+        bazarr_key = _discover_bazarr_api_key()
+        if bazarr_key:
+            keys["bazarr"] = bazarr_key
+    if not requested or "jellyfin" in requested:
+        jellyfin_key = _discover_jellyfin_api_key()
+        if jellyfin_key:
+            keys["jellyfin"] = jellyfin_key
     return keys
 
 
@@ -755,6 +836,11 @@ def _qbit_request(
     if "json" in content_type.lower():
         return response.json()
     return response.text.strip()
+
+
+def _qbit_webui_password_hash(username: str, password: str) -> str:
+    material = f"{username}:Web UI Access:{password}"
+    return hashlib.md5(material.encode("utf-8")).hexdigest()
 
 
 def _set_field(fields: Any, name: str, value: Any) -> None:
@@ -1003,7 +1089,19 @@ def auto_configure_services(config: dict[str, Any]) -> dict[str, Any]:
         if _trimmed(qb_cfg.get("base_url")) and _trimmed(qb_cfg.get("username")) and _trimmed(qb_cfg.get("password")):
             session = _qbit_login_session(_trimmed(qb_cfg.get("base_url")), _trimmed(qb_cfg.get("username")), _trimmed(qb_cfg.get("password")))
             download_root = _trimmed(qb_cfg.get("download_dir")) or str(stack.get("downloads_root") or "./downloads")
-            _qbit_request(session, _trimmed(qb_cfg.get("base_url")), "POST", "app/setPreferences", data={"json": json.dumps({"save_path": download_root})})
+            webui_username = _trimmed(qb_cfg.get("username")) or "retreivr"
+            webui_password = _trimmed(qb_cfg.get("password"))
+            preferences_payload: dict[str, Any] = {"save_path": download_root}
+            if webui_password:
+                preferences_payload["web_ui_username"] = webui_username
+                preferences_payload["web_ui_password"] = _qbit_webui_password_hash(webui_username, webui_password)
+            _qbit_request(
+                session,
+                _trimmed(qb_cfg.get("base_url")),
+                "POST",
+                "app/setPreferences",
+                data={"json": json.dumps(preferences_payload)},
+            )
             categories = _qbit_request(session, _trimmed(qb_cfg.get("base_url")), "GET", "torrents/categories") or {}
             category_map = {
                 _trimmed(qb_cfg.get("category_movies")) or "movies": f"{download_root.rstrip('/')}/{_trimmed(qb_cfg.get('category_movies')) or 'movies'}",
