@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented here.
 
+## v1.0.0 — ARR Stack, Movies & TV, and Music Player Milestone
+
+### High-Level
+Retreivr 1.0.0 is the first major release and the biggest product expansion so far. Retreivr now moves beyond a focused downloader into a full media acquisition control plane: brand-new Movies & TV browse surfaces, first-class ARR stack integration, guided Docker Compose setup/management, and a much deeper Music experience with MusicBrainz-backed browsing, favorites, local playback, queueing, and repair workflows. The original Retreivr core remains intact: video downloads, direct URL acquisition, and automated playlist monitoring across YouTube, Rumble, Archive.org, and supported source workflows continue to be central to the app.
+
+### Added
+- Brand-new `Movies & TV` experience with discovery, browsing, saved titles, and setup-aware empty states.
+- ARR integration for Radarr, Sonarr, Readarr, Prowlarr, Bazarr, qBittorrent, and Jellyfin across managed and existing-service setup paths.
+- Guided Setup flow for Retreivr-first onboarding, optional managed stack setup, existing service connections, path mapping, preflight checks, and generated restart/apply commands.
+- Docker Compose profile management for optional ARR/downloader/VPN/Jellyfin services while keeping Retreivr-only startup as the default path.
+- Connections and Services status surfaces for health visibility across automation services.
+- Music Player foundation with queue playback, local library scanning, playlists, radio/station flows, and player status/debug visibility.
+- Music browse mode backed by MusicBrainz metadata for artists, albums, tracks, release groups, and canonical identity handling.
+- Favorite artist/album support and richer Music library/card interactions.
+- Music metadata repair flow with review-queue routing for questionable or non-canonical items.
+- Local artwork cache handling and regression coverage for faster, more reliable card artwork loading.
+- Import resolve queue behavior that can stream resolved items into the download queue while the rest of a library import continues processing.
+- Key-discovery controls in Guided Setup with explicit opt-in, service scope, preview-before-save, audit visibility, and disable/clear controls.
+- Open file location support from the UI for downloaded/local media.
+
+### Changed
+- Retreivr now presents as a unified acquisition and media-management control plane rather than only a downloader UI.
+- Movies/TV workflows are now setup-aware and can hand off to the configured ARR stack instead of remaining isolated discovery pages.
+- Music download/play flows now prioritize canonical MusicBrainz identity, source-resolution reuse, local cache updates, and reviewable repair paths.
+- Direct URL and video acquisition paths were hardened around clean title filenames, bounded destinations, and safer mode separation between video and music.
+- Guided setup path browsing now supports host filesystem mapping for Docker-managed environments, including macOS host path handling.
+- Settings navigation and advanced-mode layout were stabilized so advanced controls extend the settings list without shifting core buttons.
+- Community cache and local resolution flows were tightened so play/download resolutions follow the same canonical sourceURL database/cache path.
+- Docker examples, setup docs, and runtime defaults now align around the new Retreivr-first stack model.
+
+### Fixed
+- Music import pipeline queue contract issues that could stall or misroute imported library items.
+- Metadata/tag embedding gaps that could leave downloaded music without clean player-facing titles.
+- Multi-disc music path behavior so `[disc N]` folders are only used when release metadata indicates a true multi-disc release.
+- Local player file-root checks to prevent unsafe playback path access.
+- Music player failure handling now marks unresolved queue items, skips forward where possible, and uses non-blocking notices instead of hard-stop playback failures.
+- Artist/album/player interactions and browse-card click handling were tightened after the expanded Music and Movies/TV UI work.
+- Test/runtime artifact paths were hardened so test runs do not recreate tracked `/data` or `/tests` artifacts.
+
 ## v0.9.21 — Retreivr-First Stack Setup + Music/Movie UX Expansion
 
 ### High-Level
