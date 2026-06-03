@@ -1192,9 +1192,8 @@
             <a class="settings-nav-link" href="#settings-security" data-settings-link="security">Security</a>
             <a class="settings-nav-link" href="#settings-status-hub" data-settings-link="status-hub">Status</a>
             <a class="settings-nav-link" href="#settings-info-hub" data-settings-link="info-hub">Info</a>
-            <a class="settings-nav-link settings-advanced-link" href="#settings-services-hub" data-settings-link="services-hub" data-settings-level="advanced">Services</a>
             <a class="settings-nav-link settings-advanced-link" href="#settings-logs-hub" data-settings-link="logs-hub" data-settings-level="advanced">Logs</a>
-            <a class="settings-nav-link settings-advanced-link" href="#settings-tagging" data-settings-link="tagging" data-settings-level="advanced">Tagging</a>
+            <a class="settings-nav-link" href="#settings-tagging" data-settings-link="tagging">Music Metadata</a>
             <a class="settings-nav-link settings-advanced-link" href="#settings-community-cache" data-settings-link="community-cache" data-settings-level="advanced">Community Cache</a>
             <a class="settings-nav-link settings-advanced-link" href="#settings-long-term-retry" data-settings-link="long-term-retry" data-settings-level="advanced">Long-Term Retry</a>
             <a class="settings-nav-link settings-advanced-link" href="#settings-arr" data-settings-link="arr" data-settings-level="advanced">ARR Integration</a>
@@ -1215,9 +1214,8 @@
               <option value="settings-security">Security</option>
               <option value="settings-status-hub">Status</option>
               <option value="settings-info-hub">Info</option>
-              <option value="settings-services-hub" data-settings-level="advanced">Services</option>
               <option value="settings-logs-hub" data-settings-level="advanced">Logs</option>
-              <option value="settings-tagging" data-settings-level="advanced">Tagging</option>
+              <option value="settings-tagging">Music Metadata</option>
               <option value="settings-community-cache" data-settings-level="advanced">Community Cache</option>
               <option value="settings-long-term-retry" data-settings-level="advanced">Long-Term Retry</option>
               <option value="settings-arr" data-settings-level="advanced">ARR Integration</option>
@@ -1291,9 +1289,6 @@
             <section id="settings-connections-hub" class="settings-section" data-settings-section="connections-hub">
               <div class="settings-section-heading">Connections</div>
               <div id="settings-connections-slot" class="settings-embedded-slot"></div>
-            </section>
-            <section id="settings-services-hub" class="settings-section" data-settings-section="services-hub" data-settings-level="advanced">
-              <div class="settings-section-heading">Services</div>
               <div id="settings-services-slot" class="settings-embedded-slot"></div>
             </section>
             <section id="settings-status-hub" class="settings-section" data-settings-section="status-hub">
@@ -1970,11 +1965,12 @@
               </div>
             </section>
 
-            <section id="settings-tagging" class="settings-section" data-settings-section="tagging" data-settings-level="advanced">
-              <div class="settings-section-heading">Tagging</div>
+            <section id="settings-tagging" class="settings-section" data-settings-section="tagging">
+              <div class="settings-section-heading">Music Metadata</div>
               <div class="group" id="music-meta-group">
-                <div class="group-title">Post-download tagging &amp; enrichment</div>
+                <div class="group-title">MusicBrainz &amp; AcoustID</div>
                 <div class="stack music-meta-layout">
+                  <div class="notice">MusicBrainz is used as the primary public metadata authority and does not require an API key. AcoustID is optional and requires an API key plus fingerprinting support in the container.</div>
                   <div class="row">
                     <label class="field inline short">
                       <span title="Turns post-download metadata enrichment on or off for music-mode items.">Enabled</span>

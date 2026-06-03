@@ -1814,7 +1814,7 @@ function setPage(page) {
     const sectionFromPage = ({
       setup: "settings-guided-setup",
       connections: "settings-connections-hub",
-      services: "settings-services-hub",
+      services: "settings-connections-hub",
       status: "settings-status-hub",
       logs: "settings-logs-hub",
       info: "settings-info-hub",
@@ -13058,7 +13058,7 @@ function renderMusicLanding() {
     "grid",
     genreActions
   );
-  const genresToRender = favoriteGenres.length ? favoriteGenres : visiblePopularGenres.slice(0, 8);
+  const genresToRender = favoriteGenres.length ? favoriteGenres : visiblePopularGenres;
   if (genresToRender.length) {
     genresToRender.forEach((genre) => {
       genreGrid.appendChild(createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible: !favoriteGenres.length }));

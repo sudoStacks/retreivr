@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - optional dependency in some environments
     MutagenFile = None
 
 
-AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".aac", ".ogg", ".opus", ".wav", ".alac"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".mp4", ".flac", ".aac", ".ogg", ".opus", ".wav", ".alac", ".wma"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 PREFERRED_ART_NAMES = (
     "cover",
