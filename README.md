@@ -48,8 +48,8 @@ Retreivr is not a streaming server. It is the acquisition layer.
 ### Video Search & Download
 ![Video search and download flow](docs/img/img-04.png)
 
-### Music Mode Resolution
-![Music Mode resolution workflow](docs/img/img-03.png)
+### Music Browse & Download
+![Music browse and download flow](docs/img/img-03.png)
 
 ### Movies & TV
 ![Movies & TV browse and saved titles](docs/img/img-06-movies-tv.png)
