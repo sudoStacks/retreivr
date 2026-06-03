@@ -177,6 +177,45 @@ def test_reconcile_library_backfills_video_jobs_and_history(tmp_path, monkeypatc
     )
 
 
+def test_reconcile_library_scans_default_video_root_when_download_destination_is_subfolder(tmp_path, monkeypatch) -> None:
+    downloads_root = tmp_path / "downloads"
+    video_root = downloads_root / "Videos"
+    category_video_path = video_root / "Comedy" / "Clip.mkv"
+    destination_video_path = video_root / "YouTube-Downloads" / "Recent.webm"
+    category_video_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_video_path.parent.mkdir(parents=True, exist_ok=True)
+    category_video_path.write_bytes(b"video")
+    destination_video_path.write_bytes(b"video")
+
+    db_path = tmp_path / "db.sqlite"
+    _prepare_db(db_path)
+
+    monkeypatch.setattr(reconcile_module, "DOWNLOADS_DIR", downloads_root)
+    monkeypatch.setattr(
+        reconcile_module,
+        "_read_video_identity",
+        lambda path: {
+            "title": path.stem,
+            "media_type": "video",
+            "media_intent": "episode",
+            "source": "youtube",
+            "external_id": path.stem,
+            "input_url": f"https://www.youtube.com/watch?v={path.stem}",
+            "canonical_url": f"https://www.youtube.com/watch?v={path.stem}",
+            "channel_id": "channel-1",
+        },
+    )
+
+    result = reconcile_module.reconcile_library(
+        db_path=str(db_path),
+        config={"single_download_folder": "Videos/YouTube-Downloads"},
+    )
+
+    assert result["scan_roots"] == [str(video_root.resolve())]
+    assert result["video_files_seen"] == 2
+    assert result["jobs_inserted"] == 2
+
+
 def test_reconcile_library_skips_macos_appledouble_sidecars(tmp_path, monkeypatch) -> None:
     downloads_root = tmp_path / "downloads"
     video_root = downloads_root / "Videos"

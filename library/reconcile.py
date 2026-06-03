@@ -113,6 +113,9 @@ def _resolve_scan_roots(config: dict[str, Any]) -> list[Path]:
     default_music = (DOWNLOADS_DIR / "Music").resolve()
     if default_music.exists():
         candidates.append(default_music)
+    default_videos = (DOWNLOADS_DIR / "Videos").resolve()
+    if default_videos.exists():
+        candidates.append(default_videos)
     if not candidates:
         candidates.append(DOWNLOADS_DIR.resolve())
 
