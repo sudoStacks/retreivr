@@ -26,20 +26,22 @@ def test_existing_service_api_key_fields_present_in_wizard() -> None:
     )
     for key in expected:
         assert key in source, f"missing wizard field: {key}"
-    assert "Add your Radarr API key to continue." in source
-    assert "Add your Sonarr API key to continue." in source
-    assert "Add your Readarr API key to continue." in source
-    assert "Add your Prowlarr API key to continue." in source
-    assert "Add your Bazarr API key to continue." in source
+    assert "Add your Radarr API key to continue, or enable key discovery for Radarr." in source
+    assert "Add your Sonarr API key to continue, or enable key discovery for Sonarr." in source
+    assert "Add your Readarr API key to continue, or enable key discovery for Readarr." in source
+    assert "Add your Prowlarr API key to continue, or enable key discovery for Prowlarr." in source
+    assert "Add your Bazarr API key to continue, or enable key discovery for Bazarr." in source
 
 
 def test_existing_connect_payload_uses_wizard_api_keys() -> None:
     source = WEBUI_APP.read_text(encoding="utf-8")
-    assert "api_key: state.setupWizard.draft.existing_radarr_api_key" in source
-    assert "api_key: state.setupWizard.draft.existing_sonarr_api_key" in source
-    assert "api_key: state.setupWizard.draft.existing_readarr_api_key" in source
-    assert "api_key: state.setupWizard.draft.existing_prowlarr_api_key" in source
-    assert "api_key: state.setupWizard.draft.existing_bazarr_api_key" in source
+    assert "function buildSetupExistingConnectPayload" in source
+    assert "api_key: draft.existing_radarr_api_key" in source
+    assert "api_key: draft.existing_sonarr_api_key" in source
+    assert "api_key: draft.existing_readarr_api_key" in source
+    assert "api_key: draft.existing_prowlarr_api_key" in source
+    assert "api_key: draft.existing_bazarr_api_key" in source
+    assert "body: JSON.stringify(buildSetupExistingConnectPayload(state.setupWizard.draft))" in source
 
 
 def test_settings_exposes_retreivr_paths_tab() -> None:

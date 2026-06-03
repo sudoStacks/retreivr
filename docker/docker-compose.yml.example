@@ -16,7 +16,7 @@
 
 services:
   retreivr:
-    image: ghcr.io/sudostacks/retreivr:latest
+    image: ghcr.io/sudostacks/retreivr:v1.0.0
     container_name: retreivr
     ports:
       - "8090:8000"
@@ -45,7 +45,7 @@ services:
       - retreivr
 
   retreivr-hostctl:
-    image: ghcr.io/sudostacks/retreivr:latest
+    image: ghcr.io/sudostacks/retreivr:v1.0.0
     container_name: retreivr-hostctl
     profiles: ["hostctl"]
     environment:

@@ -36,10 +36,12 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 0.9.21 Highlights
-- Retreivr-only is now the documented default runtime, with ARR, downloader, VPN, and Jellyfin services positioned as opt-in stack modules
-- Guided Setup, Connections, Services, Movies & TV onboarding, and the Music Player now form a cleaner operator-facing control plane
-- The compose/env/docs story is aligned around one canonical stack with profile-based expansion instead of “shipping ARR by default”
+## 1.0.0 Highlights
+- Brand-new Movies & TV browsing with setup-aware ARR integration for managed and existing Radarr/Sonarr/Prowlarr/Bazarr/qBittorrent/Jellyfin stacks
+- Guided Setup now handles Retreivr-first onboarding, stack paths, preflight checks, service connections, and generated Docker Compose profile commands
+- Music now includes a MusicBrainz-backed browse experience, favorites, local player, queues, radio/station flows, playlists, and metadata repair workflows
+- Retreivr's original acquisition core remains intact for direct URLs, video downloads, playlist monitoring, Spotify sync, YouTube, Rumble, Archive.org, and library imports
+- The compose/env/docs story is aligned around one canonical Retreivr-first stack with profile-based expansion instead of shipping ARR by default
 
 ## Product Tour
 
@@ -261,7 +263,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `0.9.21`, pull the latest image and restart:
+If you are upgrading to `1.0.0`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
