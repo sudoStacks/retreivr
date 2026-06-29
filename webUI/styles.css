@@ -3068,7 +3068,7 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
   display: flex;
   align-items: center;
   gap: 14px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   justify-content: flex-end;
   margin-left: 0;
   padding-right: 8px;
@@ -3082,6 +3082,7 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
 
 .music-import-toolbar-button {
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .music-results-size-control,
@@ -8186,10 +8187,11 @@ body.home-page .home-search-actions {
 }
 
 #music-panel .music-top-row {
-  display: grid;
-  grid-template-columns: 160px minmax(0, 1fr) 440px;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  column-gap: 16px;
+  row-gap: 8px;
   width: 100%;
   min-width: 0;
 }
@@ -8210,6 +8212,8 @@ body.home-page .home-search-actions {
 .music-section-toggle {
   justify-content: center;
   margin: 0;
+  width: auto;
+  flex: 1 1 520px;
   min-width: 0;
 }
 
@@ -8217,6 +8221,7 @@ body.home-page .home-search-actions {
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  flex: 0 1 160px;
   min-height: 38px;
   min-width: 0;
 }
@@ -8225,27 +8230,30 @@ body.home-page .home-search-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex: 0 1 auto;
+  margin-left: auto;
   min-height: 38px;
   min-width: 0;
+  max-width: 100%;
 }
 
 @media (max-width: 1200px) {
   #music-panel .music-top-row {
-    grid-template-columns: 132px minmax(0, 1fr) 360px;
-    gap: 12px;
+    column-gap: 12px;
   }
 }
 
 @media (max-width: 980px) {
   #music-panel .music-top-row {
-    grid-template-columns: 1fr;
     gap: 8px;
   }
 
   .music-nav-slot,
   .music-section-toggle,
   .music-toolbar-slot {
+    flex-basis: 100%;
     justify-content: flex-start;
+    margin-left: 0;
   }
 }
 

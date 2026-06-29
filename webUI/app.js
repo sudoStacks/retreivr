@@ -4622,6 +4622,25 @@ function syncMusicPlayerVideoShell() {
   }
 }
 
+function showDirectYouTubeIframe(videoId) {
+  const normalized = String(videoId || "").trim();
+  if (!normalized) return false;
+  const frame = $("#music-player-video-frame");
+  if (!frame) return false;
+  if (state.playerYT) {
+    try { state.playerYT.destroy(); } catch (_err) {}
+    state.playerYT = null;
+  }
+  _stopYTProgressTimer();
+  const embedUrl = buildYouTubePlayerEmbedUrl(normalized);
+  if (!embedUrl) return false;
+  frame.src = embedUrl;
+  state.playerCurrentHasVideo = true;
+  state.playerVideoVisible = true;
+  syncMusicPlayerVideoShell();
+  return true;
+}
+
 // ── YouTube IFrame player abstraction ────────────────────────────────────────
 // Load the IFrame API once; sets state.playerYTReady when the API is callable.
 function ensureYouTubeAPILoaded() {
@@ -4911,6 +4930,30 @@ function normalizePlayableItem(item = {}) {
   return normalized;
 }
 
+function canResolvePlayableItem(item = {}) {
+  const normalized = normalizePlayableItem(item);
+  if (!normalized) return false;
+  if (normalized.recording_mbid) return true;
+  return !!(normalized.artist && normalized.title);
+}
+
+function buildPlayableResolutionMeta(item = {}) {
+  const normalized = normalizePlayableItem(item) || {};
+  return {
+    artist: normalized.artist,
+    track: normalized.title,
+    album: normalized.album,
+    release_mbid: normalized.mb_release_id,
+    release_group_mbid: normalized.mb_release_group_id,
+  };
+}
+
+function getPlayableResolveKey(item = {}) {
+  const normalized = normalizePlayableItem(item) || {};
+  if (normalized.recording_mbid) return `mbid:${normalized.recording_mbid}`;
+  return `meta:${[normalized.artist, normalized.title, normalized.album].map((part) => String(part || "").trim().toLowerCase()).join("::")}`;
+}
+
 function playerItemsMatch(left, right) {
   const a = normalizePlayableItem(left);
   const b = normalizePlayableItem(right);
@@ -4986,17 +5029,13 @@ async function playPlayerQueueIndex(index) {
   if (!Number.isFinite(targetIndex) || targetIndex < 0 || targetIndex >= state.playerQueue.length) return;
   const item = normalizePlayableItem(state.playerQueue[targetIndex]);
   if (!item) return;
-  if (!item.stream_url && !item.video_id && String(item.kind || "") === "unresolved" && item.recording_mbid) {
+  if (!item.stream_url && !item.video_id && String(item.kind || "") === "unresolved" && canResolvePlayableItem(item)) {
     // Resolve the stream URL before playing — update queue in place so the UI reflects it.
-    const resolved = await resolveRecordingStreamUrl(item.recording_mbid, {
-      artist: item.artist,
-      track: item.title,
-      album: item.album,
-      release_group_mbid: item.mb_release_group_id,
-    });
+    const resolved = await resolveRecordingStreamUrl(item.recording_mbid, buildPlayableResolutionMeta(item));
     if (resolved?.stream_url || resolved?.video_id) {
       const readyItem = normalizePlayableItem({ ...item, ...resolved, kind: resolved.video_id ? "youtube" : "cached" });
       state.playerQueue[targetIndex] = readyItem;
+      renderMusicPlayerQueue();
       try {
         await playMusicPlayerItem(readyItem);
       } catch (_err) {
@@ -5004,7 +5043,6 @@ async function playPlayerQueueIndex(index) {
         setMusicPlayerStatus(`Skipped "${item.title || "Track"}" (playback unavailable).`, {
           kind: "warning",
           toast: true,
-          preserveInline: true,
         });
         const nextIndex = targetIndex + 1;
         if (nextIndex < state.playerQueue.length) {
@@ -5020,7 +5058,6 @@ async function playPlayerQueueIndex(index) {
     setMusicPlayerStatus(`Skipped "${item.title || "Track"}" (no source match yet).`, {
       kind: "warning",
       toast: true,
-      preserveInline: true,
     });
     // Could not resolve — skip to next track.
     const nextIndex = targetIndex + 1;
@@ -5036,7 +5073,6 @@ async function playPlayerQueueIndex(index) {
     setMusicPlayerStatus(`Skipped "${item.title || "Track"}" (not playable right now).`, {
       kind: "warning",
       toast: true,
-      preserveInline: true,
     });
     const nextIndex = targetIndex + 1;
     if (nextIndex < state.playerQueue.length) {
@@ -5056,22 +5092,22 @@ function _prefetchNextUnresolved(fromIndex) {
   for (let i = fromIndex; i < Math.min(fromIndex + searchWindow, queue.length); i++) {
     if (scheduled >= prefetchLimit) break;
     const item = normalizePlayableItem(queue[i]);
-    if (!item?.stream_url && !item?.video_id && String(item?.kind || "") === "unresolved" && item?.recording_mbid) {
-      if (state.playerPrefetchInFlightRecordings.has(item.recording_mbid)) {
+    if (!item?.stream_url && !item?.video_id && String(item?.kind || "") === "unresolved" && canResolvePlayableItem(item)) {
+      const prefetchKey = getPlayableResolveKey(item);
+      if (state.playerPrefetchInFlightRecordings.has(prefetchKey)) {
         continue;
       }
       const capturedIndex = i;
-      const capturedMbid = item.recording_mbid;
-      state.playerPrefetchInFlightRecordings.add(capturedMbid);
-      resolveRecordingStreamUrl(item.recording_mbid, {
-        artist: item.artist, track: item.title, album: item.album, release_group_mbid: item.mb_release_group_id,
-      }).then((resolved) => {
+      state.playerPrefetchInFlightRecordings.add(prefetchKey);
+      resolveRecordingStreamUrl(item.recording_mbid, buildPlayableResolutionMeta(item)).then((resolved) => {
         if (!resolved?.stream_url && !resolved?.video_id) return;
-        if (Array.isArray(state.playerQueue) && state.playerQueue[capturedIndex]?.recording_mbid === item.recording_mbid) {
+        const currentKey = getPlayableResolveKey(state.playerQueue?.[capturedIndex] || {});
+        if (Array.isArray(state.playerQueue) && currentKey === prefetchKey) {
           state.playerQueue[capturedIndex] = normalizePlayableItem({ ...state.playerQueue[capturedIndex], ...resolved, kind: resolved.video_id ? "youtube" : "cached" });
+          renderMusicPlayerQueue();
         }
       }).catch(() => {}).finally(() => {
-        state.playerPrefetchInFlightRecordings.delete(capturedMbid);
+        state.playerPrefetchInFlightRecordings.delete(prefetchKey);
       });
       scheduled += 1;
     }
@@ -5279,17 +5315,8 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
     clearActiveStationPlayback();
   }
   const hasDirectVideo = !!String(payload.video_id || extractYouTubeVideoId(payload.stream_url) || "").trim();
-  const isLocalOnlyPayload = !hasDirectVideo && (isLocalPlayerStreamUrl(payload.stream_url) || !!payload.local_path);
   if (payload.recording_mbid && !hasDirectVideo) {
-    const resolved = isLocalOnlyPayload
-      ? await resolveRecordingIndexedStreamUrlWithTimeout(payload.recording_mbid, 900)
-      : await resolveRecordingStreamUrl(payload.recording_mbid, {
-        artist: payload.artist,
-        track: payload.title,
-        album: payload.album,
-        release_mbid: payload.mb_release_id,
-        release_group_mbid: payload.mb_release_group_id,
-      });
+    const resolved = await resolveRecordingStreamUrl(payload.recording_mbid, buildPlayableResolutionMeta(payload));
     if (resolved?.stream_url || resolved?.video_id) {
       payload = normalizePlayableItem({
         ...payload,
@@ -5358,6 +5385,7 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
       payload = normalizePlayableItem({ ...payload, video_embed_url: payload.video_embed_url || buildYouTubePlayerEmbedUrl(videoId) });
       state.playerCurrent = payload;
       state.playerCurrentHasVideo = !!String(payload.video_embed_url || "").trim();
+      showDirectYouTubeIframe(videoId);
       if (messageEl) {
         setMusicPlayerStatus("YouTube API transport failed; falling back to direct embed.", {
           kind: "warning",
@@ -7277,6 +7305,68 @@ function getFastLocalAlbumArtwork(albumItem = {}) {
   if (byTrack?.artwork_url) return String(byTrack.artwork_url).trim();
 
   return "";
+}
+
+function getMusicReleaseGroupId(item = {}) {
+  return String(
+    item?.release_group_mbid
+    || item?.mb_release_group_id
+    || item?.releaseGroupMbid
+    || item?.release_group_id
+    || ""
+  ).trim();
+}
+
+function getImmediateAlbumArtworkUrl(item = {}) {
+  const releaseGroupMbid = getMusicReleaseGroupId(item);
+  const directArtwork = normalizeArtworkUrl(item?.artwork_url || item?.cover_url || "");
+  if (directArtwork) {
+    if (releaseGroupMbid) setCachedAlbumCoverUrl(releaseGroupMbid, directArtwork);
+    return directArtwork;
+  }
+  const localArtwork = normalizeArtworkUrl(getFastLocalAlbumArtwork(item));
+  if (localArtwork) {
+    if (releaseGroupMbid) setCachedAlbumCoverUrl(releaseGroupMbid, localArtwork);
+    return localArtwork;
+  }
+  const cachedArtwork = releaseGroupMbid ? getCachedAlbumCoverUrl(releaseGroupMbid) : "";
+  return cachedArtwork || "";
+}
+
+function getAlbumArtworkFromCard(card, releaseGroupMbid = "") {
+  const cachedArtwork = releaseGroupMbid ? getCachedAlbumCoverUrl(releaseGroupMbid) : "";
+  if (cachedArtwork) return cachedArtwork;
+  const image = card?.querySelector?.(".music-card-thumb img, .album-cover img, img");
+  const imageSrc = normalizeArtworkUrl(image?.currentSrc || image?.src || "");
+  if (imageSrc && !imageSrc.includes("assets/no_artwork.png")) {
+    if (releaseGroupMbid) setCachedAlbumCoverUrl(releaseGroupMbid, imageSrc);
+    return imageSrc;
+  }
+  return "";
+}
+
+function applyAlbumArtworkToTracks(tracks, albumContext = {}) {
+  const normalizedTracks = Array.isArray(tracks) ? tracks : [];
+  const releaseGroupMbid = getMusicReleaseGroupId(albumContext);
+  const albumArtwork = getImmediateAlbumArtworkUrl(albumContext);
+  if (!releaseGroupMbid && !albumArtwork) return normalizedTracks;
+  if (releaseGroupMbid && albumArtwork) {
+    setCachedAlbumCoverUrl(releaseGroupMbid, albumArtwork);
+  }
+  return normalizedTracks.map((track) => {
+    if (!track || typeof track !== "object") return track;
+    const trackReleaseGroupMbid = getMusicReleaseGroupId(track) || releaseGroupMbid;
+    const trackArtwork = normalizeArtworkUrl(track.artwork_url || "") || albumArtwork;
+    if (trackReleaseGroupMbid && trackArtwork) {
+      setCachedAlbumCoverUrl(trackReleaseGroupMbid, trackArtwork);
+    }
+    return {
+      ...track,
+      mb_release_group_id: trackReleaseGroupMbid || track.mb_release_group_id || null,
+      release_group_mbid: track.release_group_mbid || trackReleaseGroupMbid || null,
+      artwork_url: trackArtwork || track.artwork_url || null,
+    };
+  });
 }
 
 function isMusicArtistFavorited(artistName = "", artistKey = "") {
@@ -12665,7 +12755,7 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
 }
 
 function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued } = {}) {
-  const releaseGroupMbid = String(albumItem?.release_group_mbid || "").trim();
+  const releaseGroupMbid = getMusicReleaseGroupId(albumItem);
   const directPlaylistUrl = String(albumItem?.direct_playlist_url || "").trim();
   const card = document.createElement("article");
   card.className = "home-result-card album-card music-meta-card music-grid-card music-album-grid-card";
@@ -12673,9 +12763,9 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   const albumThumb = createMusicCardThumb(
     albumItem?.title ? `${albumItem.title} cover` : "Album cover"
   );
-  const immediateLocalAlbumArt = String(albumItem?.artwork_url || "").trim() || getFastLocalAlbumArtwork(albumItem);
-  if (immediateLocalAlbumArt) {
-    albumThumb.setImage(immediateLocalAlbumArt);
+  const immediateAlbumArt = getImmediateAlbumArtworkUrl(albumItem);
+  if (immediateAlbumArt) {
+    albumThumb.setImage(immediateAlbumArt);
   }
   card.appendChild(albumThumb.shell);
   const content = document.createElement("div");
@@ -12751,12 +12841,17 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
         releaseGroupMbid: releaseGroupMbidValue,
         limit: 100,
       });
+      const hydratedTracks = applyAlbumArtworkToTracks(tracks, {
+        ...albumItem,
+        release_group_mbid: releaseGroupMbidValue,
+        artwork_url: immediateAlbumArt || getAlbumArtworkFromCard(card, releaseGroupMbidValue),
+      });
       renderMusicModeResults(
-        { artists: [], albums: [], tracks, mode_used: "track" },
+        { artists: [], albums: [], tracks: hydratedTracks, mode_used: "track" },
         `${artistQuery} ${albumTitle}`.trim(),
         { pushHistory: true }
       );
-      setMusicPageNotice(`Loaded ${tracks.length} tracks for ${albumTitle || "album"}.`, false);
+      setMusicPageNotice(`Loaded ${hydratedTracks.length} tracks for ${albumTitle || "album"}.`, false);
     } catch (err) {
       viewTracksButton.disabled = false;
       button.disabled = false;
@@ -12842,7 +12937,7 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
     if (cachedCover) {
       albumThumb.setImage(cachedCover);
     } else if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
-      if (!immediateLocalAlbumArt) {
+      if (!immediateAlbumArt) {
         albumThumb.setNoArt();
       }
     } else {
@@ -12854,12 +12949,13 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
           }
           return;
         }
+        setCachedAlbumCoverUrl(releaseGroupMbid, coverUrl);
         albumThumb.setImage(coverUrl);
       };
       thumbTask.__priorityElement = card;
       thumbnailJobs.push(thumbTask);
     }
-  } else if (!immediateLocalAlbumArt) {
+  } else if (!immediateAlbumArt) {
     albumThumb.setNoArt();
   }
 
@@ -13567,15 +13663,16 @@ async function resolveRecordingIndexedStreamUrlWithTimeout(recordingMbid, timeou
 }
 
 async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
+  const normalizedMbid = String(recordingMbid || "").trim();
   const runPreviewResolve = async () => {
     try {
-      const response = await fetchMusicTrackPreview({ recording_mbid: recordingMbid, ...trackMeta });
+      const response = await fetchMusicTrackPreview({ recording_mbid: normalizedMbid, ...trackMeta });
       const sourceUrl = String(response?.source_url || "").trim();
       const source = String(response?.source || "").trim().toLowerCase();
       const videoId = String(response?.video_id || extractYouTubeVideoId(sourceUrl) || "").trim() || null;
       if (!sourceUrl || !videoId || !isYouTubeFamilySource(source, sourceUrl)) return null;
-      await recordRuntimeResolution({
-        recording_mbid: recordingMbid,
+      if (normalizedMbid) await recordRuntimeResolution({
+        recording_mbid: normalizedMbid,
         source_url: sourceUrl,
         source: source || "youtube",
         video_id: videoId,
@@ -13608,7 +13705,24 @@ async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
         resolve(null);
       }
     };
-    resolveRecordingIndexedStreamUrl(recordingMbid).then(done).catch(() => done(null));
+    const indexedResolve = normalizedMbid
+      ? resolveRecordingIndexedStreamUrl(normalizedMbid).then(async (result) => {
+        if (result?.stream_url || result?.video_id) {
+          await recordRuntimeResolution({
+            recording_mbid: normalizedMbid,
+            source_url: result.stream_url,
+            source: result.source || "youtube",
+            video_id: result.video_id,
+            artist: trackMeta.artist,
+            track: trackMeta.track,
+            album: trackMeta.album,
+            resolved_via: result.resolved_via || "resolution_index",
+          });
+        }
+        return result;
+      })
+      : Promise.resolve(null);
+    indexedResolve.then(done).catch(() => done(null));
     runPreviewResolve().then(done).catch(() => done(null));
   });
 }
@@ -13718,23 +13832,6 @@ async function playMusicAlbumFromSearch(albumItem) {
   clearActiveStationPlayback();
   setPlayerQueue(queueItems);
   setMusicPlayerView("queue");
-  // Play first local item immediately if available; otherwise resolve via index → preview API.
-  const firstLocalIndex = queueItems.findIndex((i) => i.kind === "local" && (i.stream_url || i.local_path));
-  if (firstLocalIndex >= 0) {
-    await playPlayerQueueIndex(firstLocalIndex);
-    return;
-  }
-  // No local files — resolve first unresolved track and start playback.
-  const firstUnresolved = queueItems[0];
-  if (!firstUnresolved?.recording_mbid) return;
-  _prefetchNextUnresolved(1);
-  const resolved = await resolveRecordingStreamUrl(firstUnresolved.recording_mbid, {
-    artist: firstUnresolved.artist, track: firstUnresolved.title, album: albumTitle, release_group_mbid: releaseGroupMbid,
-  });
-  if (!resolved?.stream_url && !resolved?.video_id) return;
-  const firstItem = normalizePlayableItem({ ...firstUnresolved, ...resolved, kind: resolved.video_id ? "youtube" : "cached" });
-  queueItems[0] = firstItem;
-  setPlayerQueue(queueItems);
   await playPlayerQueueIndex(0);
 }
 
@@ -13846,12 +13943,12 @@ function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeT
   action.appendChild(previewButton);
   card.appendChild(action);
 
-  const releaseGroupMbid = String(result?.mb_release_group_id || "").trim();
-  if (releaseGroupMbid) {
-    const cachedCover = getCachedAlbumCoverUrl(releaseGroupMbid);
-    if (cachedCover) {
-      trackThumb.setImage(cachedCover);
-    } else if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
+  const releaseGroupMbid = getMusicReleaseGroupId(result);
+  const immediateTrackArtwork = getImmediateAlbumArtworkUrl(result);
+  if (immediateTrackArtwork) {
+    trackThumb.setImage(immediateTrackArtwork);
+  } else if (releaseGroupMbid) {
+    if (Object.prototype.hasOwnProperty.call(state.homeAlbumCoverCache, releaseGroupMbid) && state.homeAlbumCoverCache[releaseGroupMbid] === null) {
       trackThumb.setNoArt();
     } else {
       const thumbTask = async (activeToken) => {
@@ -13862,13 +13959,12 @@ function createMusicTrackResultCard(result, thumbnailJobs, renderToken, { badgeT
           }
           return;
         }
+        setCachedAlbumCoverUrl(releaseGroupMbid, coverUrl);
         trackThumb.setImage(coverUrl);
       };
       thumbTask.__priorityElement = card;
       thumbnailJobs.push(thumbTask);
     }
-  } else if (result.artwork_url) {
-    trackThumb.setImage(result.artwork_url);
   } else {
     trackThumb.setNoArt();
   }
@@ -14003,12 +14099,6 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
       albumGrid.appendChild(createMusicAlbumCard(albumItem, thumbnailJobs, renderToken));
     });
   }
-  runPrioritizedThumbnailJobs(thumbnailJobs, renderToken, {
-    visibleCount: filteredTracks.length ? 10 : 12,
-    immediateConcurrency: filteredTracks.length ? 8 : 10,
-    deferredConcurrency: 4,
-    deferredDelayMs: 80,
-  });
 
   if (filteredTracks.length) {
     const trackStack = appendSection("Tracks", "stack");
@@ -14025,6 +14115,12 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
       trackStack.appendChild(createMusicTrackResultCard(result, thumbnailJobs, renderToken));
     });
   }
+  runPrioritizedThumbnailJobs(thumbnailJobs, renderToken, {
+    visibleCount: filteredTracks.length ? 10 : 12,
+    immediateConcurrency: filteredTracks.length ? 8 : 10,
+    deferredConcurrency: 4,
+    deferredDelayMs: 80,
+  });
   focusMusicResults();
 }
 
@@ -14476,12 +14572,19 @@ function renderHomeAlbumCandidates(candidates, query = "") {
           releaseGroupMbid: releaseGroupId,
           limit: 1000,
         });
+        const hydratedTracks = applyAlbumArtworkToTracks(tracks, {
+          release_group_mbid: releaseGroupId,
+          title: albumTitle,
+          album: albumTitle,
+          artist: artistCredit,
+          artwork_url: getAlbumArtworkFromCard(viewTracksButton.closest(".album-card"), releaseGroupId),
+        });
         renderMusicModeResults(
-          { artists: [], albums: [], tracks, mode_used: "track" },
+          { artists: [], albums: [], tracks: hydratedTracks, mode_used: "track" },
           `${artistCredit} ${albumTitle}`.trim(),
           { pushHistory: true }
         );
-        setMusicPageNotice(`Loaded ${tracks.length} tracks for ${albumTitle || "album"}.`, false);
+        setMusicPageNotice(`Loaded ${hydratedTracks.length} tracks for ${albumTitle || "album"}.`, false);
       } catch (err) {
         viewTracksButton.disabled = false;
         viewTracksButton.textContent = previousViewLabel;
@@ -21103,7 +21206,12 @@ function bindEvents() {
           clearActiveStationPlayback();
         }
         if (playButton.closest("#music-player-queue")) {
-          // preserve current queue order
+          const queueIndex = Number.parseInt(String(playButton.closest(".music-player-track-row")?.querySelector("[data-queue-index]")?.dataset?.queueIndex || ""), 10);
+          const fallbackIndex = Array.isArray(state.playerQueue)
+            ? state.playerQueue.findIndex((entry) => playerItemsMatch(entry, payload))
+            : -1;
+          await playPlayerQueueIndex(Number.isFinite(queueIndex) ? queueIndex : fallbackIndex);
+          return;
         } else if (playButton.closest(".music-player-playlist-items")) {
           const playlistItems = Array.isArray(state.playerSelectedPlaylistItems) ? state.playerSelectedPlaylistItems : [];
           setPlayerQueue(buildQueueFromTracks(playlistItems, payload));
