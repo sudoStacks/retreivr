@@ -154,10 +154,10 @@
             <span class="home-launcher-tile-title">Movies &amp; TV</span>
             <span class="home-launcher-tile-meta">Discover titles, cast, genres, and send them to ARR</span>
           </button>
-          <button id="home-launcher-books" class="home-launcher-tile hidden" data-home-launch="books" type="button">
+          <button id="home-launcher-books" class="home-launcher-tile" data-home-launch="books" type="button">
             <span class="home-launcher-icon" aria-hidden="true">☰</span>
             <span class="home-launcher-tile-title">Books</span>
-            <span class="home-launcher-tile-meta">Search, import, organize, and keep rich ebook metadata</span>
+            <span id="home-launcher-books-meta" class="home-launcher-tile-meta">Search, import, organize, and keep rich ebook metadata</span>
           </button>
         </div>
       </div>
@@ -739,7 +739,16 @@
     </section>
     <section class="panel full page-full page-hidden" id="books-panel" data-page="books">
       <div class="movies-tv-page-shell books-page-shell">
-        <div class="movies-tv-mode-row books-mode-row">
+        <div id="books-disabled-gate" class="books-disabled-gate hidden">
+          <div class="books-disabled-icon" aria-hidden="true">▤</div>
+          <div>
+            <div class="books-disabled-kicker">Optional library</div>
+            <h2>Enable Books to start discovering</h2>
+            <p>Turn on Books in Settings to search Open Library, browse rich book cards, and import DRM-free PDF and ebook files.</p>
+          </div>
+          <button id="books-open-settings" class="button primary" type="button">Open Books Settings</button>
+        </div>
+        <div class="movies-tv-mode-row books-mode-row" data-books-enabled-content>
           <div class="movies-tv-section-toggle" aria-label="Books sections">
             <button class="button ghost small movies-tv-nav active" data-books-section="search" type="button">Discover</button>
             <button class="button ghost small movies-tv-nav" data-books-section="library" type="button">My Library</button>
@@ -748,7 +757,7 @@
           <span id="books-provider-chip" class="notice movies-tv-connection-chip">Open Library discovery</span>
           <button id="books-refresh-library" class="button ghost small" type="button">Refresh Library</button>
         </div>
-        <div class="movies-tv-search-row books-search-row">
+        <div class="movies-tv-search-row books-search-row" data-books-enabled-content>
           <span class="searchbar-leading-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l5 5"></path></svg>
           </span>
@@ -756,8 +765,20 @@
           <button id="books-search-clear" class="button ghost small searchbar-clear-button" type="button" aria-label="Clear search">×</button>
           <button id="books-search-button" class="button primary" type="button">Search</button>
         </div>
-        <div id="books-message" class="notice hidden" role="status"></div>
-        <section id="books-search-view" class="books-view">
+        <div id="books-message" class="notice hidden" role="status" data-books-enabled-content></div>
+        <section id="books-search-view" class="books-view" data-books-enabled-content>
+          <div class="books-discovery-hero">
+            <div class="books-discovery-kicker">Discover your next read</div>
+            <h1>Search millions of books</h1>
+            <p>Find books by title, author, subject, or ISBN. Explore the metadata and available previews, then add an authorized PDF or ebook to your library.</p>
+            <div class="books-browse-shortcuts" aria-label="Browse popular book subjects">
+              <button class="button ghost small" data-books-browse-query="classic literature" type="button">Classics</button>
+              <button class="button ghost small" data-books-browse-query="science fiction" type="button">Science fiction</button>
+              <button class="button ghost small" data-books-browse-query="history" type="button">History</button>
+              <button class="button ghost small" data-books-browse-query="biography" type="button">Biography</button>
+              <button class="button ghost small" data-books-browse-query="technology" type="button">Technology</button>
+            </div>
+          </div>
           <div class="books-acquire-bar group">
             <div class="books-acquire-copy">
               <div class="group-title">Add a DRM-free book</div>
@@ -779,7 +800,7 @@
             <div id="books-results-list" class="music-meta-grid movies-tv-results-grid books-results-grid"></div>
           </div>
         </section>
-        <section id="books-library-view" class="books-view hidden">
+        <section id="books-library-view" class="books-view hidden" data-books-enabled-content>
           <div class="home-results books-results-shell">
             <div class="home-results-header">
               <span>My Library</span>

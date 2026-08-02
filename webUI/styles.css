@@ -2070,6 +2070,16 @@ body.topbar-hidden .topbar {
   border-color: rgba(89, 176, 255, 0.45);
 }
 
+.home-launcher-tile-optional {
+  border-style: dashed;
+  background: linear-gradient(180deg, rgba(24, 30, 41, 0.82), rgba(13, 17, 24, 0.92));
+}
+
+.home-launcher-tile-optional .home-launcher-icon {
+  filter: saturate(0.65);
+  opacity: 0.82;
+}
+
 .home-launcher-tile-accent {
   border-color: rgba(89, 176, 255, 0.38);
   background: linear-gradient(180deg, rgba(20, 36, 58, 0.98), rgba(14, 22, 36, 0.99));
@@ -9271,6 +9281,84 @@ body[data-page="music"] #music-panel .music-page-shell {
 
 .books-mode-row {
   align-items: center;
+}
+
+.books-disabled-gate {
+  min-height: min(540px, 66vh);
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 20px;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.books-feature-hidden {
+  display: none !important;
+}
+
+.books-disabled-gate > div:not(.books-disabled-icon) {
+  max-width: 620px;
+}
+
+.books-disabled-gate h2,
+.books-discovery-hero h1 {
+  margin: 0;
+}
+
+.books-disabled-gate p,
+.books-discovery-hero p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.books-disabled-icon {
+  display: grid;
+  place-content: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+  color: var(--accent);
+  font-size: 38px;
+}
+
+.books-disabled-kicker,
+.books-discovery-kicker {
+  margin-bottom: 8px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.books-discovery-hero {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+  padding: clamp(20px, 4vw, 42px);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 86% 12%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 34%),
+    linear-gradient(145deg, color-mix(in srgb, var(--panel) 92%, var(--accent)), var(--panel));
+}
+
+.books-discovery-hero h1 {
+  font-size: clamp(30px, 4vw, 46px);
+}
+
+.books-discovery-hero p {
+  max-width: 760px;
+  margin: 0;
+}
+
+.books-browse-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .books-acquire-bar {

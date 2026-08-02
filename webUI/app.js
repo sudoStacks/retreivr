@@ -122,6 +122,7 @@ const state = {
   booksSection: "search",
   booksResults: [],
   booksLibrary: [],
+  booksSearchStarted: false,
   booksSelectedMetadata: null,
   setupStatus: null,
   setupWizard: null,
@@ -614,6 +615,10 @@ function mountTopbarForPage(page) {
     return;
   }
   if (page === "books") {
+    if (!state.config?.books?.enabled) {
+      syncTopbarSubbarVisibility();
+      return;
+    }
     const searchRow = document.querySelector(".books-search-row");
     if (searchRow) searchHost.appendChild(searchRow);
     syncTopbarSubbarVisibility();
@@ -1735,9 +1740,7 @@ function setPage(page) {
   const normalized = normalizePageName(page);
   const requested = String(page || "").split("?")[0] || page;
   const allowed = new Set(["home", "video", "music", "movies-tv", "books", "review", "config"]);
-  const target = allowed.has(normalized) && !(normalized === "books" && !state.config?.books?.enabled)
-    ? normalized
-    : "home";
+  const target = allowed.has(normalized) ? normalized : "home";
   if (activePlayerIsYT() && target !== "music") {
     activePlayerPause();
   }
@@ -1745,6 +1748,7 @@ function setPage(page) {
     setHomeSetupOverlayOpen(false);
   }
   state.currentPage = target;
+  syncBooksNavigation();
   mountTopbarForPage(target);
   if (target === "music") {
     mountMusicPageNodes();
@@ -1824,11 +1828,13 @@ function setPage(page) {
     setMoviesTvSection(state.moviesTvSection || "search");
     startArrStatusPolling();
   } else if (target === "books") {
-    mountTopbarForPage("books");
-    setBooksSection(state.booksSection || "search");
-    loadBooksStatus().catch(() => {});
-    if ((state.booksSection || "search") === "library") {
-      loadBooksLibrary().catch(() => {});
+    if (state.config?.books?.enabled) {
+      mountTopbarForPage("books");
+      setBooksSection(state.booksSection || "search");
+      loadBooksStatus().catch(() => {});
+      if ((state.booksSection || "search") === "library") {
+        loadBooksLibrary().catch(() => {});
+      }
     }
   } else if (target === "config") {
     mountSettingsSubpages();
@@ -1883,7 +1889,15 @@ function renderHomeLauncher() {
   if (!booksTile && !setupTile) return;
   const enabled = !!state.config?.books?.enabled;
   if (booksTile) {
-    booksTile.classList.toggle("hidden", !enabled);
+    booksTile.classList.remove("hidden");
+    booksTile.classList.toggle("home-launcher-tile-optional", !enabled);
+    booksTile.setAttribute("aria-label", enabled ? "Open Books" : "Open Books and enable it in Settings");
+  }
+  const booksMeta = $("#home-launcher-books-meta");
+  if (booksMeta) {
+    booksMeta.textContent = enabled
+      ? "Search, import, organize, and keep rich ebook metadata"
+      : "Enable Books, then search Open Library and build your ebook library";
   }
   syncBooksNavigation();
   if (setupTile) {
@@ -1895,8 +1909,12 @@ function syncBooksNavigation() {
   const enabled = !!state.config?.books?.enabled;
   const button = $("#books-nav-button");
   if (button) button.classList.toggle("hidden", !enabled);
-  if (!enabled && state.currentPage === "books") {
-    setPage("home");
+  $("#books-disabled-gate")?.classList.toggle("hidden", enabled);
+  $$('[data-books-enabled-content]').forEach((element) => {
+    element.classList.toggle("books-feature-hidden", !enabled);
+  });
+  if (state.currentPage === "books") {
+    mountTopbarForPage("books");
   }
 }
 
@@ -1946,9 +1964,13 @@ function renderBooksResults() {
   const host = $("#books-results-list");
   if (!host) return;
   const results = Array.isArray(state.booksResults) ? state.booksResults : [];
-  $("#books-results-status").textContent = results.length ? `${results.length} matches` : "No results";
+  $("#books-results-status").textContent = results.length
+    ? `${results.length} matches`
+    : (state.booksSearchStarted ? "No matches" : "Ready to discover");
   if (!results.length) {
-    host.innerHTML = '<div class="home-results-empty">Search by title, author, subject, or ISBN.</div>';
+    host.innerHTML = state.booksSearchStarted
+      ? '<div class="home-results-empty">No matching books found. Try another title, author, subject, or ISBN.</div>'
+      : '<div class="home-results-empty">Search above or choose a subject to start browsing.</div>';
     return;
   }
   host.innerHTML = results.map((item, index) => {
@@ -2020,6 +2042,7 @@ async function performBooksSearch() {
     return;
   }
   const button = $("#books-search-button");
+  state.booksSearchStarted = true;
   if (button) { button.disabled = true; button.textContent = "Searching…"; }
   setNotice($("#books-message"), "Searching Open Library…", false);
   try {
@@ -2105,7 +2128,21 @@ function initializeBooksUi() {
     const input = $("#books-search-input");
     if (input) input.value = "";
     state.booksResults = [];
+    state.booksSearchStarted = false;
     renderBooksResults();
+  });
+  $$('[data-books-browse-query]').forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = $("#books-search-input");
+      if (input) input.value = String(button.dataset.booksBrowseQuery || "");
+      performBooksSearch();
+    });
+  });
+  $("#books-open-settings")?.addEventListener("click", () => {
+    setPage("config");
+    showSettingsPage("settings-core", { jump: false, smooth: false });
+    window.location.hash = "settings-core";
+    requestAnimationFrame(() => $("#cfg-books-enabled")?.focus());
   });
   $("#books-direct-add")?.addEventListener("click", acquireBookFromUrl);
   $("#books-import-file")?.addEventListener("change", (event) => {
