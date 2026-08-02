@@ -115,10 +115,21 @@ def ensure_music_player_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS music_player_playlists (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            import_batch_id TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
+    )
+    playlist_columns = {
+        str(row[1])
+        for row in cur.execute("PRAGMA table_info(music_player_playlists)").fetchall()
+    }
+    if "import_batch_id" not in playlist_columns:
+        cur.execute("ALTER TABLE music_player_playlists ADD COLUMN import_batch_id TEXT")
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_music_player_playlists_import_batch "
+        "ON music_player_playlists (import_batch_id) WHERE import_batch_id IS NOT NULL"
     )
     cur.execute(
         """

@@ -19,6 +19,7 @@ music/daft_punk_one_more_time.mp3
     assert item.artist == "Daft Punk"
     assert item.title == "One More Time"
     assert item.album is None
+    assert item.duration_ms == 123000
 
 
 def test_csv_basic() -> None:
@@ -32,6 +33,25 @@ def test_csv_basic() -> None:
     assert item.artist == "Taylor Swift"
     assert item.title == "Style"
     assert item.album == "1989"
+
+
+def test_csv_preserves_common_export_metadata_aliases() -> None:
+    payload = (
+        "Track Name,Artist Name(s),Album Name,Album Artist,Track Number,Disc Number,Release Date,Genre,Duration (ms)\n"
+        "Teardrop,Massive Attack,Mezzanine,Massive Attack,1,1,1998-04-20,Trip Hop,330000\n"
+    ).encode("utf-8")
+
+    item = import_playlist(payload, "service-export.csv")[0]
+
+    assert item.title == "Teardrop"
+    assert item.artist == "Massive Attack"
+    assert item.album == "Mezzanine"
+    assert item.album_artist == "Massive Attack"
+    assert item.track_number == 1
+    assert item.disc_number == 1
+    assert item.release_date == "1998-04-20"
+    assert item.genre == "Trip Hop"
+    assert item.duration_ms == 330000
 
 
 def test_apple_xml_sample() -> None:
@@ -90,6 +110,34 @@ def test_soundizz_json_sample() -> None:
     assert intents[1].artist == "Massive Attack"
     assert intents[1].title == "Teardrop"
     assert intents[1].album is None
+
+
+def test_soundiiz_json_preserves_nested_and_release_metadata() -> None:
+    payload = b'''{
+      "tracks": [{
+        "name": "Midnight City",
+        "artists": [{"name": "M83"}],
+        "album": {"name": "Hurry Up, We're Dreaming"},
+        "albumArtist": {"name": "M83"},
+        "trackNumber": 2,
+        "discNumber": 1,
+        "releaseDate": "2011-10-18",
+        "genres": ["Synth-pop", "Electronic"],
+        "durationMs": 244000
+      }]
+    }'''
+
+    item = import_playlist(payload, "soundiiz.json")[0]
+
+    assert item.title == "Midnight City"
+    assert item.artist == "M83"
+    assert item.album == "Hurry Up, We're Dreaming"
+    assert item.album_artist == "M83"
+    assert item.track_number == 2
+    assert item.disc_number == 1
+    assert item.release_date == "2011-10-18"
+    assert item.genre == "Synth-pop, Electronic"
+    assert item.duration_ms == 244000
 
 
 def test_invalid_format_error() -> None:

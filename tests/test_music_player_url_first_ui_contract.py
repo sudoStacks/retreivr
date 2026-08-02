@@ -4,9 +4,10 @@ from pathlib import Path
 
 
 APP_JS = Path(__file__).resolve().parent.parent / "webUI" / "app.js"
+INDEX_HTML = Path(__file__).resolve().parent.parent / "webUI" / "index.html"
 
 
-def test_local_music_playback_prefers_indexed_source_url_before_local_fallback() -> None:
+def test_local_music_playback_wins_before_remote_resolution() -> None:
     source = APP_JS.read_text()
     player_start = source.index("async function playMusicPlayerItem")
     player_end = source.index("function clearMusicPlayerCurrentState", player_start)
@@ -16,7 +17,29 @@ def test_local_music_playback_prefers_indexed_source_url_before_local_fallback()
     assert "async function resolveRecordingIndexedStreamUrlWithTimeout(recordingMbid, timeoutMs = 900)" in source
     assert "const resolved = await resolveRecordingStreamUrl(payload.recording_mbid, buildPlayableResolutionMeta(payload))" in player_source
     assert "resolveRecordingIndexedStreamUrlWithTimeout(payload.recording_mbid, 900)" not in player_source
-    assert player_source.index("const resolved = await resolveRecordingStreamUrl") < player_source.index("if (!payload.stream_url && payload.local_path)")
+    assert player_source.index("if (payload.local_path)") < player_source.index("const resolved = await resolveRecordingStreamUrl")
+    assert "if (!payload.stream_url && !hasDirectVideo && canResolvePlayableItem(payload))" in player_source
+
+
+def test_youtube_transport_recreates_destroyed_host_and_requires_visible_player() -> None:
+    source = APP_JS.read_text()
+    create_start = source.index("function createYTPlayer")
+    create_end = source.index("// Active-player helpers", create_start)
+    create_source = source[create_start:create_end]
+    play_start = source.index("async function playMusicPlayerItem")
+    play_end = source.index("function clearMusicPlayerCurrentState", play_start)
+    play_source = source[play_start:play_end]
+
+    assert "function resetYouTubePlayerHost()" in source
+    assert "destroyYTPlayer();" in create_source
+    assert 'const frame = $("#music-player-video-frame")' in create_source
+    assert "openMusicPlayerScreen({ showVideo: true });" in play_source
+    assert 'activePlayerIsYT() && normalized !== "player"' in source
+
+    markup = INDEX_HTML.read_text()
+    assert "YouTube source player — displayed while remote playback is active" in markup
+    assert 'id="music-player-video-hide"' not in markup
+    assert 'id="music-player-video-toggle"' not in markup
 
 
 def test_album_playback_uses_common_queue_skip_resolution_path() -> None:

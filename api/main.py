@@ -228,7 +228,7 @@ from engine.import_pipeline import (
     mark_stale_import_batches_abandoned,
     process_imported_tracks,
 )
-from engine.import_m3u_builder import write_import_m3u_from_batch
+from engine.import_m3u_builder import resolve_import_playlist_root, write_import_m3u_from_batch
 from library.reconcile import reconcile_library
 from library.review_queue import (
     REVIEW_STATUS_PENDING,
@@ -447,8 +447,7 @@ def _extract_mb_youtube_urls(entity: dict) -> list[str]:
         resource = str(url_obj.get("resource") or "").strip()
         if not resource:
             continue
-        lowered = resource.lower()
-        if "youtube.com" not in lowered and "youtu.be" not in lowered:
+        if not _is_youtube_family_url(resource):
             continue
         if resource not in urls:
             urls.append(resource)
@@ -609,6 +608,15 @@ def _build_youtube_watch_url(video_id: str | None) -> str | None:
     return f"https://www.youtube.com/watch?v={quote(normalized)}"
 
 
+def _is_youtube_family_url(value: str | None) -> bool:
+    try:
+        parsed = urlparse(str(value or "").strip())
+    except Exception:
+        return False
+    hostname = str(parsed.hostname or "").strip().lower().rstrip(".")
+    return hostname == "youtu.be" or hostname == "youtube.com" or hostname.endswith(".youtube.com")
+
+
 def _normalize_preview_source_url(source: str | None, candidate_url: str | None, video_id: str | None = None) -> str | None:
     candidate = str(candidate_url or "").strip()
     if candidate:
@@ -626,8 +634,19 @@ def _resolve_music_preview_candidate(
     track: str,
     album: str,
     media_mode: str,
+    mb_youtube_urls: list[str] | None = None,
 ) -> dict[str, Any] | None:
     normalized_media_mode = str(media_mode or "music").strip().lower() or "music"
+    for candidate_url in mb_youtube_urls or []:
+        source_url = str(candidate_url or "").strip()
+        if not source_url or not _is_youtube_family_url(source_url):
+            continue
+        return {
+            "source": "youtube",
+            "source_url": source_url,
+            "title": track or "Preview",
+            "resolved_via": "musicbrainz_bound_metadata",
+        }
     cfg = get_loaded_config()
     if recording_mbid:
         community_lookup_enabled = bool(
@@ -1091,6 +1110,7 @@ def _run_playlist_import_job(
             return
 
         runtime_config = _read_config_or_404()
+        playlist_name = Path(filename).stem.strip() or "Imported Playlist"
 
         def _progress(snapshot: dict) -> None:
             progress_message = str(snapshot.get("message") or "").strip() or "Resolving tracks and enqueueing jobs..."
@@ -1122,15 +1142,24 @@ def _run_playlist_import_job(
                 "base_dir": app.state.paths.single_downloads_dir,
                 "destination_dir": str(destination_dir or "").strip() or None,
                 "final_format": str(final_format or "").strip() or None,
+                "playlist_name": playlist_name,
                 "progress_callback": _progress,
             },
         )
 
         import_batch_id = str(getattr(result, "import_batch_id", "") or "").strip()
+        playlist_entries = 0
+        if import_batch_id:
+            playlist_entries = write_import_m3u_from_batch(
+                import_batch_id=import_batch_id,
+                playlist_name=playlist_name,
+                db_path=app.state.paths.db_path,
+                playlist_root=resolve_import_playlist_root(runtime_config),
+            )
         _update_playlist_import_job(
             job_id,
             state="completed",
-            message="Playlist import completed.",
+            message="Playlist resolved. Downloads and the local playlist will continue updating in the queue.",
             phase="completed",
             total_tracks=int(getattr(result, "total_tracks", total_tracks) or total_tracks),
             processed_tracks=int(getattr(result, "total_tracks", total_tracks) or total_tracks),
@@ -1143,6 +1172,8 @@ def _run_playlist_import_job(
             top_rejection_reasons=getattr(result, "top_rejection_reasons", {}) or {},
             selected_bucket_counts=getattr(result, "selected_bucket_counts", {}) or {},
             import_batch_id=import_batch_id,
+            playlist_name=playlist_name,
+            playlist_entries=int(playlist_entries),
             error=None,
             finished_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -7906,6 +7937,7 @@ async def finalize_import_playlist(batch_id: str, payload: dict = Body(default=N
             import_batch_id=import_batch_id,
             playlist_name=playlist_name,
             db_path=app.state.paths.db_path,
+            playlist_root=resolve_import_playlist_root(_read_config_or_404()),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"import_finalize_failed: {exc}") from exc
@@ -9259,6 +9291,12 @@ def music_preview(data: dict = Body(...)):
     track = str(payload.get("track") or "").strip()
     album = str(payload.get("album") or "").strip()
     media_mode = str(payload.get("media_mode") or "music").strip().lower() or "music"
+    raw_mb_youtube_urls = payload.get("mb_youtube_urls")
+    mb_youtube_urls = [
+        str(value or "").strip()
+        for value in (raw_mb_youtube_urls if isinstance(raw_mb_youtube_urls, list) else [])
+        if str(value or "").strip()
+    ][:3]
 
     if not recording_mbid and not (artist and track):
         raise HTTPException(status_code=400, detail="recording_mbid or artist+track required")
@@ -9269,6 +9307,7 @@ def music_preview(data: dict = Body(...)):
         track=track,
         album=album,
         media_mode=media_mode,
+        mb_youtube_urls=mb_youtube_urls,
     )
     if not isinstance(preview, dict):
         raise HTTPException(status_code=404, detail="preview_not_available")
@@ -9283,6 +9322,8 @@ def music_preview(data: dict = Body(...)):
     youtube_preview = source in {"youtube", "youtube_music"} or bool(video_id)
     response = {
         "preview_type": "video" if media_mode == "music_video" or youtube_preview else "audio",
+        "playback_adapter": "youtube_iframe" if youtube_preview else "audio",
+        "requires_visible_player": bool(youtube_preview),
         "source": source,
         "source_url": source_url,
         "title": title,
@@ -10586,13 +10627,13 @@ async def api_list_review_queue(
 
 
 @app.post("/api/review_queue/accept")
-async def api_accept_review_queue(payload: ReviewQueueActionPayload):
+def api_accept_review_queue(payload: ReviewQueueActionPayload):
     result = accept_review_queue_items(app.state.paths.db_path, list(payload.item_ids or []))
     return safe_json(result)
 
 
 @app.post("/api/review_queue/reject")
-async def api_reject_review_queue(payload: ReviewQueueActionPayload):
+def api_reject_review_queue(payload: ReviewQueueActionPayload):
     result = reject_review_queue_items(app.state.paths.db_path, list(payload.item_ids or []))
     return safe_json(result)
 

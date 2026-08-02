@@ -801,6 +801,7 @@ def _enqueue_music_track_job(
     destination,
     final_format_override,
     import_batch_id: str,
+    playlist_name: str | None,
     source_index: int,
     recording_mbid: str,
     release_mbid: str | None,
@@ -869,6 +870,7 @@ def _enqueue_music_track_job(
             "source": "import",
             "import_batch": import_batch_id,
             "import_batch_id": import_batch_id,
+            "playlist_name": str(playlist_name or "").strip() or None,
             "source_index": source_index,
             "track_number": track_number,
             "disc_number": disc_number,
@@ -900,10 +902,12 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     confidence_threshold = _DEFAULT_CONFIDENCE_THRESHOLD
     runtime_config = config.get("app_config") if isinstance(config, dict) and isinstance(config.get("app_config"), dict) else (config if isinstance(config, dict) else {})
     media_mode = "music"
+    playlist_name = None
     if isinstance(config, dict):
         requested_media_mode = str(config.get("media_mode") or "").strip().lower()
         if requested_media_mode in {"music", "music_video"}:
             media_mode = requested_media_mode
+        playlist_name = str(config.get("playlist_name") or "").strip() or None
     base_dir = "/downloads"
     destination = None
     final_format_override = None
@@ -1377,6 +1381,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     destination=destination,
                     final_format_override=final_format_override,
                     import_batch_id=import_batch_id,
+                    playlist_name=playlist_name,
                     source_index=int(entry["idx"]) - 1,
                     recording_mbid=recording_mbid,
                     release_mbid=release_mbid,
@@ -1730,6 +1735,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     destination=destination,
                     final_format_override=final_format_override,
                     import_batch_id=import_batch_id,
+                    playlist_name=playlist_name,
                     source_index=idx - 1,
                     recording_mbid=recording_mbid,
                     release_mbid=release_mbid,

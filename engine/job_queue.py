@@ -29,6 +29,7 @@ from yt_dlp.utils import DownloadError, ExtractorError
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
 from engine.community_publish_worker import append_publish_proposal_to_outbox, normalize_community_publish_source
 from engine.music_export import run_music_exports
+from engine.import_m3u_builder import resolve_import_playlist_root, write_import_m3u_from_batch
 from engine.resolution_api import upsert_local_acquired_mapping
 from engine.music_title_normalization import has_live_intent, relaxed_search_title
 from engine.download_defaults import normalize_download_media_mode, resolve_effective_download_settings
@@ -534,9 +535,21 @@ def ensure_download_history_table(conn):
     )
     cur.execute("PRAGMA table_info(download_history)")
     existing_columns = {row[1] for row in cur.fetchall()}
-    for column in ("input_url", "canonical_url", "external_id", "source", "channel_id", "thumbnail_url"):
+    for column in (
+        "input_url",
+        "canonical_url",
+        "external_id",
+        "source",
+        "channel_id",
+        "thumbnail_url",
+        "output_path",
+        "import_batch_id",
+        "playlist_name",
+    ):
         if column not in existing_columns:
             cur.execute(f"ALTER TABLE download_history ADD COLUMN {column} TEXT")
+    if "source_index" not in existing_columns:
+        cur.execute("ALTER TABLE download_history ADD COLUMN source_index INTEGER")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_download_history_source_extid "
         "ON download_history (source, external_id)"
@@ -4698,6 +4711,24 @@ class DownloadWorkerEngine:
                     status=current_status,
                 )
                 return
+            output_template = getattr(job, "output_template", None)
+            if isinstance(output_template, dict):
+                import_batch_id = str(output_template.get("import_batch_id") or "").strip()
+                playlist_name = str(output_template.get("playlist_name") or "").strip()
+                if import_batch_id and playlist_name:
+                    try:
+                        write_import_m3u_from_batch(
+                            import_batch_id=import_batch_id,
+                            playlist_name=playlist_name,
+                            db_path=self.db_path,
+                            playlist_root=resolve_import_playlist_root(self.config),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[MUSIC] imported playlist rebuild failed batch_id=%s job_id=%s",
+                            import_batch_id,
+                            getattr(job, "id", None),
+                        )
             self.store.update_long_term_retry_status(
                 job.id,
                 status=LONG_TERM_RETRY_STATUS_RESOLVED,
@@ -8940,13 +8971,24 @@ def record_download_history(db_path, job, filepath, *, meta=None):
             file_size_bytes = None
         now = utc_now()
         title = meta.get("title") if isinstance(meta, dict) else None
+        output_template = getattr(job, "output_template", None)
+        if not isinstance(output_template, dict):
+            output_template = {}
+        import_batch_id = str(output_template.get("import_batch_id") or "").strip() or None
+        playlist_name = str(output_template.get("playlist_name") or "").strip() or None
+        source_index = output_template.get("source_index")
+        try:
+            source_index = int(source_index) if source_index is not None else None
+        except (TypeError, ValueError):
+            source_index = None
         cur.execute(
             """
             INSERT INTO download_history (
                 video_id, title, filename, destination, source, status,
                 created_at, completed_at, file_size_bytes,
-                input_url, canonical_url, external_id, channel_id, thumbnail_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                input_url, canonical_url, external_id, channel_id, thumbnail_url,
+                output_path, import_batch_id, playlist_name, source_index
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 video_id,
@@ -8963,6 +9005,10 @@ def record_download_history(db_path, job, filepath, *, meta=None):
                 external_id,
                 (meta or {}).get("channel_id") if isinstance(meta, dict) else None,
                 (meta or {}).get("thumbnail_url") if isinstance(meta, dict) else None,
+                filepath,
+                import_batch_id,
+                playlist_name,
+                source_index,
             ),
         )
         conn.commit()

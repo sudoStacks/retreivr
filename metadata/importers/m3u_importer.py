@@ -13,6 +13,7 @@ class M3UImporter(BaseImporter):
         intents: list[TrackIntent] = []
         pending_artist: str | None = None
         pending_title: str | None = None
+        pending_duration_ms: int | None = None
 
         for raw_line in text.splitlines():
             line = raw_line.strip()
@@ -21,7 +22,7 @@ class M3UImporter(BaseImporter):
             if line.upper() == "#EXTM3U":
                 continue
             if line.startswith("#EXTINF"):
-                pending_artist, pending_title = _parse_extinf(line)
+                pending_artist, pending_title, pending_duration_ms = _parse_extinf(line)
                 continue
             if line.startswith("#"):
                 continue
@@ -42,20 +43,30 @@ class M3UImporter(BaseImporter):
                     album=None,
                     raw_line=raw_value,
                     source_format=self.SOURCE_FORMAT,
+                    duration_ms=pending_duration_ms,
                 )
             )
             pending_artist = None
             pending_title = None
+            pending_duration_ms = None
 
         return intents
 
 
-def _parse_extinf(line: str) -> tuple[str | None, str | None]:
+def _parse_extinf(line: str) -> tuple[str | None, str | None, int | None]:
     # #EXTINF:<seconds>,Artist - Title
     parts = line.split(",", 1)
     if len(parts) != 2:
-        return None, None
-    return _split_artist_title(parts[1].strip())
+        return None, None, None
+    duration_ms = None
+    try:
+        seconds = float(parts[0].split(":", 1)[1].strip())
+        if seconds > 0:
+            duration_ms = int(round(seconds * 1000))
+    except (IndexError, TypeError, ValueError):
+        duration_ms = None
+    artist, title = _split_artist_title(parts[1].strip())
+    return artist, title, duration_ms
 
 
 def _split_artist_title(value: str) -> tuple[str | None, str | None]:

@@ -425,11 +425,10 @@
                   </div>
                   <div id="music-player-video-shell" class="music-player-video-shell hidden">
                     <div class="music-player-video-toolbar">
-                      <div class="meta">Video companion</div>
-                      <button id="music-player-video-hide" class="button ghost small" type="button">Hide Video</button>
+                      <div class="meta">YouTube source player — displayed while remote playback is active</div>
                     </div>
                     <div class="music-player-video-frame-wrap">
-                      <iframe id="music-player-video-frame" src="" title="Music radio video" allow="autoplay; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+                      <div id="music-player-video-frame"></div>
                     </div>
                   </div>
                   <audio id="music-player-audio" class="music-player-audio" preload="metadata"></audio>
@@ -440,7 +439,6 @@
                       <button id="music-player-playpause" class="button primary small" type="button">Play</button>
                       <button id="music-player-next" class="button ghost small" type="button">Next</button>
                       <button id="music-player-repeat" class="button ghost small music-player-control-toggle" type="button" aria-pressed="false">Repeat: Off</button>
-                      <button id="music-player-video-toggle" class="button ghost small hidden" type="button">Show Video</button>
                     </div>
                     <div class="music-player-progress-row">
                       <span id="music-player-current-time" class="meta music-player-time">0:00</span>
