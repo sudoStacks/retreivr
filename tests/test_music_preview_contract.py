@@ -129,3 +129,28 @@ def test_bounded_call_does_not_wait_for_timed_out_worker(api_module) -> None:
     with pytest.raises(TimeoutError):
         api_module._bounded_call(0.2, lambda: time.sleep(0.7))
     assert time.monotonic() - started_at < 0.5
+
+
+def test_music_preview_ranking_prefers_exact_track_title(api_module) -> None:
+    ranked = api_module._rank_music_preview_candidates(
+        [
+            {
+                "source": "youtube",
+                "video_id": "lyric-video",
+                "url": "https://youtube.com/watch?v=lyric-video",
+                "title": "Alan Jackson - When God Paints (Lyric Video)",
+                "uploader": "Alan Jackson",
+            },
+            {
+                "source": "youtube",
+                "video_id": "exact-track",
+                "url": "https://youtube.com/watch?v=exact-track",
+                "title": "When God Paints",
+                "uploader": "Alan Jackson",
+            },
+        ],
+        artist="Alan Jackson",
+        track="When God Paints",
+    )
+
+    assert ranked[0]["video_id"] == "exact-track"

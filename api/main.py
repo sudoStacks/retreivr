@@ -699,6 +699,8 @@ def _rank_music_preview_candidates(candidates: Any, *, artist: str, track: str) 
         score = (track_hits * 12) + (artist_hits * 7)
         if track_tokens and track_tokens.issubset(title_tokens):
             score += 35
+        if track_tokens and title_tokens == track_tokens:
+            score += 25
         if artist_tokens and artist_tokens.issubset(searchable_tokens):
             score += 20
         if _mv_has_intent(title):
