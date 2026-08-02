@@ -106,6 +106,7 @@ def test_music_preview_fast_search_uses_lightweight_youtube_result(api_module, m
             ]
 
     monkeypatch.setattr(api_module, "YouTubeAdapter", _FakeYouTubeAdapter)
+    monkeypatch.setattr(api_module, "youtube_fast_search", lambda *_args, **_kwargs: [])
     api_module._MUSIC_PREVIEW_CACHE.clear()
 
     preview = api_module._resolve_music_preview_candidate(
@@ -118,7 +119,7 @@ def test_music_preview_fast_search_uses_lightweight_youtube_result(api_module, m
 
     assert preview is not None
     assert preview["video_id"] == "qSorUl1pBbg"
-    assert preview["resolved_via"] == "youtube_fast_search"
+    assert preview["resolved_via"] == "youtube_fast_search:yt_dlp_flat"
     assert calls[0][2] is None
     assert calls[0][4] is True
 

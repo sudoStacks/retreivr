@@ -87,7 +87,7 @@ from engine.json_utils import json_sanity_check, safe_json, safe_json_dump, safe
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
 from engine.musicbrainz_binding import resolve_best_mb_pair, search_artists_by_genre, search_music_metadata
 from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
-from engine.search_adapters import YouTubeAdapter
+from engine.search_adapters import YouTubeAdapter, youtube_fast_search
 import engine.community_cache as community_cache
 from engine.spotify_playlist_importer import (
     SpotifyPlaylistImportError,
@@ -712,42 +712,59 @@ def _search_fast_music_preview(*, artist: str, track: str, album: str) -> dict[s
     if not str(artist or "").strip() or not str(track or "").strip():
         return None
     adapter = YouTubeAdapter()
-    attempts = [(artist, track, None)]
-    if str(album or "").strip():
-        attempts.append((artist, track, album))
-    for search_artist, search_track, search_album in attempts:
-        try:
-            candidates = _bounded_call(
-                3.2,
-                lambda search_album=search_album: adapter.search_track(
-                    search_artist,
-                    search_track,
-                    album=search_album,
-                    limit=8,
-                    lightweight=True,
-                    timeout_budget_sec=2.6,
-                ),
-            )
-        except Exception:
-            logging.debug(
-                "music_preview_fast_search_failed artist=%s track=%s album=%s",
-                artist,
-                track,
-                search_album or "",
-                exc_info=True,
-            )
-            continue
-        ranked = _rank_music_preview_candidates(candidates, artist=artist, track=track)
-        if not ranked:
-            continue
-        candidate = ranked[0]
-        return {
-            "source": str(candidate.get("source") or "youtube").strip().lower() or "youtube",
-            "source_url": str(candidate.get("source_url") or "").strip(),
-            "title": str(candidate.get("title") or track or "Preview").strip() or "Preview",
-            "resolved_via": "youtube_fast_search",
-            "video_id": str(candidate.get("video_id") or "").strip() or None,
-        }
+    query = " ".join(part for part in [artist, track] if str(part or "").strip()).strip()
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    futures = {
+        pool.submit(youtube_fast_search, query, 8): "innertube",
+        pool.submit(
+            adapter.search_track,
+            artist,
+            track,
+            None,
+            8,
+            lightweight=True,
+            timeout_budget_sec=4.5,
+        ): "yt_dlp_flat",
+    }
+    try:
+        for future in concurrent.futures.as_completed(futures, timeout=6.0):
+            resolver = futures[future]
+            try:
+                candidates = future.result()
+            except Exception:
+                logging.debug(
+                    "music_preview_fast_search_failed resolver=%s artist=%s track=%s",
+                    resolver,
+                    artist,
+                    track,
+                    exc_info=True,
+                )
+                continue
+            if resolver == "innertube" and isinstance(candidates, list):
+                candidates = [
+                    {
+                        **candidate,
+                        "source": "youtube",
+                        "uploader": candidate.get("channel"),
+                    }
+                    for candidate in candidates
+                    if isinstance(candidate, dict)
+                ]
+            ranked = _rank_music_preview_candidates(candidates, artist=artist, track=track)
+            if not ranked:
+                continue
+            candidate = ranked[0]
+            return {
+                "source": str(candidate.get("source") or "youtube").strip().lower() or "youtube",
+                "source_url": str(candidate.get("source_url") or "").strip(),
+                "title": str(candidate.get("title") or track or "Preview").strip() or "Preview",
+                "resolved_via": f"youtube_fast_search:{resolver}",
+                "video_id": str(candidate.get("video_id") or "").strip() or None,
+            }
+    except TimeoutError:
+        logging.debug("music_preview_fast_search_timeout artist=%s track=%s", artist, track)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return None
 
 
@@ -782,6 +799,11 @@ def _resolve_music_preview_candidate(
     if cached_preview is not None:
         cached_preview["resolved_via"] = "runtime_preview_cache"
         return cached_preview
+    if normalized_media_mode == "music":
+        fast_preview = _search_fast_music_preview(artist=artist, track=track, album=album)
+        if fast_preview is not None:
+            _music_preview_cache_put(cache_key, fast_preview)
+            return fast_preview
     cfg = get_loaded_config()
     if recording_mbid:
         community_lookup_enabled = bool(
@@ -849,11 +871,6 @@ def _resolve_music_preview_candidate(
                     "resolved_via": "youtube_mv_precheck",
                 }
         return None
-
-    fast_preview = _search_fast_music_preview(artist=artist, track=track, album=album)
-    if fast_preview is not None:
-        _music_preview_cache_put(cache_key, fast_preview)
-        return fast_preview
 
     query = " ".join(part for part in [artist, track] if str(part or "").strip()).strip()
     if not query:
