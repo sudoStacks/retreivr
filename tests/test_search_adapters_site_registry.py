@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -168,3 +169,39 @@ def test_site_search_adapter_dedupes_repeated_terms(monkeypatch):
     adapter = mod.SiteSearchAdapter(source="test_site", domains=["example.com"], query_suffix="video")
     adapter.search_track("fox news", "fox news", limit=5, lightweight=True)
     assert captured["query"] == "fox news video"
+
+
+def test_youtube_lightweight_search_builds_watch_url_from_flat_video_id(monkeypatch):
+    mod = _load_search_adapters_module()
+
+    class _FlatYdl:
+        def extract_info(self, *_args, **_kwargs):
+            return {
+                "entries": [
+                    {
+                        "id": "qSorUl1pBbg",
+                        "url": "qSorUl1pBbg",
+                        "title": "When God Paints",
+                        "channel": "Alan Jackson",
+                    }
+                ]
+            }
+
+    adapter = mod.YouTubeAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "_get_discovery_ydl",
+        lambda **_kwargs: (_FlatYdl(), threading.Lock()),
+    )
+
+    rows = adapter.search_track(
+        "Alan Jackson",
+        "When God Paints",
+        limit=3,
+        lightweight=True,
+        timeout_budget_sec=2.0,
+    )
+
+    assert rows
+    assert rows[0]["video_id"] == "qSorUl1pBbg"
+    assert rows[0]["url"] == "https://www.youtube.com/watch?v=qSorUl1pBbg"

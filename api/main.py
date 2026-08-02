@@ -457,9 +457,55 @@ def _extract_mb_youtube_urls(entity: dict) -> list[str]:
 
 
 def _bounded_call(timeout_seconds: float, fn):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(fn)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(fn)
+    try:
         return future.result(timeout=max(0.2, float(timeout_seconds)))
+    finally:
+        # ThreadPoolExecutor's context manager waits for a timed-out worker during
+        # __exit__. That made the preview endpoint block until yt-dlp finished and
+        # then discard its valid result. A bounded call must actually return at its
+        # deadline; the underlying network operation may finish in the background.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+_MUSIC_PREVIEW_CACHE_TTL_SECONDS = 12 * 60 * 60
+_MUSIC_PREVIEW_CACHE_MAX_ENTRIES = 2048
+_MUSIC_PREVIEW_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_MUSIC_PREVIEW_CACHE_LOCK = threading.Lock()
+
+
+def _music_preview_cache_key(
+    *, recording_mbid: str, artist: str, track: str, album: str, media_mode: str
+) -> str:
+    identity = str(recording_mbid or "").strip().lower()
+    if not identity:
+        identity = "|".join(
+            re.sub(r"\s+", " ", str(value or "").strip().lower())
+            for value in (artist, track, album)
+        )
+    return f"{str(media_mode or 'music').strip().lower()}:{identity}"
+
+
+def _music_preview_cache_get(cache_key: str) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _MUSIC_PREVIEW_CACHE_LOCK:
+        cached = _MUSIC_PREVIEW_CACHE.get(cache_key)
+        if cached is None:
+            return None
+        created_at, payload = cached
+        if now - created_at > _MUSIC_PREVIEW_CACHE_TTL_SECONDS:
+            _MUSIC_PREVIEW_CACHE.pop(cache_key, None)
+            return None
+        return dict(payload)
+
+
+def _music_preview_cache_put(cache_key: str, payload: dict[str, Any]) -> None:
+    with _MUSIC_PREVIEW_CACHE_LOCK:
+        if len(_MUSIC_PREVIEW_CACHE) >= _MUSIC_PREVIEW_CACHE_MAX_ENTRIES:
+            oldest_key = min(_MUSIC_PREVIEW_CACHE, key=lambda key: _MUSIC_PREVIEW_CACHE[key][0])
+            _MUSIC_PREVIEW_CACHE.pop(oldest_key, None)
+        _MUSIC_PREVIEW_CACHE[cache_key] = (time.monotonic(), dict(payload))
 
 
 _MV_HINT_STOPWORDS = {
@@ -627,6 +673,84 @@ def _normalize_preview_source_url(source: str | None, candidate_url: str | None,
     return None
 
 
+def _rank_music_preview_candidates(candidates: Any, *, artist: str, track: str) -> list[dict[str, Any]]:
+    if not isinstance(candidates, list):
+        return []
+    artist_tokens = set(_mv_hint_tokens(artist))
+    track_tokens = set(_mv_hint_tokens(track))
+    ranked: list[tuple[int, int, dict[str, Any]]] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source") or "").strip().lower()
+        source_url = _normalize_preview_source_url(
+            source,
+            candidate.get("url"),
+            candidate.get("video_id"),
+        )
+        if source not in {"youtube", "youtube_music"} or not source_url:
+            continue
+        title = str(candidate.get("title") or "").strip()
+        uploader = str(candidate.get("uploader") or candidate.get("artist") or "").strip()
+        title_tokens = set(_mv_hint_tokens(title))
+        searchable_tokens = title_tokens.union(_mv_hint_tokens(uploader))
+        track_hits = len(track_tokens.intersection(title_tokens)) if track_tokens else 0
+        artist_hits = len(artist_tokens.intersection(searchable_tokens)) if artist_tokens else 0
+        score = (track_hits * 12) + (artist_hits * 7)
+        if track_tokens and track_tokens.issubset(title_tokens):
+            score += 35
+        if artist_tokens and artist_tokens.issubset(searchable_tokens):
+            score += 20
+        if _mv_has_intent(title):
+            score += 3
+        ranked.append((score, -index, {**candidate, "source_url": source_url}))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in ranked]
+
+
+def _search_fast_music_preview(*, artist: str, track: str, album: str) -> dict[str, Any] | None:
+    if not str(artist or "").strip() or not str(track or "").strip():
+        return None
+    adapter = YouTubeAdapter()
+    attempts = [(artist, track, None)]
+    if str(album or "").strip():
+        attempts.append((artist, track, album))
+    for search_artist, search_track, search_album in attempts:
+        try:
+            candidates = _bounded_call(
+                3.2,
+                lambda search_album=search_album: adapter.search_track(
+                    search_artist,
+                    search_track,
+                    album=search_album,
+                    limit=8,
+                    lightweight=True,
+                    timeout_budget_sec=2.6,
+                ),
+            )
+        except Exception:
+            logging.debug(
+                "music_preview_fast_search_failed artist=%s track=%s album=%s",
+                artist,
+                track,
+                search_album or "",
+                exc_info=True,
+            )
+            continue
+        ranked = _rank_music_preview_candidates(candidates, artist=artist, track=track)
+        if not ranked:
+            continue
+        candidate = ranked[0]
+        return {
+            "source": str(candidate.get("source") or "youtube").strip().lower() or "youtube",
+            "source_url": str(candidate.get("source_url") or "").strip(),
+            "title": str(candidate.get("title") or track or "Preview").strip() or "Preview",
+            "resolved_via": "youtube_fast_search",
+            "video_id": str(candidate.get("video_id") or "").strip() or None,
+        }
+    return None
+
+
 def _resolve_music_preview_candidate(
     *,
     recording_mbid: str,
@@ -637,6 +761,13 @@ def _resolve_music_preview_candidate(
     mb_youtube_urls: list[str] | None = None,
 ) -> dict[str, Any] | None:
     normalized_media_mode = str(media_mode or "music").strip().lower() or "music"
+    cache_key = _music_preview_cache_key(
+        recording_mbid=recording_mbid,
+        artist=artist,
+        track=track,
+        album=album,
+        media_mode=normalized_media_mode,
+    )
     for candidate_url in mb_youtube_urls or []:
         source_url = str(candidate_url or "").strip()
         if not source_url or not _is_youtube_family_url(source_url):
@@ -647,6 +778,10 @@ def _resolve_music_preview_candidate(
             "title": track or "Preview",
             "resolved_via": "musicbrainz_bound_metadata",
         }
+    cached_preview = _music_preview_cache_get(cache_key)
+    if cached_preview is not None:
+        cached_preview["resolved_via"] = "runtime_preview_cache"
+        return cached_preview
     cfg = get_loaded_config()
     if recording_mbid:
         community_lookup_enabled = bool(
@@ -715,20 +850,25 @@ def _resolve_music_preview_candidate(
                 }
         return None
 
-    query = " ".join(part for part in [artist, track, album] if str(part or "").strip()).strip()
+    fast_preview = _search_fast_music_preview(artist=artist, track=track, album=album)
+    if fast_preview is not None:
+        _music_preview_cache_put(cache_key, fast_preview)
+        return fast_preview
+
+    query = " ".join(part for part in [artist, track] if str(part or "").strip()).strip()
     if not query:
         return None
     try:
         candidates = _bounded_call(
-            4.2,
-            lambda: YouTubeAdapter().search_music_track(query, limit=8),
+            9.5,
+            lambda: YouTubeAdapter().search_music_track(query, limit=5),
         )
     except Exception:
         logging.debug("music_preview_search_failed query=%s", query, exc_info=True)
         return None
     if not isinstance(candidates, list):
         return None
-    for candidate in candidates:
+    for candidate in _rank_music_preview_candidates(candidates, artist=artist, track=track):
         if not isinstance(candidate, dict):
             continue
         source = str(candidate.get("source") or "").strip().lower()
@@ -741,13 +881,15 @@ def _resolve_music_preview_candidate(
         )
         if not source or not source_url:
             continue
-        return {
+        preview = {
             "source": source,
             "source_url": source_url,
             "title": str(candidate.get("title") or track or "Preview").strip() or "Preview",
             "resolved_via": "search_fallback",
             "video_id": str(candidate.get("video_id") or "").strip() or None,
         }
+        _music_preview_cache_put(cache_key, preview)
+        return preview
     return None
 
 

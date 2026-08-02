@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,3 +87,44 @@ def test_youtube_family_url_validation_rejects_deceptive_hosts(api_module) -> No
     assert api_module._is_youtube_family_url("https://music.youtube.com/watch?v=abc123") is True
     assert api_module._is_youtube_family_url("https://youtube.com.example.test/watch?v=abc123") is False
     assert api_module._is_youtube_family_url("https://example.test/youtube.com/watch?v=abc123") is False
+
+
+def test_music_preview_fast_search_uses_lightweight_youtube_result(api_module, monkeypatch) -> None:
+    calls = []
+
+    class _FakeYouTubeAdapter:
+        def search_track(self, artist, track, album=None, limit=5, *, lightweight=False, timeout_budget_sec=None):
+            calls.append((artist, track, album, limit, lightweight, timeout_budget_sec))
+            return [
+                {
+                    "source": "youtube",
+                    "video_id": "qSorUl1pBbg",
+                    "url": "https://www.youtube.com/watch?v=qSorUl1pBbg",
+                    "title": "When God Paints",
+                    "uploader": "Alan Jackson",
+                }
+            ]
+
+    monkeypatch.setattr(api_module, "YouTubeAdapter", _FakeYouTubeAdapter)
+    api_module._MUSIC_PREVIEW_CACHE.clear()
+
+    preview = api_module._resolve_music_preview_candidate(
+        recording_mbid="",
+        artist="Alan Jackson",
+        track="When God Paints",
+        album="Angels and Alcohol",
+        media_mode="music",
+    )
+
+    assert preview is not None
+    assert preview["video_id"] == "qSorUl1pBbg"
+    assert preview["resolved_via"] == "youtube_fast_search"
+    assert calls[0][2] is None
+    assert calls[0][4] is True
+
+
+def test_bounded_call_does_not_wait_for_timed_out_worker(api_module) -> None:
+    started_at = time.monotonic()
+    with pytest.raises(TimeoutError):
+        api_module._bounded_call(0.2, lambda: time.sleep(0.7))
+    assert time.monotonic() - started_at < 0.5

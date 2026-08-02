@@ -632,6 +632,17 @@ class _YtDlpSearchMixin(SearchAdapter):
                 logging.debug("Skipping restricted search result from %s", self.source)
                 continue
             url = entry.get("webpage_url")
+            if lightweight and not _is_http_url(url):
+                # Flat yt-dlp discovery intentionally skips the expensive video probe.
+                # Depending on the extractor/version, that leaves the canonical watch
+                # URL in ``url`` (or only exposes the video id) instead of
+                # ``webpage_url``. Preserve the shallow result rather than throwing
+                # away an otherwise playable YouTube match.
+                flat_url = entry.get("url")
+                if _is_http_url(flat_url):
+                    url = flat_url
+                elif self.source in {"youtube", "youtube_music"} and entry.get("id"):
+                    url = f"https://www.youtube.com/watch?v={entry.get('id')}"
             if not _is_http_url(url):
                 # yt-dlp search extractors often expose internal extractor URLs (e.g. bandcampsearch5)
                 # which must never be treated as real URLs.

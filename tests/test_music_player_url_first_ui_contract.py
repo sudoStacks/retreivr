@@ -49,7 +49,9 @@ def test_album_playback_uses_common_queue_skip_resolution_path() -> None:
     album_source = source[start:end]
 
     assert "setPlayerQueue(queueItems)" in album_source
+    assert "_prefetchNextUnresolved(1)" in album_source
     assert "await playPlayerQueueIndex(0)" in album_source
+    assert album_source.index("_prefetchNextUnresolved(1)") < album_source.index("await playPlayerQueueIndex(0)")
     assert "const firstUnresolved = queueItems[0]" not in album_source
     assert "return;" not in album_source[album_source.index("setPlayerQueue(queueItems)"):]
 

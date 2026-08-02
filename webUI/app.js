@@ -13885,6 +13885,9 @@ async function playMusicAlbumFromSearch(albumItem) {
   clearActiveStationPlayback();
   setPlayerQueue(queueItems);
   setMusicPlayerView("queue");
+  // Resolve upcoming album tracks while the first track starts, so continuous
+  // playback does not pause at every unresolved YouTube handoff.
+  _prefetchNextUnresolved(1);
   await playPlayerQueueIndex(0);
 }
 
