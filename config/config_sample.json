@@ -91,6 +91,14 @@
     "favorite_genres": [],
     "favorite_artists": []
   },
+  "books": {
+    "enabled": false,
+    "library_path": "./media/books",
+    "metadata_provider": "openlibrary",
+    "allow_direct_urls": true,
+    "allow_private_source_urls": false,
+    "max_download_mb": 500
+  },
   "music_player": {
     "stations": [],
     "favorites": [],

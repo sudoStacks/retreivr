@@ -119,6 +119,10 @@ const state = {
     sonarr: { configured: false, reachable: false, message: "Sonarr is not configured" },
   },
   arrStatusPollTimer: null,
+  booksSection: "search",
+  booksResults: [],
+  booksLibrary: [],
+  booksSelectedMetadata: null,
   setupStatus: null,
   setupWizard: null,
   servicesHealth: null,
@@ -608,6 +612,11 @@ function mountTopbarForPage(page) {
     if (filtersPanel) subbarHost.appendChild(filtersPanel);
     syncTopbarSubbarVisibility();
     return;
+  }
+  if (page === "books") {
+    const searchRow = document.querySelector(".books-search-row");
+    if (searchRow) searchHost.appendChild(searchRow);
+    syncTopbarSubbarVisibility();
   }
 }
 
@@ -1725,8 +1734,10 @@ async function refreshCommunityCacheSyncStatus() {
 function setPage(page) {
   const normalized = normalizePageName(page);
   const requested = String(page || "").split("?")[0] || page;
-  const allowed = new Set(["home", "video", "music", "movies-tv", "review", "config"]);
-  const target = allowed.has(normalized) ? normalized : "home";
+  const allowed = new Set(["home", "video", "music", "movies-tv", "books", "review", "config"]);
+  const target = allowed.has(normalized) && !(normalized === "books" && !state.config?.books?.enabled)
+    ? normalized
+    : "home";
   if (activePlayerIsYT() && target !== "music") {
     activePlayerPause();
   }
@@ -1771,6 +1782,7 @@ function setPage(page) {
   document.body.classList.toggle("launcher-page", target === "home");
   document.body.classList.toggle("video-page", target === "video");
   document.body.classList.toggle("music-page", target === "music");
+  document.body.classList.toggle("books-page", target === "books");
   if (target !== "video" && target !== "music") {
     setHomeSearchActive(false);
     setHomeResultsState({ hasResults: false, terminal: false });
@@ -1811,6 +1823,13 @@ function setPage(page) {
     renderArrResults();
     setMoviesTvSection(state.moviesTvSection || "search");
     startArrStatusPolling();
+  } else if (target === "books") {
+    mountTopbarForPage("books");
+    setBooksSection(state.booksSection || "search");
+    loadBooksStatus().catch(() => {});
+    if ((state.booksSection || "search") === "library") {
+      loadBooksLibrary().catch(() => {});
+    }
   } else if (target === "config") {
     mountSettingsSubpages();
     ensureSettingsLayoutVisible();
@@ -1862,19 +1881,250 @@ function renderHomeLauncher() {
   const booksTile = $("#home-launcher-books");
   const setupTile = $("#home-launcher-setup");
   if (!booksTile && !setupTile) return;
-  const readarrCfg = (state.config?.arr?.readarr && typeof state.config.arr.readarr === "object")
-    ? state.config.arr.readarr
-    : {};
-  const stack = (state.config?.setup?.stack && typeof state.config.setup.stack === "object")
-    ? state.config.setup.stack
-    : {};
-  const enabled = !!(stack.enable_readarr || readarrCfg.base_url || readarrCfg.api_key);
+  const enabled = !!state.config?.books?.enabled;
   if (booksTile) {
     booksTile.classList.toggle("hidden", !enabled);
   }
+  syncBooksNavigation();
   if (setupTile) {
     setupTile.classList.toggle("hidden", isInitialSetupComplete());
   }
+}
+
+function syncBooksNavigation() {
+  const enabled = !!state.config?.books?.enabled;
+  const button = $("#books-nav-button");
+  if (button) button.classList.toggle("hidden", !enabled);
+  if (!enabled && state.currentPage === "books") {
+    setPage("home");
+  }
+}
+
+function setBooksSection(section) {
+  const normalized = section === "library" ? "library" : "search";
+  state.booksSection = normalized;
+  $$('[data-books-section]').forEach((button) => {
+    button.classList.toggle("active", button.dataset.booksSection === normalized);
+  });
+  $("#books-search-view")?.classList.toggle("hidden", normalized !== "search");
+  $("#books-library-view")?.classList.toggle("hidden", normalized !== "library");
+  if (normalized === "library") loadBooksLibrary().catch(() => {});
+}
+
+function bookAuthorsLabel(item) {
+  const authors = Array.isArray(item?.authors) ? item.authors.filter(Boolean) : [];
+  return authors.length ? authors.join(", ") : "Unknown author";
+}
+
+function bookMetadataFromResult(item) {
+  return {
+    title: item?.title || "Untitled",
+    subtitle: item?.subtitle || "",
+    authors: Array.isArray(item?.authors) ? item.authors : [],
+    publishers: Array.isArray(item?.publishers) ? item.publishers : [],
+    first_publish_year: item?.first_publish_year || "",
+    subjects: Array.isArray(item?.subjects) ? item.subjects : [],
+    languages: Array.isArray(item?.languages) ? item.languages : [],
+    isbn: Array.isArray(item?.isbn) ? item.isbn : [],
+    cover_url: item?.cover_url || "",
+    work_id: item?.work_id || "",
+    edition_id: item?.edition_id || "",
+    provider: item?.provider || "openlibrary",
+  };
+}
+
+function renderBookCover(item, { library = false } = {}) {
+  const coverUrl = String(item?.cover_url || "").trim();
+  if (coverUrl) {
+    return `<img src="${escapeHtml(coverUrl)}" alt="" loading="lazy" decoding="async" onerror="this.classList.add('hidden');this.nextElementSibling?.classList.remove('hidden')"><div class="books-cover-placeholder hidden" aria-hidden="true">▤</div>`;
+  }
+  const format = library ? String(item?.format || "BOOK") : "BOOK";
+  return `<div class="books-cover-placeholder" aria-hidden="true"><span>▤</span><small>${escapeHtml(format)}</small></div>`;
+}
+
+function renderBooksResults() {
+  const host = $("#books-results-list");
+  if (!host) return;
+  const results = Array.isArray(state.booksResults) ? state.booksResults : [];
+  $("#books-results-status").textContent = results.length ? `${results.length} matches` : "No results";
+  if (!results.length) {
+    host.innerHTML = '<div class="home-results-empty">Search by title, author, subject, or ISBN.</div>';
+    return;
+  }
+  host.innerHTML = results.map((item, index) => {
+    const year = item?.first_publish_year ? String(item.first_publish_year) : "Year unknown";
+    const subjects = (Array.isArray(item?.subjects) ? item.subjects : []).slice(0, 3).join(" · ");
+    const access = item?.public_readable ? "Read online" : (item?.has_fulltext ? "Preview available" : "Metadata");
+    const detailsUrl = String(item?.details_url || "").trim();
+    return `
+      <article class="home-result-card music-meta-card music-grid-card movies-tv-card books-card" data-book-index="${index}">
+        <div class="home-candidate-artwork movies-tv-artwork books-artwork">${renderBookCover(item)}</div>
+        <div class="movies-tv-overlay books-card-overlay">
+          <div class="home-candidate-main movies-tv-main">
+            <div class="home-candidate-title">${escapeHtml(item?.title || "Untitled")}</div>
+            <div class="meta books-authors">${escapeHtml(bookAuthorsLabel(item))}</div>
+            <div class="meta">${escapeHtml(year)} · ${escapeHtml(access)}</div>
+            <div class="meta movies-tv-overview">${escapeHtml(subjects || `${Number(item?.edition_count || 0)} editions`)}</div>
+          </div>
+          <div class="home-candidate-action home-candidate-action-primary-stack movies-tv-action books-card-actions">
+            ${detailsUrl ? `<a class="button ghost small" href="${escapeHtml(detailsUrl)}" target="_blank" rel="noreferrer">${item?.public_readable ? "Read / Preview" : "Details"}</a>` : ""}
+            <button class="button primary small" data-book-action="use-metadata" data-book-index="${index}" type="button">Add file</button>
+          </div>
+        </div>
+      </article>`;
+  }).join("");
+}
+
+function renderBooksLibrary() {
+  const host = $("#books-library-list");
+  if (!host) return;
+  const items = Array.isArray(state.booksLibrary) ? state.booksLibrary : [];
+  $("#books-library-status").textContent = `${items.length} ${items.length === 1 ? "book" : "books"}`;
+  if (!items.length) {
+    host.innerHTML = '<div class="home-results-empty">Your library is empty. Import a DRM-free PDF or EPUB to begin.</div>';
+    return;
+  }
+  host.innerHTML = items.map((item) => {
+    const detail = [item?.format, formatBytes(item?.size), item?.published_date].filter(Boolean).join(" · ");
+    const subjects = (Array.isArray(item?.subjects) ? item.subjects : []).slice(0, 3).join(" · ");
+    return `
+      <article class="home-result-card music-meta-card music-grid-card movies-tv-card books-card">
+        <div class="home-candidate-artwork movies-tv-artwork books-artwork">${renderBookCover(item, { library: true })}</div>
+        <div class="movies-tv-overlay books-card-overlay">
+          <div class="home-candidate-main movies-tv-main">
+            <div class="home-candidate-title">${escapeHtml(item?.title || "Untitled")}</div>
+            <div class="meta books-authors">${escapeHtml(bookAuthorsLabel(item))}</div>
+            <div class="meta">${escapeHtml(detail)}</div>
+            <div class="meta movies-tv-overview">${escapeHtml(subjects || item?.relative_path || "")}</div>
+          </div>
+          <div class="home-candidate-action home-candidate-action-primary-stack movies-tv-action books-card-actions">
+            <a class="button primary small" href="/api/books/library/${encodeURIComponent(item.id)}/file" target="_blank" rel="noreferrer">Open</a>
+          </div>
+        </div>
+      </article>`;
+  }).join("");
+}
+
+async function loadBooksStatus() {
+  const status = await fetchJson("/api/books/status");
+  const chip = $("#books-provider-chip");
+  if (chip) chip.textContent = status?.readarr_configured ? "Open Library · legacy Readarr connected" : "Open Library discovery";
+  const detail = $("#books-library-detail");
+  if (detail) detail.textContent = `Library: ${status?.library_path || "./media/books"}`;
+}
+
+async function performBooksSearch() {
+  const query = String($("#books-search-input")?.value || "").trim();
+  if (!query) {
+    setNotice($("#books-message"), "Enter a title, author, subject, or ISBN.", true);
+    return;
+  }
+  const button = $("#books-search-button");
+  if (button) { button.disabled = true; button.textContent = "Searching…"; }
+  setNotice($("#books-message"), "Searching Open Library…", false);
+  try {
+    const payload = await fetchJson(`/api/books/search?q=${encodeURIComponent(query)}&limit=24`);
+    state.booksResults = Array.isArray(payload?.results) ? payload.results : [];
+    renderBooksResults();
+    setNotice($("#books-message"), state.booksResults.length ? "" : "No matching books found.", false);
+  } catch (err) {
+    setNotice($("#books-message"), `Book search failed: ${toUserErrorMessage(err)}`, true);
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "Search"; }
+  }
+}
+
+async function loadBooksLibrary() {
+  const status = $("#books-library-status");
+  if (status) status.textContent = "Loading library…";
+  try {
+    const payload = await fetchJson("/api/books/library");
+    state.booksLibrary = Array.isArray(payload?.results) ? payload.results : [];
+    if ($("#books-library-detail")) $("#books-library-detail").textContent = `Library: ${payload?.library_path || ""}`;
+    renderBooksLibrary();
+  } catch (err) {
+    if (status) status.textContent = "Library unavailable";
+    setNotice($("#books-message"), `Could not load the book library: ${toUserErrorMessage(err)}`, true);
+  }
+}
+
+async function acquireBookFromUrl() {
+  const input = $("#books-direct-url");
+  const sourceUrl = String(input?.value || "").trim();
+  if (!sourceUrl) {
+    setNotice($("#books-message"), "Paste a direct PDF or ebook file URL first.", true);
+    input?.focus();
+    return;
+  }
+  const button = $("#books-direct-add");
+  if (button) { button.disabled = true; button.textContent = "Adding…"; }
+  setNotice($("#books-message"), "Downloading and finalizing the book…", false);
+  try {
+    await fetchJson("/api/books/acquire/url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_url: sourceUrl, metadata: state.booksSelectedMetadata || {} }),
+    });
+    state.booksSelectedMetadata = null;
+    if (input) input.value = "";
+    setNotice($("#books-message"), "Book added with a deterministic metadata sidecar.", false);
+    await loadBooksLibrary();
+    setBooksSection("library");
+  } catch (err) {
+    setNotice($("#books-message"), `Could not add book: ${toUserErrorMessage(err)}`, true);
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "Add URL"; }
+  }
+}
+
+async function importBookFile(file) {
+  if (!file) return;
+  const form = new FormData();
+  form.append("file", file);
+  const metadata = state.booksSelectedMetadata || { title: String(file.name || "").replace(/\.[^.]+$/, "") };
+  form.append("metadata_json", JSON.stringify(metadata));
+  setNotice($("#books-message"), `Importing ${file.name}…`, false);
+  try {
+    await fetchJson("/api/books/import", { method: "POST", body: form });
+    state.booksSelectedMetadata = null;
+    setNotice($("#books-message"), "Book imported and metadata finalized.", false);
+    await loadBooksLibrary();
+    setBooksSection("library");
+  } catch (err) {
+    setNotice($("#books-message"), `Book import failed: ${toUserErrorMessage(err)}`, true);
+  }
+}
+
+function initializeBooksUi() {
+  $$('[data-books-section]').forEach((button) => button.addEventListener("click", () => setBooksSection(button.dataset.booksSection)));
+  $("#books-search-button")?.addEventListener("click", performBooksSearch);
+  $("#books-search-input")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") performBooksSearch();
+  });
+  $("#books-search-clear")?.addEventListener("click", () => {
+    const input = $("#books-search-input");
+    if (input) input.value = "";
+    state.booksResults = [];
+    renderBooksResults();
+  });
+  $("#books-direct-add")?.addEventListener("click", acquireBookFromUrl);
+  $("#books-import-file")?.addEventListener("change", (event) => {
+    const file = event.target.files?.[0];
+    importBookFile(file).finally(() => { event.target.value = ""; });
+  });
+  $("#books-refresh-library")?.addEventListener("click", () => loadBooksLibrary());
+  $("#books-results-list")?.addEventListener("click", (event) => {
+    const button = event.target.closest('[data-book-action="use-metadata"]');
+    if (!button) return;
+    const item = state.booksResults[Number(button.dataset.bookIndex)];
+    if (!item) return;
+    state.booksSelectedMetadata = bookMetadataFromResult(item);
+    const input = $("#books-direct-url");
+    input?.focus();
+    setNotice($("#books-message"), `Metadata selected for “${item.title}”. Paste its authorized PDF or ebook URL, or import the file.`, false);
+    $("#books-search-view")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  renderBooksResults();
 }
 
 function setHomeSection(section) {
@@ -17292,6 +17542,14 @@ function renderConfig(cfg) {
   );
   const musicCfg = (cfg && typeof cfg.music === "object") ? cfg.music : {};
   $("#cfg-music-library-path").value = musicCfg.library_path ?? "";
+  const booksCfg = (cfg && typeof cfg.books === "object") ? cfg.books : {};
+  $("#cfg-books-enabled").checked = !!booksCfg.enabled;
+  $("#cfg-books-library-path").value = booksCfg.library_path ?? "./media/books";
+  $("#cfg-books-direct-urls").checked = booksCfg.allow_direct_urls !== false;
+  $("#cfg-books-max-download-mb").value = Number.isFinite(Number(booksCfg.max_download_mb))
+    ? Number(booksCfg.max_download_mb)
+    : 500;
+  syncBooksNavigation();
   const musicExportsList = $("#music-exports-list");
   if (musicExportsList) {
     musicExportsList.textContent = "";
@@ -18218,6 +18476,21 @@ function buildConfigFromForm() {
     resolutionApi.local_node_id = resolutionLocalNodeId;
   }
   base.resolution_api = resolutionApi;
+
+  const booksMaxRaw = $("#cfg-books-max-download-mb").value.trim();
+  const booksMax = Number.parseInt(booksMaxRaw || "500", 10);
+  if (!Number.isInteger(booksMax) || booksMax < 1 || booksMax > 4096) {
+    errors.push("Maximum book size must be an integer between 1 and 4096 MB");
+  }
+  base.books = {
+    ...((base.books && typeof base.books === "object") ? base.books : {}),
+    enabled: !!$("#cfg-books-enabled").checked,
+    library_path: $("#cfg-books-library-path").value.trim() || "./media/books",
+    metadata_provider: "openlibrary",
+    allow_direct_urls: !!$("#cfg-books-direct-urls").checked,
+    allow_private_source_urls: false,
+    max_download_mb: Number.isInteger(booksMax) ? booksMax : 500,
+  };
 
   base.long_term_retry_enabled = !!$("#cfg-long-term-retry-enabled").checked;
   const longTermRetryIntervalRaw = $("#cfg-long-term-retry-interval-hours").value.trim();
@@ -20428,6 +20701,14 @@ function bindEvents() {
       openBrowser(input, rootKey, "dir", "", resolveBrowseStart(rootKey, input?.value || ""));
     });
   }
+  const browseBooksLibraryPath = $("#browse-books-library-path");
+  if (browseBooksLibraryPath) {
+    browseBooksLibraryPath.addEventListener("click", () => {
+      const input = $("#cfg-books-library-path");
+      const rootKey = preferredMusicLibraryBrowseRoot(input?.value || "");
+      openBrowser(input, rootKey, "dir", "", resolveBrowseStart(rootKey, input?.value || ""));
+    });
+  }
   const addMusicExportButton = $("#add-music-export");
   if (addMusicExportButton) {
     addMusicExportButton.addEventListener("click", () => addMusicExportRow({ enabled: true, type: "copy" }));
@@ -22018,6 +22299,7 @@ async function init() {
   });
   applyTheme(resolveTheme());
   bindEvents();
+  initializeBooksUi();
   updateRetreivrHuntHud();
   applyAppSidebarCollapsed(state.appSidebarCollapsed, { persist: false });
   setMusicHeaderMode(state.musicHeaderMode, { persist: false });

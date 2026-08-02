@@ -94,6 +94,15 @@ from engine.spotify_playlist_importer import (
     SpotifyPlaylistImporter,
 )
 from engine.download_defaults import resolve_effective_download_settings
+from engine.book_services import (
+    BookServiceError,
+    acquire_book_url,
+    get_books_config,
+    import_book_file,
+    list_book_library,
+    resolve_library_book,
+    search_open_library,
+)
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 from metadata.tag_repair import repair_music_library_tags
 
@@ -12421,6 +12430,114 @@ async def api_arr_search_movies(
         return safe_json(_attach_saved_titles_to_payload(payload, kind="movie"))
     except ArrServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+def _books_runtime_config() -> dict:
+    config = _current_loaded_config()
+    if not get_books_config(config).get("enabled"):
+        raise HTTPException(status_code=404, detail={"error": "Books is disabled in Settings"})
+    return config
+
+
+@app.get("/api/books/status")
+def api_books_status():
+    config = _current_loaded_config()
+    books = get_books_config(config)
+    readarr = ((config.get("arr") or {}).get("readarr") or {}) if isinstance(config, dict) else {}
+    return safe_json(
+        {
+            **books,
+            "readarr_configured": bool(readarr.get("base_url") and readarr.get("api_key")),
+            "readarr_retired": True,
+            "discovery_provider": "Open Library",
+            "acquisition_paths": ["local_import", "direct_url"],
+        }
+    )
+
+
+@app.get("/api/books/search")
+def api_books_search(
+    q: str = Query(..., min_length=1, max_length=300),
+    limit: int = Query(24, ge=1, le=50),
+    page: int = Query(1, ge=1, le=100),
+):
+    _books_runtime_config()
+    try:
+        return safe_json(search_open_library(q, limit=limit, page=page))
+    except BookServiceError as exc:
+        raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+
+
+@app.get("/api/books/library")
+def api_books_library():
+    try:
+        return safe_json(list_book_library(_books_runtime_config()))
+    except BookServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
+@app.get("/api/books/library/{book_id}/file")
+def api_books_library_file(book_id: str):
+    try:
+        path = resolve_library_book(_books_runtime_config(), book_id)
+    except BookServiceError as exc:
+        raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
+    return FileResponse(
+        str(path),
+        filename=path.name,
+        media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+    )
+
+
+@app.post("/api/books/acquire/url", status_code=201)
+def api_books_acquire_url(payload: dict = Body(...)):
+    source_url = str(payload.get("source_url") or payload.get("url") or "").strip()
+    if not source_url:
+        raise HTTPException(status_code=400, detail={"error": "source_url is required"})
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    try:
+        result = acquire_book_url(_books_runtime_config(), source_url, metadata)
+        return safe_json({"status": "completed", **result})
+    except BookServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
+@app.post("/api/books/import", status_code=201)
+def api_books_import(
+    file: UploadFile = File(...),
+    metadata_json: str = Form("{}"),
+):
+    config = _books_runtime_config()
+    extension = Path(file.filename or "").suffix.lower()
+    if extension not in {".pdf", ".epub", ".mobi", ".azw", ".azw3", ".txt"}:
+        raise HTTPException(status_code=400, detail={"error": "Unsupported book format"})
+    try:
+        metadata = json.loads(metadata_json or "{}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": "metadata_json must be valid JSON"}) from exc
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail={"error": "metadata_json must be an object"})
+    maximum = int(get_books_config(config)["max_download_mb"]) * 1024 * 1024
+    fd, temp_name = tempfile.mkstemp(prefix="retreivr-book-import-", suffix=extension)
+    written = 0
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            while True:
+                chunk = file.file.read(1024 * 256)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > maximum:
+                    limit_mb = get_books_config(config)["max_download_mb"]
+                    raise BookServiceError(f"Book exceeds the configured {limit_mb} MB limit")
+                handle.write(chunk)
+        result = import_book_file(config, temp_name, metadata)
+        return safe_json({"status": "completed", **result})
+    except BookServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    finally:
+        if os.path.exists(temp_name):
+            os.remove(temp_name)
 
 
 @app.get("/api/arr/genres")

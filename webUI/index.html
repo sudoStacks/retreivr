@@ -25,6 +25,9 @@
       <button class="button ghost small nav-button" data-page="movies-tv" type="button" title="Movies &amp; TV">
         <span class="nav-label">Movies &amp; TV</span>
       </button>
+      <button id="books-nav-button" class="button ghost small nav-button hidden" data-page="books" type="button" title="Books">
+        <span class="nav-label">Books</span>
+      </button>
       <button class="button ghost small nav-button nav-button-with-count hidden" data-page="review" type="button" title="Review">
         <span class="nav-label">Review</span>
         <span id="review-nav-badge" class="nav-count-badge hidden">0</span>
@@ -151,10 +154,10 @@
             <span class="home-launcher-tile-title">Movies &amp; TV</span>
             <span class="home-launcher-tile-meta">Discover titles, cast, genres, and send them to ARR</span>
           </button>
-          <button id="home-launcher-books" class="home-launcher-tile hidden" data-home-launch="config" data-home-hash="settings-connections-hub" type="button">
+          <button id="home-launcher-books" class="home-launcher-tile hidden" data-home-launch="books" type="button">
             <span class="home-launcher-icon" aria-hidden="true">☰</span>
             <span class="home-launcher-tile-title">Books</span>
-            <span class="home-launcher-tile-meta">Available when Readarr is connected</span>
+            <span class="home-launcher-tile-meta">Search, import, organize, and keep rich ebook metadata</span>
           </button>
         </div>
       </div>
@@ -734,6 +737,60 @@
         </div>
       </div>
     </section>
+    <section class="panel full page-full page-hidden" id="books-panel" data-page="books">
+      <div class="movies-tv-page-shell books-page-shell">
+        <div class="movies-tv-mode-row books-mode-row">
+          <div class="movies-tv-section-toggle" aria-label="Books sections">
+            <button class="button ghost small movies-tv-nav active" data-books-section="search" type="button">Discover</button>
+            <button class="button ghost small movies-tv-nav" data-books-section="library" type="button">My Library</button>
+          </div>
+          <div class="movies-tv-toolbar-spacer"></div>
+          <span id="books-provider-chip" class="notice movies-tv-connection-chip">Open Library discovery</span>
+          <button id="books-refresh-library" class="button ghost small" type="button">Refresh Library</button>
+        </div>
+        <div class="movies-tv-search-row books-search-row">
+          <span class="searchbar-leading-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l5 5"></path></svg>
+          </span>
+          <input id="books-search-input" class="home-search-input" type="text" placeholder="Search books, authors, subjects, or ISBN…" autocomplete="off">
+          <button id="books-search-clear" class="button ghost small searchbar-clear-button" type="button" aria-label="Clear search">×</button>
+          <button id="books-search-button" class="button primary" type="button">Search</button>
+        </div>
+        <div id="books-message" class="notice hidden" role="status"></div>
+        <section id="books-search-view" class="books-view">
+          <div class="books-acquire-bar group">
+            <div class="books-acquire-copy">
+              <div class="group-title">Add a DRM-free book</div>
+              <div class="meta">Import a PDF/EPUB from your device, or paste a direct file URL you are authorized to download.</div>
+            </div>
+            <div class="books-acquire-actions">
+              <input id="books-direct-url" type="url" placeholder="https://example.org/book.epub" aria-label="Direct book URL">
+              <button id="books-direct-add" class="button ghost" type="button">Add URL</button>
+              <label class="button ghost books-import-label" for="books-import-file">Import file</label>
+              <input id="books-import-file" class="hidden" type="file" accept=".pdf,.epub,.mobi,.azw,.azw3,.txt">
+            </div>
+          </div>
+          <div class="home-results books-results-shell">
+            <div class="home-results-header">
+              <span>Books</span>
+              <span id="books-results-status" class="meta">Search Open Library to begin</span>
+            </div>
+            <div id="books-results-detail" class="meta home-results-detail">Discovery is metadata-first. Read or preview links stay with the provider; downloads require an exposed file, a local import, or a configured acquisition adapter.</div>
+            <div id="books-results-list" class="music-meta-grid movies-tv-results-grid books-results-grid"></div>
+          </div>
+        </section>
+        <section id="books-library-view" class="books-view hidden">
+          <div class="home-results books-results-shell">
+            <div class="home-results-header">
+              <span>My Library</span>
+              <span id="books-library-status" class="meta">Loading library</span>
+            </div>
+            <div id="books-library-detail" class="meta home-results-detail"></div>
+            <div id="books-library-list" class="music-meta-grid movies-tv-results-grid books-results-grid"></div>
+          </div>
+        </section>
+      </div>
+    </section>
     <section class="panel full page-full page-hidden" id="setup-panel" data-page="setup">
       <div class="panel-header-row">
         <div>
@@ -1303,6 +1360,31 @@
             </section>
             <section id="settings-core" class="settings-section" data-settings-section="core">
               <div class="settings-section-heading">General</div>
+              <div class="group">
+                <div class="group-title">Books</div>
+                <div class="grid two">
+                  <label class="field inline short">
+                    <span>Show Books section</span>
+                    <input id="cfg-books-enabled" type="checkbox">
+                  </label>
+                  <label class="field full">
+                    <span>Books library path</span>
+                    <div class="row path-picker">
+                      <input id="cfg-books-library-path" type="text" placeholder="./media/books" data-browser-absolute="1">
+                      <button id="browse-books-library-path" class="button ghost small" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <label class="field inline short">
+                    <span>Allow direct file URLs</span>
+                    <input id="cfg-books-direct-urls" type="checkbox">
+                  </label>
+                  <label class="field short">
+                    <span>Maximum book size (MB)</span>
+                    <input id="cfg-books-max-download-mb" type="number" min="1" max="4096" step="1">
+                  </label>
+                </div>
+                <div class="notice">Open Library supplies discovery metadata and covers. Retreivr imports DRM-free PDF, EPUB, MOBI, AZW/AZW3, and text files. Kindle and Apple Books remain reader/export destinations; Retreivr does not bypass store DRM.</div>
+              </div>
               <div class="group">
                 <div class="group-title">Download Defaults</div>
                 <div class="stack">

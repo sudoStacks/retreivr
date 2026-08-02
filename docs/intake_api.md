@@ -70,8 +70,11 @@ Retreivr currently normalizes `media_class` as follows:
 Notes:
 
 - `audiobook` is currently routed through the existing audio pipeline.
-- `book` and `pdf` are currently queued as generic downloads, not a dedicated
-  book-finalization pipeline.
+- `book` and `pdf` sent to this legacy intake route are queued as generic
+  downloads. New integrations should use `/api/books/acquire/url` or
+  `/api/books/import`; those routes use the dedicated book finalizer, preserve
+  the original document format, embed safe PDF/EPUB metadata, and write the
+  canonical sidecar described in `docs/books_mode.md`.
 
 ## Metadata Guidance
 

@@ -510,6 +510,17 @@ def apply_config_defaults(config):
             "favorite_artists": [],
         },
     )
+    normalized.setdefault(
+        "books",
+        {
+            "enabled": False,
+            "library_path": "./media/books",
+            "metadata_provider": "openlibrary",
+            "allow_direct_urls": True,
+            "allow_private_source_urls": False,
+            "max_download_mb": 500,
+        },
+    )
 
     return normalized
 
@@ -755,6 +766,23 @@ def validate_config(config):
                             errors.append(f"music_preferences.favorite_artists[{index}].name must be a non-empty string")
                         if artist_mbid is not None and (not isinstance(artist_mbid, str) or not str(artist_mbid).strip()):
                             errors.append(f"music_preferences.favorite_artists[{index}].artist_mbid must be a non-empty string when present")
+
+    books = config.get("books")
+    if books is not None:
+        if not isinstance(books, dict):
+            errors.append("books must be an object")
+        else:
+            for key in ("enabled", "allow_direct_urls", "allow_private_source_urls"):
+                if books.get(key) is not None and not isinstance(books.get(key), bool):
+                    errors.append(f"books.{key} must be true/false")
+            if books.get("library_path") is not None and not isinstance(books.get("library_path"), str):
+                errors.append("books.library_path must be a string")
+            provider = books.get("metadata_provider")
+            if provider is not None and provider not in {"openlibrary"}:
+                errors.append("books.metadata_provider must be 'openlibrary'")
+            maximum = books.get("max_download_mb")
+            if maximum is not None and (not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1 or maximum > 4096):
+                errors.append("books.max_download_mb must be an integer between 1 and 4096")
 
     ui_preferences = config.get("ui_preferences")
     if ui_preferences is not None:
