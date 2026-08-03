@@ -156,3 +156,36 @@ def test_pending_outbox_deduplicates_same_recording_and_video(tmp_path: Path) ->
     assert second["status"] == "deduped"
     assert second["reason"] == "matching_proposal_already_pending"
     assert Path(str(first["outbox_path"])).read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_published_queue_mapping_is_not_rewritten_to_outbox(tmp_path: Path) -> None:
+    db_path = tmp_path / "db.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        community_publish_worker = sys.modules[append_publish_proposal_to_outbox.__module__]
+        community_publish_worker._ensure_publish_queue_table(conn)
+        proposal = _write_proposal()
+        conn.execute(
+            """
+            INSERT INTO community_publish_queue (
+                proposal_id, recording_mbid, video_id, status, proposal_json, ingested_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "already-published",
+                proposal["recording_mbid"],
+                proposal["video_id"],
+                community_publish_worker.COMMUNITY_PUBLISH_STATUS_PUBLISHED,
+                json.dumps(proposal),
+                proposal["emitted_at"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = append_publish_proposal_to_outbox(config={}, db_path=str(db_path), proposal=_write_proposal())
+
+    assert result["status"] == "deduped"
+    assert result["reason"] == "matching_mapping_already_queued_or_published"
+    assert result["outbox_path"] is None

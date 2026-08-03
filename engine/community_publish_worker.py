@@ -245,6 +245,33 @@ def append_publish_proposal_to_outbox(
     outbox_path = os.path.join(outbox_dir, filename)
     recording_mbid = str(proposal.get("recording_mbid") or "").strip().lower()
     video_id = str(proposal.get("video_id") or "").strip().lower()
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            _ensure_publish_queue_table(conn)
+            existing = conn.execute(
+                """
+                SELECT 1
+                FROM community_publish_queue
+                WHERE lower(recording_mbid)=? AND lower(video_id)=?
+                  AND status IN (?, ?)
+                LIMIT 1
+                """,
+                (
+                    recording_mbid,
+                    video_id,
+                    COMMUNITY_PUBLISH_STATUS_PENDING,
+                    COMMUNITY_PUBLISH_STATUS_PUBLISHED,
+                ),
+            ).fetchone()
+        finally:
+            conn.close()
+        if existing is not None:
+            return {
+                "status": "deduped",
+                "reason": "matching_mapping_already_queued_or_published",
+                "outbox_path": None,
+            }
     # Resolution, lookahead, playback, and completed-download paths can observe the
     # same mapping. Keep one pending contribution per MBID/source pair; later PR
     # merges update verification timestamps without flooding the shared repository.
