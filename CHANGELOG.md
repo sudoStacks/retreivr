@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.1 — Release Metadata Correction
+
+### Fixed
+- Aligned the Python package version, Docker build default, canonical Compose images, deployment documentation, and runtime provenance fallback with the published release line.
+- Updated both the main Retreivr service and the optional host-control service examples to use the same `v1.1.1` container image.
+- Corrected the current upgrade guidance so new release artifacts and installations report and deploy the intended patch version consistently.
+
 ## v1.1.0 — Music Radio, Shared Resolution Contributions, and Books Mode
 
 ### High-Level
