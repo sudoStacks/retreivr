@@ -49,7 +49,7 @@ def test_youtube_transport_recreates_destroyed_host_and_keeps_stationary_player(
     assert 'id="music-bottom-player-close"' in markup
     assert "moveMusicPlayerVideoShell" not in source
     assert 'activePlayerIsYT() && target !== "music"' not in source
-    assert 'const shouldHide = !hasTrack || playerPageOpen;' in source
+    assert 'const shouldHide = !hasPlayerContent || playerPageOpen;' in source
 
 
 def test_genre_and_artist_play_build_diverse_shuffled_queues() -> None:
@@ -67,6 +67,19 @@ def test_genre_and_artist_play_build_diverse_shuffled_queues() -> None:
     assert "artistCount < 2" in genre_source
     assert "state.playerShuffle = true" in genre_source
     assert "playMusicArtistFromBrowse(artists[0])" not in genre_source
+
+
+def test_music_card_play_surfaces_immediate_cancelable_loading_state() -> None:
+    source = APP_JS.read_text()
+
+    assert "function beginMusicPlaybackLoading" in source
+    assert "function finishMusicPlaybackLoading" in source
+    assert "function cancelMusicPlaybackLoading" in source
+    assert 'shell.classList.toggle("is-loading", !!loading)' in source
+    assert "music-loading-spinner" in source
+    assert "const loadingToken = beginMusicPlaybackLoading" in source
+    assert "if (!isMusicPlaybackLoadingCurrent(loadingToken)) return;" in source
+    assert "cancelMusicPlaybackLoading();" in source[source.index("function clearMusicPlayerCurrentState"):]
 
 
 def test_music_queue_prefetches_five_tracks_and_preserves_artwork() -> None:

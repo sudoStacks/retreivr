@@ -165,6 +165,8 @@ const state = {
   playerBarMinimized: false,
   playerDockResizeObserver: null,
   playerRuntimePublishStatus: null,
+  playerLoading: null,
+  playerLoadingSequence: 0,
   playerPrefetchInFlightRecordings: new Set(),
   playerYT: null,           // active YT.Player instance, or null when using <audio>
   playerYTReady: false,     // IFrame API script loaded and YT.Player can be instantiated
@@ -2784,23 +2786,33 @@ function syncBottomPlayerShell() {
   const audio = $("#music-player-audio");
   if (!shell || !titleEl || !metaEl || !artEl || !toggleButton) return;
   const current = state.playerCurrent || {};
+  const loading = state.playerLoading && typeof state.playerLoading === "object" ? state.playerLoading : null;
+  const displayItem = loading || current;
   const audioHasSource = !!(audio && (audio.currentSrc || audio.src));
   const hasVideo = !!String(current.video_id || extractYouTubeVideoId(current.stream_url) || "").trim()
     || !!String(current.video_embed_url || "").trim();
   const hasTrack = !!(current.stream_url && audioHasSource) || hasVideo;
+  const hasPlayerContent = hasTrack || !!loading;
   const playerPageOpen = state.currentPage === "music" && state.musicSection === "player";
-  const shouldHide = !hasTrack || playerPageOpen;
+  const shouldHide = !hasPlayerContent || playerPageOpen;
   shell.classList.toggle("hidden", shouldHide);
   shell.classList.toggle("is-minimized", state.playerBarMinimized);
+  shell.classList.toggle("is-loading", !!loading);
   if (artworkShell) artworkShell.classList.toggle("hidden", state.playerBarMinimized);
   if (minimizeButton) {
     minimizeButton.textContent = state.playerBarMinimized ? "Expand" : "Minimize";
     minimizeButton.setAttribute("aria-expanded", state.playerBarMinimized ? "false" : "true");
     minimizeButton.title = state.playerBarMinimized ? "Expand player bar" : "Minimize player bar";
   }
-  titleEl.textContent = String(current.title || "Nothing playing");
-  metaEl.textContent = [current.artist, current.album, current.kind].filter(Boolean).join(" • ") || "Choose a track from your library or start a station.";
+  titleEl.textContent = String(displayItem.title || (loading ? "Preparing music…" : "Nothing playing"));
+  metaEl.textContent = loading
+    ? String(loading.message || "Building queue and resolving the first source…")
+    : ([current.artist, current.album, current.kind].filter(Boolean).join(" • ") || "Choose a track from your library or start a station.");
   if (statusEl) {
+    if (loading) {
+      statusEl.innerHTML = `<span class="music-status-badge music-status-loading"><span class="music-loading-spinner" aria-hidden="true"></span>Loading</span>`;
+      statusEl.classList.remove("hidden");
+    } else {
     const stationBits = [];
     if (Number(state.playerActiveStationId || 0)) {
       stationBits.push(`<span class="music-status-badge is-queued">Radio</span>`);
@@ -2811,16 +2823,45 @@ function syncBottomPlayerShell() {
     const badges = `${stationBits.join("")}${buildMusicStatusBadges(current, { queueOnly: true })}`;
     statusEl.innerHTML = badges;
     statusEl.classList.toggle("hidden", !badges);
+    }
   }
-  artEl.src = getMusicLibraryArtworkUrl(current);
-  toggleButton.textContent = activePlayerIsPaused() ? "Play" : "Pause";
+  artEl.src = getMusicLibraryArtworkUrl(displayItem);
+  toggleButton.textContent = loading && !hasTrack ? "Loading…" : (activePlayerIsPaused() ? "Play" : "Pause");
+  toggleButton.disabled = !hasTrack;
   if (prevButton) prevButton.disabled = !hasTrack;
   if (nextButton) nextButton.disabled = !hasTrack;
   if (queueButton) {
-    queueButton.disabled = !hasTrack;
+    queueButton.disabled = !hasTrack && !state.playerQueue.length;
     queueButton.textContent = `Queue ${Array.isArray(state.playerQueue) && state.playerQueue.length ? `(${state.playerQueue.length})` : ""}`.trim();
   }
   syncMusicPlayerDockSpacing();
+}
+
+function beginMusicPlaybackLoading({ title = "Preparing music…", message = "Building queue and resolving the first source…", artwork_url = null } = {}) {
+  const token = ++state.playerLoadingSequence;
+  state.playerLoading = {
+    token,
+    title: String(title || "Preparing music…"),
+    message: String(message || "Building queue and resolving the first source…"),
+    artwork_url: String(artwork_url || "").trim() || null,
+  };
+  syncBottomPlayerShell();
+  return token;
+}
+
+function isMusicPlaybackLoadingCurrent(token) {
+  return Number(state.playerLoading?.token || 0) === Number(token || 0);
+}
+
+function finishMusicPlaybackLoading(token) {
+  if (!isMusicPlaybackLoadingCurrent(token)) return;
+  state.playerLoading = null;
+  syncBottomPlayerShell();
+}
+
+function cancelMusicPlaybackLoading() {
+  state.playerLoadingSequence += 1;
+  state.playerLoading = null;
 }
 
 function isMusicPlayerPageOpen() {
@@ -6203,6 +6244,7 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
 }
 
 function clearMusicPlayerCurrentState() {
+  cancelMusicPlaybackLoading();
   destroyYTPlayer();
   const audio = $("#music-player-audio");
   if (audio) {
@@ -14532,6 +14574,12 @@ async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
 // Resolve a search-result track to a stream and play it in the main player.
 // Checks the local library first; falls back to the resolution index and preview API.
 async function playMusicSearchResult(result) {
+  const loadingToken = beginMusicPlaybackLoading({
+    title: String(result?.track || "Preparing track"),
+    message: `Finding a playable source${result?.artist ? ` for ${result.artist}` : ""}…`,
+    artwork_url: result?.artwork_url || null,
+  });
+  try {
   const recordingMbid = String(result?.recording_mbid || "").trim();
   // 1. Local library match by MBID
   const localMatch = findLocalPlayerTrackByRecordingMbid(recordingMbid);
@@ -14558,6 +14606,7 @@ async function playMusicSearchResult(result) {
     release_group_mbid: result.mb_release_group_id,
     mb_youtube_urls: result.mb_youtube_urls,
   });
+  if (!isMusicPlaybackLoadingCurrent(loadingToken)) return;
   if (!resolved?.stream_url && !resolved?.video_id) throw new Error("No playable stream found. Try downloading the track first.");
   const item = normalizePlayableItem({
     id: `search:${recordingMbid || result.track || "track"}`,
@@ -14577,6 +14626,9 @@ async function playMusicSearchResult(result) {
   setPlayerQueue([item]);
   setMusicPlayerView("queue");
   await playMusicPlayerItem(item);
+  } finally {
+    finishMusicPlaybackLoading(loadingToken);
+  }
 }
 
 function shuffledMusicItems(items = []) {
@@ -14655,7 +14707,14 @@ async function playMusicArtistFromBrowse(artistItem) {
   const nextQuery = String(artistItem?.name || artistItem?.artist || "").trim();
   const nextArtistMbid = String(artistItem?.artist_mbid || artistItem?.id || "").trim();
   if (!nextQuery) throw new Error("Artist identity unknown.");
+  const loadingToken = beginMusicPlaybackLoading({
+    title: `${nextQuery} Shuffle`,
+    message: "Collecting songs across releases and preparing a shuffled queue…",
+    artwork_url: getMusicLibraryArtworkUrl(artistItem),
+  });
+  try {
   const tracks = await fetchMusicTracksForArtist(nextQuery, { artistMbid: nextArtistMbid, limit: 100 });
+  if (!isMusicPlaybackLoadingCurrent(loadingToken)) return;
   const queue = shuffledMusicItems(dedupePlayableMusicItems(tracks)).slice(0, 100);
   if (!queue.length) throw new Error("No playable tracks found for this artist.");
   clearActiveStationPlayback();
@@ -14666,11 +14725,20 @@ async function playMusicArtistFromBrowse(artistItem) {
   updateMusicPlayerTransportUI();
   await playPlayerQueueIndex(0);
   setMusicPlayerStatus(`Shuffling ${queue.length} songs by ${nextQuery}.`, { kind: "success", toast: true });
+  } finally {
+    finishMusicPlaybackLoading(loadingToken);
+  }
 }
 
 async function playMusicGenreFromBrowse(genreValue) {
   const normalizedGenre = normalizeMusicGenreIntent(genreValue);
+  const loadingToken = beginMusicPlaybackLoading({
+    title: `${normalizedGenre || genreValue} Radio`,
+    message: "Finding artists and building a diverse genre mix…",
+  });
+  try {
   const artists = await fetchArtistsForGenreIntent(normalizedGenre, { limit: 24 });
+  if (!isMusicPlaybackLoadingCurrent(loadingToken)) return;
   if (!Array.isArray(artists) || !artists.length) throw new Error("No playable artists found for this genre.");
   const selectedArtists = shuffledMusicItems(artists).slice(0, 8);
   const artistResults = await Promise.allSettled(selectedArtists.map(async (artistItem) => {
@@ -14679,6 +14747,7 @@ async function playMusicGenreFromBrowse(genreValue) {
     const tracks = await fetchMusicTracksForArtist(artistName, { artistMbid, limit: 24 });
     return shuffledMusicItems(tracks).slice(0, 5);
   }));
+  if (!isMusicPlaybackLoadingCurrent(loadingToken)) return;
   const mixedTracks = artistResults.flatMap((result) => result.status === "fulfilled" ? result.value : []);
   const queue = shuffledMusicItems(dedupePlayableMusicItems(mixedTracks)).slice(0, 40);
   const artistCount = new Set(queue.map((item) => String(item?.artist || "").trim().toLowerCase()).filter(Boolean)).size;
@@ -14696,6 +14765,9 @@ async function playMusicGenreFromBrowse(genreValue) {
     `${normalizedGenre || genreValue} Radio ready: ${queue.length} songs across ${artistCount} artists.`,
     { kind: "success", toast: true }
   );
+  } finally {
+    finishMusicPlaybackLoading(loadingToken);
+  }
 }
 
 // Fetch album tracks and queue them for playback.
@@ -14705,12 +14777,19 @@ async function playMusicAlbumFromSearch(albumItem) {
   const artistQuery = String(albumItem?.artist || "").trim();
   const albumTitle = String(albumItem?.title || "").trim();
   if (!releaseGroupMbid && !artistQuery && !albumTitle) throw new Error("Album identity unknown.");
+  const loadingToken = beginMusicPlaybackLoading({
+    title: albumTitle || "Preparing album",
+    message: `Loading the album queue${artistQuery ? ` by ${artistQuery}` : ""}…`,
+    artwork_url: getImmediateAlbumArtworkUrl(albumItem),
+  });
+  try {
   const tracks = applyAlbumArtworkToTracks(await fetchMusicTracksByAlbum({
     artist: artistQuery,
     album: albumTitle,
     releaseGroupMbid,
     limit: 100,
   }), albumItem);
+  if (!isMusicPlaybackLoadingCurrent(loadingToken)) return;
   if (!tracks.length) throw new Error("No tracks found for this album.");
   const queueItems = tracks.map((t) => {
     const mbid = String(t?.recording_mbid || "").trim();
@@ -14745,6 +14824,9 @@ async function playMusicAlbumFromSearch(albumItem) {
   // playback does not pause at every unresolved YouTube handoff.
   _prefetchNextUnresolved(1);
   await playPlayerQueueIndex(0);
+  } finally {
+    finishMusicPlaybackLoading(loadingToken);
+  }
 }
 
 async function resolveDirectUrl(url, mediaMode = "video") {
