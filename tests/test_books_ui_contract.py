@@ -6,6 +6,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APP_JS = REPO_ROOT / "webUI" / "app.js"
 INDEX_HTML = REPO_ROOT / "webUI" / "index.html"
+STYLES_CSS = REPO_ROOT / "webUI" / "styles.css"
 
 
 def test_books_has_a_native_landing_and_home_launcher() -> None:
@@ -23,6 +24,7 @@ def test_books_has_a_native_landing_and_home_launcher() -> None:
 
 def test_disabled_books_shows_an_enable_gate_instead_of_home() -> None:
     source = APP_JS.read_text(encoding="utf-8")
+    styles = STYLES_CSS.read_text(encoding="utf-8")
     set_page_start = source.index("function setPage(page)")
     set_page_end = source.index("function mountMusicPageNodes", set_page_start)
     set_page_source = source[set_page_start:set_page_end]
@@ -35,6 +37,10 @@ def test_disabled_books_shows_an_enable_gate_instead_of_home() -> None:
     assert 'setPage("home")' not in sync_source
     assert '$("#books-disabled-gate")?.classList.toggle("hidden", enabled)' in sync_source
     assert 'button.classList.toggle("hidden", !enabled)' in sync_source
+    assert ".books-disabled-gate.hidden" in styles
+    gate_hidden_start = styles.index(".books-disabled-gate.hidden")
+    gate_hidden_rule = styles[gate_hidden_start:styles.index("}", gate_hidden_start)]
+    assert "display: none !important" in gate_hidden_rule
 
 
 def test_books_quick_browse_uses_the_native_search_path() -> None:

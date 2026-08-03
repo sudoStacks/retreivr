@@ -9297,6 +9297,10 @@ body[data-page="music"] #music-panel .music-page-shell {
   text-align: center;
 }
 
+.books-disabled-gate.hidden {
+  display: none !important;
+}
+
 .books-feature-hidden {
   display: none !important;
 }
