@@ -630,7 +630,7 @@ function mountTopbarForPage(page) {
 }
 
 function getMoviesTvSearchRowEl() {
-  return document.querySelector(".movies-tv-search-row");
+  return $("#movies-tv-header-search");
 }
 
 function getMoviesTvFiltersPanelEl() {

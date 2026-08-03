@@ -6,8 +6,8 @@
   <title>Retreivr - Self-Hosted Media Retrieval</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=1.0.3">
-  <script defer src="app.js?v=1.0.3"></script>
+  <link rel="stylesheet" href="styles.css?v=1.0.4">
+  <script defer src="app.js?v=1.0.4"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -47,7 +47,32 @@
     </div>
   </header>
   <div id="topbar-subbar-host" class="topbar-subbar-host hidden" aria-live="polite"></div>
-  <div id="topbar-node-parking" class="hidden" aria-hidden="true"></div>
+  <div id="topbar-node-parking" class="hidden" aria-hidden="true">
+    <div id="movies-tv-header-search" class="movies-tv-search-row">
+      <span class="searchbar-leading-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.5"></circle>
+          <path d="M16 16l5 5"></path>
+        </svg>
+      </span>
+      <input
+        id="movies-tv-search-input"
+        class="home-search-input"
+        type="text"
+        placeholder="Search titles, actors, or directors via TMDb…"
+        autocomplete="off"
+      />
+      <button id="movies-tv-search-clear" class="button ghost small searchbar-clear-button" type="button" aria-label="Clear search" title="Clear search">×</button>
+      <button id="movies-tv-filters-toggle" class="button ghost" type="button" aria-expanded="false" aria-controls="movies-tv-filters-panel">Filters</button>
+      <button id="movies-tv-search-button" class="button primary" type="button">Search</button>
+    </div>
+    <div id="movies-tv-filters-panel" class="movies-tv-filters-panel hidden">
+      <div class="movies-tv-filter-group">
+        <span class="meta">Release year</span>
+        <div id="movies-tv-year-chips" class="movies-tv-year-chips"></div>
+      </div>
+    </div>
+  </div>
 
   <div id="retreivr-hunt-launcher" class="retreivr-hunt-launcher hidden" aria-live="polite">
     <div class="retreivr-hunt-launcher-title">Retreivr Hunt</div>
@@ -630,30 +655,6 @@
         <div class="movies-tv-connection-strip">
           <div id="movies-tv-radarr-status" class="notice movies-tv-connection-chip">Radarr: Not configured</div>
           <div id="movies-tv-sonarr-status" class="notice movies-tv-connection-chip">Sonarr: Not configured</div>
-        </div>
-        <div class="movies-tv-search-row">
-          <span class="searchbar-leading-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
-              <circle cx="11" cy="11" r="6.5"></circle>
-              <path d="M16 16l5 5"></path>
-            </svg>
-          </span>
-          <input
-            id="movies-tv-search-input"
-            class="home-search-input"
-            type="text"
-            placeholder="Search titles, actors, or directors via TMDb…"
-            autocomplete="off"
-          />
-          <button id="movies-tv-search-clear" class="button ghost small searchbar-clear-button" type="button" aria-label="Clear search" title="Clear search">×</button>
-          <button id="movies-tv-filters-toggle" class="button ghost" type="button" aria-expanded="false" aria-controls="movies-tv-filters-panel">Filters</button>
-          <button id="movies-tv-search-button" class="button primary" type="button">Search</button>
-        </div>
-        <div id="movies-tv-filters-panel" class="movies-tv-filters-panel hidden">
-          <div class="movies-tv-filter-group">
-            <span class="meta">Release year</span>
-            <div id="movies-tv-year-chips" class="movies-tv-year-chips"></div>
-          </div>
         </div>
         <div id="movies-tv-message-region">
           <div id="movies-tv-message" class="notice hidden" role="status"></div>
