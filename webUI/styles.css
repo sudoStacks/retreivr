@@ -8786,6 +8786,18 @@ body.music-player-dock-visible .layout {
   padding: 6px;
 }
 
+.music-player-queue-position {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.music-player-track-row.is-current .music-player-queue-position {
+  color: #93c5fd;
+}
+
 .music-player-track-art {
   width: 84px;
   height: 84px;
@@ -8964,11 +8976,54 @@ body.music-player-dock-visible .layout {
 
 /* ── Station grid cards ─────────────────────────────────────────────────── */
 .music-station-grid {
+  --music-card-min: 290px;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 340px));
   margin-bottom: 8px;
 }
 
 .music-station-grid-card {
   cursor: default;
+  min-width: 0;
+  gap: 12px;
+}
+
+.music-station-grid-card .music-card-thumb-shell {
+  min-height: 260px;
+}
+
+.music-station-grid-card .home-candidate-title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 1.05rem;
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.music-station-grid-card .home-candidate-meta {
+  display: -webkit-box;
+  overflow: hidden;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.music-station-grid-card .home-candidate-action {
+  position: static;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.music-station-grid-card .home-candidate-action .button {
+  min-width: 0;
 }
 
 .music-station-grid-card.is-active .music-card-thumb-shell {
@@ -9096,6 +9151,25 @@ body[data-page="music"] #music-panel .music-page-shell {
     top: 68px;
     right: 12px;
     width: min(360px, calc(100vw - 24px));
+  }
+}
+
+@media (max-width: 680px) {
+  .music-station-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .music-station-grid-card .music-card-thumb-shell {
+    min-height: 0;
+  }
+
+  .music-station-grid-card .home-candidate-action {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .music-station-grid-card .home-candidate-action .home-candidate-download-primary,
+  .music-station-grid-card .home-candidate-action .button:first-child {
+    grid-column: 1 / -1;
   }
 }
 

@@ -5293,12 +5293,16 @@ function renderMusicPlayerQueue() {
   const queueEl = $("#music-player-queue");
   if (!queueEl) return;
   const queue = Array.isArray(state.playerQueue) ? state.playerQueue : [];
+  const currentIndex = getCurrentQueueIndex();
+  const upcomingCount = currentIndex >= 0 ? Math.max(0, queue.length - currentIndex - 1) : queue.length;
   queueEl.innerHTML = `
     <div class="group">
       <div class="panel-header-row compact">
         <div>
           <div class="group-title">Queue</div>
-          <div class="meta">${escapeHtml(`${queue.length} upcoming track${queue.length === 1 ? "" : "s"}`)}</div>
+          <div class="meta">${currentIndex >= 0
+            ? escapeHtml(`1 playing · ${upcomingCount} up next`)
+            : escapeHtml(`${upcomingCount} track${upcomingCount === 1 ? "" : "s"} ready`)}</div>
         </div>
         <div class="row compact">
           <button class="button ghost small" type="button" data-action="player-save-queue-playlist" ${queue.length ? "" : "disabled"}>Save Queue as Playlist</button>
@@ -5308,23 +5312,27 @@ function renderMusicPlayerQueue() {
     </div>
     ${queue.length ? `
       <div class="music-player-track-list">
-        ${queue.map((item, index) => `
-          <article class="music-player-track-row music-player-track-row-rich${String(state.playerCurrent?.stream_url || "") === String(item.stream_url || "") ? " is-current" : ""}">
+        ${queue.map((item, index) => {
+          const isCurrent = index === currentIndex;
+          const relativePosition = currentIndex >= 0 ? index - currentIndex : index + 1;
+          return `
+          <article class="music-player-track-row music-player-track-row-rich${isCurrent ? " is-current" : ""}${!isCurrent && relativePosition > 0 ? " is-up-next" : ""}" data-queue-position="${isCurrent ? "current" : "up-next"}">
             <div class="music-player-browser-card-art music-player-track-art">
               <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Track")}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
             </div>
             <button class="music-player-track" type="button" data-action="player-play" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.kind || "cached")}">
-              <span class="music-player-track-title">${index + 1}. ${escapeHtml(item.title || "Untitled")}</span>
+              <span class="music-player-queue-position">${isCurrent ? "Now playing" : `Up next · ${relativePosition}`}</span>
+              <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
               <span class="music-player-track-meta">${escapeHtml([item.artist, item.album, item.kind].filter(Boolean).join(" • "))}</span>
               ${item.prefetch_state === "resolving" ? `<span class="music-status-badge">Resolving next…</span>` : item.prefetch_state === "ready" || item.resolved_via ? `<span class="music-status-badge is-queued">Ready</span>` : ""}
             </button>
             <div class="music-player-inline-actions">
-              <button class="button ghost small" type="button" data-action="player-queue-move-up" data-queue-index="${escapeAttr(index)}" ${index === 0 ? "disabled" : ""}>Up</button>
-              <button class="button ghost small" type="button" data-action="player-queue-move-down" data-queue-index="${escapeAttr(index)}" ${index === queue.length - 1 ? "disabled" : ""}>Down</button>
-              <button class="button ghost small" type="button" data-action="player-remove-queue-item" data-queue-index="${escapeAttr(index)}">Remove</button>
+              <button class="button ghost small" type="button" data-action="player-queue-move-up" data-queue-index="${escapeAttr(index)}" ${isCurrent || index <= Math.max(0, currentIndex + 1) ? "disabled" : ""} aria-label="Move ${escapeAttr(item.title || "track")} earlier">Up</button>
+              <button class="button ghost small" type="button" data-action="player-queue-move-down" data-queue-index="${escapeAttr(index)}" ${isCurrent || index === queue.length - 1 ? "disabled" : ""} aria-label="Move ${escapeAttr(item.title || "track")} later">Down</button>
+              <button class="button ghost small" type="button" data-action="player-remove-queue-item" data-queue-index="${escapeAttr(index)}" ${isCurrent ? "disabled" : ""}>Remove</button>
             </div>
           </article>
-        `).join("")}
+        `}).join("")}
       </div>
     ` : `<div class="home-results-empty">Queue is empty. Start a station or pick a library track.</div>`}
   `;
@@ -5547,7 +5555,12 @@ function scheduleStationPrime(stationId, delayMs = 1800) {
         renderMusicPlayerStations();
       }
       if (Number(state.playerActiveStationId || 0) === normalized && Array.isArray(payload?.queue)) {
-        setPlayerQueue(payload.queue, { preserveCurrent: true });
+        const currentQueue = Array.isArray(state.playerQueue) ? state.playerQueue.slice() : [];
+        const additions = payload.queue
+          .map((item) => normalizePlayableItem(item))
+          .filter(Boolean)
+          .filter((item) => !currentQueue.some((existing) => playerItemsMatch(existing, item)));
+        setPlayerQueue([...currentQueue, ...additions], { preserveCurrent: true });
         state.playerActiveStationRuntime = payload?.runtime || state.playerActiveStationRuntime;
       }
     } catch (_err) {
@@ -5789,8 +5802,16 @@ function markQueueItemUnresolved(index, item, reason = "unresolved") {
 
 async function playPlayerQueueIndex(index) {
   if (!Array.isArray(state.playerQueue) || !state.playerQueue.length) return;
-  const targetIndex = Number.parseInt(String(index), 10);
+  let targetIndex = Number.parseInt(String(index), 10);
   if (!Number.isFinite(targetIndex) || targetIndex < 0 || targetIndex >= state.playerQueue.length) return;
+  const previousIndex = getCurrentQueueIndex();
+  if (previousIndex >= 0 && targetIndex > previousIndex) {
+    // The visible queue is the playback contract. Once playback advances, discard
+    // everything already played or explicitly skipped and make the selected item first.
+    state.playerQueue = state.playerQueue.slice(targetIndex);
+    targetIndex = 0;
+    state.playerShuffleBag = state.playerQueue.map((_entry, queueIndex) => queueIndex);
+  }
   const item = normalizePlayableItem(state.playerQueue[targetIndex]);
   if (!item) return;
   state.playerShuffleBag = (Array.isArray(state.playerShuffleBag) ? state.playerShuffleBag : [])
@@ -5809,7 +5830,7 @@ async function playPlayerQueueIndex(index) {
       state.playerQueue[targetIndex] = readyItem;
       renderMusicPlayerQueue();
       try {
-        await playMusicPlayerItem(readyItem);
+        await playMusicPlayerItem(readyItem, { preserveStation: Number(state.playerActiveStationId || 0) > 0 });
       } catch (_err) {
         markQueueItemUnresolved(targetIndex, item, "playback_init_failed");
         setMusicPlayerStatus(`Skipped "${item.title || "Track"}" (playback unavailable).`, {
@@ -5839,7 +5860,7 @@ async function playPlayerQueueIndex(index) {
     return;
   }
   try {
-    await playMusicPlayerItem(item);
+    await playMusicPlayerItem(item, { preserveStation: Number(state.playerActiveStationId || 0) > 0 });
   } catch (_err) {
     markQueueItemUnresolved(targetIndex, item, "playback_failed");
     setMusicPlayerStatus(`Skipped "${item.title || "Track"}" (not playable right now).`, {
@@ -5901,7 +5922,13 @@ function _prefetchNextUnresolved(fromIndex) {
 
 async function playNextPlayerItem({ autoAdvance = false } = {}) {
   if (!Array.isArray(state.playerQueue) || !state.playerQueue.length) return;
-  if (Number(state.playerActiveStationId || 0) && !state.playerShuffle && String(state.playerRepeatMode || "off") !== "one") {
+  const visibleCurrentIndex = getCurrentQueueIndex();
+  const visibleNextIndex = visibleCurrentIndex >= 0 ? visibleCurrentIndex + 1 : 0;
+  if (!state.playerShuffle && String(state.playerRepeatMode || "off") !== "one" && visibleNextIndex < state.playerQueue.length) {
+    await playPlayerQueueIndex(visibleNextIndex);
+    return;
+  }
+  if (Number(state.playerActiveStationId || 0) && String(state.playerRepeatMode || "off") !== "one") {
     try {
       const payload = await fetchJson(`/api/player/stations/${encodeURIComponent(state.playerActiveStationId)}/next`, { method: "POST" });
       if (Array.isArray(payload?.queue)) {
@@ -6174,6 +6201,7 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
       contextEl.textContent = buildPlayerNowContextText(payload, { isYouTube });
     }
     if (nowArt) nowArt.src = getMusicLibraryArtworkUrl(payload);
+    renderMusicPlayerQueue();
     syncBottomPlayerShell();
     updateMusicPlayerTransportUI();
     syncMusicPlayerVideoShell();
@@ -6225,6 +6253,7 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
   }
   if (nowArt) nowArt.src = getMusicLibraryArtworkUrl(payload);
 
+  renderMusicPlayerQueue();
   syncBottomPlayerShell();
   updateMusicPlayerTransportUI();
   syncMusicPlayerVideoShell();
@@ -8268,7 +8297,8 @@ function queueTrackNext(item) {
 function moveQueueItem(fromIndex, toIndex) {
   const queue = Array.isArray(state.playerQueue) ? state.playerQueue.slice() : [];
   if (fromIndex < 0 || fromIndex >= queue.length || toIndex < 0 || toIndex >= queue.length || fromIndex === toIndex) return;
-  clearActiveStationPlayback();
+  const currentIndex = getCurrentQueueIndex();
+  if (fromIndex === currentIndex || toIndex === currentIndex) return;
   const [item] = queue.splice(fromIndex, 1);
   queue.splice(toIndex, 0, item);
   setPlayerQueue(queue, { preserveCurrent: true });
@@ -14718,7 +14748,8 @@ async function playMusicArtistFromBrowse(artistItem) {
   const queue = shuffledMusicItems(dedupePlayableMusicItems(tracks)).slice(0, 100);
   if (!queue.length) throw new Error("No playable tracks found for this artist.");
   clearActiveStationPlayback();
-  state.playerShuffle = true;
+  // The queue itself is shuffled once; Next must then obey its visible order.
+  state.playerShuffle = false;
   state.playerRepeatMode = "off";
   setPlayerQueue(queue);
   setMusicPlayerView("queue");
@@ -14755,7 +14786,9 @@ async function playMusicGenreFromBrowse(genreValue) {
     throw new Error(`Could not build a diverse ${normalizedGenre || genreValue} mix yet.`);
   }
   clearActiveStationPlayback();
-  state.playerShuffle = true;
+  // The genre builder already creates a mixed order. Keep runtime shuffle off so
+  // reordering the visible queue remains authoritative.
+  state.playerShuffle = false;
   state.playerRepeatMode = "off";
   setPlayerQueue(queue);
   setMusicPlayerView("queue");
@@ -14818,6 +14851,7 @@ async function playMusicAlbumFromSearch(albumItem) {
     });
   });
   clearActiveStationPlayback();
+  state.playerShuffle = false;
   setPlayerQueue(queueItems);
   setMusicPlayerView("queue");
   // Resolve upcoming album tracks while the first track starts, so continuous
@@ -21938,7 +21972,12 @@ function bindEvents() {
       if (loadStationButton) {
         const stationId = String(loadStationButton.dataset.stationId || "").trim();
         const payload = await fetchJson(`/api/player/stations/${encodeURIComponent(stationId)}/start`, { method: "POST" });
-        setPlayerQueue(Array.isArray(payload?.queue) ? payload.queue : []);
+        const stationQueue = Array.isArray(payload?.queue) ? payload.queue : [];
+        const firstCandidate = normalizePlayableItem(payload?.current_item || null);
+        const orderedStationQueue = firstCandidate
+          ? [firstCandidate, ...stationQueue.filter((item) => !playerItemsMatch(item, firstCandidate))]
+          : stationQueue;
+        setPlayerQueue(orderedStationQueue);
         if (!state.playerQueue.length) {
           clearActiveStationPlayback();
           setMusicPlayerView("radio");
@@ -21953,12 +21992,11 @@ function bindEvents() {
         setMusicPlayerView("queue");
         // Prefer the explicit current_item from the server; fall back to queue[0] if absent
         // so playback always starts if any item is available.
-        const firstCandidate = normalizePlayableItem(payload?.current_item || null);
         const firstItem = firstCandidate && (firstCandidate.stream_url || firstCandidate.video_id || firstCandidate.recording_mbid || firstCandidate.local_path)
           ? firstCandidate
           : (state.playerQueue[0] || null);
         if (firstItem) {
-          await playMusicPlayerItem(firstItem, { preserveStation: true });
+          await playPlayerQueueIndex(0);
           scheduleStationPrime(stationId, 600);
           const readyCount = Number(payload?.runtime?.ready_count || state.playerQueue.length || 0);
           setMusicPlayerStatus(`Station ready with ${readyCount} prepared item${readyCount === 1 ? "" : "s"}.`, { kind: "success", toast: true });
@@ -22079,6 +22117,7 @@ function bindEvents() {
         const artistKey = String(playArtistButton.dataset.artistKey || state.playerSelectedArtistKey || "");
         const tracks = getPlayerTracksForArtist(artistKey);
         if (!tracks.length) return;
+        state.playerShuffle = false;
         setPlayerQueue(tracks);
         await playMusicPlayerItem(normalizePlayableItem(tracks[0]));
         setMusicSection("library");
@@ -22090,6 +22129,7 @@ function bindEvents() {
         const tracks = getPlayerTracksForArtist(artistKey);
         if (!tracks.length) return;
         const shuffled = tracks.slice().sort(() => Math.random() - 0.5);
+        state.playerShuffle = false;
         setPlayerQueue(shuffled);
         await playMusicPlayerItem(normalizePlayableItem(shuffled[0]));
         setMusicSection("library");
@@ -22101,6 +22141,7 @@ function bindEvents() {
         const albumKey = String(playAlbumButton.dataset.albumKey || state.playerSelectedAlbumKey || "");
         const tracks = getPlayerTracksForAlbum(artistKey, albumKey);
         if (!tracks.length) return;
+        state.playerShuffle = false;
         setPlayerQueue(tracks);
         await playMusicPlayerItem(normalizePlayableItem(tracks[0]));
         setMusicSection("library");

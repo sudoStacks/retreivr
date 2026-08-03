@@ -61,11 +61,13 @@ def test_genre_and_artist_play_build_diverse_shuffled_queues() -> None:
     genre_source = source[genre_start:album_start]
 
     assert "fetchMusicTracksForArtist(nextQuery" in artist_source
-    assert "state.playerShuffle = true" in artist_source
+    assert "shuffledMusicItems" in artist_source
+    assert "state.playerShuffle = false" in artist_source
     assert "playMusicAlbumFromSearch(albums[0])" not in artist_source
     assert "selectedArtists.map" in genre_source
     assert "artistCount < 2" in genre_source
-    assert "state.playerShuffle = true" in genre_source
+    assert "shuffledMusicItems" in genre_source
+    assert "state.playerShuffle = false" in genre_source
     assert "playMusicArtistFromBrowse(artists[0])" not in genre_source
 
 
