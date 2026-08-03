@@ -9,7 +9,8 @@ configuring Readarr or any future acquisition provider.
 1. **Discover** — Search Open Library by title, author, subject, or ISBN.
 2. **Inspect** — Cards show cover, title, authors, first publication year,
    subjects, edition count, and provider access state.
-3. **Acquire** — Import a local DRM-free file or provide a direct downloadable
+3. **Acquire** — Download a verified public Open Library/Internet Archive scan
+   in one click, import a local DRM-free file, or provide a direct downloadable
    URL that the user is authorized to access.
 4. **Finalize** — Store the book under `Author/Title.ext`, embed metadata into
    PDF/EPUB when the format permits it, and always write `Title.ext.metadata.json`.
@@ -23,9 +24,11 @@ configuring Readarr or any future acquisition provider.
 
 Discovery and acquisition are separate contracts:
 
-- **Open Library** is the default discovery/cover provider. A `Read / Preview`
-  action stays on Open Library; an availability hint is not treated as a direct
-  download authorization.
+- **Open Library** is the default discovery/cover provider. Public scan results
+  expose their Internet Archive identifiers. Retreivr verifies the selected
+  archive item is unrestricted, title-matched, and has a public EPUB/PDF before
+  showing and executing the one-click download path. Other availability hints
+  remain `Read / Preview` actions and are not treated as authorization.
 - **Local import** accepts PDF, EPUB, MOBI, AZW, AZW3, and TXT.
 - **Direct URL** accepts only HTTP(S) responses with a supported file extension
   or content type. Redirect targets are revalidated, private/link-local hosts
@@ -64,6 +67,7 @@ the full sidecar even when safe in-file rewriting is unavailable.
 - `GET /api/books/library`
 - `GET /api/books/library/{book_id}/file`
 - `POST /api/books/acquire/url`
+- `POST /api/books/acquire/openlibrary`
 - `POST /api/books/import` (multipart file plus `metadata_json`)
 
 All search, library, and acquisition endpoints except status fail closed while

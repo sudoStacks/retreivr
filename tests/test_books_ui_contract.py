@@ -46,3 +46,19 @@ def test_books_quick_browse_uses_the_native_search_path() -> None:
     assert "[data-books-browse-query]" in books_ui
     assert "button.dataset.booksBrowseQuery" in books_ui
     assert "performBooksSearch();" in books_ui
+
+
+def test_public_book_cards_have_a_one_click_download_path() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    render_start = source.index("function renderBooksResults()")
+    render_end = source.index("function renderBooksLibrary", render_start)
+    render_source = source[render_start:render_end]
+    download_start = source.index("async function downloadOpenLibraryBook")
+    download_end = source.index("async function acquireBookFromUrl", download_start)
+    download_source = source[download_start:download_end]
+
+    assert "item?.download_available" in render_source
+    assert 'data-book-action="download"' in render_source
+    assert ">Download</button>" in render_source
+    assert 'fetchJson("/api/books/acquire/openlibrary"' in download_source
+    assert "await loadBooksLibrary();" in download_source

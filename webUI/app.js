@@ -1976,7 +1976,10 @@ function renderBooksResults() {
   host.innerHTML = results.map((item, index) => {
     const year = item?.first_publish_year ? String(item.first_publish_year) : "Year unknown";
     const subjects = (Array.isArray(item?.subjects) ? item.subjects : []).slice(0, 3).join(" · ");
-    const access = item?.public_readable ? "Read online" : (item?.has_fulltext ? "Preview available" : "Metadata");
+    const downloadAvailable = !!item?.download_available && Array.isArray(item?.archive_identifiers) && item.archive_identifiers.length > 0;
+    const access = downloadAvailable
+      ? "Free download"
+      : (item?.public_readable ? "Read online" : (item?.has_fulltext ? "Preview available" : "Metadata"));
     const detailsUrl = String(item?.details_url || "").trim();
     return `
       <article class="home-result-card music-meta-card music-grid-card movies-tv-card books-card" data-book-index="${index}">
@@ -1990,7 +1993,9 @@ function renderBooksResults() {
           </div>
           <div class="home-candidate-action home-candidate-action-primary-stack movies-tv-action books-card-actions">
             ${detailsUrl ? `<a class="button ghost small" href="${escapeHtml(detailsUrl)}" target="_blank" rel="noreferrer">${item?.public_readable ? "Read / Preview" : "Details"}</a>` : ""}
-            <button class="button primary small" data-book-action="use-metadata" data-book-index="${index}" type="button">Add file</button>
+            ${downloadAvailable
+              ? `<button class="button primary small" data-book-action="download" data-book-index="${index}" type="button" title="Download the best public EPUB or PDF and add it to My Library">Download</button>`
+              : `<button class="button primary small" data-book-action="use-metadata" data-book-index="${index}" type="button">Import my file</button>`}
           </div>
         </div>
       </article>`;
@@ -2068,6 +2073,40 @@ async function loadBooksLibrary() {
   } catch (err) {
     if (status) status.textContent = "Library unavailable";
     setNotice($("#books-message"), `Could not load the book library: ${toUserErrorMessage(err)}`, true);
+  }
+}
+
+async function downloadOpenLibraryBook(item, button) {
+  if (!item || !button) return;
+  const identifiers = Array.isArray(item.archive_identifiers)
+    ? item.archive_identifiers.filter(Boolean).slice(0, 6)
+    : [];
+  if (!item.download_available || !identifiers.length) {
+    setNotice($("#books-message"), "This edition does not expose a public downloadable EPUB or PDF.", true);
+    return;
+  }
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Downloading…";
+  setNotice($("#books-message"), `Downloading “${item.title || "book"}” and embedding its metadata…`, false);
+  try {
+    const result = await fetchJson("/api/books/acquire/openlibrary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        archive_identifiers: identifiers,
+        preferred_format: "epub",
+        metadata: bookMetadataFromResult(item),
+      }),
+    });
+    const format = String(result?.metadata?.file_format || "book").toUpperCase();
+    button.textContent = "In Library";
+    setNotice($("#books-message"), `Added “${item.title || "book"}” to My Library as ${format}.`, false);
+    await loadBooksLibrary();
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = originalText;
+    setNotice($("#books-message"), `Book download failed: ${toUserErrorMessage(err)}`, true);
   }
 }
 
@@ -2151,10 +2190,15 @@ function initializeBooksUi() {
   });
   $("#books-refresh-library")?.addEventListener("click", () => loadBooksLibrary());
   $("#books-results-list")?.addEventListener("click", (event) => {
-    const button = event.target.closest('[data-book-action="use-metadata"]');
+    const button = event.target.closest('[data-book-action]');
     if (!button) return;
     const item = state.booksResults[Number(button.dataset.bookIndex)];
     if (!item) return;
+    if (button.dataset.bookAction === "download") {
+      downloadOpenLibraryBook(item, button);
+      return;
+    }
+    if (button.dataset.bookAction !== "use-metadata") return;
     state.booksSelectedMetadata = bookMetadataFromResult(item);
     const input = $("#books-direct-url");
     input?.focus();

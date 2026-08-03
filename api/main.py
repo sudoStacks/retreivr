@@ -96,6 +96,7 @@ from engine.spotify_playlist_importer import (
 from engine.download_defaults import resolve_effective_download_settings
 from engine.book_services import (
     BookServiceError,
+    acquire_open_library_book,
     acquire_book_url,
     get_books_config,
     import_book_file,
@@ -12450,7 +12451,7 @@ def api_books_status():
             "readarr_configured": bool(readarr.get("base_url") and readarr.get("api_key")),
             "readarr_retired": True,
             "discovery_provider": "Open Library",
-            "acquisition_paths": ["local_import", "direct_url"],
+            "acquisition_paths": ["openlibrary_public_scan", "local_import", "direct_url"],
         }
     )
 
@@ -12497,6 +12498,28 @@ def api_books_acquire_url(payload: dict = Body(...)):
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     try:
         result = acquire_book_url(_books_runtime_config(), source_url, metadata)
+        return safe_json({"status": "completed", **result})
+    except BookServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
+@app.post("/api/books/acquire/openlibrary", status_code=201)
+def api_books_acquire_openlibrary(payload: dict = Body(...)):
+    identifiers = payload.get("archive_identifiers")
+    if not isinstance(identifiers, list):
+        identifier = str(payload.get("archive_identifier") or "").strip()
+        identifiers = [identifier] if identifier else []
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    preferred_format = str(payload.get("preferred_format") or "").strip().lower()
+    if preferred_format not in {"", "epub", "pdf", "mobi"}:
+        raise HTTPException(status_code=400, detail={"error": "preferred_format must be epub, pdf, or mobi"})
+    try:
+        result = acquire_open_library_book(
+            _books_runtime_config(),
+            identifiers,
+            metadata,
+            preferred_format=preferred_format,
+        )
         return safe_json({"status": "completed", **result})
     except BookServiceError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc

@@ -43,6 +43,12 @@ def test_search_open_library_normalizes_rich_metadata(monkeypatch):
                         "cover_i": 42,
                         "edition_key": ["OL1M"],
                         "ebook_access": "public",
+                        "public_scan_b": True,
+                        "ia": ["examplebook00writ"],
+                        "availability": {
+                            "identifier": "examplebook00writ",
+                            "is_restricted": False,
+                        },
                     }
                 ],
             }
@@ -55,7 +61,67 @@ def test_search_open_library_normalizes_rich_metadata(monkeypatch):
     assert row["work_id"] == "OL1W"
     assert row["authors"] == ["A. Writer"]
     assert row["public_readable"] is True
+    assert row["download_available"] is True
+    assert row["archive_identifiers"] == ["examplebook00writ"]
     assert row["cover_url"].endswith("/b/id/42-M.jpg?default=false")
+
+
+def test_one_click_open_library_download_resolves_public_epub(monkeypatch, tmp_path):
+    class MetadataResponse:
+        def __init__(self, title):
+            self._title = title
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "metadata": {"title": self._title, "licenseurl": "https://archive.org/about/terms.php"},
+                "files": [
+                    {"name": "book.epub", "format": "EPUB", "size": "12"},
+                    {"name": "book.pdf", "format": "Text PDF", "size": "20"},
+                ],
+            }
+
+    class DownloadResponse:
+        status_code = 200
+        url = "https://archive.org/download/right/book.epub"
+        headers = {"Content-Type": "application/epub+zip", "Content-Length": "12"}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            yield b"not-real-epub"
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        if url.endswith("/metadata/wrong"):
+            return MetadataResponse("A Completely Different Work")
+        if url.endswith("/metadata/right"):
+            return MetadataResponse("The Time Machine; an invention")
+        assert url == "https://archive.org/download/right/book.epub"
+        return DownloadResponse()
+
+    monkeypatch.setattr(book_services.requests, "get", fake_get)
+    result = book_services.acquire_open_library_book(
+        _config(tmp_path),
+        ["wrong", "right"],
+        {"title": "The Time Machine", "authors": ["H. G. Wells"], "work_id": "OL52267W"},
+    )
+
+    final_path = Path(result["path"])
+    assert final_path.name == "The Time Machine.epub"
+    assert final_path.read_bytes() == b"not-real-epub"
+    sidecar = json.loads(Path(result["sidecar"]).read_text(encoding="utf-8"))
+    assert sidecar["archive_identifier"] == "right"
+    assert sidecar["source_provider"] == "internet_archive_openlibrary"
+    assert calls[:2] == [
+        "https://archive.org/metadata/wrong",
+        "https://archive.org/metadata/right",
+    ]
 
 
 def test_import_book_writes_deterministic_sidecar_and_library_record(tmp_path):

@@ -16,9 +16,10 @@ import shutil
 import socket
 import tempfile
 import zipfile
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
@@ -26,6 +27,8 @@ import requests
 OPEN_LIBRARY_SEARCH_URL = "https://openlibrary.org/search.json"
 OPEN_LIBRARY_BASE_URL = "https://openlibrary.org"
 OPEN_LIBRARY_COVERS_URL = "https://covers.openlibrary.org"
+INTERNET_ARCHIVE_METADATA_URL = "https://archive.org/metadata/{identifier}"
+INTERNET_ARCHIVE_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
 BOOK_EXTENSIONS = {".pdf", ".epub", ".mobi", ".azw", ".azw3", ".txt"}
 CONTENT_TYPE_EXTENSIONS = {
     "application/pdf": ".pdf",
@@ -36,6 +39,7 @@ CONTENT_TYPE_EXTENSIONS = {
 DEFAULT_MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 DEFAULT_TIMEOUT = (8, 45)
 _SAFE_COMPONENT = re.compile(r"[^\w\-.()' ]+", re.UNICODE)
+_ARCHIVE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 
 
 class BookServiceError(RuntimeError):
@@ -96,6 +100,19 @@ def _normalize_open_library_row(row: dict[str, Any]) -> dict[str, Any]:
         cover_url = f"{OPEN_LIBRARY_COVERS_URL}/b/isbn/{isbn_values[0]}-M.jpg?default=false"
     availability = row.get("availability") if isinstance(row.get("availability"), dict) else {}
     ebook_access = str(row.get("ebook_access") or availability.get("status") or "").strip().lower()
+    public_readable = ebook_access in {"open", "public"}
+    archive_identifiers = _clean_list(row.get("ia"), limit=12)
+    availability_identifier = str(availability.get("identifier") or "").strip()
+    if availability_identifier and availability_identifier in archive_identifiers:
+        archive_identifiers.remove(availability_identifier)
+        archive_identifiers.insert(0, availability_identifier)
+    public_scan = _truthy_metadata_value(row.get("public_scan_b"))
+    download_available = bool(
+        public_readable
+        and public_scan
+        and not _truthy_metadata_value(availability.get("is_restricted"))
+        and archive_identifiers
+    )
     return {
         "id": work_id or hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()[:16],
         "provider": "openlibrary",
@@ -115,8 +132,13 @@ def _normalize_open_library_row(row: dict[str, Any]) -> dict[str, Any]:
         "details_url": f"{OPEN_LIBRARY_BASE_URL}{work_key}" if work_key.startswith("/") else OPEN_LIBRARY_BASE_URL,
         "read_url": f"{OPEN_LIBRARY_BASE_URL}{work_key}" if work_key.startswith("/") else "",
         "ebook_access": ebook_access,
-        "public_readable": ebook_access in {"open", "public"},
+        "public_readable": public_readable,
         "has_fulltext": bool(row.get("has_fulltext")),
+        "public_scan": public_scan,
+        "download_available": download_available,
+        "download_provider": "internet_archive" if download_available else "",
+        "archive_identifier": archive_identifiers[0] if download_available else "",
+        "archive_identifiers": archive_identifiers if download_available else [],
         "metadata": {
             "openlibrary_work_id": work_id,
             "openlibrary_edition_id": str(_first(row.get("edition_key"), "") or ""),
@@ -134,6 +156,7 @@ def search_open_library(query: str, *, limit: int = 24, page: int = 1) -> dict[s
             "key", "title", "subtitle", "author_name", "author_key", "first_publish_year",
             "publisher", "subject", "language", "isbn", "cover_i", "edition_key",
             "edition_count", "number_of_pages_median", "has_fulltext", "ebook_access", "availability",
+            "ia", "public_scan_b",
         )
     )
     try:
@@ -194,7 +217,122 @@ def _canonical_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
         "cover_url": str(source.get("cover_url") or "").strip(),
         "source_url": str(source.get("source_url") or "").strip(),
         "source_provider": str(source.get("source_provider") or source.get("provider") or "manual").strip(),
+        "archive_identifier": str(source.get("archive_identifier") or "").strip(),
+        "license_url": str(source.get("license_url") or "").strip(),
+        "rights": str(source.get("rights") or "").strip(),
     }
+
+
+def _truthy_metadata_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _title_match_score(expected: str, actual: str) -> float:
+    expected_text = re.sub(r"[^a-z0-9]+", " ", str(expected or "").casefold()).strip()
+    actual_text = re.sub(r"[^a-z0-9]+", " ", str(actual or "").casefold()).strip()
+    if not expected_text or not actual_text:
+        return 1.0
+    stop_words = {"a", "an", "and", "of", "the"}
+    expected_tokens = {token for token in expected_text.split() if token not in stop_words}
+    actual_tokens = {token for token in actual_text.split() if token not in stop_words}
+    token_score = len(expected_tokens & actual_tokens) / max(1, len(expected_tokens))
+    sequence_score = SequenceMatcher(None, expected_text, actual_text).ratio()
+    return max(token_score, sequence_score)
+
+
+def _archive_download_file(payload: dict[str, Any], *, preferred_format: str = "") -> dict[str, Any] | None:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if _truthy_metadata_value(metadata.get("access-restricted-item")):
+        return None
+    requested = str(preferred_format or "").strip().lower()
+    format_priority = {
+        "epub": ("epub", "pdf", "mobi"),
+        "pdf": ("pdf", "epub", "mobi"),
+        "mobi": ("mobi", "epub", "pdf"),
+    }.get(requested, ("epub", "pdf", "mobi"))
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for file_row in payload.get("files") or []:
+        if not isinstance(file_row, dict) or _truthy_metadata_value(file_row.get("private")):
+            continue
+        name = str(file_row.get("name") or "").strip()
+        extension = Path(name).suffix.lower().lstrip(".")
+        if extension not in format_priority or name.casefold().endswith("_bw.pdf"):
+            continue
+        format_name = str(file_row.get("format") or "").strip().casefold()
+        if extension == "pdf" and format_name not in {"text pdf", "pdf"}:
+            continue
+        try:
+            size = int(file_row.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        candidates.append((format_priority.index(extension), size, file_row))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda entry: (entry[0], entry[1] or 2**63))
+    return candidates[0][2]
+
+
+def acquire_open_library_book(
+    config: dict | None,
+    archive_identifiers: list[str] | tuple[str, ...],
+    metadata: dict[str, Any] | None,
+    *,
+    preferred_format: str = "",
+) -> dict[str, Any]:
+    """Resolve a public Open Library scan and finalize it in one request."""
+
+    identifiers: list[str] = []
+    for value in archive_identifiers or []:
+        identifier = str(value or "").strip()
+        if identifier and _ARCHIVE_IDENTIFIER.fullmatch(identifier) and identifier not in identifiers:
+            identifiers.append(identifier)
+        if len(identifiers) >= 6:
+            break
+    if not identifiers:
+        raise BookServiceError("This result does not expose a public downloadable artifact")
+
+    expected_title = str((metadata or {}).get("title") or "").strip()
+    last_error = "No matching public EPUB or PDF was found"
+    for identifier in identifiers:
+        try:
+            response = requests.get(
+                INTERNET_ARCHIVE_METADATA_URL.format(identifier=quote(identifier, safe="")),
+                headers={"Accept": "application/json", "User-Agent": "Retreivr/1.0 (+https://github.com/sudostacks/retreivr)"},
+                timeout=(6, 20),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            last_error = f"Internet Archive metadata lookup failed: {exc}"
+            continue
+        if not isinstance(payload, dict):
+            continue
+        archive_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        if _title_match_score(expected_title, str(archive_metadata.get("title") or "")) < 0.5:
+            last_error = "The public scan did not match the selected title"
+            continue
+        file_row = _archive_download_file(payload, preferred_format=preferred_format)
+        if not file_row:
+            last_error = "The matching archive item has no public EPUB or PDF file"
+            continue
+        name = str(file_row.get("name") or "").strip()
+        source_url = INTERNET_ARCHIVE_DOWNLOAD_URL.format(
+            identifier=quote(identifier, safe=""),
+            filename=quote(name, safe=""),
+        )
+        enriched = dict(metadata or {})
+        enriched.update(
+            {
+                "archive_identifier": identifier,
+                "source_provider": "internet_archive_openlibrary",
+                "license_url": str(archive_metadata.get("licenseurl") or "").strip(),
+                "rights": str(archive_metadata.get("rights") or archive_metadata.get("usage") or "").strip(),
+            }
+        )
+        return acquire_book_url(config, source_url, enriched)
+    raise BookServiceError(last_error)
 
 
 def _write_sidecar(path: Path, metadata: dict[str, Any]) -> Path:
@@ -415,7 +553,12 @@ def acquire_book_url(config: dict | None, url: str, metadata: dict[str, Any] | N
                         raise BookServiceError(f"Book exceeds the configured {books['max_download_mb']} MB limit")
                     handle.write(chunk)
             enriched = dict(metadata or {})
-            enriched.update({"source_url": response.url, "source_provider": enriched.get("provider") or "direct_url"})
+            enriched.update(
+                {
+                    "source_url": response.url,
+                    "source_provider": enriched.get("source_provider") or enriched.get("provider") or "direct_url",
+                }
+            )
             return finalize_book_artifact(temp_name, library, enriched)
         except Exception:
             if os.path.exists(temp_name):

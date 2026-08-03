@@ -68,3 +68,34 @@ def test_books_import_and_library_round_trip(monkeypatch, tmp_path):
     assert library.status_code == 200
     assert library.json()["count"] == 1
     assert library.json()["results"][0]["title"] == "Example"
+
+
+def test_books_one_click_openlibrary_acquisition(monkeypatch, tmp_path):
+    module, client = _client(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_acquire(config, identifiers, metadata, *, preferred_format):
+        captured.update(
+            identifiers=identifiers,
+            metadata=metadata,
+            preferred_format=preferred_format,
+        )
+        return {
+            "path": str(tmp_path / "books" / "Writer" / "Example.epub"),
+            "metadata": {"title": "Example", "file_format": "epub"},
+        }
+
+    monkeypatch.setattr(module, "acquire_open_library_book", fake_acquire)
+    response = client.post(
+        "/api/books/acquire/openlibrary",
+        json={
+            "archive_identifiers": ["example00writ"],
+            "preferred_format": "epub",
+            "metadata": {"title": "Example", "authors": ["Writer"]},
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "completed"
+    assert captured["identifiers"] == ["example00writ"]
+    assert captured["preferred_format"] == "epub"
