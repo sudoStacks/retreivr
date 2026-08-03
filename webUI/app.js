@@ -1981,13 +1981,67 @@ function bookHasDirectDownload(item) {
   return Array.isArray(item?.archive_identifiers) && item.archive_identifiers.length > 0;
 }
 
-function renderBookCover(item, { library = false } = {}) {
-  const coverUrl = String(item?.cover_url || "").trim();
-  if (coverUrl) {
-    return `<img src="${escapeHtml(coverUrl)}" alt="" loading="lazy" decoding="async" onerror="this.classList.add('hidden');this.nextElementSibling?.classList.remove('hidden')"><div class="books-cover-placeholder hidden" aria-hidden="true">▤</div>`;
+function bookCoverUrls(item) {
+  const urls = [
+    String(item?.cover_url || "").trim(),
+    ...(Array.isArray(item?.cover_fallback_urls) ? item.cover_fallback_urls : []),
+  ];
+  const gutenbergId = String(item?.gutenberg_id || "").trim();
+  if (gutenbergId) {
+    urls.push(`https://www.gutenberg.org/cache/epub/${encodeURIComponent(gutenbergId)}/pg${encodeURIComponent(gutenbergId)}.cover.medium.jpg`);
   }
-  const format = library ? String(item?.format || "BOOK") : "BOOK";
-  return `<div class="books-cover-placeholder" aria-hidden="true"><span>▤</span><small>${escapeHtml(format)}</small></div>`;
+  (Array.isArray(item?.archive_identifiers) ? item.archive_identifiers : []).slice(0, 3).forEach((identifier) => {
+    const value = String(identifier || "").trim();
+    if (value) urls.push(`https://archive.org/services/img/${encodeURIComponent(value)}`);
+  });
+  const seen = new Set();
+  return urls.map((value) => String(value || "").trim()).filter((value) => {
+    if (!value || seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function advanceBookCoverImage(image) {
+  if (!image) return;
+  let fallbacks = [];
+  try {
+    fallbacks = JSON.parse(decodeURIComponent(String(image.dataset.coverFallbacks || "")));
+  } catch (_err) {
+    fallbacks = [];
+  }
+  const index = Number(image.dataset.coverFallbackIndex || 0);
+  const nextUrl = Array.isArray(fallbacks) ? String(fallbacks[index] || "").trim() : "";
+  if (nextUrl) {
+    image.dataset.coverFallbackIndex = String(index + 1);
+    image.src = nextUrl;
+    return;
+  }
+  image.classList.add("hidden");
+  image.nextElementSibling?.classList.remove("hidden");
+}
+
+function bookGeneratedCoverTheme(item) {
+  const seed = `${String(item?.title || "")}|${bookAuthorsLabel(item)}`;
+  let value = 0;
+  for (let index = 0; index < seed.length; index += 1) value = (value + seed.charCodeAt(index)) % 7;
+  return value;
+}
+
+function renderGeneratedBookCover(item, { library = false, hidden = false } = {}) {
+  const title = String(item?.title || "Untitled").trim() || "Untitled";
+  const author = bookAuthorsLabel(item);
+  const format = library ? String(item?.format || "BOOK").toUpperCase() : "RETREIVR BOOKS";
+  return `<div class="books-cover-placeholder books-generated-cover books-generated-cover-theme-${bookGeneratedCoverTheme(item)} ${hidden ? "hidden" : ""}" aria-hidden="true"><span class="books-generated-cover-kicker">${escapeHtml(format)}</span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(author)}</small></div>`;
+}
+
+function renderBookCover(item, { library = false } = {}) {
+  const coverUrls = bookCoverUrls(item);
+  if (coverUrls.length) {
+    const fallbackPayload = encodeURIComponent(JSON.stringify(coverUrls.slice(1)));
+    return `<img src="${escapeAttr(coverUrls[0])}" alt="" loading="lazy" decoding="async" data-cover-fallbacks="${escapeAttr(fallbackPayload)}" data-cover-fallback-index="0" onerror="advanceBookCoverImage(this)">${renderGeneratedBookCover(item, { library, hidden: true })}`;
+  }
+  return renderGeneratedBookCover(item, { library });
 }
 
 function partitionBookResults(results) {
@@ -2128,7 +2182,12 @@ function openBooksDetailsModal(item) {
   $("#books-details-title").textContent = String(item.title || "Book Details");
   $("#books-details-authors").textContent = bookAuthorsLabel(item);
   const cover = $("#books-details-cover");
-  cover.src = String(item.cover_url || "").trim() || "assets/no_artwork.png";
+  const detailsCoverUrls = [...bookCoverUrls(item), "assets/no_artwork.png"];
+  cover.classList.remove("hidden");
+  cover.dataset.coverFallbacks = encodeURIComponent(JSON.stringify(detailsCoverUrls.slice(1)));
+  cover.dataset.coverFallbackIndex = "0";
+  cover.onerror = () => advanceBookCoverImage(cover);
+  cover.src = detailsCoverUrls[0];
   cover.alt = `${String(item.title || "Book")} cover`;
   const chips = [];
   if (item.first_publish_year) chips.push(`<span class="arr-details-chip"><span class="arr-details-chip-label">First published</span><span class="arr-details-chip-value">${escapeHtml(String(item.first_publish_year))}</span></span>`);

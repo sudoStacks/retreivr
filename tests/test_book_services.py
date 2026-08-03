@@ -64,6 +64,23 @@ def test_search_open_library_normalizes_rich_metadata(monkeypatch):
     assert row["download_available"] is True
     assert row["archive_identifiers"] == ["examplebook00writ"]
     assert row["cover_url"].endswith("/b/id/42-M.jpg?default=false")
+    assert row["cover_fallback_urls"] == ["https://archive.org/services/img/examplebook00writ"]
+
+
+def test_open_library_uses_archive_thumbnail_when_cover_is_missing() -> None:
+    row = book_services._normalize_open_library_row(
+        {
+            "key": "/works/OL2W",
+            "title": "Archive Cover",
+            "author_name": ["A. Writer"],
+            "ebook_access": "public",
+            "public_scan_b": True,
+            "ia": ["archivecover00writ"],
+        }
+    )
+
+    assert row["cover_url"] == "https://archive.org/services/img/archivecover00writ"
+    assert row["cover_fallback_urls"] == []
 
 
 def test_one_click_open_library_download_resolves_public_epub(monkeypatch, tmp_path):
@@ -171,6 +188,7 @@ def test_project_gutenberg_opds_search_normalizes_free_results(monkeypatch):
     assert row["gutenberg_id"] == "1342"
     assert row["download_available"] is True
     assert row["authors"] == ["Jane Austen"]
+    assert row["cover_url"] == "https://www.gutenberg.org/cache/epub/1342/pg1342.cover.medium.jpg"
 
 
 def test_project_gutenberg_one_click_prefers_small_epub(monkeypatch, tmp_path):
@@ -280,6 +298,7 @@ def test_multi_source_merge_deduplicates_catalog_author_order() -> None:
     assert rows[0]["gutenberg_id"] == "1342"
     assert rows[0]["archive_identifiers"] == ["prideprejudice00aust", "prideprejudice0000jane"]
     assert rows[0]["cover_url"].startswith("https://covers.openlibrary.org/")
+    assert "https://www.gutenberg.org/cache/epub/1342/pg1342.cover.medium.jpg" in rows[0]["cover_fallback_urls"]
 
 
 def test_import_book_writes_deterministic_sidecar_and_library_record(tmp_path):

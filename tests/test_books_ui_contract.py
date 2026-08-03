@@ -121,3 +121,17 @@ def test_book_thumbnail_opens_movies_style_details_modal() -> None:
     assert 'data-book-action="details"' in source
     assert "function openBooksDetailsModal(item)" in source
     assert "/api/books/details/" in source
+
+
+def test_book_cards_use_provider_cover_fallbacks_and_generated_covers() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    styles = STYLES_CSS.read_text(encoding="utf-8")
+
+    assert "function bookCoverUrls(item)" in source
+    assert "www.gutenberg.org/cache/epub/" in source
+    assert "archive.org/services/img/" in source
+    assert "function advanceBookCoverImage(image)" in source
+    assert "function renderGeneratedBookCover(item" in source
+    assert 'onerror="advanceBookCoverImage(this)"' in source
+    assert ".books-generated-cover" in styles
+    assert ".books-generated-cover strong" in styles

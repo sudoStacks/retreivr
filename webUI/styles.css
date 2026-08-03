@@ -9475,6 +9475,70 @@ body[data-page="music"] #music-panel .music-page-shell {
   text-align: center;
 }
 
+.books-generated-cover {
+  position: relative;
+  align-content: space-between;
+  justify-items: start;
+  gap: 18px;
+  padding: 24px 20px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.96);
+  background:
+    radial-gradient(circle at 82% 12%, rgba(255, 255, 255, 0.22), transparent 31%),
+    linear-gradient(145deg, #3152a4, #121a33 72%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.books-generated-cover::after {
+  content: "";
+  position: absolute;
+  right: -34px;
+  bottom: -44px;
+  width: 150px;
+  height: 150px;
+  border: 18px solid rgba(255, 255, 255, 0.08);
+  border-radius: 50%;
+}
+
+.books-generated-cover strong {
+  position: relative;
+  z-index: 1;
+  display: -webkit-box;
+  overflow: hidden;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(22px, 2.2vw, 34px);
+  line-height: 1.08;
+  text-align: left;
+  text-wrap: balance;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+}
+
+.books-generated-cover-kicker,
+.books-generated-cover small {
+  position: relative;
+  z-index: 1;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  line-height: 1.35;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.books-generated-cover small {
+  align-self: end;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.books-generated-cover-theme-1 { background: radial-gradient(circle at 82% 12%, rgba(255,255,255,.2), transparent 31%), linear-gradient(145deg, #8a3d58, #291522 72%); }
+.books-generated-cover-theme-2 { background: radial-gradient(circle at 82% 12%, rgba(255,255,255,.2), transparent 31%), linear-gradient(145deg, #397466, #102b27 72%); }
+.books-generated-cover-theme-3 { background: radial-gradient(circle at 82% 12%, rgba(255,255,255,.2), transparent 31%), linear-gradient(145deg, #9a632f, #302012 72%); }
+.books-generated-cover-theme-4 { background: radial-gradient(circle at 82% 12%, rgba(255,255,255,.2), transparent 31%), linear-gradient(145deg, #594b9e, #1b1735 72%); }
+.books-generated-cover-theme-5 { background: radial-gradient(circle at 82% 12%, rgba(255,255,255,.2), transparent 31%), linear-gradient(145deg, #33728b, #102631 72%); }
+.books-generated-cover-theme-6 { background: radial-gradient(circle at 82% 12%, rgba(255,255,255,.2), transparent 31%), linear-gradient(145deg, #7b4b2e, #28190f 72%); }
+
 .books-cover-placeholder small {
   font-size: 11px;
   font-weight: 700;

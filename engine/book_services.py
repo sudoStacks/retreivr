@@ -32,8 +32,10 @@ OPEN_LIBRARY_COVERS_URL = "https://covers.openlibrary.org"
 OPEN_LIBRARY_WORK_URL = "https://openlibrary.org/works/{work_id}.json"
 GUTENBERG_SEARCH_OPDS_URL = "https://www.gutenberg.org/ebooks/search.opds/"
 GUTENBERG_BOOK_OPDS_URL = "https://www.gutenberg.org/ebooks/{book_id}.opds"
+GUTENBERG_COVER_URL = "https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.cover.medium.jpg"
 INTERNET_ARCHIVE_METADATA_URL = "https://archive.org/metadata/{identifier}"
 INTERNET_ARCHIVE_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
+INTERNET_ARCHIVE_COVER_URL = "https://archive.org/services/img/{identifier}"
 BOOK_EXTENSIONS = {".pdf", ".epub", ".mobi", ".azw", ".azw3", ".txt"}
 CONTENT_TYPE_EXTENSIONS = {
     "application/pdf": ".pdf",
@@ -121,6 +123,13 @@ def _normalize_open_library_row(row: dict[str, Any]) -> dict[str, Any]:
         and not _truthy_metadata_value(availability.get("is_restricted"))
         and archive_identifiers
     )
+    archive_cover_urls = [
+        INTERNET_ARCHIVE_COVER_URL.format(identifier=identifier)
+        for identifier in archive_identifiers[:3]
+    ]
+    cover_fallback_urls = archive_cover_urls
+    if not cover_url and cover_fallback_urls:
+        cover_url = cover_fallback_urls.pop(0)
     return {
         "id": work_id or hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()[:16],
         "provider": "openlibrary",
@@ -137,6 +146,7 @@ def _normalize_open_library_row(row: dict[str, Any]) -> dict[str, Any]:
         "edition_count": int(row.get("edition_count") or 0),
         "page_count": row.get("number_of_pages_median"),
         "cover_url": cover_url,
+        "cover_fallback_urls": cover_fallback_urls,
         "details_url": f"{OPEN_LIBRARY_BASE_URL}{work_key}" if work_key.startswith("/") else OPEN_LIBRARY_BASE_URL,
         "read_url": f"{OPEN_LIBRARY_BASE_URL}{work_key}" if work_key.startswith("/") else "",
         "ebook_access": ebook_access,
@@ -272,7 +282,8 @@ def search_project_gutenberg(query: str, *, limit: int = 12) -> dict[str, Any]:
                 "isbn": [],
                 "edition_count": 1,
                 "page_count": None,
-                "cover_url": "",
+                "cover_url": GUTENBERG_COVER_URL.format(book_id=book_id),
+                "cover_fallback_urls": [],
                 "details_url": f"https://www.gutenberg.org/ebooks/{book_id}",
                 "read_url": f"https://www.gutenberg.org/ebooks/{book_id}",
                 "ebook_access": "public",
@@ -303,6 +314,33 @@ def _book_result_key(item: dict[str, Any]) -> str:
     return f"{title}|{author}"
 
 
+def _book_cover_urls(item: dict[str, Any]) -> list[str]:
+    gutenberg_id = str(item.get("gutenberg_id") or "").strip()
+    archive_identifiers = item.get("archive_identifiers") if isinstance(item.get("archive_identifiers"), list) else []
+    return _clean_list(
+        [
+            item.get("cover_url"),
+            *((item.get("cover_fallback_urls") if isinstance(item.get("cover_fallback_urls"), list) else []) or []),
+            GUTENBERG_COVER_URL.format(book_id=gutenberg_id) if gutenberg_id else "",
+            *[
+                INTERNET_ARCHIVE_COVER_URL.format(identifier=identifier)
+                for identifier in archive_identifiers[:3]
+                if str(identifier or "").strip()
+            ],
+        ],
+        limit=8,
+    )
+
+
+def _merge_book_cover_urls(target: dict[str, Any], source: dict[str, Any]) -> None:
+    urls = _clean_list(
+        [*_book_cover_urls(target), *_book_cover_urls(source)],
+        limit=8,
+    )
+    target["cover_url"] = urls[0] if urls else ""
+    target["cover_fallback_urls"] = urls[1:]
+
+
 def _merge_book_results(open_library: list[dict[str, Any]], gutenberg: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     by_key: dict[str, dict[str, Any]] = {}
@@ -314,6 +352,7 @@ def _merge_book_results(open_library: list[dict[str, Any]], gutenberg: list[dict
             merged.append(row)
             by_key[key] = row
             continue
+        _merge_book_cover_urls(existing, item)
         archive_ids = _clean_list(
             list(existing.get("archive_identifiers") or []) + list(item.get("archive_identifiers") or []),
             limit=12,
@@ -335,6 +374,7 @@ def _merge_book_results(open_library: list[dict[str, Any]], gutenberg: list[dict
             merged.append(row)
             by_key[key] = row
             continue
+        _merge_book_cover_urls(existing, item)
         existing["download_available"] = True
         existing["download_provider"] = "project_gutenberg"
         if not existing.get("gutenberg_id"):
