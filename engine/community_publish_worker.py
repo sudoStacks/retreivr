@@ -31,6 +31,11 @@ COMMUNITY_PUBLISH_STATUS_PENDING = "pending"
 COMMUNITY_PUBLISH_STATUS_PUBLISHED = "published"
 COMMUNITY_PUBLISH_STATUS_SKIPPED = "skipped"
 COMMUNITY_PUBLISH_STATUS_ERROR = "error"
+_MBID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_PUBLIC_DATASET_MIN_CONFIDENCE = 0.74
 
 
 def normalize_community_publish_source(value: Any) -> str:
@@ -38,6 +43,16 @@ def normalize_community_publish_source(value: Any) -> str:
     if source == "youtube_music":
         return "youtube"
     return source
+
+
+def normalize_publish_duration_ms(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        duration_ms = int(value)
+    except (TypeError, ValueError):
+        return None
+    return duration_ms if 1 <= duration_ms <= 7_200_000 else None
 
 
 def utc_now() -> str:
@@ -192,12 +207,22 @@ def _validate_publish_proposal(payload: dict[str, Any]) -> tuple[bool, str | Non
         score = float(payload.get("selected_score"))
     except (TypeError, ValueError):
         return False, "invalid_selected_score"
-    if score < 0 or score > 1:
+    if score < _PUBLIC_DATASET_MIN_CONFIDENCE or score > 1:
         return False, "invalid_selected_score"
     normalized_source = normalize_community_publish_source(payload.get("source"))
-    if not normalized_source:
-        return False, "missing_source"
+    if normalized_source != "youtube":
+        return False, "unsupported_source"
     payload["source"] = normalized_source
+    if not _MBID_RE.fullmatch(str(payload.get("recording_mbid") or "").strip()):
+        return False, "invalid_recording_mbid"
+    if not _YOUTUBE_VIDEO_ID_RE.fullmatch(str(payload.get("video_id") or "").strip()):
+        return False, "invalid_video_id"
+    duration_ms = payload.get("duration_ms")
+    if duration_ms is not None:
+        normalized_duration = normalize_publish_duration_ms(duration_ms)
+        if normalized_duration is None:
+            return False, "invalid_duration_ms"
+        payload["duration_ms"] = normalized_duration
     return True, None
 
 
@@ -369,6 +394,40 @@ def _source_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
     return (-confidence_value, str(item.get("source") or ""), str(item.get("video_id") or ""))
 
 
+def validate_dataset_record(record: dict[str, Any]) -> tuple[bool, str | None]:
+    if not isinstance(record, dict) or int(record.get("schema_version") or 0) != 1:
+        return False, "invalid_schema_version"
+    recording_mbid = str(record.get("recording_mbid") or "").strip()
+    if not _MBID_RE.fullmatch(recording_mbid):
+        return False, "invalid_recording_mbid"
+    if not str(record.get("updated_at") or "").strip():
+        return False, "missing_updated_at"
+    sources = record.get("sources")
+    if not isinstance(sources, list) or not sources:
+        return False, "missing_sources"
+    seen_video_ids: set[str] = set()
+    for source in sources:
+        if not isinstance(source, dict):
+            return False, "invalid_source_entry"
+        if normalize_community_publish_source(source.get("source")) != "youtube":
+            return False, "unsupported_source"
+        video_id = str(source.get("video_id") or "").strip()
+        if not _YOUTUBE_VIDEO_ID_RE.fullmatch(video_id):
+            return False, "invalid_video_id"
+        if video_id in seen_video_ids:
+            return False, "duplicate_video_id"
+        seen_video_ids.add(video_id)
+        try:
+            confidence = float(source.get("confidence"))
+        except (TypeError, ValueError):
+            return False, "invalid_confidence"
+        if confidence < _PUBLIC_DATASET_MIN_CONFIDENCE or confidence > 1.0:
+            return False, "invalid_confidence"
+        if source.get("duration_ms") is not None and normalize_publish_duration_ms(source.get("duration_ms")) is None:
+            return False, "invalid_duration_ms"
+    return True, None
+
+
 def merge_proposals_into_record(
     existing: dict[str, Any] | None,
     proposals: list[dict[str, Any]],
@@ -380,6 +439,7 @@ def merge_proposals_into_record(
     if not isinstance(sources, list):
         sources = []
     normalized_sources: list[dict[str, Any]] = []
+    changed = False
     for item in sources:
         if not isinstance(item, dict):
             continue
@@ -390,7 +450,6 @@ def merge_proposals_into_record(
             changed = True
         normalized_sources.append(current)
 
-    changed = False
     recording_mbid = None
     for proposal in proposals:
         recording_mbid = str(proposal.get("recording_mbid") or recording_mbid or "").strip().lower()
@@ -398,7 +457,7 @@ def merge_proposals_into_record(
             "video_id": str(proposal.get("video_id") or "").strip(),
             "source": normalize_community_publish_source(proposal.get("source") or "youtube") or "youtube",
             "confidence": float(proposal.get("selected_score")),
-            "duration_ms": proposal.get("duration_ms"),
+            "duration_ms": normalize_publish_duration_ms(proposal.get("duration_ms")),
             "candidate_url": str(proposal.get("candidate_url") or "").strip() or None,
             "candidate_id": str(proposal.get("candidate_id") or "").strip() or None,
             "duration_delta_ms": proposal.get("duration_delta_ms"),
@@ -406,6 +465,7 @@ def merge_proposals_into_record(
             "last_verified_at": str(proposal.get("emitted_at") or "").strip() or utc_now(),
             "verified_by": str(proposal.get("verified_by") or "").strip() or "retreivr",
         }
+        entry = {key: value for key, value in entry.items() if value is not None}
         existing_idx = None
         for idx, current in enumerate(normalized_sources):
             if str(current.get("video_id") or "").strip() == entry["video_id"]:
@@ -520,6 +580,57 @@ class GitHubCommunityCachePublisher:
         commit_sha = str(commit.get("sha") or "").strip()
         if not commit_sha:
             raise RuntimeError("missing_commit_sha")
+        return commit_sha
+
+    def put_files(self, files: dict[str, dict[str, Any]], *, message: str) -> str:
+        """Write a group of dataset files in one Git commit and one branch update."""
+        if not files:
+            raise ValueError("files_required")
+        branch_ref = self._request("GET", f"/repos/{self.repo}/git/ref/heads/{self.branch}")
+        head_sha = str((((branch_ref.json() or {}).get("object") or {}).get("sha") or "")).strip()
+        if not head_sha:
+            raise RuntimeError("missing_branch_head_sha")
+        head_commit = self._request("GET", f"/repos/{self.repo}/git/commits/{head_sha}")
+        base_tree_sha = str((((head_commit.json() or {}).get("tree") or {}).get("sha") or "")).strip()
+        if not base_tree_sha:
+            raise RuntimeError("missing_base_tree_sha")
+
+        tree_entries = []
+        for path, content in sorted(files.items()):
+            encoded = base64.b64encode(
+                (json.dumps(content, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            ).decode("ascii")
+            blob = self._request(
+                "POST",
+                f"/repos/{self.repo}/git/blobs",
+                json_body={"content": encoded, "encoding": "base64"},
+            )
+            blob_sha = str((blob.json() or {}).get("sha") or "").strip()
+            if not blob_sha:
+                raise RuntimeError(f"missing_blob_sha path={path}")
+            tree_entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob_sha})
+
+        tree = self._request(
+            "POST",
+            f"/repos/{self.repo}/git/trees",
+            json_body={"base_tree": base_tree_sha, "tree": tree_entries},
+        )
+        tree_sha = str((tree.json() or {}).get("sha") or "").strip()
+        if not tree_sha:
+            raise RuntimeError("missing_tree_sha")
+        commit = self._request(
+            "POST",
+            f"/repos/{self.repo}/git/commits",
+            json_body={"message": message, "tree": tree_sha, "parents": [head_sha]},
+        )
+        commit_sha = str((commit.json() or {}).get("sha") or "").strip()
+        if not commit_sha:
+            raise RuntimeError("missing_commit_sha")
+        self._request(
+            "PATCH",
+            f"/repos/{self.repo}/git/refs/heads/{self.branch}",
+            json_body={"sha": commit_sha, "force": False},
+        )
         return commit_sha
 
     def get_open_pull_request(self) -> int | None:
@@ -706,6 +817,8 @@ class CommunityPublishWorker:
             for row in pending:
                 grouped[str(row["recording_mbid"] or "").strip().lower()].append(row)
 
+            prepared_groups: list[tuple[str, list[sqlite3.Row], bool]] = []
+            files_to_publish: dict[str, dict[str, Any]] = {}
             for recording_mbid, rows in grouped.items():
                 path = _proposal_file_path(recording_mbid)
                 proposals = []
@@ -715,36 +828,14 @@ class CommunityPublishWorker:
                     except json.JSONDecodeError:
                         proposals.append({})
                 try:
-                    existing, sha = publisher.get_file(path)
+                    existing, _sha = publisher.get_file(path)
                     merged, changed = merge_proposals_into_record(existing, proposals)
-                    commit_sha = None
-                    if changed or sha is None:
-                        commit_sha = publisher.put_file(
-                            path,
-                            content=merged,
-                            sha=sha,
-                            message=f"retreivr: publish community cache for {recording_mbid}",
-                        )
-                    status = COMMUNITY_PUBLISH_STATUS_PUBLISHED
-                    published_at = utc_now()
-                    for row in rows:
-                        conn.execute(
-                            """
-                            UPDATE community_publish_queue
-                            SET status=?, published_at=?, branch_name=?, commit_sha=?, attempts=attempts+1, last_error=NULL
-                            WHERE proposal_id=?
-                            """,
-                            (
-                                status,
-                                published_at,
-                                branch,
-                                commit_sha,
-                                str(row["proposal_id"] or ""),
-                            ),
-                        )
-                    conn.commit()
-                    summary["published_groups"] += 1
-                    summary["published_proposals"] += len(rows)
+                    record_valid, record_reason = validate_dataset_record(merged)
+                    if not record_valid:
+                        raise ValueError(f"invalid_dataset_record:{record_reason}")
+                    if changed or existing is None:
+                        files_to_publish[path] = merged
+                    prepared_groups.append((recording_mbid, rows, changed or existing is None))
                 except Exception as exc:
                     summary["errors"] += len(rows)
                     logger.exception("community_publish_group_failed recording_mbid=%s", recording_mbid)
@@ -762,6 +853,50 @@ class CommunityPublishWorker:
                             ),
                         )
                     conn.commit()
+
+            batch_commit_sha = None
+            if files_to_publish:
+                try:
+                    batch_commit_sha = publisher.put_files(
+                        files_to_publish,
+                        message=f"retreivr: publish community cache batch ({len(files_to_publish)} recordings)",
+                    )
+                except Exception as exc:
+                    logger.exception("community_publish_batch_failed groups=%s", len(files_to_publish))
+                    for _recording_mbid, rows, _changed in prepared_groups:
+                        summary["errors"] += len(rows)
+                        for row in rows:
+                            conn.execute(
+                                """
+                                UPDATE community_publish_queue
+                                SET status=?, last_error=?, attempts=attempts+1
+                                WHERE proposal_id=?
+                                """,
+                                (COMMUNITY_PUBLISH_STATUS_ERROR, str(exc), str(row["proposal_id"] or "")),
+                            )
+                    conn.commit()
+                    prepared_groups = []
+
+            published_at = utc_now()
+            for _recording_mbid, rows, changed in prepared_groups:
+                for row in rows:
+                    conn.execute(
+                        """
+                        UPDATE community_publish_queue
+                        SET status=?, published_at=?, branch_name=?, commit_sha=?, attempts=attempts+1, last_error=NULL
+                        WHERE proposal_id=?
+                        """,
+                        (
+                            COMMUNITY_PUBLISH_STATUS_PUBLISHED,
+                            published_at,
+                            branch,
+                            batch_commit_sha if changed else None,
+                            str(row["proposal_id"] or ""),
+                        ),
+                    )
+                summary["published_groups"] += 1
+                summary["published_proposals"] += len(rows)
+            conn.commit()
 
             try:
                 pr_number = open_pr_number if open_pr_number is not None else publisher.ensure_pull_request()

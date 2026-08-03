@@ -242,6 +242,7 @@ from engine.import_pipeline import (
 )
 from engine.import_m3u_builder import resolve_import_playlist_root, write_import_m3u_from_batch
 from library.reconcile import reconcile_library
+from library.provenance import get_retreivr_version
 from library.review_queue import (
     REVIEW_STATUS_PENDING,
     accept_review_queue_items,
@@ -254,6 +255,7 @@ from engine.community_publish_worker import (
     append_publish_proposal_to_outbox,
     apply_community_publish_defaults,
     normalize_community_publish_source,
+    normalize_publish_duration_ms,
     summarize_publish_runtime,
     community_publish_worker_enabled,
     utc_now,
@@ -9638,11 +9640,11 @@ def music_runtime_resolution(data: dict = Body(...)):
                 "source": normalize_community_publish_source(source),
                 "candidate_url": source_url,
                 "candidate_id": str(payload.get("candidate_id") or source_id or "").strip() or None,
-                "duration_ms": payload.get("duration_ms"),
+                "duration_ms": normalize_publish_duration_ms(payload.get("duration_ms")),
                 "selected_score": selected_score,
                 "duration_delta_ms": payload.get("duration_delta_ms"),
                 "final_path": None,
-                "retreivr_version": str(payload.get("retreivr_version") or "runtime_playback"),
+                "retreivr_version": str(payload.get("retreivr_version") or get_retreivr_version()),
                 "verified_by": "successful_playback",
             }
             outbox_result = append_publish_proposal_to_outbox(
@@ -10927,11 +10929,11 @@ def api_accept_review_queue(payload: ReviewQueueActionPayload):
             "source": source,
             "candidate_url": candidate_url,
             "candidate_id": video_id,
-            "duration_ms": item.get("duration_ms"),
+            "duration_ms": normalize_publish_duration_ms(item.get("duration_ms")),
             "selected_score": 1.0,
             "duration_delta_ms": None,
             "final_path": next((str(row.get("file_path") or "").strip() for row in result.get("items", []) if isinstance(row, dict) and str(row.get("id") or "") == str(item.get("id") or "")), None),
-            "retreivr_version": "review_accept",
+            "retreivr_version": get_retreivr_version(),
             "verified_by": "operator_review_accept",
         }
         if publish_mode == "dry_run":

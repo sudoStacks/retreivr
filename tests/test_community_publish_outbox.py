@@ -153,7 +153,7 @@ def _build_music_job(job_id: str, *, output_template: dict) -> DownloadJob:
 def _base_output_template(*, score=0.95) -> dict:
     return {
         "canonical_metadata": {
-            "recording_mbid": "rec-1",
+            "recording_mbid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "mb_release_id": "rel-1",
             "mb_release_group_id": "rg-1",
             "duration_ms": 200000,
@@ -233,5 +233,5 @@ def test_publish_write_outbox_dedupes_recent_recording_video_pair(tmp_path: Path
     lines = [line for line in files[0].read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == 1
     payload = json.loads(lines[0])
-    assert payload["recording_mbid"] == "rec-1"
+    assert payload["recording_mbid"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     assert payload["video_id"] == "abc123xyz00"

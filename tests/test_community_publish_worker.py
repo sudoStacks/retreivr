@@ -28,7 +28,7 @@ community_publish_worker = _load_module()
 def test_merge_proposals_into_record_updates_existing_source_and_keeps_schema() -> None:
     existing = {
         "schema_version": 1,
-        "recording_mbid": "aa11",
+        "recording_mbid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "sources": [
             {"video_id": "vid-1", "source": "youtube", "confidence": 0.80},
             {"video_id": "vid-2", "source": "youtube", "confidence": 0.60},
@@ -62,7 +62,7 @@ def test_merge_proposals_into_record_updates_existing_source_and_keeps_schema() 
 def test_merge_proposals_into_record_normalizes_youtube_music_sources() -> None:
     existing = {
         "schema_version": 1,
-        "recording_mbid": "aa11",
+        "recording_mbid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "sources": [
             {"video_id": "vid-1", "source": "youtube_music", "confidence": 0.80},
         ],
@@ -88,6 +88,72 @@ def test_merge_proposals_into_record_normalizes_youtube_music_sources() -> None:
     assert merged["sources"][0]["source"] == "youtube"
 
 
+def test_merge_proposals_omits_unknown_or_zero_duration() -> None:
+    proposal = {
+        "recording_mbid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "video_id": "abc123DEF45",
+        "source": "youtube",
+        "selected_score": 0.95,
+        "candidate_url": "https://www.youtube.com/watch?v=abc123DEF45",
+        "duration_ms": 0,
+        "emitted_at": "2026-08-03T00:00:00+00:00",
+    }
+
+    merged, changed = community_publish_worker.merge_proposals_into_record(None, [proposal])
+
+    assert changed is True
+    assert "duration_ms" not in merged["sources"][0]
+
+
+def test_publish_proposal_validation_matches_public_dataset_contract() -> None:
+    valid = {
+        "proposal_id": "proposal-1",
+        "recording_mbid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "video_id": "abc123DEF45",
+        "source": "youtube",
+        "candidate_url": "https://www.youtube.com/watch?v=abc123DEF45",
+        "selected_score": 0.95,
+        "emitted_at": "2026-08-03T00:00:00+00:00",
+    }
+    assert community_publish_worker._validate_publish_proposal(dict(valid)) == (True, None)
+    assert community_publish_worker._validate_publish_proposal({**valid, "duration_ms": 0}) == (
+        False,
+        "invalid_duration_ms",
+    )
+    assert community_publish_worker._validate_publish_proposal({**valid, "video_id": "not-a-youtube-id"}) == (
+        False,
+        "invalid_video_id",
+    )
+    assert community_publish_worker._validate_publish_proposal({**valid, "source": "unknown"}) == (
+        False,
+        "unsupported_source",
+    )
+    assert community_publish_worker._validate_publish_proposal({**valid, "selected_score": 0.73}) == (
+        False,
+        "invalid_selected_score",
+    )
+
+
+def test_complete_dataset_record_is_validated_before_publish() -> None:
+    record = {
+        "schema_version": 1,
+        "recording_mbid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "updated_at": "2026-08-03T00:00:00+00:00",
+        "sources": [
+            {
+                "video_id": "abc123DEF45",
+                "source": "youtube",
+                "confidence": 0.95,
+                "last_verified_at": "2026-08-03T00:00:00+00:00",
+            }
+        ],
+    }
+    assert community_publish_worker.validate_dataset_record(record) == (True, None)
+    poisoned = json.loads(json.dumps(record))
+    poisoned["sources"][0]["duration_ms"] = 0
+    assert community_publish_worker.validate_dataset_record(poisoned) == (False, "invalid_duration_ms")
+
+
 def test_community_publish_worker_ingests_outbox_and_marks_rows_published(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "db.sqlite"
     outbox_dir = tmp_path / "outbox"
@@ -97,12 +163,12 @@ def test_community_publish_worker_ingests_outbox_and_marks_rows_published(monkey
         "proposal_type": "community_cache_publish_proposal",
         "proposal_id": "proposal-1",
         "emitted_at": "2026-03-23T00:00:00+00:00",
-        "recording_mbid": "aa11",
+        "recording_mbid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "release_mbid": "rel-1",
         "release_group_mbid": "rg-1",
-        "video_id": "vid-1",
+        "video_id": "abc123DEF45",
         "source": "youtube",
-        "candidate_url": "https://www.youtube.com/watch?v=vid-1",
+        "candidate_url": "https://www.youtube.com/watch?v=abc123DEF45",
         "candidate_id": "cand-1",
         "duration_ms": 200000,
         "selected_score": 0.97,
@@ -133,11 +199,11 @@ def test_community_publish_worker_ingests_outbox_and_marks_rows_published(monkey
             return None
 
         def get_file(self, path):
-            assert path == "youtube/recording/aa/aa11.json"
+            assert path == "youtube/recording/aa/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json"
             return None, None
 
-        def put_file(self, path, *, content, sha, message):
-            captured["puts"].append({"path": path, "content": content, "sha": sha, "message": message})
+        def put_files(self, files, *, message):
+            captured["puts"].append({"files": files, "message": message})
             return "commit-sha-1"
 
         def ensure_pull_request(self):
@@ -167,9 +233,10 @@ def test_community_publish_worker_ingests_outbox_and_marks_rows_published(monkey
     assert summary["published_proposals"] == 1
     assert summary["pr_number"] == 42
     assert len(captured["puts"]) == 1
-    sources = captured["puts"][0]["content"]["sources"]
+    published_files = captured["puts"][0]["files"]
+    sources = published_files["youtube/recording/aa/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json"]["sources"]
     assert len(sources) == 1
-    assert sources[0]["video_id"] == "vid-1"
+    assert sources[0]["video_id"] == "abc123DEF45"
 
     conn = sqlite3.connect(db_path)
     try:
@@ -195,12 +262,12 @@ def test_community_publish_worker_resets_branch_when_no_open_pr(monkeypatch, tmp
         "proposal_type": "community_cache_publish_proposal",
         "proposal_id": "proposal-reset-1",
         "emitted_at": "2026-03-26T00:00:00+00:00",
-        "recording_mbid": "bb22",
+        "recording_mbid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         "release_mbid": "rel-2",
         "release_group_mbid": "rg-2",
-        "video_id": "vid-2",
+        "video_id": "xyz987ABC65",
         "source": "youtube",
-        "candidate_url": "https://www.youtube.com/watch?v=vid-2",
+        "candidate_url": "https://www.youtube.com/watch?v=xyz987ABC65",
         "candidate_id": "cand-2",
         "duration_ms": 210000,
         "selected_score": 0.93,
@@ -225,7 +292,7 @@ def test_community_publish_worker_resets_branch_when_no_open_pr(monkeypatch, tmp
         def get_file(self, path):
             return None, None
 
-        def put_file(self, path, *, content, sha, message):
+        def put_files(self, files, *, message):
             return "commit-sha-2"
 
         def ensure_pull_request(self):
@@ -296,3 +363,60 @@ def test_github_publisher_resets_existing_branch_via_git_refs_endpoint(monkeypat
     publisher.ensure_branch(reset_existing=True)
 
     assert ("PATCH", "/repos/sudoStacks/retreivr-community-cache/git/refs/heads/retreivr-community-publish/tester", {"sha": "target-sha", "force": True}) in calls
+
+
+def test_github_publisher_writes_multiple_files_in_one_commit(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self.status_code = 200
+            self._payload = payload
+            self.text = ""
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.headers = {}
+            self.blob_count = 0
+
+        def request(self, method, url, params=None, json=None, timeout=None):
+            path = url.replace(community_publish_worker.GITHUB_API_BASE, "")
+            calls.append((method.upper(), path, json))
+            if method.upper() == "GET" and path.endswith("/git/ref/heads/retreivr-community-publish/tester"):
+                return FakeResponse({"object": {"sha": "head-sha"}})
+            if method.upper() == "GET" and path.endswith("/git/commits/head-sha"):
+                return FakeResponse({"tree": {"sha": "base-tree-sha"}})
+            if method.upper() == "POST" and path.endswith("/git/blobs"):
+                self.blob_count += 1
+                return FakeResponse({"sha": f"blob-{self.blob_count}"})
+            if method.upper() == "POST" and path.endswith("/git/trees"):
+                return FakeResponse({"sha": "new-tree-sha"})
+            if method.upper() == "POST" and path.endswith("/git/commits"):
+                return FakeResponse({"sha": "batch-commit-sha"})
+            if method.upper() == "PATCH" and path.endswith("/git/refs/heads/retreivr-community-publish/tester"):
+                return FakeResponse({"object": {"sha": "batch-commit-sha"}})
+            raise AssertionError(f"unexpected request {method} {path} {json}")
+
+    monkeypatch.setattr(community_publish_worker.requests, "Session", FakeSession)
+    publisher = community_publish_worker.GitHubCommunityCachePublisher(
+        repo="sudoStacks/retreivr-community-cache",
+        token="token",
+        branch="retreivr-community-publish/tester",
+        target_branch="main",
+    )
+
+    commit_sha = publisher.put_files(
+        {
+            "youtube/recording/aa/a.json": {"recording_mbid": "a"},
+            "youtube/recording/bb/b.json": {"recording_mbid": "b"},
+        },
+        message="batch",
+    )
+
+    assert commit_sha == "batch-commit-sha"
+    assert len([call for call in calls if call[1].endswith("/git/blobs")]) == 2
+    assert len([call for call in calls if call[1].endswith("/git/commits") and call[0] == "POST"]) == 1
+    assert len([call for call in calls if call[1].endswith("/git/refs/heads/retreivr-community-publish/tester") and call[0] == "PATCH"]) == 1
