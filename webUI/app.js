@@ -1990,22 +1990,17 @@ function renderBookCover(item, { library = false } = {}) {
   return `<div class="books-cover-placeholder" aria-hidden="true"><span>▤</span><small>${escapeHtml(format)}</small></div>`;
 }
 
-function renderBooksResults() {
-  const host = $("#books-results-list");
-  if (!host) return;
-  const results = Array.isArray(state.booksResults) ? state.booksResults : [];
-  const heading = $("#books-results-heading");
-  if (heading) heading.textContent = state.booksResultsHeading || "Books";
-  $("#books-results-status").textContent = results.length
-    ? `${results.length} matches`
-    : (state.booksSearchStarted ? "No matches" : "Ready to discover");
-  if (!results.length) {
-    host.innerHTML = state.booksSearchStarted
-      ? '<div class="home-results-empty">No matching books found. Try another title, author, subject, or ISBN.</div>'
-      : '<div class="home-results-empty">Search above or choose a subject to start browsing.</div>';
-    return;
-  }
-  host.innerHTML = results.map((item, index) => {
+function partitionBookResults(results) {
+  const sections = { freeDownloads: [], otherSources: [] };
+  (Array.isArray(results) ? results : []).forEach((item, index) => {
+    const entry = { item, index };
+    if (bookHasDirectDownload(item)) sections.freeDownloads.push(entry);
+    else sections.otherSources.push(entry);
+  });
+  return sections;
+}
+
+function renderBookResultCard({ item, index }) {
     const year = item?.first_publish_year ? String(item.first_publish_year) : "Year unknown";
     const subjects = (Array.isArray(item?.subjects) ? item.subjects : []).slice(0, 3).join(" · ");
     const downloadAvailable = bookHasDirectDownload(item);
@@ -2016,7 +2011,7 @@ function renderBooksResults() {
       ? `Free download · ${downloadSource}`
       : (item?.public_readable ? "Read online" : (item?.has_fulltext ? "Preview available" : "Metadata"));
     const detailsUrl = String(item?.details_url || "").trim();
-    return `
+  return `
       <article class="home-result-card music-meta-card music-grid-card movies-tv-card books-card" data-book-index="${index}">
         <button class="home-candidate-artwork movies-tv-artwork books-artwork books-artwork-button" data-book-action="details" data-book-index="${index}" type="button" aria-label="View details for ${escapeHtml(item?.title || "this book")}">${renderBookCover(item)}</button>
         <div class="movies-tv-overlay books-card-overlay">
@@ -2034,7 +2029,57 @@ function renderBooksResults() {
           </div>
         </div>
       </article>`;
-  }).join("");
+}
+
+function renderBookResultsShelf({ section, title, description, entries, emptyMessage }) {
+  const count = entries.length;
+  return `
+    <section class="home-results movies-tv-editorial-shelf books-results-shelf books-results-shelf-${section}" data-books-results-section="${section}">
+      <div class="home-results-header">
+        <span class="movies-tv-section-title">${escapeHtml(title)}</span>
+        <span class="meta">${count} ${count === 1 ? "result" : "results"}</span>
+      </div>
+      <div class="meta home-results-detail">${escapeHtml(description)}</div>
+      <div class="music-meta-grid movies-tv-results-grid books-results-grid">
+        ${count ? entries.map(renderBookResultCard).join("") : `<div class="home-results-empty">${escapeHtml(emptyMessage)}</div>`}
+      </div>
+    </section>`;
+}
+
+function renderBooksResults() {
+  const host = $("#books-results-list");
+  if (!host) return;
+  const results = Array.isArray(state.booksResults) ? state.booksResults : [];
+  const sections = partitionBookResults(results);
+  const freeCount = sections.freeDownloads.length;
+  const otherCount = sections.otherSources.length;
+  const heading = $("#books-results-heading");
+  if (heading) heading.textContent = state.booksResultsHeading || "Books";
+  $("#books-results-status").textContent = results.length
+    ? `${freeCount} free ${freeCount === 1 ? "download" : "downloads"} · ${otherCount} other ${otherCount === 1 ? "source" : "sources"}`
+    : (state.booksSearchStarted ? "No matches" : "Ready to discover");
+  if (!results.length) {
+    host.innerHTML = `<section class="home-results books-results-shelf"><div class="home-results-empty">${state.booksSearchStarted
+      ? "No matching books found. Try another title, author, subject, or ISBN."
+      : "Search above or choose a subject to start browsing."}</div></section>`;
+    return;
+  }
+  host.innerHTML = [
+    renderBookResultsShelf({
+      section: "free",
+      title: "Free downloads",
+      description: "Verified public EPUB or PDF editions that Retreivr can download directly into My Library.",
+      entries: sections.freeDownloads,
+      emptyMessage: "No direct free downloads were found for this search.",
+    }),
+    renderBookResultsShelf({
+      section: "other",
+      title: "Other sources",
+      description: "Read, preview, import your own file, or open the title on another book platform.",
+      entries: sections.otherSources,
+      emptyMessage: "No additional sources were found for this search.",
+    }),
+  ].join("");
 }
 
 function renderBooksDetailsSubjects(subjects) {
@@ -2218,7 +2263,7 @@ async function performBooksSearch() {
   state.booksSearchStarted = true;
   state.booksResultsHeading = `Results for “${query}”`;
   if (button) { button.disabled = true; button.textContent = "Searching…"; }
-  setNotice($("#books-message"), "Searching Open Library…", false);
+  setNotice($("#books-message"), "Searching free downloads and other book sources…", false);
   try {
     const payload = await fetchJson(`/api/books/search?q=${encodeURIComponent(query)}&limit=24`);
     state.booksResults = Array.isArray(payload?.results) ? payload.results : [];

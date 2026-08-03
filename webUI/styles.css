@@ -9400,6 +9400,38 @@ body[data-page="music"] #music-panel .music-page-shell {
   --movies-tv-card-min: 220px;
 }
 
+.books-results-summary {
+  margin-bottom: 16px;
+}
+
+.books-results-sections {
+  display: grid;
+  gap: 22px;
+  min-width: 0;
+}
+
+.books-results-shelf {
+  min-width: 0;
+}
+
+.books-results-shelf-free {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+}
+
+.books-results-shelf-free .movies-tv-section-title::before {
+  content: "↓";
+  display: inline-grid;
+  place-items: center;
+  width: 1.5em;
+  height: 1.5em;
+  margin-right: 8px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  font-size: 0.72em;
+  vertical-align: 0.12em;
+}
+
 .books-card .books-artwork {
   aspect-ratio: 2 / 3;
   min-height: 300px;

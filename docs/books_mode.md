@@ -8,7 +8,9 @@ configuring Readarr or any future acquisition provider.
 
 1. **Discover** — Open a ready-to-browse Free Downloads shelf or search Project
    Gutenberg, Open Library, and Internet Archive-backed records by title,
-   author, subject, or ISBN.
+   author, subject, or ISBN. Search results are separated into a first shelf of
+   verified files Retreivr can download directly and a second shelf containing
+   read, preview, metadata, import, and external-platform options.
 2. **Inspect** — Cards show cover, title, authors, first publication year,
    subjects, edition count, and provider access state. Selecting a cover opens
    the full details modal with Download, Preview, and Import actions.

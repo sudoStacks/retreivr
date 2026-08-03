@@ -50,20 +50,40 @@ def test_books_quick_browse_uses_the_native_search_path() -> None:
 
 def test_public_book_cards_have_a_one_click_download_path() -> None:
     source = APP_JS.read_text(encoding="utf-8")
-    render_start = source.index("function renderBooksResults()")
-    render_end = source.index("function renderBooksLibrary", render_start)
-    render_source = source[render_start:render_end]
+    card_start = source.index("function renderBookResultCard")
+    card_end = source.index("function renderBookResultsShelf", card_start)
+    card_source = source[card_start:card_end]
     download_start = source.index("async function downloadOpenLibraryBook")
     download_end = source.index("async function acquireBookFromUrl", download_start)
     download_source = source[download_start:download_end]
 
-    assert "bookHasDirectDownload(item)" in render_source
+    assert "bookHasDirectDownload(item)" in card_source
     assert "item?.download_available" in source
-    assert 'data-book-action="download"' in render_source
-    assert ">Download</button>" in render_source
+    assert 'data-book-action="download"' in card_source
+    assert ">Download</button>" in card_source
     assert '"/api/books/acquire/openlibrary"' in download_source
     assert '"/api/books/acquire/gutenberg"' in download_source
     assert "await loadBooksLibrary();" in download_source
+
+
+def test_book_search_results_are_split_into_free_and_other_shelves() -> None:
+    markup = INDEX_HTML.read_text(encoding="utf-8")
+    source = APP_JS.read_text(encoding="utf-8")
+    partition_start = source.index("function partitionBookResults(results)")
+    partition_end = source.index("function renderBookResultCard", partition_start)
+    partition_source = source[partition_start:partition_end]
+    render_start = source.index("function renderBooksResults()")
+    render_end = source.index("function renderBooksDetailsSubjects", render_start)
+    render_source = source[render_start:render_end]
+
+    assert 'id="books-results-list" class="books-results-sections"' in markup
+    assert "bookHasDirectDownload(item)" in partition_source
+    assert "sections.freeDownloads.push(entry)" in partition_source
+    assert "sections.otherSources.push(entry)" in partition_source
+    assert 'title: "Free downloads"' in render_source
+    assert 'title: "Other sources"' in render_source
+    assert 'section: "free"' in render_source
+    assert 'section: "other"' in render_source
 
 
 def test_books_reconciles_enabled_state_and_loads_free_downloads() -> None:
