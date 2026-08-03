@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.0 — Music Radio, Shared Resolution Contributions, and Books Mode
+
+### High-Level
+Retreivr 1.1.0 turns the Music experience into a practical, persistent listening surface while strengthening the project’s core resolution-network contract. MusicBrainz recording metadata can now resolve to YouTube-backed playback for browse, artist shuffle, genre radio, queues, and lookahead preparation; qualified mappings are retained locally and can flow into the shared community-cache publisher. This release also introduces the first Books Mode, with free-first multi-source discovery, rich book details, one-click acquisition where an open file is available, and paid/open-platform fallbacks when it is not.
+
+### Added
+- Persistent Music player that continues across navigation, supports minimized controls, a full player view, YouTube iframe playback, close/stop behavior, and immediate loading feedback.
+- Artist shuffle and diverse genre-radio queue generation backed by MusicBrainz identity and YouTube source resolution.
+- Rolling queue lookahead that pre-resolves upcoming tracks and contributes qualified MBID-to-source matches without requiring playback or download completion.
+- Queue UX with an explicit Now Playing position, numbered Up Next items, authoritative reordering, consumed-track removal, and background preparation status.
+- Provider-aware community contribution evidence for runtime resolutions, including recording, release, and release-group MBIDs, resolver provenance, score, duration, and duration delta.
+- Pending community-proposal deduplication across lookahead, playback, Review acceptance, and completed-download observations.
+- Books Mode behind an opt-in setting, with a native landing/search experience, book detail cards, rich metadata, and home-page navigation.
+- Free-first book result shelves that distinguish directly acquirable titles from borrowing, preview, and paid/open-platform options.
+- Multi-source book discovery across Open Library, Internet Archive, Project Gutenberg, and Google Books-derived availability signals.
+- One-click acquisition for eligible public-domain PDF and ebook files, with generated cover fallbacks when upstream artwork is unavailable.
+
+### Changed
+- Retreivr now treats high-confidence metadata-to-source resolution as a contribution event; successful playback and completed acquisition add further evidence but are not required to retain a qualified match.
+- Music queue order is now the playback contract. Prebuilt artist and genre mixes are shuffled once and then obey visible user reordering.
+- Radio and Favorites use dedicated music shelf cards with large artwork, stable actions, readable metadata, and responsive layouts.
+- Community-cache lookup remains local-first and precedes fresh transport search for faster, more deterministic playback.
+- Runtime, Review, download, and library-backfill contributions now target the same outbox monitored by the automatic GitHub PR publisher.
+- Movies search now uses the primary page-header search field rather than a competing secondary search control.
+- Books and Music artwork loading use stronger fallback paths and cache-aware rendering.
+
+### Fixed
+- Runtime music resolutions now import and call the local resolution persistence path correctly instead of failing silently behind the player UI.
+- Player and radio contribution proposals are written relative to the publisher’s main database rather than an unwatched search-database outbox.
+- Community publication now respects both the enable switch and configured minimum score instead of treating missing runtime scores as perfect matches.
+- Accepted Review mappings can emit qualified community-cache proposals instead of updating only the local index.
+- Radio priming appends new tracks without replacing a queue the user has reordered.
+- Played tracks no longer remain indefinitely in the active queue, and Next follows the visible Up Next order.
+- Player navigation no longer recreates the iframe or restarts the current song when moving between mini-player, Player, and Queue views.
+- Books no longer show the optional-library setup gate after Books Mode has been enabled.
+- Book thumbnails now use broader upstream artwork selection and deterministic generated-cover fallbacks.
+- Books detail cards and acquisition actions now open from result artwork consistently.
+
 ## v1.0.0 — ARR Stack, Movies & TV, and Music Player Milestone
 
 ### High-Level

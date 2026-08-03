@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  URLs, playlists, search, Spotify sync, and library imports into a clean, predictable media archive.
+  Resolve metadata and media intent into deterministic source matches, playback, and clean local libraries.
 </p>
 
 <p align="center">
@@ -19,11 +19,11 @@
 ---
 
 ## What Is Retreivr?
-Retreivr is a self-hosted acquisition engine for building and maintaining a clean local media archive.
+Retreivr is a self-hosted media-resolution and acquisition engine for building and maintaining clean local libraries.
 
-It takes your intent, resolves the target, downloads the media, normalizes metadata and naming, and writes predictable files to disk.
+It takes your intent, binds it to authoritative metadata, resolves a source, and can play, acquire, normalize, and organize the result. Qualified MusicBrainz-to-source matches can be retained locally and contributed to the public community cache so every participating Retreivr node becomes faster and more deterministic.
 
-Retreivr is not a streaming server. It is the acquisition layer.
+Retreivr is not intended to replace a full media server. It is the resolution and acquisition layer, with integrated music playback for discovery, radio, and pre-download listening.
 
 ## Why Retreivr
 - Deterministic acquisition instead of one-off, chaotic downloads
@@ -32,6 +32,13 @@ Retreivr is not a streaming server. It is the acquisition layer.
 - Unified queue, worker, watcher, scheduler, and review flows
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
+
+## 1.1.0 Highlights
+- Persistent Music playback across navigation, with minimized controls, full-player video docking, authoritative queues, artist shuffle, and diverse genre radio
+- MusicBrainz-to-YouTube resolution lookahead that prepares upcoming songs and retains qualified source matches before playback
+- End-to-end community-cache contributions from runtime resolution, radio lookahead, completed downloads, accepted Review items, and library backfill
+- Books Mode with free-first search, Open Library/Internet Archive/Project Gutenberg discovery, rich detail cards, and one-click acquisition for eligible public files
+- Refined Radio and Favorites shelves, stronger artwork fallbacks, and clearer loading/progress feedback throughout Music Mode
 
 ## 1.0.0 Highlights
 - Brand-new Movies & TV browsing with setup-aware ARR integration for managed and existing Radarr/Sonarr/Prowlarr/Bazarr/qBittorrent/Jellyfin stacks
@@ -48,6 +55,12 @@ Retreivr is not a streaming server. It is the acquisition layer.
 ### Music Browse & Download
 ![Music browse and download flow](docs/img/img-03.png)
 
+### Music Player & Radio
+Browse by artist or genre, start a shuffled mix, reorder the visible queue, and continue listening while navigating elsewhere in Retreivr. Remote tracks use a persistent YouTube iframe adapter while MusicBrainz remains the canonical recording identity.
+
+### Books
+Enable Books in Settings to search free-first public sources, inspect rich title metadata, and acquire eligible PDF or ebook files. See [Books Mode](docs/books_mode.md) for source and availability details.
+
 ### Movies & TV
 ![Movies & TV browse and saved titles](docs/img/img-06-movies-tv.png)
 
@@ -56,6 +69,8 @@ Retreivr is not a streaming server. It is the acquisition layer.
 
 ## What It Does
 - Acquire from direct URLs, playlists, search, Spotify sync, and library-import files
+- Search and acquire free/public books through the optional Books Mode
+- Play unresolved music before download through a persistent YouTube-backed player and radio queue
 - Resolve media into canonical download and metadata workflows
 - Finalize files into a clean, predictable local library
 - Keep ingestion repeatable through queueing, retries, and review paths
@@ -98,9 +113,10 @@ Retreivr follows a simple acquisition model:
 
 1. Input arrives from URL, search, playlist, Spotify sync, or library import.
 2. Resolver logic identifies the best target and metadata authority.
-3. Jobs enter the queue and are claimed by workers.
-4. Media is downloaded, post-processed, tagged, and finalized.
-5. The UI and API expose status, logs, review states, and recovery actions.
+3. Qualified MusicBrainz-to-source mappings are retained locally and can be proposed to the shared community cache.
+4. Playback can begin immediately, or acquisition jobs enter the queue and are claimed by workers.
+5. Downloaded media is post-processed, tagged, and finalized.
+6. The UI and API expose status, logs, review states, and recovery actions.
 
 ## Architecture Diagram
 ![Retreivr architecture flow](docs/img/arch.svg)
@@ -168,7 +184,7 @@ Retreivr is now part of a broader resolution-network ecosystem. If you want to p
 - Plex plugin: `https://github.com/sudoStacks/retreivr-plex-plugin`
   - experimental legacy Plex integration path
 
-If you want to contribute verified mappings back to the shared network, start with the community cache repository and its trusted publisher workflow.
+Retreivr can contribute qualified mappings automatically when community publishing is enabled. Runtime resolution, radio lookahead, completed downloads, accepted Review items, and library backfill all feed the same outbox and trusted PR publisher workflow.
 
 ## Canonical Docker Mounts
 Use these container paths for predictable behavior:
@@ -214,10 +230,10 @@ http://localhost:8000
 - `GET /docs`
 
 ## Cache Configuration
-Retreivr currently supports one cache concept in the acquisition pipeline:
+Retreivr uses the community cache as a shared MusicBrainz-recording-to-source resolution layer:
 
 - `community_cache_lookup_enabled`: Enables reading shared community transport hints. Defaults to `true`.
-- `community_cache_publish_enabled`: Enables local proposal emission for contributing verified matches. Defaults to `false`.
+- `community_cache_publish_enabled`: Enables local proposal emission for contributing qualified matches. Defaults to `false`.
 
 Related controls:
 - `community_cache_publish_mode`: `off | dry_run | write_outbox`
@@ -230,6 +246,8 @@ Related controls:
 - `community_cache_publish_poll_minutes`
 - `community_cache_publish_token_env`
 - `community_cache_publish_batch_size`
+
+When contribution is enabled, a mapping must contain a MusicBrainz recording ID, a supported source identity and URL, and a score meeting `community_cache_publish_min_score`. Pending duplicate recording/source pairs are collapsed before the publisher opens or updates its GitHub pull request. The current public dataset transport contract is YouTube-family specific; the local Resolution API remains the boundary for future provider-neutral expansion.
 
 ### Local Cache Sync
 The `resolution_api` block controls optional node-to-node dataset sync for the Resolution API layer.
