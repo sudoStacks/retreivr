@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -57,6 +59,55 @@ def test_music_preview_returns_iframe_video_for_youtube_source(api_module, monke
     assert payload["requires_visible_player"] is True
     assert payload["artwork_url"] == "https://i.ytimg.com/vi/abc123XYZ99/hqdefault.jpg"
     assert "stream_url" not in payload
+
+
+def test_runtime_resolution_uses_publisher_outbox_and_enforces_score(api_module, tmp_path: Path) -> None:
+    main_dir = tmp_path / "main"
+    search_dir = tmp_path / "search"
+    main_dir.mkdir()
+    search_dir.mkdir()
+    main_db = main_dir / "retreivr.sqlite3"
+    search_db = search_dir / "search.sqlite3"
+    sqlite3.connect(main_db).close()
+    sqlite3.connect(search_db).close()
+    api_module.app.state.paths = SimpleNamespace(db_path=str(main_db))
+    api_module.app.state.search_db_path = str(search_db)
+    api_module.app.state.config = {
+        "community_cache_publish_enabled": True,
+        "community_cache_publish_mode": "write_outbox",
+        "community_cache_publish_min_score": 0.78,
+    }
+    api_module.app.state.loaded_config = dict(api_module.app.state.config)
+    client = TestClient(api_module.app)
+
+    high = client.post("/api/music/runtime-resolution", json={
+        "recording_mbid": "recording-high",
+        "release_mbid": "release-1",
+        "release_group_mbid": "release-group-1",
+        "source": "youtube",
+        "source_url": "https://www.youtube.com/watch?v=highScore01",
+        "selected_score": 0.93,
+        "duration_ms": 200000,
+        "resolved_via": "lookahead",
+    })
+    assert high.status_code == 200
+    assert high.json()["community_publish"]["status"] == "written"
+    outbox = main_dir / "run_summaries" / "community_publish_outbox"
+    lines = [json.loads(line) for path in outbox.glob("*.jsonl") for line in path.read_text().splitlines() if line]
+    assert lines[0]["release_mbid"] == "release-1"
+    assert lines[0]["release_group_mbid"] == "release-group-1"
+    assert not (search_dir / "run_summaries" / "community_publish_outbox").exists()
+
+    low = client.post("/api/music/runtime-resolution", json={
+        "recording_mbid": "recording-low",
+        "source": "youtube",
+        "source_url": "https://www.youtube.com/watch?v=lowScore001",
+        "selected_score": 0.55,
+        "resolved_via": "lookahead",
+    })
+    assert low.status_code == 200
+    assert low.json()["community_publish"]["reason"] == "selected_score_below_min"
+    assert len([line for path in outbox.glob("*.jsonl") for line in path.read_text().splitlines() if line]) == 1
 
 
 def test_music_preview_prefers_musicbrainz_bound_source_without_network_resolution(api_module, monkeypatch) -> None:

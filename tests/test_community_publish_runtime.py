@@ -143,3 +143,16 @@ def test_append_publish_proposal_rejects_invalid_payload(tmp_path: Path) -> None
 def test_normalize_community_publish_source_maps_youtube_music_to_youtube() -> None:
     assert normalize_community_publish_source("youtube_music") == "youtube"
     assert normalize_community_publish_source("youtube") == "youtube"
+
+
+def test_pending_outbox_deduplicates_same_recording_and_video(tmp_path: Path) -> None:
+    db_path = tmp_path / "db.sqlite"
+    sqlite3.connect(db_path).close()
+    first = append_publish_proposal_to_outbox(config={}, db_path=str(db_path), proposal=_write_proposal())
+    duplicate = {**_write_proposal(), "proposal_id": "proposal-2"}
+    second = append_publish_proposal_to_outbox(config={}, db_path=str(db_path), proposal=duplicate)
+
+    assert first["status"] == "written"
+    assert second["status"] == "deduped"
+    assert second["reason"] == "matching_proposal_already_pending"
+    assert Path(str(first["outbox_path"])).read_text(encoding="utf-8").count("\n") == 1

@@ -218,6 +218,30 @@ def append_publish_proposal_to_outbox(
     os.makedirs(outbox_dir, exist_ok=True)
     filename = f"community_publish_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
     outbox_path = os.path.join(outbox_dir, filename)
+    recording_mbid = str(proposal.get("recording_mbid") or "").strip().lower()
+    video_id = str(proposal.get("video_id") or "").strip().lower()
+    # Resolution, lookahead, playback, and completed-download paths can observe the
+    # same mapping. Keep one pending contribution per MBID/source pair; later PR
+    # merges update verification timestamps without flooding the shared repository.
+    for existing_path in sorted(Path(outbox_dir).glob("*.jsonl")):
+        try:
+            with existing_path.open("r", encoding="utf-8") as existing_handle:
+                for raw_line in existing_handle:
+                    try:
+                        existing = json.loads(raw_line)
+                    except Exception:
+                        continue
+                    if (
+                        str(existing.get("recording_mbid") or "").strip().lower() == recording_mbid
+                        and str(existing.get("video_id") or "").strip().lower() == video_id
+                    ):
+                        return {
+                            "status": "deduped",
+                            "reason": "matching_proposal_already_pending",
+                            "outbox_path": str(existing_path),
+                        }
+        except OSError:
+            continue
     with open(outbox_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(proposal, sort_keys=True))
         handle.write("\n")

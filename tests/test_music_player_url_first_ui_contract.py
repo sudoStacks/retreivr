@@ -78,6 +78,20 @@ def test_music_card_play_surfaces_immediate_cancelable_loading_state() -> None:
     assert "function finishMusicPlaybackLoading" in source
     assert "function cancelMusicPlaybackLoading" in source
     assert 'shell.classList.toggle("is-loading", !!loading)' in source
+
+
+def test_lookahead_resolution_records_qualified_mapping_with_full_identity() -> None:
+    source = APP_JS.read_text()
+    resolver_start = source.index("async function resolveRecordingStreamUrl")
+    resolver_end = source.index("async function playMusicSearchResult", resolver_start)
+    resolver = source[resolver_start:resolver_end]
+
+    assert resolver.count("await recordRuntimeResolution({") >= 2
+    assert "release_mbid: trackMeta.release_mbid" in resolver
+    assert "release_group_mbid: trackMeta.release_group_mbid" in resolver
+    assert "selected_score: response?.selected_score" in resolver
+    assert "selected_score: result.selected_score" in resolver
+    assert "duration_delta_ms" in resolver
     assert "music-loading-spinner" in source
     assert "const loadingToken = beginMusicPlaybackLoading" in source
     assert "if (!isMusicPlaybackLoadingCurrent(loadingToken)) return;" in source

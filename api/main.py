@@ -256,6 +256,7 @@ from engine.community_publish_worker import (
     normalize_community_publish_source,
     summarize_publish_runtime,
     community_publish_worker_enabled,
+    utc_now,
 )
 from engine.community_publish_backfill import run_publish_backfill
 from engine.resolution_auth import resolve_node_auth
@@ -272,6 +273,7 @@ from engine.resolution_api import (
     resolve_recording as resolve_resolution_recording,
     submit_mapping as submit_resolution_mapping,
     sync_local_cache_from_api as sync_resolution_local_cache_from_api,
+    upsert_local_acquired_mapping,
     verify_mapping as verify_resolution_mapping,
 )
 from api.media_stream import build_media_file_response, guess_browser_media_type
@@ -741,7 +743,11 @@ def _rank_music_preview_candidates(candidates: Any, *, artist: str, track: str) 
             score += 20
         if _mv_has_intent(title):
             score += 3
-        ranked.append((score, -index, {**candidate, "source_url": source_url}))
+        ranked.append((score, -index, {
+            **candidate,
+            "source_url": source_url,
+            "selected_score": max(0.0, min(1.0, float(score) / 100.0)),
+        }))
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [item[2] for item in ranked]
 
@@ -799,6 +805,7 @@ def _search_fast_music_preview(*, artist: str, track: str, album: str) -> dict[s
                 "resolved_via": f"youtube_fast_search:{resolver}",
                 "video_id": str(candidate.get("video_id") or "").strip() or None,
                 "artwork_url": str(candidate.get("thumbnail_url") or candidate.get("thumbnail") or "").strip() or None,
+                "selected_score": candidate.get("selected_score"),
             }
     except TimeoutError:
         logging.debug("music_preview_fast_search_timeout artist=%s track=%s", artist, track)
@@ -833,6 +840,7 @@ def _resolve_music_preview_candidate(
             "source_url": source_url,
             "title": track or "Preview",
             "resolved_via": "musicbrainz_bound_metadata",
+            "selected_score": 1.0,
         }
     cached_preview = _music_preview_cache_get(cache_key)
     if cached_preview is not None:
@@ -875,6 +883,7 @@ def _resolve_music_preview_candidate(
                                     or community_record.get("thumbnail")
                                     or ""
                                 ).strip() or _build_youtube_thumbnail_url(video_id),
+                                "selected_score": community_record.get("confidence"),
                             }
                             _music_preview_cache_put(cache_key, community_preview)
                             return community_preview
@@ -900,6 +909,7 @@ def _resolve_music_preview_candidate(
                     "resolved_via": "musicbrainz_url_rel",
                     "video_id": mb_video_id or None,
                     "artwork_url": _build_youtube_thumbnail_url(mb_video_id),
+                    "selected_score": 1.0,
                 }
                 _music_preview_cache_put(cache_key, mb_preview)
                 return mb_preview
@@ -960,6 +970,7 @@ def _resolve_music_preview_candidate(
             "resolved_via": "search_fallback",
             "video_id": str(candidate.get("video_id") or "").strip() or None,
             "artwork_url": str(candidate.get("thumbnail_url") or candidate.get("thumbnail") or "").strip() or None,
+            "selected_score": candidate.get("selected_score"),
         }
         if not preview["artwork_url"]:
             preview["artwork_url"] = _build_youtube_thumbnail_url(preview.get("video_id"))
@@ -9549,6 +9560,7 @@ def music_preview(data: dict = Body(...)):
         "resolved_via": str(preview.get("resolved_via") or "").strip() or None,
         "video_id": video_id,
         "artwork_url": str(preview.get("artwork_url") or "").strip() or _build_youtube_thumbnail_url(video_id),
+        "selected_score": preview.get("selected_score"),
     }
     if response["preview_type"] != "video":
         response["stream_url"] = f"/api/music/preview/stream?url={quote(source_url, safe='')}"
@@ -9573,6 +9585,11 @@ def music_runtime_resolution(data: dict = Body(...)):
             "video_id": source_id,
             "source": source,
             "resolved_via": str(payload.get("resolved_via") or "").strip() or None,
+            "release_mbid": str(payload.get("release_mbid") or payload.get("mb_release_id") or "").strip() or None,
+            "release_group_mbid": str(payload.get("release_group_mbid") or payload.get("mb_release_group_id") or "").strip() or None,
+            "duration_ms": payload.get("duration_ms"),
+            "duration_delta_ms": payload.get("duration_delta_ms"),
+            "selected_score": payload.get("selected_score"),
         }
     result = upsert_local_acquired_mapping(
         app.state.search_db_path,
@@ -9590,13 +9607,24 @@ def music_runtime_resolution(data: dict = Body(...)):
     publish_outbox_path: str | None = None
     try:
         cfg = apply_community_publish_defaults(app.state.config if isinstance(app.state.config, dict) else {})
+        publish_enabled = bool(cfg.get("community_cache_publish_enabled", False))
         publish_mode = str(cfg.get("community_cache_publish_mode") or "off").strip().lower() or "off"
-        if publish_mode == "write_outbox":
-            selected_score_raw = payload.get("selected_score")
-            try:
-                selected_score = float(selected_score_raw)
-            except Exception:
-                selected_score = 1.0
+        selected_score_raw = payload.get("selected_score")
+        try:
+            selected_score = float(selected_score_raw)
+        except Exception:
+            selected_score = None
+        min_score = float(cfg.get("community_cache_publish_min_score", 0.78) or 0.78)
+        if not publish_enabled:
+            publish_status = "skipped"
+            publish_reason = "community_publish_disabled"
+        elif selected_score is None:
+            publish_status = "skipped"
+            publish_reason = "missing_selected_score"
+        elif selected_score < min_score:
+            publish_status = "skipped"
+            publish_reason = "selected_score_below_min"
+        elif publish_mode == "write_outbox":
             selected_score = max(0.0, min(1.0, selected_score))
             proposal = {
                 "schema_version": 1,
@@ -9615,10 +9643,11 @@ def music_runtime_resolution(data: dict = Body(...)):
                 "duration_delta_ms": payload.get("duration_delta_ms"),
                 "final_path": None,
                 "retreivr_version": str(payload.get("retreivr_version") or "runtime_playback"),
+                "verified_by": "successful_playback",
             }
             outbox_result = append_publish_proposal_to_outbox(
                 config=cfg,
-                db_path=app.state.search_db_path,
+                db_path=app.state.paths.db_path,
                 proposal=proposal,
             )
             publish_status = str(outbox_result.get("status") or "error")
@@ -10858,7 +10887,60 @@ async def api_list_review_queue(
 
 @app.post("/api/review_queue/accept")
 def api_accept_review_queue(payload: ReviewQueueActionPayload):
+    requested_items = [
+        get_review_queue_item(app.state.paths.db_path, item_id)
+        for item_id in list(payload.item_ids or [])
+    ]
     result = accept_review_queue_items(app.state.paths.db_path, list(payload.item_ids or []))
+    accepted_ids = {
+        str(item.get("id") or "").strip()
+        for item in (result.get("items") if isinstance(result, dict) and isinstance(result.get("items"), list) else [])
+        if isinstance(item, dict)
+    }
+    contributions: list[dict[str, Any]] = []
+    cfg = apply_community_publish_defaults(get_loaded_config() or {})
+    publish_enabled = bool(cfg.get("community_cache_publish_enabled", False))
+    publish_mode = str(cfg.get("community_cache_publish_mode") or "off").strip().lower()
+    for item in requested_items:
+        if not isinstance(item, dict) or str(item.get("id") or "").strip() not in accepted_ids:
+            continue
+        canonical = item.get("canonical_metadata") if isinstance(item.get("canonical_metadata"), dict) else {}
+        recording_mbid = str(item.get("recording_mbid") or canonical.get("recording_mbid") or "").strip().lower()
+        candidate_url = str(item.get("candidate_url") or "").strip()
+        source = normalize_community_publish_source(item.get("source"))
+        video_id = str(item.get("candidate_id") or extract_video_id(candidate_url) or "").strip()
+        if not recording_mbid or not candidate_url or not source or not video_id:
+            contributions.append({"id": item.get("id"), "status": "skipped", "reason": "missing_mapping_fields"})
+            continue
+        if not publish_enabled or publish_mode not in {"dry_run", "write_outbox"}:
+            contributions.append({"id": item.get("id"), "status": "skipped", "reason": "community_publish_disabled"})
+            continue
+        proposal = {
+            "schema_version": 1,
+            "proposal_type": "community_cache_publish_proposal",
+            "proposal_id": uuid4().hex,
+            "emitted_at": utc_now(),
+            "recording_mbid": recording_mbid,
+            "release_mbid": str(canonical.get("mb_release_id") or "").strip() or None,
+            "release_group_mbid": str(canonical.get("mb_release_group_id") or "").strip() or None,
+            "video_id": video_id,
+            "source": source,
+            "candidate_url": candidate_url,
+            "candidate_id": video_id,
+            "duration_ms": item.get("duration_ms"),
+            "selected_score": 1.0,
+            "duration_delta_ms": None,
+            "final_path": next((str(row.get("file_path") or "").strip() for row in result.get("items", []) if isinstance(row, dict) and str(row.get("id") or "") == str(item.get("id") or "")), None),
+            "retreivr_version": "review_accept",
+            "verified_by": "operator_review_accept",
+        }
+        if publish_mode == "dry_run":
+            contributions.append({"id": item.get("id"), "status": "dry_run", "reason": "proposal_valid_dry_run"})
+        else:
+            outcome = append_publish_proposal_to_outbox(config=cfg, db_path=app.state.paths.db_path, proposal=proposal)
+            contributions.append({"id": item.get("id"), **outcome})
+    if isinstance(result, dict):
+        result["community_contributions"] = contributions
     return safe_json(result)
 
 

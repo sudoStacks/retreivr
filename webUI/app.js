@@ -165,6 +165,7 @@ const state = {
   playerBarMinimized: false,
   playerDockResizeObserver: null,
   playerRuntimePublishStatus: null,
+  playerRuntimeRecordedKey: null,
   playerLoading: null,
   playerLoadingSequence: 0,
   playerPrefetchInFlightRecordings: new Set(),
@@ -5483,6 +5484,9 @@ function createYTPlayer(videoId) {
           },
           onStateChange: (event) => {
             const S = window.YT.PlayerState;
+            if (event.data === S.PLAYING) {
+              recordCurrentPlaybackResolution().catch(() => {});
+            }
             if (event.data === S.ENDED) {
               playNextPlayerItem({ autoAdvance: true }).catch(() => {});
             }
@@ -5686,6 +5690,9 @@ function normalizePlayableItem(item = {}) {
     mb_release_group_id: String(item.mb_release_group_id || item.release_group_mbid || "").trim() || null,
     source: String(item.source || "").trim() || null,
     resolved_via: String(item.resolved_via || "").trim() || null,
+    selected_score: Number.isFinite(Number(item.selected_score)) ? Number(item.selected_score) : null,
+    duration_ms: Number.isFinite(Number(item.duration_ms)) ? Number(item.duration_ms) : null,
+    duration_delta_ms: Number.isFinite(Number(item.duration_delta_ms)) ? Number(item.duration_delta_ms) : null,
     artwork_url: String(item.artwork_url || item.thumbnail_url || item.thumbnail || item.cover_url || "").trim() || null,
     mb_youtube_urls: Array.isArray(item.mb_youtube_urls)
       ? item.mb_youtube_urls.map((value) => String(value || "").trim()).filter(Boolean).slice(0, 3)
@@ -5718,6 +5725,7 @@ function buildPlayableResolutionMeta(item = {}) {
     album: normalized.album,
     release_mbid: normalized.mb_release_id,
     release_group_mbid: normalized.mb_release_group_id,
+    duration_ms: normalized.duration_ms,
     mb_youtube_urls: normalized.mb_youtube_urls,
   };
 }
@@ -14443,6 +14451,11 @@ async function recordRuntimeResolution(payload = {}) {
         artist: String(payload.artist || "").trim() || null,
         track: String(payload.track || "").trim() || null,
         album: String(payload.album || "").trim() || null,
+        release_mbid: String(payload.release_mbid || payload.mb_release_id || "").trim() || null,
+        release_group_mbid: String(payload.release_group_mbid || payload.mb_release_group_id || "").trim() || null,
+        duration_ms: Number.isFinite(Number(payload.duration_ms)) ? Number(payload.duration_ms) : null,
+        duration_delta_ms: Number.isFinite(Number(payload.duration_delta_ms)) ? Number(payload.duration_delta_ms) : null,
+        selected_score: Number.isFinite(Number(payload.selected_score)) ? Number(payload.selected_score) : null,
         resolved_via: String(payload.resolved_via || "").trim() || null,
       }),
     });
@@ -14458,6 +14471,29 @@ async function recordRuntimeResolution(payload = {}) {
       }
     }
   } catch (_err) {}
+}
+
+async function recordCurrentPlaybackResolution() {
+  const current = normalizePlayableItem(state.playerCurrent || null);
+  if (!current?.recording_mbid || !current?.video_id || !current?.stream_url) return;
+  const key = `${current.recording_mbid.toLowerCase()}|${current.video_id.toLowerCase()}`;
+  if (state.playerRuntimeRecordedKey === key) return;
+  state.playerRuntimeRecordedKey = key;
+  await recordRuntimeResolution({
+    recording_mbid: current.recording_mbid,
+    source_url: current.stream_url,
+    source: current.source || "youtube",
+    video_id: current.video_id,
+    artist: current.artist,
+    track: current.title,
+    album: current.album,
+    release_mbid: current.mb_release_id,
+    release_group_mbid: current.mb_release_group_id,
+    duration_ms: current.duration_ms,
+    duration_delta_ms: current.duration_delta_ms,
+    selected_score: current.selected_score,
+    resolved_via: current.resolved_via,
+  });
 }
 
 // Resolve a recording MBID to a stream URL using the local resolution index, then
@@ -14501,6 +14537,10 @@ async function resolveRecordingIndexedStreamUrl(recordingMbid) {
       video_id: videoId,
       source: source || "youtube",
       resolved_via: "resolution_index",
+      selected_score: Number(resolution?.best_source?.metadata?.selected_score
+        ?? (resolution?.best_source?.availability?.status === "verified" ? 1.0
+          : resolution?.best_source?.availability?.status === "local_only" ? 0.9 : 0.7)),
+      duration_ms: Number(resolution?.best_source?.duration || 0) > 0 ? Number(resolution.best_source.duration) * 1000 : null,
       artwork_url: `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`,
     };
   } catch (_err) {
@@ -14547,13 +14587,21 @@ async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
         artist: trackMeta.artist,
         track: trackMeta.track,
         album: trackMeta.album,
-        resolved_via: "preview_api",
+        release_mbid: trackMeta.release_mbid,
+        release_group_mbid: trackMeta.release_group_mbid,
+        duration_ms: trackMeta.duration_ms,
+        duration_delta_ms: response?.duration_delta_ms,
+        selected_score: response?.selected_score,
+        resolved_via: String(response?.resolved_via || "preview_api").trim() || "preview_api",
       });
       return {
         stream_url: sourceUrl,
         video_id: videoId,
         source: source || "youtube",
         resolved_via: String(response?.resolved_via || "preview_api").trim() || "preview_api",
+        selected_score: Number.isFinite(Number(response?.selected_score)) ? Number(response.selected_score) : null,
+        duration_ms: Number.isFinite(Number(trackMeta.duration_ms)) ? Number(trackMeta.duration_ms) : null,
+        duration_delta_ms: Number.isFinite(Number(response?.duration_delta_ms)) ? Number(response.duration_delta_ms) : null,
         artwork_url: String(response?.artwork_url || "").trim() || `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`,
       };
     } catch (_err) {
@@ -14590,6 +14638,11 @@ async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
             artist: trackMeta.artist,
             track: trackMeta.track,
             album: trackMeta.album,
+            release_mbid: trackMeta.release_mbid,
+            release_group_mbid: trackMeta.release_group_mbid,
+            duration_ms: trackMeta.duration_ms || result.duration_ms,
+            duration_delta_ms: result.duration_delta_ms,
+            selected_score: result.selected_score,
             resolved_via: result.resolved_via || "resolution_index",
           });
         }
@@ -14634,6 +14687,7 @@ async function playMusicSearchResult(result) {
     album: result.album,
     release_mbid: result.mb_release_id,
     release_group_mbid: result.mb_release_group_id,
+    duration_ms: result.duration_ms,
     mb_youtube_urls: result.mb_youtube_urls,
   });
   if (!isMusicPlaybackLoadingCurrent(loadingToken)) return;
@@ -14651,6 +14705,10 @@ async function playMusicSearchResult(result) {
     recording_mbid: recordingMbid || null,
     artwork_url: result.artwork_url || resolved.artwork_url || null,
     mb_release_group_id: String(result?.mb_release_group_id || "").trim() || null,
+    mb_release_id: String(result?.mb_release_id || "").trim() || null,
+    selected_score: resolved.selected_score,
+    duration_ms: Number.isFinite(Number(result?.duration_ms)) ? Number(result.duration_ms) : null,
+    duration_delta_ms: resolved.duration_delta_ms,
   });
   clearActiveStationPlayback();
   setPlayerQueue([item]);

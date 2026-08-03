@@ -48,5 +48,5 @@ def test_radio_and_favorites_use_dedicated_music_shelf_cards() -> None:
     assert "aspect-ratio: 1 / 1" in CSS
     assert ".music-shelf-card-actions" in CSS
     assert "grid-template-columns: repeat(auto-fill, minmax(250px, 1fr))" in CSS
-    assert "styles.css?v=1.0.11" in HTML
-    assert "app.js?v=1.0.11" in HTML
+    assert "styles.css?v=1.0.12" in HTML
+    assert "app.js?v=1.0.12" in HTML
