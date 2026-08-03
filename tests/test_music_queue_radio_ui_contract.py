@@ -39,11 +39,14 @@ def test_station_prime_appends_without_replacing_reordered_queue() -> None:
     assert "setPlayerQueue(payload.queue" not in source
 
 
-def test_radio_cards_have_large_static_responsive_layout() -> None:
-    assert "grid-template-columns: repeat(auto-fill, minmax(290px, 340px))" in CSS
-    assert ".music-station-grid-card .music-card-thumb-shell" in CSS
-    assert "min-height: 260px" in CSS
-    assert ".music-station-grid-card .home-candidate-action" in CSS
-    assert "position: static" in CSS
-    assert "styles.css?v=1.0.10" in HTML
-    assert "app.js?v=1.0.10" in HTML
+def test_radio_and_favorites_use_dedicated_music_shelf_cards() -> None:
+    assert 'class="music-shelf-grid music-station-grid"' in APP
+    assert 'class="music-shelf-grid music-favorites-grid"' in APP
+    assert 'class="music-shelf-card music-station-grid-card' in APP
+    assert 'class="music-shelf-card music-player-favorite-card"' in APP
+    assert ".music-shelf-card-art" in CSS
+    assert "aspect-ratio: 1 / 1" in CSS
+    assert ".music-shelf-card-actions" in CSS
+    assert "grid-template-columns: repeat(auto-fill, minmax(250px, 1fr))" in CSS
+    assert "styles.css?v=1.0.11" in HTML
+    assert "app.js?v=1.0.11" in HTML

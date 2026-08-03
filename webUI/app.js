@@ -5221,7 +5221,7 @@ function renderMusicPlayerStations() {
     stationsEl.innerHTML = `<div class="home-results-empty">No stations yet — create one above to start your first radio mix.</div>`;
     return;
   }
-  stationsEl.innerHTML = `<div class="music-meta-grid music-station-grid">${stations.map((station) => {
+  stationsEl.innerHTML = `<div class="music-shelf-grid music-station-grid">${stations.map((station) => {
     const runtime = station.runtime || {};
     const previewItems = (Array.isArray(station.preview?.items) ? station.preview.items : []);
     const firstArt = previewItems.length ? getMusicLibraryArtworkUrl(previewItems[0]) : "assets/no_artwork.png";
@@ -5233,24 +5233,24 @@ function renderMusicPlayerStations() {
     const needsMatches = tone.label === "Needs Matches";
     const modeLabel = stationModeLabel(station.station_mode, station.seed_type);
     return `
-      <article class="home-result-card music-meta-card music-grid-card music-station-grid-card${active ? " is-active" : ""}">
-        <div class="music-card-thumb-shell">
-          <img src="${escapeAttr(firstArt)}" alt="${escapeAttr(station.name || "Station")}" loading="lazy" style="width:100%;height:100%;object-fit:cover;border-radius:14px;">
+      <article class="music-shelf-card music-station-grid-card${active ? " is-active" : ""}">
+        <div class="music-shelf-card-art">
+          <img src="${escapeAttr(firstArt)}" alt="${escapeAttr(station.name || "Station")}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
           ${active ? `<div class="music-station-active-overlay"><span class="music-station-playing-dot" aria-hidden="true"></span></div>` : ""}
         </div>
-        <div class="music-meta-main">
-          <div class="home-candidate-title">${escapeHtml(station.name || station.seed_value || "Station")}</div>
-          <div class="home-candidate-meta">${escapeHtml(modeLabel)}${station.seed_value ? ` · ${escapeHtml(station.seed_value)}` : ""}</div>
+        <div class="music-shelf-card-body">
+          <div class="music-shelf-card-title">${escapeHtml(station.name || station.seed_value || "Station")}</div>
+          <div class="music-shelf-card-meta">${escapeHtml(modeLabel)}${station.seed_value ? ` · ${escapeHtml(station.seed_value)}` : ""}</div>
           <div class="music-status-row">
             <span class="music-status-badge ${tone.className}">${escapeHtml(tone.label)}</span>
             ${readyCount > 0 ? `<span class="music-status-badge is-downloaded">${escapeHtml(`${readyCount} ready`)}</span>` : ""}
             ${localCount + cachedCount > 0 ? `<span class="music-status-badge">${escapeHtml(`${localCount}L · ${cachedCount}C`)}</span>` : ""}
           </div>
         </div>
-        <div class="home-candidate-action home-candidate-action-primary-stack">
+        <div class="music-shelf-card-actions">
           ${active
-            ? `<button class="button ghost small" type="button" disabled>Now Playing</button>`
-            : `<button class="button ${needsMatches ? "ghost" : "primary"} small home-candidate-download-primary" type="button" data-action="player-load-station" data-station-id="${escapeAttr(station.id)}">${needsMatches ? "Play Anyway" : "Play Station"}</button>`
+            ? `<button class="button ghost small music-shelf-card-primary" type="button" disabled>Now Playing</button>`
+            : `<button class="button ${needsMatches ? "ghost" : "primary"} small music-shelf-card-primary" type="button" data-action="player-load-station" data-station-id="${escapeAttr(station.id)}">${needsMatches ? "Play Anyway" : "Play Station"}</button>`
           }
           <button class="button ghost small" type="button" data-action="player-prime-station" data-station-id="${escapeAttr(station.id)}">Prime</button>
           <button class="button ghost small" type="button" data-action="player-delete-station" data-station-id="${escapeAttr(station.id)}">Delete</button>
@@ -5606,26 +5606,26 @@ function renderMusicPlayerHistory() {
   if (favoritesEl) {
     const favoriteArtists = Array.isArray(state.musicPreferences?.favorite_artists) ? state.musicPreferences.favorite_artists : [];
     favoritesEl.innerHTML = favoriteArtists.length ? `
-      <div class="music-player-browser-grid">
+      <div class="music-shelf-grid music-favorites-grid">
         ${favoriteArtists.map((artist) => {
           const artistName = artist.name || artist.artist_name || "Favorite Artist";
           const artistKey = String(artistName).trim().toLowerCase();
           const downloadedArtist = (Array.isArray(state.playerLibrarySummary?.artists) ? state.playerLibrarySummary.artists : []).find((entry) => String(entry.artist_key || "").trim().toLowerCase() === artistKey) || null;
           return `
-            <article class="music-player-browser-card music-player-browser-card-rich music-player-favorite-card">
-              <div class="music-player-browser-card-art">
-                <img src="${escapeAttr(getMusicLibraryArtworkUrl(downloadedArtist || artist))}" alt="${escapeAttr(artistName)}" loading="lazy">
+            <article class="music-shelf-card music-player-favorite-card">
+              <div class="music-shelf-card-art">
+                <img src="${escapeAttr(getMusicLibraryArtworkUrl(downloadedArtist || artist))}" alt="${escapeAttr(artistName)}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
               </div>
-              <div class="music-player-browser-card-copy">
-                <span class="music-player-track-title">${escapeHtml(artistName)}</span>
-                <span class="music-player-track-meta">${downloadedArtist ? escapeHtml(`${downloadedArtist.album_count || 0} albums • ${downloadedArtist.track_count || 0} tracks downloaded`) : "Favorited only • Not downloaded yet"}</span>
+              <div class="music-shelf-card-body">
+                <span class="music-shelf-card-title">${escapeHtml(artistName)}</span>
+                <span class="music-shelf-card-meta">${downloadedArtist ? escapeHtml(`${downloadedArtist.album_count || 0} albums • ${downloadedArtist.track_count || 0} tracks downloaded`) : "Favorited only • Not downloaded yet"}</span>
                 <div class="music-status-row">
                   <span class="music-status-badge is-favorited">Favorited</span>
                   ${downloadedArtist ? `<span class="music-status-badge is-downloaded">Downloaded</span>` : `<span class="music-status-badge">Not Downloaded</span>`}
                 </div>
               </div>
-              <div class="music-player-browser-card-actions">
-                ${downloadedArtist ? `<button class="button ghost small" type="button" data-action="player-open-artist" data-artist-key="${escapeAttr(downloadedArtist.artist_key || "")}">Open Library</button>` : `<button class="button ghost small" type="button" data-action="music-go-search">Find Music</button>`}
+              <div class="music-shelf-card-actions">
+                ${downloadedArtist ? `<button class="button primary small music-shelf-card-primary" type="button" data-action="player-open-artist" data-artist-key="${escapeAttr(downloadedArtist.artist_key || "")}">Open Artist</button>` : `<button class="button primary small music-shelf-card-primary" type="button" data-action="music-go-search">Find Music</button>`}
               </div>
             </article>
           `;
