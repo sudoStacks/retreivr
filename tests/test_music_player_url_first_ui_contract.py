@@ -43,8 +43,23 @@ def test_youtube_transport_recreates_destroyed_host_and_uses_persistent_visible_
     music_panel_end = markup.index('<div id="music-bottom-player"')
     assert markup.rfind("</section>", 0, music_panel_end) > markup.index('id="music-panel"')
     assert "music-player-video-mini" in markup
-    assert 'id="music-player-video-hide"' not in markup
-    assert 'id="music-player-video-toggle"' not in markup
+    assert 'id="music-player-full-video-slot"' in markup
+    assert 'id="music-player-mini-video-slot"' in markup
+    assert 'id="music-bottom-player-video-toggle"' in markup
+    assert "moveBefore(shell, null)" in source
+    assert 'const shouldHide = !hasTrack || playerPageOpen;' in source
+
+
+def test_music_queue_prefetches_five_tracks_and_preserves_artwork() -> None:
+    source = APP_JS.read_text()
+    prefetch_start = source.index("function _prefetchNextUnresolved")
+    prefetch_end = source.index("async function playNextPlayerItem", prefetch_start)
+    prefetch_source = source[prefetch_start:prefetch_end]
+
+    assert "const prefetchLimit = 5;" in prefetch_source
+    assert 'prefetch_state: "resolving"' in prefetch_source
+    assert 'prefetch_state: "ready"' in prefetch_source
+    assert "state.playerQueue[capturedIndex]?.artwork_url || resolved.artwork_url" in prefetch_source
 
 
 def test_album_playback_uses_common_queue_skip_resolution_path() -> None:

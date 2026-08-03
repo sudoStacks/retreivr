@@ -162,6 +162,8 @@ const state = {
   playerCurrent: null,
   playerCurrentHasVideo: false,
   playerVideoVisible: false,
+  playerMiniVideoCollapsed: false,
+  playerDockResizeObserver: null,
   playerRuntimePublishStatus: null,
   playerPrefetchInFlightRecordings: new Set(),
   playerYT: null,           // active YT.Player instance, or null when using <audio>
@@ -267,6 +269,7 @@ const STACK_PATH_DEFAULTS = {
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version_v2";
 const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
 const APP_SIDEBAR_COLLAPSED_KEY = "retreivr.app.sidebar_collapsed";
+const MUSIC_MINI_VIDEO_COLLAPSED_KEY = "retreivr.music_player.video_collapsed";
 const ADMIN_PIN_TOKEN_KEY = "retreivr.admin.pin.token";
 const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
 const MUSIC_RECENT_SEARCHES_KEY = "retreivr.music.recent_searches.v1";
@@ -2777,8 +2780,8 @@ function syncBottomPlayerShell() {
   const prevButton = $("#music-bottom-player-prev");
   const nextButton = $("#music-bottom-player-next");
   const queueButton = $("#music-bottom-player-queue");
+  const videoToggleButton = $("#music-bottom-player-video-toggle");
   const statusEl = $("#music-bottom-player-status");
-  const videoShell = $("#music-player-video-shell");
   const artworkShell = shell?.querySelector(".music-bottom-player-art");
   const audio = $("#music-player-audio");
   if (!shell || !titleEl || !metaEl || !artEl || !toggleButton) return;
@@ -2787,11 +2790,18 @@ function syncBottomPlayerShell() {
   const hasVideo = !!String(current.video_id || extractYouTubeVideoId(current.stream_url) || "").trim()
     || !!String(current.video_embed_url || "").trim();
   const hasTrack = !!(current.stream_url && audioHasSource) || hasVideo;
-  const shouldHide = !hasTrack || (!hasVideo && state.currentPage === "music" && state.musicSection === "player");
+  const playerPageOpen = state.currentPage === "music" && state.musicSection === "player";
+  const miniVideoVisible = hasVideo && !state.playerMiniVideoCollapsed && !playerPageOpen;
+  const shouldHide = !hasTrack || playerPageOpen;
   shell.classList.toggle("hidden", shouldHide);
-  shell.classList.toggle("has-video", hasVideo);
-  if (videoShell) videoShell.classList.toggle("hidden", !hasVideo);
-  if (artworkShell) artworkShell.classList.toggle("hidden", hasVideo);
+  shell.classList.toggle("has-video", miniVideoVisible);
+  shell.classList.toggle("video-collapsed", hasVideo && state.playerMiniVideoCollapsed);
+  if (artworkShell) artworkShell.classList.toggle("hidden", miniVideoVisible);
+  if (videoToggleButton) {
+    videoToggleButton.classList.toggle("hidden", !hasVideo || playerPageOpen);
+    videoToggleButton.textContent = state.playerMiniVideoCollapsed ? "Show Video" : "Hide Video";
+    videoToggleButton.setAttribute("aria-expanded", state.playerMiniVideoCollapsed ? "false" : "true");
+  }
   titleEl.textContent = String(current.title || "Nothing playing");
   metaEl.textContent = [current.artist, current.album, current.kind].filter(Boolean).join(" • ") || "Choose a track from your library or start a station.";
   if (statusEl) {
@@ -2814,6 +2824,52 @@ function syncBottomPlayerShell() {
     queueButton.disabled = !hasTrack;
     queueButton.textContent = `Queue ${Array.isArray(state.playerQueue) && state.playerQueue.length ? `(${state.playerQueue.length})` : ""}`.trim();
   }
+  syncMusicPlayerDockSpacing();
+}
+
+function isMusicPlayerPageOpen() {
+  return state.currentPage === "music" && state.musicSection === "player";
+}
+
+function moveMusicPlayerVideoShell(shell, target) {
+  if (!shell || !target || shell.parentElement === target) return;
+  // moveBefore performs a state-preserving DOM move in current Chromium, keeping
+  // the live iframe browsing context and YT.Player instance intact.
+  if (typeof target.moveBefore === "function") {
+    target.moveBefore(shell, null);
+    return;
+  }
+  // Older engines do not expose atomic DOM moves. Keep a functional fallback;
+  // the application never creates a second iframe/player during the handoff.
+  target.appendChild(shell);
+}
+
+function syncMusicPlayerDockSpacing() {
+  const shell = $("#music-bottom-player");
+  const visible = !!shell && !shell.classList.contains("hidden");
+  document.body.classList.toggle("music-player-dock-visible", visible);
+  const updateHeight = () => {
+    const height = visible ? Math.ceil(shell.getBoundingClientRect().height + 24) : 0;
+    document.documentElement.style.setProperty("--music-player-dock-height", `${height}px`);
+  };
+  window.requestAnimationFrame(updateHeight);
+  if (!state.playerDockResizeObserver && shell && typeof ResizeObserver === "function") {
+    state.playerDockResizeObserver = new ResizeObserver(() => {
+      if (!shell.classList.contains("hidden")) updateHeight();
+    });
+    state.playerDockResizeObserver.observe(shell);
+  }
+}
+
+function setMusicMiniVideoCollapsed(collapsed, { persist = true } = {}) {
+  state.playerMiniVideoCollapsed = !!collapsed;
+  if (persist) {
+    try {
+      localStorage.setItem(MUSIC_MINI_VIDEO_COLLAPSED_KEY, state.playerMiniVideoCollapsed ? "true" : "false");
+    } catch (_err) {}
+  }
+  syncMusicPlayerVideoShell();
+  syncBottomPlayerShell();
 }
 
 function syncMusicStationCreateForm() {
@@ -5190,7 +5246,7 @@ function renderMusicPlayerCommunityCache() {
       ${items.map((item) => `
         <article class="music-player-browser-card music-player-browser-card-rich">
           <div class="music-player-browser-card-art">
-            <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Cached Match")}" loading="lazy">
+            <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Cached Match")}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
           </div>
           <div class="music-player-browser-card-copy">
             <span class="music-player-track-title">${escapeHtml(item.title || "Cached Match")}</span>
@@ -5232,11 +5288,12 @@ function renderMusicPlayerQueue() {
         ${queue.map((item, index) => `
           <article class="music-player-track-row music-player-track-row-rich${String(state.playerCurrent?.stream_url || "") === String(item.stream_url || "") ? " is-current" : ""}">
             <div class="music-player-browser-card-art music-player-track-art">
-              <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Track")}" loading="lazy">
+              <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Track")}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
             </div>
             <button class="music-player-track" type="button" data-action="player-play" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.kind || "cached")}">
               <span class="music-player-track-title">${index + 1}. ${escapeHtml(item.title || "Untitled")}</span>
               <span class="music-player-track-meta">${escapeHtml([item.artist, item.album, item.kind].filter(Boolean).join(" • "))}</span>
+              ${item.prefetch_state === "resolving" ? `<span class="music-status-badge">Resolving next…</span>` : item.prefetch_state === "ready" || item.resolved_via ? `<span class="music-status-badge is-queued">Ready</span>` : ""}
             </button>
             <div class="music-player-inline-actions">
               <button class="button ghost small" type="button" data-action="player-queue-move-up" data-queue-index="${escapeAttr(index)}" ${index === 0 ? "disabled" : ""}>Up</button>
@@ -5253,23 +5310,36 @@ function renderMusicPlayerQueue() {
 function syncMusicPlayerVideoShell() {
   const shell = $("#music-player-video-shell");
   if (!shell) return;
-  // Remote YouTube playback remains visible in the persistent mini-player. Hiding the
-  // iframe can suspend playback and violates the predictable player contract.
   const hasVideo = activePlayerIsYT()
     || !!String(state.playerCurrent?.video_id || extractYouTubeVideoId(state.playerCurrent?.stream_url) || "").trim()
     || !!String(state.playerCurrent?.video_embed_url || "").trim();
-  const shouldShow = hasVideo;
-  shell.classList.toggle("hidden", !shouldShow);
+  const playerPageOpen = isMusicPlayerPageOpen();
+  const fullSlot = $("#music-player-full-video-slot");
+  const miniSlot = $("#music-player-mini-video-slot");
+  const targetSlot = playerPageOpen ? fullSlot : miniSlot;
+  if (hasVideo && targetSlot) moveMusicPlayerVideoShell(shell, targetSlot);
+  if (fullSlot) fullSlot.classList.toggle("hidden", !hasVideo || !playerPageOpen);
+  if (miniSlot) miniSlot.classList.toggle("hidden", !hasVideo || playerPageOpen || state.playerMiniVideoCollapsed);
+  shell.classList.toggle("hidden", !hasVideo);
+  shell.classList.toggle("music-player-video-mini", !playerPageOpen);
+  shell.classList.toggle("music-player-video-full", playerPageOpen);
+  const nowPlaying = shell.closest(".music-player-now-playing") || $("#music-player-view .music-player-now-playing");
+  const nowTop = $("#music-player-view .music-player-now-top");
+  const artwork = $("#music-player-view .music-player-now-art");
+  if (nowPlaying) nowPlaying.classList.toggle("has-remote-video", hasVideo && playerPageOpen);
+  if (nowTop) nowTop.classList.toggle("has-remote-video", hasVideo && playerPageOpen);
+  if (artwork) artwork.classList.toggle("hidden", hasVideo && playerPageOpen);
   // For non-YT embed-url items (legacy path) keep the frame src in sync.
   if (!activePlayerIsYT()) {
     const frame = $("#music-player-video-frame");
     if (!frame) return;
     const embedUrl = String(state.playerCurrent?.video_embed_url || "").trim();
     if (frame.tagName === "IFRAME") {
-      if (shouldShow && embedUrl && frame.src !== embedUrl) frame.src = embedUrl;
-      else if (!shouldShow && frame.src) frame.src = "";
+      if (hasVideo && embedUrl && frame.src !== embedUrl) frame.src = embedUrl;
+      else if (!hasVideo && frame.src) frame.src = "";
     }
   }
+  syncMusicPlayerDockSpacing();
 }
 
 function resetYouTubePlayerHost() {
@@ -5587,7 +5657,7 @@ function normalizePlayableItem(item = {}) {
     mb_release_group_id: String(item.mb_release_group_id || item.release_group_mbid || "").trim() || null,
     source: String(item.source || "").trim() || null,
     resolved_via: String(item.resolved_via || "").trim() || null,
-    artwork_url: String(item.artwork_url || "").trim() || null,
+    artwork_url: String(item.artwork_url || item.thumbnail_url || item.thumbnail || item.cover_url || "").trim() || null,
     mb_youtube_urls: Array.isArray(item.mb_youtube_urls)
       ? item.mb_youtube_urls.map((value) => String(value || "").trim()).filter(Boolean).slice(0, 3)
       : [],
@@ -5597,6 +5667,9 @@ function normalizePlayableItem(item = {}) {
   normalized.kind = String(item.kind || item.source_kind || (normalized.local_path ? "local" : (normalized.video_id ? "youtube" : "unresolved"))).trim() || "unresolved";
   if (!normalized.video_embed_url && normalized.video_id) {
     normalized.video_embed_url = buildYouTubePlayerEmbedUrl(normalized.video_id);
+  }
+  if (!normalized.artwork_url && normalized.video_id) {
+    normalized.artwork_url = `https://i.ytimg.com/vi/${encodeURIComponent(normalized.video_id)}/hqdefault.jpg`;
   }
   return normalized;
 }
@@ -5676,6 +5749,8 @@ function setPlayerQueue(items = [], { preserveCurrent = false } = {}) {
     }
   }
   renderMusicPlayerQueue();
+  const currentIndex = getCurrentQueueIndex();
+  window.setTimeout(() => _prefetchNextUnresolved(currentIndex >= 0 ? currentIndex + 1 : 1), 0);
 }
 
 function markQueueItemUnresolved(index, item, reason = "unresolved") {
@@ -5705,7 +5780,13 @@ async function playPlayerQueueIndex(index) {
     // Resolve the stream URL before playing — update queue in place so the UI reflects it.
     const resolved = await resolveRecordingStreamUrl(item.recording_mbid, buildPlayableResolutionMeta(item));
     if (resolved?.stream_url || resolved?.video_id) {
-      const readyItem = normalizePlayableItem({ ...item, ...resolved, kind: resolved.video_id ? "youtube" : "cached" });
+      const readyItem = normalizePlayableItem({
+        ...item,
+        ...resolved,
+        artwork_url: item.artwork_url || resolved.artwork_url || null,
+        kind: resolved.video_id ? "youtube" : "cached",
+        prefetch_state: "ready",
+      });
       state.playerQueue[targetIndex] = readyItem;
       renderMusicPlayerQueue();
       try {
@@ -5755,12 +5836,13 @@ async function playPlayerQueueIndex(index) {
   _prefetchNextUnresolved(targetIndex + 1);
 }
 
-// Background-resolve the next unresolved queue item so playback can start instantly.
+// Background-resolve a rolling lookahead so Next can hand off immediately.
 function _prefetchNextUnresolved(fromIndex) {
   const queue = Array.isArray(state.playerQueue) ? state.playerQueue : [];
-  const prefetchLimit = 3;
-  const searchWindow = 8;
+  const prefetchLimit = 5;
+  const searchWindow = 12;
   let scheduled = 0;
+  let queueChanged = false;
   for (let i = fromIndex; i < Math.min(fromIndex + searchWindow, queue.length); i++) {
     if (scheduled >= prefetchLimit) break;
     const item = normalizePlayableItem(queue[i]);
@@ -5771,11 +5853,22 @@ function _prefetchNextUnresolved(fromIndex) {
       }
       const capturedIndex = i;
       state.playerPrefetchInFlightRecordings.add(prefetchKey);
+      state.playerQueue[capturedIndex] = normalizePlayableItem({
+        ...state.playerQueue[capturedIndex],
+        prefetch_state: "resolving",
+      });
+      queueChanged = true;
       resolveRecordingStreamUrl(item.recording_mbid, buildPlayableResolutionMeta(item)).then((resolved) => {
         if (!resolved?.stream_url && !resolved?.video_id) return;
         const currentKey = getPlayableResolveKey(state.playerQueue?.[capturedIndex] || {});
         if (Array.isArray(state.playerQueue) && currentKey === prefetchKey) {
-          state.playerQueue[capturedIndex] = normalizePlayableItem({ ...state.playerQueue[capturedIndex], ...resolved, kind: resolved.video_id ? "youtube" : "cached" });
+          state.playerQueue[capturedIndex] = normalizePlayableItem({
+            ...state.playerQueue[capturedIndex],
+            ...resolved,
+            artwork_url: state.playerQueue[capturedIndex]?.artwork_url || resolved.artwork_url || null,
+            kind: resolved.video_id ? "youtube" : "cached",
+            prefetch_state: "ready",
+          });
           renderMusicPlayerQueue();
         }
       }).catch(() => {}).finally(() => {
@@ -5784,6 +5877,7 @@ function _prefetchNextUnresolved(fromIndex) {
       scheduled += 1;
     }
   }
+  if (queueChanged) renderMusicPlayerQueue();
 }
 
 async function playNextPlayerItem({ autoAdvance = false } = {}) {
@@ -6012,6 +6106,7 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
       payload = normalizePlayableItem({
         ...payload,
         ...resolved,
+        artwork_url: payload.artwork_url || resolved.artwork_url || null,
         kind: resolved.video_id ? "youtube" : (payload.kind || "cached"),
       });
     }
@@ -7912,12 +8007,20 @@ function getMusicLibraryRootsLabel() {
 }
 
 function getMusicLibraryArtworkUrl(item) {
-  const localArtwork = String(item?.artwork_url || "").trim();
+  const localArtwork = String(item?.artwork_url || item?.thumbnail_url || item?.thumbnail || item?.cover_url || "").trim();
   if (localArtwork) return localArtwork;
   const albumKey = String(item?.album_key || "").trim().toLowerCase();
-  if (albumKey) {
+  const albumName = String(item?.album || item?.title || "").trim().toLowerCase();
+  const artistName = String(item?.artist || item?.artist_name || "").trim().toLowerCase();
+  if (albumKey || albumName) {
     const tracks = Array.isArray(state.playerLibrarySummary?.tracks) ? state.playerLibrarySummary.tracks : [];
-    const matchingTrack = tracks.find((entry) => String(entry?.album_key || "").trim().toLowerCase() === albumKey && String(entry?.artwork_url || "").trim());
+    const matchingTrack = tracks.find((entry) => {
+      const keyMatch = albumKey && String(entry?.album_key || "").trim().toLowerCase() === albumKey;
+      const nameMatch = albumName
+        && String(entry?.album || "").trim().toLowerCase() === albumName
+        && (!artistName || String(entry?.artist || "").trim().toLowerCase() === artistName);
+      return (keyMatch || nameMatch) && String(entry?.artwork_url || "").trim();
+    });
     if (matchingTrack?.artwork_url) return String(matchingTrack.artwork_url).trim();
   }
   const artistKey = String(item?.artist_key || "").trim().toLowerCase();
@@ -7926,6 +8029,8 @@ function getMusicLibraryArtworkUrl(item) {
     const matchingAlbum = albums.find((entry) => String(entry?.artist_key || "").trim().toLowerCase() === artistKey && String(entry?.artwork_url || "").trim());
     if (matchingAlbum?.artwork_url) return String(matchingAlbum.artwork_url).trim();
   }
+  const videoId = String(item?.video_id || extractYouTubeVideoId(item?.stream_url) || "").trim();
+  if (videoId) return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
   return "assets/no_artwork.png";
 }
 
@@ -14334,7 +14439,13 @@ async function resolveRecordingIndexedStreamUrl(recordingMbid) {
     if (!selectedUrl || !isYouTubeFamilySource(source, selectedUrl)) return null;
     const videoId = extractYouTubeVideoId(selectedUrl);
     if (!videoId) return null;
-    return { stream_url: selectedUrl, video_id: videoId, source: source || "youtube", resolved_via: "resolution_index" };
+    return {
+      stream_url: selectedUrl,
+      video_id: videoId,
+      source: source || "youtube",
+      resolved_via: "resolution_index",
+      artwork_url: `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`,
+    };
   } catch (_err) {
     return null;
   }
@@ -14381,7 +14492,13 @@ async function resolveRecordingStreamUrl(recordingMbid, trackMeta = {}) {
         album: trackMeta.album,
         resolved_via: "preview_api",
       });
-      return { stream_url: sourceUrl, video_id: videoId, source: source || "youtube", resolved_via: "preview_api" };
+      return {
+        stream_url: sourceUrl,
+        video_id: videoId,
+        source: source || "youtube",
+        resolved_via: String(response?.resolved_via || "preview_api").trim() || "preview_api",
+        artwork_url: String(response?.artwork_url || "").trim() || `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`,
+      };
     } catch (_err) {
       return null;
     }
@@ -14468,7 +14585,7 @@ async function playMusicSearchResult(result) {
     source: resolved.source,
     resolved_via: resolved.resolved_via,
     recording_mbid: recordingMbid || null,
-    artwork_url: result.artwork_url || null,
+    artwork_url: result.artwork_url || resolved.artwork_url || null,
     mb_release_group_id: String(result?.mb_release_group_id || "").trim() || null,
   });
   clearActiveStationPlayback();
@@ -14502,18 +14619,25 @@ async function playMusicAlbumFromSearch(albumItem) {
   const artistQuery = String(albumItem?.artist || "").trim();
   const albumTitle = String(albumItem?.title || "").trim();
   if (!releaseGroupMbid && !artistQuery && !albumTitle) throw new Error("Album identity unknown.");
-  const tracks = await fetchMusicTracksByAlbum({
+  const tracks = applyAlbumArtworkToTracks(await fetchMusicTracksByAlbum({
     artist: artistQuery,
     album: albumTitle,
     releaseGroupMbid,
     limit: 100,
-  });
+  }), albumItem);
   if (!tracks.length) throw new Error("No tracks found for this album.");
   const queueItems = tracks.map((t) => {
     const mbid = String(t?.recording_mbid || "").trim();
     const local = findLocalPlayerTrackByRecordingMbid(mbid);
     if (local && (local.stream_url || local.local_path)) {
-      return normalizePlayableItem({ ...local, kind: "local", title: local.title || t.track, artist: local.artist || artistQuery, album: albumTitle });
+      return normalizePlayableItem({
+        ...local,
+        kind: "local",
+        title: local.title || t.track,
+        artist: local.artist || artistQuery,
+        album: albumTitle,
+        artwork_url: local.artwork_url || t.artwork_url || getImmediateAlbumArtworkUrl(albumItem) || null,
+      });
     }
     return normalizePlayableItem({
       id: `search:${mbid || t.track || "track"}`,
@@ -14523,6 +14647,7 @@ async function playMusicAlbumFromSearch(albumItem) {
       recording_mbid: mbid || null,
       mb_release_group_id: releaseGroupMbid || null,
       mb_youtube_urls: Array.isArray(t?.mb_youtube_urls) ? t.mb_youtube_urls : [],
+      artwork_url: t.artwork_url || getImmediateAlbumArtworkUrl(albumItem) || null,
       kind: "unresolved",
       stream_url: null,
     });
@@ -21549,16 +21674,15 @@ function bindEvents() {
   const musicBottomToggle = $("#music-bottom-player-toggle");
   if (musicBottomToggle) {
     musicBottomToggle.addEventListener("click", () => {
-      if (activePlayerIsYT() && !(state.currentPage === "music" && state.musicSection === "player")) {
-        openMusicPlayerScreen({ showVideo: true });
-        activePlayerPlay();
-        syncBottomPlayerShell();
-        updateMusicPlayerTransportUI();
-        return;
-      }
       if (activePlayerIsPaused()) activePlayerPlay(); else activePlayerPause();
       syncBottomPlayerShell();
       updateMusicPlayerTransportUI();
+    });
+  }
+  const musicBottomVideoToggle = $("#music-bottom-player-video-toggle");
+  if (musicBottomVideoToggle) {
+    musicBottomVideoToggle.addEventListener("click", () => {
+      setMusicMiniVideoCollapsed(!state.playerMiniVideoCollapsed);
     });
   }
   const musicBottomPrev = $("#music-bottom-player-prev");
@@ -22682,6 +22806,11 @@ function applyAppSidebarCollapsed(collapsed, { persist = true } = {}) {
 async function init() {
   state.adminPinToken = localStorage.getItem(ADMIN_PIN_TOKEN_KEY) || "";
   state.appSidebarCollapsed = loadAppSidebarCollapsedPreference();
+  try {
+    state.playerMiniVideoCollapsed = localStorage.getItem(MUSIC_MINI_VIDEO_COLLAPSED_KEY) === "true";
+  } catch (_err) {
+    state.playerMiniVideoCollapsed = false;
+  }
   state.musicHeaderMode = loadMusicHeaderModePreference();
   mountSettingsSubpages();
   mountHomePageNodes();

@@ -6,8 +6,8 @@
   <title>Retreivr - Self-Hosted Media Retrieval</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=1.0.6">
-  <script defer src="app.js?v=1.0.6"></script>
+  <link rel="stylesheet" href="styles.css?v=1.0.7">
+  <script defer src="app.js?v=1.0.7"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -442,6 +442,7 @@
               <div class="music-player-main">
                 <div class="music-player-now-playing">
                   <div class="music-player-now-top">
+                    <div id="music-player-full-video-slot" class="music-player-full-video-slot hidden" aria-live="polite"></div>
                     <div class="music-player-now-art">
                       <img id="music-player-now-art" src="assets/no_artwork.png" alt="Now playing artwork">
                     </div>
@@ -518,12 +519,14 @@
       </div>
     </section>
     <div id="music-bottom-player" class="music-bottom-player hidden" aria-label="Now playing">
-        <div id="music-player-video-shell" class="music-player-video-shell music-player-video-mini hidden">
-          <div class="music-player-video-toolbar">
-            <div class="meta">YouTube remote source</div>
-          </div>
-          <div class="music-player-video-frame-wrap">
-            <div id="music-player-video-frame"></div>
+        <div id="music-player-mini-video-slot" class="music-player-mini-video-slot">
+          <div id="music-player-video-shell" class="music-player-video-shell music-player-video-mini hidden">
+            <div class="music-player-video-toolbar">
+              <div class="meta">YouTube remote source</div>
+            </div>
+            <div class="music-player-video-frame-wrap">
+              <div id="music-player-video-frame"></div>
+            </div>
           </div>
         </div>
         <div class="music-bottom-player-art">
@@ -538,6 +541,7 @@
           <button id="music-bottom-player-prev" class="button ghost small" type="button">Prev</button>
           <button id="music-bottom-player-toggle" class="button ghost small" type="button">Play</button>
           <button id="music-bottom-player-next" class="button ghost small" type="button">Next</button>
+          <button id="music-bottom-player-video-toggle" class="button ghost small hidden" type="button" aria-expanded="true">Hide Video</button>
           <button id="music-bottom-player-queue" class="button ghost small" type="button">Queue</button>
           <button id="music-bottom-player-expand" class="button ghost small" type="button">Open Player</button>
         </div>

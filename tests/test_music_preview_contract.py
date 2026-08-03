@@ -55,6 +55,7 @@ def test_music_preview_returns_iframe_video_for_youtube_source(api_module, monke
     assert payload["video_id"] == "abc123XYZ99"
     assert payload["playback_adapter"] == "youtube_iframe"
     assert payload["requires_visible_player"] is True
+    assert payload["artwork_url"] == "https://i.ytimg.com/vi/abc123XYZ99/hqdefault.jpg"
     assert "stream_url" not in payload
 
 
@@ -147,6 +148,41 @@ def test_music_preview_fast_search_uses_lightweight_youtube_result(api_module, m
     assert preview["resolved_via"] == "youtube_fast_search:yt_dlp_flat"
     assert calls[0][2] is None
     assert calls[0][4] is True
+
+
+def test_music_preview_uses_community_cache_before_fresh_youtube_search(api_module, monkeypatch) -> None:
+    calls = []
+    api_module.app.state.loaded_config = {"community_cache_lookup_enabled": True}
+    api_module._MUSIC_PREVIEW_CACHE.clear()
+    monkeypatch.setattr(
+        api_module.community_cache,
+        "cached_lookup",
+        lambda recording_mbid, **_kwargs: {
+            "recording_mbid": recording_mbid,
+            "source": "youtube",
+            "candidate_url": "https://www.youtube.com/watch?v=cache123XYZ",
+            "video_id": "cache123XYZ",
+            "thumbnail_url": "https://img.example/cache-cover.jpg",
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_search_fast_music_preview",
+        lambda **_kwargs: calls.append("fresh-search") or None,
+    )
+
+    preview = api_module._resolve_music_preview_candidate(
+        recording_mbid="recording-cache-1",
+        artist="Artist",
+        track="Track",
+        album="Album",
+        media_mode="music",
+    )
+
+    assert preview is not None
+    assert preview["resolved_via"] == "community_cache"
+    assert preview["artwork_url"] == "https://img.example/cache-cover.jpg"
+    assert calls == []
 
 
 def test_bounded_call_does_not_wait_for_timed_out_worker(api_module) -> None:

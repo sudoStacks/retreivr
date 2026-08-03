@@ -683,6 +683,13 @@ def _build_youtube_watch_url(video_id: str | None) -> str | None:
     return f"https://www.youtube.com/watch?v={quote(normalized)}"
 
 
+def _build_youtube_thumbnail_url(video_id: str | None) -> str | None:
+    normalized = str(video_id or "").strip()
+    if not normalized:
+        return None
+    return f"https://i.ytimg.com/vi/{quote(normalized)}/hqdefault.jpg"
+
+
 def _is_youtube_family_url(value: str | None) -> bool:
     try:
         parsed = urlparse(str(value or "").strip())
@@ -791,6 +798,7 @@ def _search_fast_music_preview(*, artist: str, track: str, album: str) -> dict[s
                 "title": str(candidate.get("title") or track or "Preview").strip() or "Preview",
                 "resolved_via": f"youtube_fast_search:{resolver}",
                 "video_id": str(candidate.get("video_id") or "").strip() or None,
+                "artwork_url": str(candidate.get("thumbnail_url") or candidate.get("thumbnail") or "").strip() or None,
             }
     except TimeoutError:
         logging.debug("music_preview_fast_search_timeout artist=%s track=%s", artist, track)
@@ -830,15 +838,10 @@ def _resolve_music_preview_candidate(
     if cached_preview is not None:
         cached_preview["resolved_via"] = "runtime_preview_cache"
         return cached_preview
-    if normalized_media_mode == "music":
-        fast_preview = _search_fast_music_preview(artist=artist, track=track, album=album)
-        if fast_preview is not None:
-            _music_preview_cache_put(cache_key, fast_preview)
-            return fast_preview
     cfg = get_loaded_config()
     if recording_mbid:
         community_lookup_enabled = bool(
-            cfg.get("community_cache_lookup_enabled", cfg.get("community_cache_enabled", False))
+            cfg.get("community_cache_lookup_enabled", cfg.get("community_cache_enabled", True))
         )
         if community_lookup_enabled:
             try:
@@ -856,17 +859,25 @@ def _resolve_music_preview_candidate(
                         video_id = str(community_record.get("video_id") or "").strip()
                         source_url = _normalize_preview_source_url(
                             source,
-                            community_record.get("candidate_url"),
+                            community_record.get("candidate_url") or community_record.get("source_url"),
                             video_id,
                         )
                         if source and source_url:
-                            return {
+                            community_preview = {
                                 "source": source,
                                 "source_url": source_url,
                                 "title": track or "Preview",
                                 "resolved_via": "community_cache",
                                 "video_id": video_id or None,
+                                "artwork_url": str(
+                                    community_record.get("artwork_url")
+                                    or community_record.get("thumbnail_url")
+                                    or community_record.get("thumbnail")
+                                    or ""
+                                ).strip() or _build_youtube_thumbnail_url(video_id),
                             }
+                            _music_preview_cache_put(cache_key, community_preview)
+                            return community_preview
             except Exception:
                 logging.debug("music_preview_community_lookup_failed mbid=%s", recording_mbid, exc_info=True)
 
@@ -881,14 +892,27 @@ def _resolve_music_preview_candidate(
             recording = recording_payload.get("recording", {}) if isinstance(recording_payload, dict) else {}
             mb_urls = _extract_mb_youtube_urls(recording)
             if mb_urls:
-                return {
+                mb_video_id = extract_video_id(str(mb_urls[0] or "").strip())
+                mb_preview = {
                     "source": "youtube",
                     "source_url": str(mb_urls[0] or "").strip(),
                     "title": track or "Preview",
                     "resolved_via": "musicbrainz_url_rel",
+                    "video_id": mb_video_id or None,
+                    "artwork_url": _build_youtube_thumbnail_url(mb_video_id),
                 }
+                _music_preview_cache_put(cache_key, mb_preview)
+                return mb_preview
         except Exception:
             logging.debug("music_preview_mb_lookup_failed mbid=%s", recording_mbid, exc_info=True)
+
+    if normalized_media_mode == "music":
+        fast_preview = _search_fast_music_preview(artist=artist, track=track, album=album)
+        if fast_preview is not None:
+            if not fast_preview.get("artwork_url"):
+                fast_preview["artwork_url"] = _build_youtube_thumbnail_url(fast_preview.get("video_id"))
+            _music_preview_cache_put(cache_key, fast_preview)
+            return fast_preview
 
     if normalized_media_mode == "music_video":
         precheck = _quick_youtube_mv_precheck(artist, track, album=album)
@@ -935,7 +959,10 @@ def _resolve_music_preview_candidate(
             "title": str(candidate.get("title") or track or "Preview").strip() or "Preview",
             "resolved_via": "search_fallback",
             "video_id": str(candidate.get("video_id") or "").strip() or None,
+            "artwork_url": str(candidate.get("thumbnail_url") or candidate.get("thumbnail") or "").strip() or None,
         }
+        if not preview["artwork_url"]:
+            preview["artwork_url"] = _build_youtube_thumbnail_url(preview.get("video_id"))
         _music_preview_cache_put(cache_key, preview)
         return preview
     return None
@@ -9519,6 +9546,7 @@ def music_preview(data: dict = Body(...)):
         "title": title,
         "resolved_via": str(preview.get("resolved_via") or "").strip() or None,
         "video_id": video_id,
+        "artwork_url": str(preview.get("artwork_url") or "").strip() or _build_youtube_thumbnail_url(video_id),
     }
     if response["preview_type"] != "video":
         response["stream_url"] = f"/api/music/preview/stream?url={quote(source_url, safe='')}"

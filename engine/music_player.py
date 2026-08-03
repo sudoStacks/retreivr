@@ -599,6 +599,13 @@ def _build_youtube_embed_url(value: Any) -> str | None:
     return f"https://www.youtube.com/embed/{quote(video_id, safe='')}?autoplay=1&rel=0&modestbranding=1&playsinline=1"
 
 
+def _build_youtube_thumbnail_url(value: Any) -> str | None:
+    video_id = _extract_youtube_video_id(value)
+    if not video_id:
+        return None
+    return f"https://i.ytimg.com/vi/{quote(video_id, safe='')}/hqdefault.jpg"
+
+
 def _normalized_music_preferences(config: dict[str, Any]) -> dict[str, Any]:
     prefs = config.get("music_preferences") if isinstance(config.get("music_preferences"), dict) else {}
     favorite_genres = [
@@ -1083,7 +1090,8 @@ def _build_cached_candidates(conn: sqlite3.Connection, *, station: dict[str, Any
             "recording_mbid": str(row.get("recording_mbid") or "").strip() or None,
             "verification_status": str(row.get("verification_status") or "").strip() or None,
             "verification_count": _safe_int(row.get("verification_count"), 0),
-            "artwork_url": str(payload.get("thumbnail") or payload.get("thumbnail_url") or "").strip() or None,
+            "artwork_url": str(payload.get("artwork_url") or payload.get("thumbnail") or payload.get("thumbnail_url") or "").strip()
+            or _build_youtube_thumbnail_url(url),
             "release_date": str(payload.get("release_date") or payload.get("release_year") or "").strip() or None,
             "stream_url": url,
             "video_id": video_id,
@@ -1452,7 +1460,9 @@ def list_cached_matches(conn: sqlite3.Connection, *, limit: int = 60) -> list[di
         artist = str(payload.get("artist") or payload.get("uploader") or "").strip()
         album = str(payload.get("album") or "").strip()
         title = str(payload.get("title") or payload.get("track") or row["recording_mbid"] or "Cached Match").strip() or "Cached Match"
-        artwork_url = str(payload.get("thumbnail") or payload.get("thumbnail_url") or "").strip()
+        artwork_url = str(payload.get("artwork_url") or payload.get("thumbnail") or payload.get("thumbnail_url") or "").strip()
+        if not artwork_url:
+            artwork_url = _build_youtube_thumbnail_url(url) or ""
         source = str(row["source"] or "").strip().lower()
         if source not in YOUTUBE_SOURCE_KEYS:
             continue
