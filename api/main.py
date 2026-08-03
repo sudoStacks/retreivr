@@ -449,14 +449,31 @@ def _mb_get_release_group_by_id_raw(release_group_mbid: str, *, includes: list[s
 
 def _extract_mb_youtube_urls(entity: dict) -> list[str]:
     urls: list[str] = []
-    rels = entity.get("url-relation-list") if isinstance(entity, dict) else None
-    if not isinstance(rels, list):
+    if not isinstance(entity, dict):
         return urls
+    rels: list[dict[str, Any]] = []
+    direct_rels = entity.get("url-relation-list")
+    if isinstance(direct_rels, list):
+        rels.extend(rel for rel in direct_rels if isinstance(rel, dict))
+    relation_buckets = entity.get("relation-list")
+    if isinstance(relation_buckets, list):
+        for bucket in relation_buckets:
+            if not isinstance(bucket, dict):
+                continue
+            target_type = str(bucket.get("target-type") or "").strip().lower()
+            if target_type and target_type != "url":
+                continue
+            nested_rels = bucket.get("relation")
+            if isinstance(nested_rels, list):
+                rels.extend(rel for rel in nested_rels if isinstance(rel, dict))
     for rel in rels:
-        if not isinstance(rel, dict):
-            continue
-        url_obj = rel.get("target") if isinstance(rel.get("target"), dict) else {}
-        resource = str(url_obj.get("resource") or "").strip()
+        target = rel.get("target")
+        if isinstance(target, dict):
+            resource = str(target.get("resource") or target.get("url") or "").strip()
+        else:
+            resource = str(target or "").strip()
+        if not resource and isinstance(rel.get("url"), dict):
+            resource = str(rel.get("url", {}).get("resource") or "").strip()
         if not resource:
             continue
         if not _is_youtube_family_url(resource):
@@ -10795,8 +10812,18 @@ class ReviewQueueActionPayload(BaseModel):
 async def api_list_review_queue(
     status: str = Query(REVIEW_STATUS_PENDING, max_length=32),
     limit: int = Query(200, ge=1, le=2000),
+    compact: bool = Query(False),
 ):
-    return safe_json(list_review_queue_items(app.state.paths.db_path, status=status, limit=limit))
+    payload = await anyio.to_thread.run_sync(
+        functools.partial(
+            list_review_queue_items,
+            app.state.paths.db_path,
+            status=status,
+            limit=limit,
+            compact=compact,
+        )
+    )
+    return safe_json(payload)
 
 
 @app.post("/api/review_queue/accept")

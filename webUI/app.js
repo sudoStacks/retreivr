@@ -2714,9 +2714,6 @@ function setMusicSection(section) {
   const requested = String(section || "browse").trim() || "browse";
   const normalized = requested === "search" || requested === "home" ? "browse" : requested;
   state.musicSection = normalized;
-  if (activePlayerIsYT() && normalized !== "player") {
-    activePlayerPause();
-  }
   $$(".music-app-nav").forEach((button) => {
     button.classList.toggle("active", button.dataset.musicSection === normalized);
   });
@@ -2781,13 +2778,20 @@ function syncBottomPlayerShell() {
   const nextButton = $("#music-bottom-player-next");
   const queueButton = $("#music-bottom-player-queue");
   const statusEl = $("#music-bottom-player-status");
+  const videoShell = $("#music-player-video-shell");
+  const artworkShell = shell?.querySelector(".music-bottom-player-art");
   const audio = $("#music-player-audio");
   if (!shell || !titleEl || !metaEl || !artEl || !toggleButton) return;
   const current = state.playerCurrent || {};
   const audioHasSource = !!(audio && (audio.currentSrc || audio.src));
-  const hasTrack = !!(current.stream_url && audioHasSource) || !!(current.video_id && activePlayerIsYT()) || !!String(current.video_embed_url || "").trim();
-  const shouldHide = !hasTrack || (state.currentPage === "music" && state.musicSection === "player");
+  const hasVideo = !!String(current.video_id || extractYouTubeVideoId(current.stream_url) || "").trim()
+    || !!String(current.video_embed_url || "").trim();
+  const hasTrack = !!(current.stream_url && audioHasSource) || hasVideo;
+  const shouldHide = !hasTrack || (!hasVideo && state.currentPage === "music" && state.musicSection === "player");
   shell.classList.toggle("hidden", shouldHide);
+  shell.classList.toggle("has-video", hasVideo);
+  if (videoShell) videoShell.classList.toggle("hidden", !hasVideo);
+  if (artworkShell) artworkShell.classList.toggle("hidden", hasVideo);
   titleEl.textContent = String(current.title || "Nothing playing");
   metaEl.textContent = [current.artist, current.album, current.kind].filter(Boolean).join(" • ") || "Choose a track from your library or start a station.";
   if (statusEl) {
@@ -5249,9 +5253,12 @@ function renderMusicPlayerQueue() {
 function syncMusicPlayerVideoShell() {
   const shell = $("#music-player-video-shell");
   if (!shell) return;
-  // YouTube playback must remain visible. It is only active on the dedicated Player screen.
-  const hasVideo = activePlayerIsYT() || !!String(state.playerCurrent?.video_embed_url || "").trim();
-  const shouldShow = hasVideo && state.musicSection === "player";
+  // Remote YouTube playback remains visible in the persistent mini-player. Hiding the
+  // iframe can suspend playback and violates the predictable player contract.
+  const hasVideo = activePlayerIsYT()
+    || !!String(state.playerCurrent?.video_id || extractYouTubeVideoId(state.playerCurrent?.stream_url) || "").trim()
+    || !!String(state.playerCurrent?.video_embed_url || "").trim();
+  const shouldShow = hasVideo;
   shell.classList.toggle("hidden", !shouldShow);
   // For non-YT embed-url items (legacy path) keep the frame src in sync.
   if (!activePlayerIsYT()) {
@@ -6034,7 +6041,6 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
   // recreating active playback for the same item, which causes black iframe flashes.
   if (sameAsCurrent && (currentYTActive || currentAudioActive)) {
     if (isYouTube) {
-      openMusicPlayerScreen({ showVideo: true });
       activePlayerPlay();
     }
     const titleEl = $("#music-player-now-title");
@@ -6054,12 +6060,12 @@ async function playMusicPlayerItem(payload, { preserveStation = false } = {}) {
   }
 
   if (isYouTube) {
-    // YouTube requires a visible embedded player. Move from Browse/Radio/etc. to the
-    // dedicated Player screen before starting the remote source.
-    openMusicPlayerScreen({ showVideo: true });
-    // Stop any audio playback and hand off to YT IFrame player.
+    // Keep Browse/Library context in place and hand off to the persistent, visible
+    // mini-player. The user can expand the queue without interrupting playback.
     const audio = $("#music-player-audio");
     if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
+    syncMusicPlayerVideoShell();
+    syncBottomPlayerShell();
     ensureYouTubeAPILoaded();
     try {
       await createYTPlayer(videoId);
@@ -19362,7 +19368,7 @@ async function refreshReviewQueue() {
     if (summaryEl) {
       summaryEl.textContent = "Loading review queue...";
     }
-    const data = await fetchJson("/api/review_queue?status=pending&limit=300");
+    const data = await fetchJson("/api/review_queue?status=pending&limit=300&compact=true");
     const nextItems = Array.isArray(data.items) ? data.items : [];
     const nextSignature = JSON.stringify(nextItems);
     const reviewChanged = nextSignature !== state.reviewItemsSignature;

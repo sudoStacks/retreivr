@@ -6,8 +6,8 @@
   <title>Retreivr - Self-Hosted Media Retrieval</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=1.0.5">
-  <script defer src="app.js?v=1.0.5"></script>
+  <link rel="stylesheet" href="styles.css?v=1.0.6">
+  <script defer src="app.js?v=1.0.6"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -451,14 +451,6 @@
                       <div id="music-player-now-context" class="meta music-player-now-context">Local-first playback with queue, playlists, and radio.</div>
                     </div>
                   </div>
-                  <div id="music-player-video-shell" class="music-player-video-shell hidden">
-                    <div class="music-player-video-toolbar">
-                      <div class="meta">YouTube source player — displayed while remote playback is active</div>
-                    </div>
-                    <div class="music-player-video-frame-wrap">
-                      <div id="music-player-video-frame"></div>
-                    </div>
-                  </div>
                   <audio id="music-player-audio" class="music-player-audio" preload="metadata"></audio>
                   <div class="music-player-transport">
                     <div class="music-player-transport-controls">
@@ -524,7 +516,16 @@
             </section>
           </div>
       </div>
-      <div id="music-bottom-player" class="music-bottom-player hidden" aria-label="Now playing">
+    </section>
+    <div id="music-bottom-player" class="music-bottom-player hidden" aria-label="Now playing">
+        <div id="music-player-video-shell" class="music-player-video-shell music-player-video-mini hidden">
+          <div class="music-player-video-toolbar">
+            <div class="meta">YouTube remote source</div>
+          </div>
+          <div class="music-player-video-frame-wrap">
+            <div id="music-player-video-frame"></div>
+          </div>
+        </div>
         <div class="music-bottom-player-art">
           <img id="music-bottom-player-art" src="assets/no_artwork.png" alt="Now playing artwork">
         </div>
@@ -541,7 +542,6 @@
           <button id="music-bottom-player-expand" class="button ghost small" type="button">Open Player</button>
         </div>
       </div>
-    </section>
     <div id="shared-music-nodes" class="hidden" aria-hidden="true">
       <div id="music-header-search" class="music-header-search">
         <div class="music-header-search-bar">

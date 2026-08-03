@@ -153,6 +153,50 @@ def _row_to_item(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | N
     return raw
 
 
+_COMPACT_REVIEW_FIELDS = {
+    "id",
+    "status",
+    "media_type",
+    "media_intent",
+    "source",
+    "failure_reason",
+    "top_failed_gate",
+    "filename",
+    "mime_type",
+    "file_size_bytes",
+    "duration_ms",
+    "bitrate_kbps",
+    "artist",
+    "album",
+    "track",
+    "album_artist",
+    "recording_mbid",
+    "mb_release_id",
+    "created_at",
+    "updated_at",
+}
+_COMPACT_CANDIDATE_DETAIL_FIELDS = {
+    "final_score",
+    "title_similarity",
+    "artist_similarity",
+    "album_similarity",
+    "duration_delta_ms",
+    "duration_ms",
+    "bitrate_kbps",
+}
+
+
+def _compact_review_item(item: dict[str, Any]) -> dict[str, Any]:
+    compact = {key: value for key, value in item.items() if key in _COMPACT_REVIEW_FIELDS}
+    details = item.get("candidate_details") if isinstance(item.get("candidate_details"), dict) else {}
+    compact["candidate_details"] = {
+        key: value
+        for key, value in details.items()
+        if key in _COMPACT_CANDIDATE_DETAIL_FIELDS
+    }
+    return compact
+
+
 def _candidate_detail_value(candidate: dict[str, Any], key: str) -> Any:
     if not isinstance(candidate, dict):
         return None
@@ -406,7 +450,13 @@ def record_tag_repair_review_item(
         conn.close()
 
 
-def list_review_queue_items(db_path: str, *, status: str = REVIEW_STATUS_PENDING, limit: int = 200) -> dict[str, Any]:
+def list_review_queue_items(
+    db_path: str,
+    *,
+    status: str = REVIEW_STATUS_PENDING,
+    limit: int = 200,
+    compact: bool = False,
+) -> dict[str, Any]:
     normalized_status = _normalize_status(status)
     max_rows = max(1, min(int(limit or 200), 2000))
     conn = _connect(db_path)
@@ -422,6 +472,8 @@ def list_review_queue_items(db_path: str, *, status: str = REVIEW_STATUS_PENDING
             (normalized_status, max_rows),
         )
         items = [_row_to_item(row) for row in cur.fetchall()]
+        if compact:
+            items = [_compact_review_item(item) for item in items if isinstance(item, dict)]
         cur.execute(
             """
             SELECT status, COUNT(*) AS count

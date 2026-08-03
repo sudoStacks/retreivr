@@ -21,7 +21,7 @@ def test_local_music_playback_wins_before_remote_resolution() -> None:
     assert "if (!payload.stream_url && !hasDirectVideo && canResolvePlayableItem(payload))" in player_source
 
 
-def test_youtube_transport_recreates_destroyed_host_and_requires_visible_player() -> None:
+def test_youtube_transport_recreates_destroyed_host_and_uses_persistent_visible_player() -> None:
     source = APP_JS.read_text()
     create_start = source.index("function createYTPlayer")
     create_end = source.index("// Active-player helpers", create_start)
@@ -33,11 +33,16 @@ def test_youtube_transport_recreates_destroyed_host_and_requires_visible_player(
     assert "function resetYouTubePlayerHost()" in source
     assert "destroyYTPlayer();" in create_source
     assert 'const frame = $("#music-player-video-frame")' in create_source
-    assert "openMusicPlayerScreen({ showVideo: true });" in play_source
-    assert 'activePlayerIsYT() && normalized !== "player"' in source
+    assert "openMusicPlayerScreen({ showVideo: true });" not in play_source
+    assert 'activePlayerIsYT() && normalized !== "player"' not in source
+    assert "syncMusicPlayerVideoShell();" in play_source
+    assert "syncBottomPlayerShell();" in play_source
 
     markup = INDEX_HTML.read_text()
-    assert "YouTube source player — displayed while remote playback is active" in markup
+    assert "YouTube remote source" in markup
+    music_panel_end = markup.index('<div id="music-bottom-player"')
+    assert markup.rfind("</section>", 0, music_panel_end) > markup.index('id="music-panel"')
+    assert "music-player-video-mini" in markup
     assert 'id="music-player-video-hide"' not in markup
     assert 'id="music-player-video-toggle"' not in markup
 

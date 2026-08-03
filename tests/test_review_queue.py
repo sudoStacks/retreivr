@@ -265,6 +265,41 @@ def test_reject_review_queue_item_deletes_quarantine_file(tmp_path: Path) -> Non
     assert rejected_item["file_path"] is None
 
 
+def test_compact_review_queue_omits_heavy_payloads_but_keeps_render_metrics(tmp_path: Path) -> None:
+    _, review_queue = _load_review_modules()
+    db_path = str(tmp_path / "review.sqlite3")
+    file_path = tmp_path / "candidate.m4a"
+    file_path.write_bytes(b"candidate")
+    item = review_queue.record_tag_repair_review_item(
+        db_path,
+        str(file_path),
+        existing_tags={"comment": "x" * 5000},
+        proposed_tags={"artist": "Example Artist", "track": "Example Track"},
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE review_queue_items SET candidate_details_json=? WHERE id=?",
+            (
+                '{"final_score":0.91,"duration_delta_ms":240,"raw_probe":"' + ("y" * 5000) + '"}',
+                item["id"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = review_queue.list_review_queue_items(db_path, compact=True)
+    compact_item = result["items"][0]
+
+    assert compact_item["id"] == item["id"]
+    assert compact_item["candidate_details"] == {"final_score": 0.91, "duration_delta_ms": 240}
+    assert "canonical_metadata" not in compact_item
+    assert "nearest_pass_margin" not in compact_item
+    assert "raw_probe" not in compact_item["candidate_details"]
+
+
 def test_accept_tag_repair_review_item_updates_existing_file_in_place(tmp_path: Path, monkeypatch) -> None:
     _, review_queue = _load_review_modules()
     db_path = str(tmp_path / "db.sqlite")

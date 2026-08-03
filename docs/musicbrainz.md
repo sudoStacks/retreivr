@@ -8,8 +8,25 @@ Retreivr uses MusicBrainz for:
 - Canonical release selection for a chosen release-group.
 - Canonical track ordering/metadata before enqueueing per-track download jobs.
 - Canonical metadata authority during search-time resolution, with Spotify used only as gated fallback.
+- Authoritative YouTube URL relationships that can start remote playback before a
+  local download exists.
 
 This is additive to the existing search/download pipeline. It does not auto-download on search.
+
+## Remote Playback Contract
+
+Music playback remains local-first. When a selected track is not downloaded,
+Retreivr resolves a YouTube-family source in this order:
+
+1. YouTube URL relationships already attached to the selected MusicBrainz entity.
+2. Retreivr's recording resolution index and verified community cache.
+3. A bounded, metadata-scored YouTube search fallback.
+
+The browser plays remote sources through the YouTube IFrame adapter instead of
+probing and proxying an audio stream. The iframe remains visible in a persistent
+mini-player while the user browses other Retreivr sections; hiding or destroying
+the iframe would interrupt playback. Downloading remains a separate explicit
+action and preserves the deterministic MusicBrainz metadata pathway.
 
 ## Album Download Flow
 

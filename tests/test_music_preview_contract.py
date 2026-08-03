@@ -89,6 +89,31 @@ def test_youtube_family_url_validation_rejects_deceptive_hosts(api_module) -> No
     assert api_module._is_youtube_family_url("https://example.test/youtube.com/watch?v=abc123") is False
 
 
+def test_musicbrainz_youtube_relationships_accept_real_api_shapes(api_module) -> None:
+    payload = {
+        "url-relation-list": [
+            {"type": "youtube", "target": "https://www.youtube.com/watch?v=direct12345"},
+            {"type": "streaming", "target": {"resource": "https://music.youtube.com/watch?v=nested12345"}},
+            {"type": "other", "url": {"resource": "https://youtu.be/urlobj12345"}},
+            {"type": "homepage", "target": "https://example.test/not-youtube"},
+        ],
+        "relation-list": [
+            {
+                "target-type": "url",
+                "relation": [
+                    {"type": "video", "target": "https://www.youtube.com/watch?v=bucket12345"},
+                ],
+            }
+        ],
+    }
+
+    assert api_module._extract_mb_youtube_urls(payload) == [
+        "https://www.youtube.com/watch?v=direct12345",
+        "https://music.youtube.com/watch?v=nested12345",
+        "https://youtu.be/urlobj12345",
+    ]
+
+
 def test_music_preview_fast_search_uses_lightweight_youtube_result(api_module, monkeypatch) -> None:
     calls = []
 
