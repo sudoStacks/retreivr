@@ -21,7 +21,7 @@ def test_local_music_playback_wins_before_remote_resolution() -> None:
     assert "if (!payload.stream_url && !hasDirectVideo && canResolvePlayableItem(payload))" in player_source
 
 
-def test_youtube_transport_recreates_destroyed_host_and_uses_persistent_visible_player() -> None:
+def test_youtube_transport_recreates_destroyed_host_and_keeps_stationary_player() -> None:
     source = APP_JS.read_text()
     create_start = source.index("function createYTPlayer")
     create_end = source.index("// Active-player helpers", create_start)
@@ -42,12 +42,31 @@ def test_youtube_transport_recreates_destroyed_host_and_uses_persistent_visible_
     assert "YouTube remote source" in markup
     music_panel_end = markup.index('<div id="music-bottom-player"')
     assert markup.rfind("</section>", 0, music_panel_end) > markup.index('id="music-panel"')
-    assert "music-player-video-mini" in markup
     assert 'id="music-player-full-video-slot"' in markup
-    assert 'id="music-player-mini-video-slot"' in markup
-    assert 'id="music-bottom-player-video-toggle"' in markup
-    assert "moveBefore(shell, null)" in source
+    assert markup.index('id="music-player-video-shell"') < music_panel_end
+    assert 'id="music-player-mini-video-slot"' not in markup
+    assert 'id="music-bottom-player-minimize"' in markup
+    assert 'id="music-bottom-player-close"' in markup
+    assert "moveMusicPlayerVideoShell" not in source
+    assert 'activePlayerIsYT() && target !== "music"' not in source
     assert 'const shouldHide = !hasTrack || playerPageOpen;' in source
+
+
+def test_genre_and_artist_play_build_diverse_shuffled_queues() -> None:
+    source = APP_JS.read_text()
+    artist_start = source.index("async function playMusicArtistFromBrowse")
+    genre_start = source.index("async function playMusicGenreFromBrowse", artist_start)
+    album_start = source.index("async function playMusicAlbumFromSearch", genre_start)
+    artist_source = source[artist_start:genre_start]
+    genre_source = source[genre_start:album_start]
+
+    assert "fetchMusicTracksForArtist(nextQuery" in artist_source
+    assert "state.playerShuffle = true" in artist_source
+    assert "playMusicAlbumFromSearch(albums[0])" not in artist_source
+    assert "selectedArtists.map" in genre_source
+    assert "artistCount < 2" in genre_source
+    assert "state.playerShuffle = true" in genre_source
+    assert "playMusicArtistFromBrowse(artists[0])" not in genre_source
 
 
 def test_music_queue_prefetches_five_tracks_and_preserves_artwork() -> None:

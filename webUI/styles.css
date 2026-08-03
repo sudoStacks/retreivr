@@ -8350,33 +8350,31 @@ body.home-page .home-search-actions {
   margin: 0;
 }
 
-.music-bottom-player.has-video {
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) auto;
-}
-
 body.music-player-dock-visible .layout {
   padding-bottom: max(28px, var(--music-player-dock-height, 120px));
 }
 
-.music-player-mini-video-slot {
-  min-width: 0;
+.music-bottom-player.is-minimized {
+  width: min(calc(100% - 32px), 760px);
+  grid-template-columns: minmax(120px, 1fr) auto;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 14px;
 }
 
-.music-bottom-player.has-video .music-player-video-mini {
-  display: grid;
+.music-bottom-player.is-minimized .music-bottom-player-copy .meta,
+.music-bottom-player.is-minimized .music-bottom-player-status {
+  display: none;
 }
 
-.music-player-video-mini .music-player-video-toolbar {
-  min-height: 0;
+.music-bottom-player.is-minimized .music-bottom-player-copy .panel-title {
+  font-size: 0.9rem;
 }
 
-.music-player-video-mini .music-player-video-toolbar .meta {
-  font-size: 0.7rem;
-}
-
-.music-player-video-mini .music-player-video-frame-wrap {
-  min-width: 220px;
-  border-radius: 12px;
+.music-bottom-player.is-minimized .music-bottom-player-controls {
+  grid-column: auto;
+  flex-wrap: nowrap;
+  gap: 5px;
 }
 
 :root[data-theme="light"] .music-bottom-player {
@@ -9061,10 +9059,6 @@ body[data-page="music"] #music-panel .music-page-shell {
     grid-template-columns: 56px minmax(0, 1fr);
   }
 
-  .music-bottom-player.has-video {
-    grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
-  }
-
   .music-bottom-player-controls {
     grid-column: 1 / -1;
     justify-content: flex-end;
@@ -9091,15 +9085,9 @@ body[data-page="music"] #music-panel .music-page-shell {
     width: calc(100% - 28px);
   }
 
-  .music-bottom-player.has-video {
-    grid-template-columns: 1fr;
-    max-height: calc(100vh - 24px);
-    overflow-y: auto;
-  }
-
-  .music-bottom-player.has-video .music-player-video-frame-wrap {
-    min-width: 0;
-    width: min(100%, 360px);
+  .music-bottom-player.is-minimized {
+    grid-template-columns: minmax(90px, 1fr) auto;
+    overflow-x: auto;
   }
 }
 

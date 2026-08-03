@@ -162,7 +162,7 @@ const state = {
   playerCurrent: null,
   playerCurrentHasVideo: false,
   playerVideoVisible: false,
-  playerMiniVideoCollapsed: false,
+  playerBarMinimized: false,
   playerDockResizeObserver: null,
   playerRuntimePublishStatus: null,
   playerPrefetchInFlightRecordings: new Set(),
@@ -170,6 +170,7 @@ const state = {
   playerYTReady: false,     // IFrame API script loaded and YT.Player can be instantiated
   playerYTProgressTimer: null,
   playerShuffle: false,
+  playerShuffleBag: [],
   playerRepeatMode: "off",
   playerProgressDragging: false,
   musicSection: "browse",
@@ -269,7 +270,7 @@ const STACK_PATH_DEFAULTS = {
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version_v2";
 const HOME_MUSIC_MODE_KEY = "retreivr.home.music_mode";
 const APP_SIDEBAR_COLLAPSED_KEY = "retreivr.app.sidebar_collapsed";
-const MUSIC_MINI_VIDEO_COLLAPSED_KEY = "retreivr.music_player.video_collapsed";
+const MUSIC_PLAYER_BAR_MINIMIZED_KEY = "retreivr.music_player.bar_minimized";
 const ADMIN_PIN_TOKEN_KEY = "retreivr.admin.pin.token";
 const HOME_MUSIC_DEBUG_KEY = "retreivr.debug.music";
 const MUSIC_RECENT_SEARCHES_KEY = "retreivr.music.recent_searches.v1";
@@ -1748,9 +1749,6 @@ function setPage(page) {
   const requested = String(page || "").split("?")[0] || page;
   const allowed = new Set(["home", "video", "music", "movies-tv", "books", "review", "config"]);
   const target = allowed.has(normalized) ? normalized : "home";
-  if (activePlayerIsYT() && target !== "music") {
-    activePlayerPause();
-  }
   if (target !== "home") {
     setHomeSetupOverlayOpen(false);
   }
@@ -2780,7 +2778,7 @@ function syncBottomPlayerShell() {
   const prevButton = $("#music-bottom-player-prev");
   const nextButton = $("#music-bottom-player-next");
   const queueButton = $("#music-bottom-player-queue");
-  const videoToggleButton = $("#music-bottom-player-video-toggle");
+  const minimizeButton = $("#music-bottom-player-minimize");
   const statusEl = $("#music-bottom-player-status");
   const artworkShell = shell?.querySelector(".music-bottom-player-art");
   const audio = $("#music-player-audio");
@@ -2791,16 +2789,14 @@ function syncBottomPlayerShell() {
     || !!String(current.video_embed_url || "").trim();
   const hasTrack = !!(current.stream_url && audioHasSource) || hasVideo;
   const playerPageOpen = state.currentPage === "music" && state.musicSection === "player";
-  const miniVideoVisible = hasVideo && !state.playerMiniVideoCollapsed && !playerPageOpen;
   const shouldHide = !hasTrack || playerPageOpen;
   shell.classList.toggle("hidden", shouldHide);
-  shell.classList.toggle("has-video", miniVideoVisible);
-  shell.classList.toggle("video-collapsed", hasVideo && state.playerMiniVideoCollapsed);
-  if (artworkShell) artworkShell.classList.toggle("hidden", miniVideoVisible);
-  if (videoToggleButton) {
-    videoToggleButton.classList.toggle("hidden", !hasVideo || playerPageOpen);
-    videoToggleButton.textContent = state.playerMiniVideoCollapsed ? "Show Video" : "Hide Video";
-    videoToggleButton.setAttribute("aria-expanded", state.playerMiniVideoCollapsed ? "false" : "true");
+  shell.classList.toggle("is-minimized", state.playerBarMinimized);
+  if (artworkShell) artworkShell.classList.toggle("hidden", state.playerBarMinimized);
+  if (minimizeButton) {
+    minimizeButton.textContent = state.playerBarMinimized ? "Expand" : "Minimize";
+    minimizeButton.setAttribute("aria-expanded", state.playerBarMinimized ? "false" : "true");
+    minimizeButton.title = state.playerBarMinimized ? "Expand player bar" : "Minimize player bar";
   }
   titleEl.textContent = String(current.title || "Nothing playing");
   metaEl.textContent = [current.artist, current.album, current.kind].filter(Boolean).join(" • ") || "Choose a track from your library or start a station.";
@@ -2831,19 +2827,6 @@ function isMusicPlayerPageOpen() {
   return state.currentPage === "music" && state.musicSection === "player";
 }
 
-function moveMusicPlayerVideoShell(shell, target) {
-  if (!shell || !target || shell.parentElement === target) return;
-  // moveBefore performs a state-preserving DOM move in current Chromium, keeping
-  // the live iframe browsing context and YT.Player instance intact.
-  if (typeof target.moveBefore === "function") {
-    target.moveBefore(shell, null);
-    return;
-  }
-  // Older engines do not expose atomic DOM moves. Keep a functional fallback;
-  // the application never creates a second iframe/player during the handoff.
-  target.appendChild(shell);
-}
-
 function syncMusicPlayerDockSpacing() {
   const shell = $("#music-bottom-player");
   const visible = !!shell && !shell.classList.contains("hidden");
@@ -2861,14 +2844,13 @@ function syncMusicPlayerDockSpacing() {
   }
 }
 
-function setMusicMiniVideoCollapsed(collapsed, { persist = true } = {}) {
-  state.playerMiniVideoCollapsed = !!collapsed;
+function setMusicPlayerBarMinimized(minimized, { persist = true } = {}) {
+  state.playerBarMinimized = !!minimized;
   if (persist) {
     try {
-      localStorage.setItem(MUSIC_MINI_VIDEO_COLLAPSED_KEY, state.playerMiniVideoCollapsed ? "true" : "false");
+      localStorage.setItem(MUSIC_PLAYER_BAR_MINIMIZED_KEY, state.playerBarMinimized ? "true" : "false");
     } catch (_err) {}
   }
-  syncMusicPlayerVideoShell();
   syncBottomPlayerShell();
 }
 
@@ -5313,22 +5295,15 @@ function syncMusicPlayerVideoShell() {
   const hasVideo = activePlayerIsYT()
     || !!String(state.playerCurrent?.video_id || extractYouTubeVideoId(state.playerCurrent?.stream_url) || "").trim()
     || !!String(state.playerCurrent?.video_embed_url || "").trim();
-  const playerPageOpen = isMusicPlayerPageOpen();
   const fullSlot = $("#music-player-full-video-slot");
-  const miniSlot = $("#music-player-mini-video-slot");
-  const targetSlot = playerPageOpen ? fullSlot : miniSlot;
-  if (hasVideo && targetSlot) moveMusicPlayerVideoShell(shell, targetSlot);
-  if (fullSlot) fullSlot.classList.toggle("hidden", !hasVideo || !playerPageOpen);
-  if (miniSlot) miniSlot.classList.toggle("hidden", !hasVideo || playerPageOpen || state.playerMiniVideoCollapsed);
+  if (fullSlot) fullSlot.classList.toggle("hidden", !hasVideo);
   shell.classList.toggle("hidden", !hasVideo);
-  shell.classList.toggle("music-player-video-mini", !playerPageOpen);
-  shell.classList.toggle("music-player-video-full", playerPageOpen);
-  const nowPlaying = shell.closest(".music-player-now-playing") || $("#music-player-view .music-player-now-playing");
+  const nowPlaying = $("#music-player-view .music-player-now-playing");
   const nowTop = $("#music-player-view .music-player-now-top");
   const artwork = $("#music-player-view .music-player-now-art");
-  if (nowPlaying) nowPlaying.classList.toggle("has-remote-video", hasVideo && playerPageOpen);
-  if (nowTop) nowTop.classList.toggle("has-remote-video", hasVideo && playerPageOpen);
-  if (artwork) artwork.classList.toggle("hidden", hasVideo && playerPageOpen);
+  if (nowPlaying) nowPlaying.classList.toggle("has-remote-video", hasVideo);
+  if (nowTop) nowTop.classList.toggle("has-remote-video", hasVideo);
+  if (artwork) artwork.classList.toggle("hidden", hasVideo);
   // For non-YT embed-url items (legacy path) keep the frame src in sync.
   if (!activePlayerIsYT()) {
     const frame = $("#music-player-video-frame");
@@ -5742,6 +5717,7 @@ function getCurrentQueueIndex() {
 
 function setPlayerQueue(items = [], { preserveCurrent = false } = {}) {
   state.playerQueue = Array.isArray(items) ? items.map((item) => normalizePlayableItem(item)).filter(Boolean) : [];
+  state.playerShuffleBag = state.playerQueue.map((_item, index) => index);
   if (!preserveCurrent && state.playerQueue.length && state.playerCurrent) {
     const index = getCurrentQueueIndex();
     if (index < 0) {
@@ -5776,6 +5752,8 @@ async function playPlayerQueueIndex(index) {
   if (!Number.isFinite(targetIndex) || targetIndex < 0 || targetIndex >= state.playerQueue.length) return;
   const item = normalizePlayableItem(state.playerQueue[targetIndex]);
   if (!item) return;
+  state.playerShuffleBag = (Array.isArray(state.playerShuffleBag) ? state.playerShuffleBag : [])
+    .filter((queueIndex) => queueIndex !== targetIndex);
   if (!item.stream_url && !item.video_id && String(item.kind || "") === "unresolved" && canResolvePlayableItem(item)) {
     // Resolve the stream URL before playing — update queue in place so the UI reflects it.
     const resolved = await resolveRecordingStreamUrl(item.recording_mbid, buildPlayableResolutionMeta(item));
@@ -5920,10 +5898,14 @@ async function playNextPlayerItem({ autoAdvance = false } = {}) {
       await playPlayerQueueIndex(0);
       return;
     }
-    let nextIndex = currentIndex;
-    while (nextIndex === currentIndex) {
-      nextIndex = Math.floor(Math.random() * state.playerQueue.length);
+    let bag = (Array.isArray(state.playerShuffleBag) ? state.playerShuffleBag : [])
+      .filter((queueIndex) => queueIndex >= 0 && queueIndex < state.playerQueue.length && queueIndex !== currentIndex);
+    if (!bag.length) {
+      bag = state.playerQueue.map((_item, index) => index).filter((index) => index !== currentIndex);
     }
+    const bagIndex = Math.floor(Math.random() * bag.length);
+    const nextIndex = bag[bagIndex];
+    state.playerShuffleBag = bag.filter((_queueIndex, index) => index !== bagIndex);
     await playPlayerQueueIndex(nextIndex);
     return;
   }
@@ -5978,6 +5960,9 @@ async function playPreviousPlayerItem() {
 
 function togglePlayerShuffle() {
   state.playerShuffle = !state.playerShuffle;
+  state.playerShuffleBag = state.playerQueue
+    .map((_item, index) => index)
+    .filter((index) => index !== getCurrentQueueIndex());
   updateMusicPlayerTransportUI();
 }
 
@@ -14594,22 +14579,123 @@ async function playMusicSearchResult(result) {
   await playMusicPlayerItem(item);
 }
 
+function shuffledMusicItems(items = []) {
+  const shuffled = Array.isArray(items) ? items.slice() : [];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+  return shuffled;
+}
+
+function buildPlayableSearchTrack(track = {}, context = {}) {
+  const recordingMbid = String(track?.recording_mbid || "").trim();
+  const local = findLocalPlayerTrackByRecordingMbid(recordingMbid);
+  const title = String(track?.track || track?.title || "Track").trim() || "Track";
+  const artist = String(track?.artist || context.artist || "").trim();
+  const album = String(track?.album || context.album || "").trim();
+  const artworkUrl = String(track?.artwork_url || context.artwork_url || "").trim() || null;
+  if (local && (local.stream_url || local.local_path)) {
+    return normalizePlayableItem({
+      ...local,
+      kind: "local",
+      title: local.title || title,
+      artist: local.artist || artist,
+      album: local.album || album,
+      artwork_url: local.artwork_url || artworkUrl,
+    });
+  }
+  return normalizePlayableItem({
+    id: `search:${recordingMbid || `${artist}:${title}`}`,
+    title,
+    artist,
+    album,
+    recording_mbid: recordingMbid || null,
+    mb_release_group_id: String(track?.mb_release_group_id || context.release_group_mbid || "").trim() || null,
+    mb_youtube_urls: Array.isArray(track?.mb_youtube_urls) ? track.mb_youtube_urls : [],
+    artwork_url: artworkUrl,
+    kind: "unresolved",
+    stream_url: null,
+  });
+}
+
+function dedupePlayableMusicItems(items = []) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const normalized = normalizePlayableItem(item);
+    if (!normalized) return false;
+    const key = normalized.recording_mbid
+      ? `mbid:${normalized.recording_mbid}`
+      : `${normalized.artist.toLowerCase()}::${normalized.title.toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function fetchMusicTracksForArtist(artistName, { artistMbid = "", limit = 100 } = {}) {
+  const normalizedArtist = String(artistName || "").trim();
+  if (!normalizedArtist) return [];
+  const cappedLimit = Math.min(100, Math.max(1, Number(limit) || 100));
+  const response = await fetch(
+    `/api/music/search?artist=${encodeURIComponent(normalizedArtist)}&artist_mbid=${encodeURIComponent(String(artistMbid || "").trim())}&album=&track=&mode=track&offset=0&limit=${cappedLimit}`
+  );
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch (_err) {}
+  if (!response.ok) {
+    throw new Error(toUserErrorMessage(payload?.detail || `HTTP ${response.status}`));
+  }
+  return normalizeMusicSearchResults(payload?.tracks)
+    .map((track) => buildPlayableSearchTrack(track, { artist: normalizedArtist }));
+}
+
 async function playMusicArtistFromBrowse(artistItem) {
   const nextQuery = String(artistItem?.name || artistItem?.artist || "").trim();
   const nextArtistMbid = String(artistItem?.artist_mbid || artistItem?.id || "").trim();
   if (!nextQuery) throw new Error("Artist identity unknown.");
-  const albums = await fetchMusicAlbumsByArtist(
-    { name: nextQuery, artist_mbid: nextArtistMbid },
-    { limit: 48, bypassInFlight: true }
-  );
-  if (!Array.isArray(albums) || !albums.length) throw new Error("No playable albums found for this artist.");
-  await playMusicAlbumFromSearch(albums[0]);
+  const tracks = await fetchMusicTracksForArtist(nextQuery, { artistMbid: nextArtistMbid, limit: 100 });
+  const queue = shuffledMusicItems(dedupePlayableMusicItems(tracks)).slice(0, 100);
+  if (!queue.length) throw new Error("No playable tracks found for this artist.");
+  clearActiveStationPlayback();
+  state.playerShuffle = true;
+  state.playerRepeatMode = "off";
+  setPlayerQueue(queue);
+  setMusicPlayerView("queue");
+  updateMusicPlayerTransportUI();
+  await playPlayerQueueIndex(0);
+  setMusicPlayerStatus(`Shuffling ${queue.length} songs by ${nextQuery}.`, { kind: "success", toast: true });
 }
 
 async function playMusicGenreFromBrowse(genreValue) {
-  const artists = await fetchArtistsForGenreIntent(genreValue, { limit: 12 });
+  const normalizedGenre = normalizeMusicGenreIntent(genreValue);
+  const artists = await fetchArtistsForGenreIntent(normalizedGenre, { limit: 24 });
   if (!Array.isArray(artists) || !artists.length) throw new Error("No playable artists found for this genre.");
-  await playMusicArtistFromBrowse(artists[0]);
+  const selectedArtists = shuffledMusicItems(artists).slice(0, 8);
+  const artistResults = await Promise.allSettled(selectedArtists.map(async (artistItem) => {
+    const artistName = String(artistItem?.name || artistItem?.artist || "").trim();
+    const artistMbid = String(artistItem?.artist_mbid || artistItem?.id || "").trim();
+    const tracks = await fetchMusicTracksForArtist(artistName, { artistMbid, limit: 24 });
+    return shuffledMusicItems(tracks).slice(0, 5);
+  }));
+  const mixedTracks = artistResults.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  const queue = shuffledMusicItems(dedupePlayableMusicItems(mixedTracks)).slice(0, 40);
+  const artistCount = new Set(queue.map((item) => String(item?.artist || "").trim().toLowerCase()).filter(Boolean)).size;
+  if (!queue.length || artistCount < 2) {
+    throw new Error(`Could not build a diverse ${normalizedGenre || genreValue} mix yet.`);
+  }
+  clearActiveStationPlayback();
+  state.playerShuffle = true;
+  state.playerRepeatMode = "off";
+  setPlayerQueue(queue);
+  setMusicPlayerView("queue");
+  updateMusicPlayerTransportUI();
+  await playPlayerQueueIndex(0);
+  setMusicPlayerStatus(
+    `${normalizedGenre || genreValue} Radio ready: ${queue.length} songs across ${artistCount} artists.`,
+    { kind: "success", toast: true }
+  );
 }
 
 // Fetch album tracks and queue them for playback.
@@ -21679,10 +21765,16 @@ function bindEvents() {
       updateMusicPlayerTransportUI();
     });
   }
-  const musicBottomVideoToggle = $("#music-bottom-player-video-toggle");
-  if (musicBottomVideoToggle) {
-    musicBottomVideoToggle.addEventListener("click", () => {
-      setMusicMiniVideoCollapsed(!state.playerMiniVideoCollapsed);
+  const musicBottomMinimize = $("#music-bottom-player-minimize");
+  if (musicBottomMinimize) {
+    musicBottomMinimize.addEventListener("click", () => {
+      setMusicPlayerBarMinimized(!state.playerBarMinimized);
+    });
+  }
+  const musicBottomClose = $("#music-bottom-player-close");
+  if (musicBottomClose) {
+    musicBottomClose.addEventListener("click", () => {
+      clearMusicPlayerCurrentState();
     });
   }
   const musicBottomPrev = $("#music-bottom-player-prev");
@@ -22807,9 +22899,9 @@ async function init() {
   state.adminPinToken = localStorage.getItem(ADMIN_PIN_TOKEN_KEY) || "";
   state.appSidebarCollapsed = loadAppSidebarCollapsedPreference();
   try {
-    state.playerMiniVideoCollapsed = localStorage.getItem(MUSIC_MINI_VIDEO_COLLAPSED_KEY) === "true";
+    state.playerBarMinimized = localStorage.getItem(MUSIC_PLAYER_BAR_MINIMIZED_KEY) === "true";
   } catch (_err) {
-    state.playerMiniVideoCollapsed = false;
+    state.playerBarMinimized = false;
   }
   state.musicHeaderMode = loadMusicHeaderModePreference();
   mountSettingsSubpages();

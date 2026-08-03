@@ -174,6 +174,40 @@ def test_search_music_metadata_track_mode_with_artist_album_queries_recordings()
     assert "release:\"Album\"" in query_text
 
 
+def test_search_music_metadata_artist_mbid_avoids_ambiguous_artist_names() -> None:
+    captured = {"query": None}
+
+    if "musicbrainzngs" not in sys.modules:
+        sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
+    mbngs = sys.modules["musicbrainzngs"]
+    mbngs.search_recordings = lambda query, limit, offset=0: (
+        captured.update({"query": str(query)}),
+        {"recording-list": []},
+    )[1]
+
+    if "metadata.services" not in sys.modules:
+        services_pkg = types.ModuleType("metadata.services")
+        services_pkg.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["metadata.services"] = services_pkg
+    mb_service_mod = types.ModuleType("metadata.services.musicbrainz_service")
+    mb_service_mod.get_musicbrainz_service = lambda: types.SimpleNamespace(_call_with_retry=lambda func: func())
+    sys.modules["metadata.services.musicbrainz_service"] = mb_service_mod
+
+    binding = _load_module(
+        "engine_musicbrainz_binding_artist_mbid_track_tests",
+        _ROOT / "engine" / "musicbrainz_binding.py",
+    )
+    binding.search_music_metadata(
+        artist="Lady A",
+        artist_mbid="eeb1195b-f213-4ce1-b28c-8565211f8e43",
+        track="",
+        mode="track",
+        limit=50,
+    )
+
+    assert captured["query"] == "arid:eeb1195b-f213-4ce1-b28c-8565211f8e43"
+
+
 def test_release_bucket_classifies_ep_as_album() -> None:
     if "musicbrainzngs" not in sys.modules:
         sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")

@@ -417,10 +417,11 @@ def _collect_mb_title_aliases(*values: Any) -> list[str]:
     return aliases
 
 
-def search_music_metadata(artist=None, album=None, track=None, mode="auto", offset=0, limit=20):
+def search_music_metadata(artist=None, album=None, track=None, mode="auto", offset=0, limit=20, artist_mbid=None):
     artist_value = str(artist or "").strip()
     album_value = str(album or "").strip()
     track_value = str(track or "").strip()
+    artist_mbid_value = str(artist_mbid or "").strip()
     mode_value = str(mode or "auto").strip().lower() or "auto"
     if mode_value not in {"auto", "artist", "album", "track"}:
         mode_value = "auto"
@@ -572,7 +573,13 @@ def search_music_metadata(artist=None, album=None, track=None, mode="auto", offs
         return response
 
     if resolved_mode == "track":
-        if route_case == "artist_album_track":
+        if artist_mbid_value and route_case in {"artist_forced_track", "artist_track", "artist_album_forced_track", "artist_album_track"}:
+            recording_query = f"arid:{artist_mbid_value}"
+            if track_value:
+                recording_query += f" AND recording:{_field(track_value)}"
+            if album_value:
+                recording_query += f" AND release:{_field(album_value)}"
+        elif route_case == "artist_album_track":
             recording_query = (
                 f"artist:{_field(artist_value)} AND "
                 f"recording:{_field(track_value)} AND "

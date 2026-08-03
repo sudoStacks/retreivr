@@ -9264,6 +9264,7 @@ def music_album_tracks(
 @app.get("/api/music/search")
 def music_search(
     artist: str = Query(""),
+    artist_mbid: str = Query(""),
     album: str = Query(""),
     track: str = Query(""),
     mode: str = Query("auto"),
@@ -9276,6 +9277,7 @@ def music_search(
 
     return search_music_metadata(
         artist=artist_value,
+        artist_mbid=str(artist_mbid or "").strip(),
         album=album_value,
         track=track_value,
         mode=mode,
