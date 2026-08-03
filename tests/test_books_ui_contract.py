@@ -57,8 +57,41 @@ def test_public_book_cards_have_a_one_click_download_path() -> None:
     download_end = source.index("async function acquireBookFromUrl", download_start)
     download_source = source[download_start:download_end]
 
-    assert "item?.download_available" in render_source
+    assert "bookHasDirectDownload(item)" in render_source
+    assert "item?.download_available" in source
     assert 'data-book-action="download"' in render_source
     assert ">Download</button>" in render_source
-    assert 'fetchJson("/api/books/acquire/openlibrary"' in download_source
+    assert '"/api/books/acquire/openlibrary"' in download_source
+    assert '"/api/books/acquire/gutenberg"' in download_source
     assert "await loadBooksLibrary();" in download_source
+
+
+def test_books_reconciles_enabled_state_and_loads_free_downloads() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    activate_start = source.index("async function activateBooksPage()")
+    activate_end = source.index("function setBooksSection", activate_start)
+    activate_source = source[activate_start:activate_end]
+    featured_start = source.index("async function loadFeaturedBooks()")
+    featured_end = source.index("async function performBooksSearch", featured_start)
+    featured_source = source[featured_start:featured_end]
+
+    assert "const status = await loadBooksStatus();" in activate_source
+    assert "await loadFeaturedBooks();" in activate_source
+    assert "downloadable_only=true" in featured_source
+    assert 'state.booksResultsHeading = "Free books to download"' in featured_source
+
+
+def test_book_thumbnail_opens_movies_style_details_modal() -> None:
+    markup = INDEX_HTML.read_text(encoding="utf-8")
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert 'id="books-details-modal"' in markup
+    assert 'id="books-details-download"' in markup
+    assert 'id="books-details-preview"' in markup
+    assert 'id="books-details-import"' in markup
+    assert 'id="books-details-apple"' in markup
+    assert 'id="books-details-google"' in markup
+    assert 'id="books-details-kindle"' in markup
+    assert 'data-book-action="details"' in source
+    assert "function openBooksDetailsModal(item)" in source
+    assert "/api/books/details/" in source

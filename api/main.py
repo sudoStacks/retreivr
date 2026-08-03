@@ -97,12 +97,14 @@ from engine.download_defaults import resolve_effective_download_settings
 from engine.book_services import (
     BookServiceError,
     acquire_open_library_book,
+    acquire_project_gutenberg_book,
     acquire_book_url,
+    get_open_library_work,
     get_books_config,
     import_book_file,
     list_book_library,
     resolve_library_book,
-    search_open_library,
+    search_book_catalogs,
 )
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 from metadata.tag_repair import repair_music_library_tags
@@ -12450,8 +12452,9 @@ def api_books_status():
             **books,
             "readarr_configured": bool(readarr.get("base_url") and readarr.get("api_key")),
             "readarr_retired": True,
-            "discovery_provider": "Open Library",
-            "acquisition_paths": ["openlibrary_public_scan", "local_import", "direct_url"],
+            "discovery_provider": "Multi-source books",
+            "discovery_providers": ["Project Gutenberg", "Open Library", "Internet Archive"],
+            "acquisition_paths": ["project_gutenberg", "openlibrary_public_scan", "local_import", "direct_url"],
         }
     )
 
@@ -12461,12 +12464,29 @@ def api_books_search(
     q: str = Query(..., min_length=1, max_length=300),
     limit: int = Query(24, ge=1, le=50),
     page: int = Query(1, ge=1, le=100),
+    downloadable_only: bool = Query(False),
 ):
     _books_runtime_config()
     try:
-        return safe_json(search_open_library(q, limit=limit, page=page))
+        return safe_json(
+            search_book_catalogs(
+                q,
+                limit=limit,
+                page=page,
+                downloadable_only=downloadable_only,
+            )
+        )
     except BookServiceError as exc:
         raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+
+
+@app.get("/api/books/details/{work_id}")
+def api_books_details(work_id: str):
+    _books_runtime_config()
+    try:
+        return safe_json(get_open_library_work(work_id))
+    except BookServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
 
 @app.get("/api/books/library")
@@ -12517,6 +12537,25 @@ def api_books_acquire_openlibrary(payload: dict = Body(...)):
         result = acquire_open_library_book(
             _books_runtime_config(),
             identifiers,
+            metadata,
+            preferred_format=preferred_format,
+        )
+        return safe_json({"status": "completed", **result})
+    except BookServiceError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
+@app.post("/api/books/acquire/gutenberg", status_code=201)
+def api_books_acquire_gutenberg(payload: dict = Body(...)):
+    book_id = str(payload.get("gutenberg_id") or payload.get("book_id") or "").strip()
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    preferred_format = str(payload.get("preferred_format") or "").strip().lower()
+    if preferred_format not in {"", "epub", "mobi"}:
+        raise HTTPException(status_code=400, detail={"error": "preferred_format must be epub or mobi"})
+    try:
+        result = acquire_project_gutenberg_book(
+            _books_runtime_config(),
+            book_id,
             metadata,
             preferred_format=preferred_format,
         )

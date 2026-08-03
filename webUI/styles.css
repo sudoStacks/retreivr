@@ -6764,6 +6764,10 @@ body.home-page #config-panel #add-account:hover,
   z-index: 20;
 }
 
+#books-details-modal {
+  z-index: 20;
+}
+
 #home-preview-modal {
   z-index: 30;
 }
@@ -9408,6 +9412,22 @@ body[data-page="music"] #music-panel .music-page-shell {
   object-fit: cover;
 }
 
+.books-artwork-button {
+  appearance: none;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  text-align: inherit;
+}
+
+.books-artwork-button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 78%, white);
+  outline-offset: -3px;
+}
+
 .books-cover-placeholder {
   display: grid;
   place-content: center;
@@ -9435,6 +9455,44 @@ body[data-page="music"] #music-panel .music-page-shell {
 
 .books-card-actions a.button {
   text-decoration: none;
+}
+
+.books-details-card {
+  width: min(1040px, 94vw);
+}
+
+.books-details-cover-wrap {
+  align-self: start;
+}
+
+.books-details-cover {
+  aspect-ratio: 2 / 3;
+  cursor: pointer;
+  object-fit: cover;
+}
+
+.books-details-authors {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.books-details-subjects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.books-details-actions {
+  align-items: center;
+}
+
+.books-details-store-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
 @media (max-width: 860px) {

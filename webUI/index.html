@@ -772,6 +772,7 @@
             <h1>Search millions of books</h1>
             <p>Find books by title, author, subject, or ISBN. Explore the metadata and available previews, then add an authorized PDF or ebook to your library.</p>
             <div class="books-browse-shortcuts" aria-label="Browse popular book subjects">
+              <button class="button primary small" id="books-featured-downloads" type="button">Free downloads</button>
               <button class="button ghost small" data-books-browse-query="classic literature" type="button">Classics</button>
               <button class="button ghost small" data-books-browse-query="science fiction" type="button">Science fiction</button>
               <button class="button ghost small" data-books-browse-query="history" type="button">History</button>
@@ -793,7 +794,7 @@
           </div>
           <div class="home-results books-results-shell">
             <div class="home-results-header">
-              <span>Books</span>
+              <span id="books-results-heading">Books</span>
               <span id="books-results-status" class="meta">Search Open Library to begin</span>
             </div>
             <div id="books-results-detail" class="meta home-results-detail">Discovery is metadata-first. Read or preview links stay with the provider; downloads require an exposed file, a local import, or a configured acquisition adapter.</div>
@@ -2550,6 +2551,45 @@
             <div id="arr-details-cast" class="arr-details-cast-list"></div>
           </div>
           <div id="arr-details-overview" class="arr-details-overview"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="books-details-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="books-details-title">
+    <div class="modal-card arr-details-card books-details-card">
+      <div class="row space-between">
+        <div id="books-details-title" class="panel-title">Book Details</div>
+        <button id="books-details-close" class="button ghost small" type="button">Close</button>
+      </div>
+      <div class="arr-details-layout">
+        <div class="arr-details-poster-wrap books-details-cover-wrap">
+          <img id="books-details-cover" class="arr-details-poster books-details-cover" src="assets/no_artwork.png" alt="Book cover">
+        </div>
+        <div class="arr-details-main">
+          <div id="books-details-authors" class="books-details-authors"></div>
+          <div id="books-details-meta" class="arr-details-meta"></div>
+          <div id="books-details-status" class="notice"></div>
+          <div class="arr-details-actions books-details-actions">
+            <div class="arr-details-action-group arr-details-action-group-primary">
+              <button id="books-details-download" class="button primary" type="button">Download</button>
+            </div>
+            <div class="arr-details-action-group arr-details-action-group-secondary">
+              <a id="books-details-preview" class="button ghost" href="#" target="_blank" rel="noreferrer">Read / Preview</a>
+              <button id="books-details-import" class="button ghost" type="button">Import my file</button>
+            </div>
+          </div>
+          <div id="books-details-store-options" class="books-details-store-options">
+            <span class="meta">Find another edition</span>
+            <a id="books-details-apple" class="button ghost small" href="#" target="_blank" rel="noreferrer">Apple Books</a>
+            <a id="books-details-google" class="button ghost small" href="#" target="_blank" rel="noreferrer">Google Play Books</a>
+            <a id="books-details-kindle" class="button ghost small" href="#" target="_blank" rel="noreferrer">Kindle</a>
+          </div>
+          <div class="arr-details-cast-section books-details-subject-section">
+            <div class="arr-details-cast-heading">Subjects</div>
+            <div id="books-details-subjects" class="books-details-subjects"></div>
+          </div>
+          <div id="books-details-overview" class="arr-details-overview">Loading book details…</div>
         </div>
       </div>
     </div>

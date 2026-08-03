@@ -16,6 +16,8 @@ import shutil
 import socket
 import tempfile
 import zipfile
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,9 @@ import requests
 OPEN_LIBRARY_SEARCH_URL = "https://openlibrary.org/search.json"
 OPEN_LIBRARY_BASE_URL = "https://openlibrary.org"
 OPEN_LIBRARY_COVERS_URL = "https://covers.openlibrary.org"
+OPEN_LIBRARY_WORK_URL = "https://openlibrary.org/works/{work_id}.json"
+GUTENBERG_SEARCH_OPDS_URL = "https://www.gutenberg.org/ebooks/search.opds/"
+GUTENBERG_BOOK_OPDS_URL = "https://www.gutenberg.org/ebooks/{book_id}.opds"
 INTERNET_ARCHIVE_METADATA_URL = "https://archive.org/metadata/{identifier}"
 INTERNET_ARCHIVE_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
 BOOK_EXTENSIONS = {".pdf", ".epub", ".mobi", ".azw", ".azw3", ".txt"}
@@ -40,6 +45,9 @@ DEFAULT_MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 DEFAULT_TIMEOUT = (8, 45)
 _SAFE_COMPONENT = re.compile(r"[^\w\-.()' ]+", re.UNICODE)
 _ARCHIVE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+_OPEN_LIBRARY_WORK_ID = re.compile(r"^OL\d+W$", re.IGNORECASE)
+_GUTENBERG_ID = re.compile(r"^[1-9]\d{0,8}$")
+_ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 
 class BookServiceError(RuntimeError):
@@ -147,7 +155,13 @@ def _normalize_open_library_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def search_open_library(query: str, *, limit: int = 24, page: int = 1) -> dict[str, Any]:
+def search_open_library(
+    query: str,
+    *,
+    limit: int = 24,
+    page: int = 1,
+    downloadable_only: bool = False,
+) -> dict[str, Any]:
     text = str(query or "").strip()
     if not text:
         raise BookServiceError("A title, author, subject, or ISBN is required")
@@ -160,9 +174,15 @@ def search_open_library(query: str, *, limit: int = 24, page: int = 1) -> dict[s
         )
     )
     try:
+        requested_limit = max(1, min(50, int(limit)))
         response = requests.get(
             OPEN_LIBRARY_SEARCH_URL,
-            params={"q": text, "fields": fields, "limit": max(1, min(50, int(limit))), "page": max(1, int(page))},
+            params={
+                "q": text,
+                "fields": fields,
+                "limit": 50 if downloadable_only else requested_limit,
+                "page": max(1, int(page)),
+            },
             headers={
                 "Accept": "application/json",
                 "User-Agent": "Retreivr/1.0 (+https://github.com/sudostacks/retreivr)",
@@ -174,12 +194,249 @@ def search_open_library(query: str, *, limit: int = 24, page: int = 1) -> dict[s
     except (requests.RequestException, ValueError) as exc:
         raise BookServiceError(f"Open Library search failed: {exc}") from exc
     docs = payload.get("docs") if isinstance(payload, dict) else []
+    results = [_normalize_open_library_row(row) for row in docs or [] if isinstance(row, dict)]
+    for index, row in enumerate(results):
+        row["search_rank"] = index
+    if downloadable_only:
+        results = [row for row in results if row.get("download_available")][:requested_limit]
+    results.sort(key=_book_access_sort_key)
     return {
         "provider": "openlibrary",
         "query": text,
         "page": max(1, int(page)),
         "total": int(payload.get("numFound") or payload.get("num_found") or 0),
-        "results": [_normalize_open_library_row(row) for row in docs or [] if isinstance(row, dict)],
+        "downloadable_only": bool(downloadable_only),
+        "results": results,
+    }
+
+
+def _book_access_sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
+    if item.get("download_available"):
+        tier = 0
+    elif item.get("public_readable"):
+        tier = 1
+    elif item.get("has_fulltext"):
+        tier = 2
+    else:
+        tier = 3
+    try:
+        search_rank = int(item.get("search_rank") or 0)
+    except (TypeError, ValueError):
+        search_rank = 0
+    return tier, search_rank, str(item.get("title") or "").casefold()
+
+
+def _gutenberg_entry_id(entry: ET.Element) -> str:
+    raw = str(entry.findtext("atom:id", default="", namespaces=_ATOM_NS) or "").strip()
+    match = re.search(r"/ebooks/(\d+)\.opds(?:$|\?)", raw)
+    return match.group(1) if match else ""
+
+
+def search_project_gutenberg(query: str, *, limit: int = 12) -> dict[str, Any]:
+    text = str(query or "").strip()
+    if not text:
+        raise BookServiceError("A Project Gutenberg search term is required")
+    try:
+        response = requests.get(
+            GUTENBERG_SEARCH_OPDS_URL,
+            params={"query": text},
+            headers={
+                "Accept": "application/atom+xml;profile=opds-catalog, application/atom+xml",
+                "User-Agent": "Retreivr/1.0 (+https://github.com/sudostacks/retreivr)",
+            },
+            timeout=(8, 35),
+        )
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+    except (requests.RequestException, ET.ParseError) as exc:
+        raise BookServiceError(f"Project Gutenberg search failed: {exc}") from exc
+    results = []
+    for entry in root.findall("atom:entry", _ATOM_NS):
+        book_id = _gutenberg_entry_id(entry)
+        if not book_id:
+            continue
+        title = str(entry.findtext("atom:title", default="", namespaces=_ATOM_NS) or "").strip() or "Untitled"
+        author_text = str(entry.findtext("atom:content", default="", namespaces=_ATOM_NS) or "").strip()
+        authors = [] if re.search(r"\bdownloads?$", author_text, re.IGNORECASE) else _clean_list(author_text, limit=4)
+        results.append(
+            {
+                "id": f"gutenberg:{book_id}",
+                "provider": "project_gutenberg",
+                "title": title,
+                "subtitle": "",
+                "authors": authors,
+                "first_publish_year": None,
+                "publishers": ["Project Gutenberg"],
+                "subjects": ["Public domain"],
+                "languages": [],
+                "isbn": [],
+                "edition_count": 1,
+                "page_count": None,
+                "cover_url": "",
+                "details_url": f"https://www.gutenberg.org/ebooks/{book_id}",
+                "read_url": f"https://www.gutenberg.org/ebooks/{book_id}",
+                "ebook_access": "public",
+                "public_readable": True,
+                "has_fulltext": True,
+                "public_scan": True,
+                "download_available": True,
+                "download_provider": "project_gutenberg",
+                "gutenberg_id": book_id,
+                "archive_identifier": "",
+                "archive_identifiers": [],
+                "source_labels": ["Project Gutenberg"],
+                "search_rank": len(results),
+            }
+        )
+        if len(results) >= max(1, min(25, int(limit))):
+            break
+    return {"provider": "project_gutenberg", "query": text, "results": results}
+
+
+def _book_result_key(item: dict[str, Any]) -> str:
+    title = re.sub(r"[^a-z0-9]+", " ", str(item.get("title") or "").casefold()).strip()
+    authors = item.get("authors") if isinstance(item.get("authors"), list) else []
+    author_text = re.sub(r"[^a-z0-9]+", " ", str(authors[0] if authors else "").casefold()).strip()
+    # Catalogs disagree on "First Last" versus "Last, First". Token ordering
+    # gives exact title/author duplicates a stable cross-provider identity.
+    author = " ".join(sorted(author_text.split()))
+    return f"{title}|{author}"
+
+
+def _merge_book_results(open_library: list[dict[str, Any]], gutenberg: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    by_key: dict[str, dict[str, Any]] = {}
+    for item in open_library:
+        key = _book_result_key(item)
+        existing = by_key.get(key)
+        if not existing:
+            row = dict(item)
+            merged.append(row)
+            by_key[key] = row
+            continue
+        archive_ids = _clean_list(
+            list(existing.get("archive_identifiers") or []) + list(item.get("archive_identifiers") or []),
+            limit=12,
+        )
+        existing["archive_identifiers"] = archive_ids
+        if not existing.get("download_available") and item.get("download_available"):
+            existing["download_available"] = True
+            existing["download_provider"] = "internet_archive"
+            existing["archive_identifier"] = item.get("archive_identifier") or (archive_ids[0] if archive_ids else "")
+        existing["search_rank"] = min(
+            int(existing.get("search_rank") or 0),
+            int(item.get("search_rank") or 0),
+        )
+    for item in gutenberg:
+        key = _book_result_key(item)
+        existing = by_key.get(key)
+        if not existing:
+            row = dict(item)
+            merged.append(row)
+            by_key[key] = row
+            continue
+        existing["download_available"] = True
+        existing["download_provider"] = "project_gutenberg"
+        if not existing.get("gutenberg_id"):
+            existing["gutenberg_id"] = item.get("gutenberg_id")
+        existing["search_rank"] = min(
+            int(existing.get("search_rank") or 0),
+            int(item.get("search_rank") or 0),
+        )
+        existing["source_labels"] = ["Project Gutenberg", "Open Library"] + (
+            ["Internet Archive"] if existing.get("archive_identifiers") else []
+        )
+    merged.sort(key=_book_access_sort_key)
+    return merged
+
+
+def search_book_catalogs(
+    query: str,
+    *,
+    limit: int = 24,
+    page: int = 1,
+    downloadable_only: bool = False,
+) -> dict[str, Any]:
+    requested_limit = max(1, min(50, int(limit)))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        open_future = pool.submit(
+            search_open_library,
+            query,
+            limit=requested_limit,
+            page=page,
+            downloadable_only=downloadable_only,
+        )
+        gutenberg_future = pool.submit(search_project_gutenberg, query, limit=min(12, requested_limit))
+        provider_errors = {}
+        try:
+            open_payload = open_future.result()
+        except BookServiceError as exc:
+            open_payload = {"provider": "openlibrary", "results": []}
+            provider_errors["openlibrary"] = str(exc)
+        try:
+            gutenberg_payload = gutenberg_future.result()
+        except BookServiceError as exc:
+            gutenberg_payload = {"provider": "project_gutenberg", "results": []}
+            provider_errors["project_gutenberg"] = str(exc)
+    results = _merge_book_results(
+        list(open_payload.get("results") or []),
+        list(gutenberg_payload.get("results") or []),
+    )[:requested_limit]
+    if not results and provider_errors:
+        raise BookServiceError("; ".join(provider_errors.values()))
+    return {
+        "provider": "multi_source",
+        "providers": ["project_gutenberg", "openlibrary", "internet_archive"],
+        "provider_errors": provider_errors,
+        "query": str(query or "").strip(),
+        "page": max(1, int(page)),
+        "downloadable_only": bool(downloadable_only),
+        "results": results,
+    }
+
+
+def get_open_library_work(work_id: str) -> dict[str, Any]:
+    normalized = str(work_id or "").strip().upper()
+    if not _OPEN_LIBRARY_WORK_ID.fullmatch(normalized):
+        raise BookServiceError("A valid Open Library work identifier is required")
+    try:
+        response = requests.get(
+            OPEN_LIBRARY_WORK_URL.format(work_id=normalized),
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Retreivr/1.0 (+https://github.com/sudostacks/retreivr)",
+            },
+            timeout=DEFAULT_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise BookServiceError(f"Open Library details failed: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise BookServiceError("Open Library returned invalid book details")
+    raw_description = payload.get("description")
+    description = str(raw_description.get("value") or "").strip() if isinstance(raw_description, dict) else str(raw_description or "").strip()
+    links = []
+    for row in payload.get("links") or []:
+        if not isinstance(row, dict):
+            continue
+        url = str(row.get("url") or "").strip()
+        if url:
+            links.append({"title": str(row.get("title") or "Reference").strip(), "url": url})
+        if len(links) >= 8:
+            break
+    return {
+        "provider": "openlibrary",
+        "work_id": normalized,
+        "title": str(payload.get("title") or "").strip(),
+        "description": description,
+        "subjects": _clean_list(payload.get("subjects"), limit=24),
+        "subject_places": _clean_list(payload.get("subject_places"), limit=12),
+        "subject_people": _clean_list(payload.get("subject_people"), limit=12),
+        "subject_times": _clean_list(payload.get("subject_times"), limit=12),
+        "first_publish_date": str(payload.get("first_publish_date") or "").strip(),
+        "links": links,
+        "details_url": f"{OPEN_LIBRARY_BASE_URL}/works/{normalized}",
     }
 
 
@@ -218,6 +475,7 @@ def _canonical_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
         "source_url": str(source.get("source_url") or "").strip(),
         "source_provider": str(source.get("source_provider") or source.get("provider") or "manual").strip(),
         "archive_identifier": str(source.get("archive_identifier") or "").strip(),
+        "gutenberg_id": str(source.get("gutenberg_id") or "").strip(),
         "license_url": str(source.get("license_url") or "").strip(),
         "rights": str(source.get("rights") or "").strip(),
     }
@@ -333,6 +591,67 @@ def acquire_open_library_book(
         )
         return acquire_book_url(config, source_url, enriched)
     raise BookServiceError(last_error)
+
+
+def acquire_project_gutenberg_book(
+    config: dict | None,
+    book_id: str,
+    metadata: dict[str, Any] | None,
+    *,
+    preferred_format: str = "",
+) -> dict[str, Any]:
+    normalized_id = str(book_id or "").strip()
+    if not _GUTENBERG_ID.fullmatch(normalized_id):
+        raise BookServiceError("A valid Project Gutenberg book identifier is required")
+    try:
+        response = requests.get(
+            GUTENBERG_BOOK_OPDS_URL.format(book_id=normalized_id),
+            headers={
+                "Accept": "application/atom+xml;profile=opds-catalog, application/atom+xml",
+                "User-Agent": "Retreivr/1.0 (+https://github.com/sudostacks/retreivr)",
+            },
+            timeout=(8, 35),
+        )
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+    except (requests.RequestException, ET.ParseError) as exc:
+        raise BookServiceError(f"Project Gutenberg download lookup failed: {exc}") from exc
+    requested = str(preferred_format or "").strip().lower()
+    format_priority = {
+        "epub": ("epub", "mobi"),
+        "mobi": ("mobi", "epub"),
+    }.get(requested, ("epub", "mobi"))
+    mime_format = {
+        "application/epub+zip": "epub",
+        "application/x-mobipocket-ebook": "mobi",
+    }
+    candidates = []
+    for link in root.findall(".//atom:link", _ATOM_NS):
+        if str(link.attrib.get("rel") or "") != "http://opds-spec.org/acquisition":
+            continue
+        kind = mime_format.get(str(link.attrib.get("type") or "").strip().lower())
+        href = str(link.attrib.get("href") or "").strip()
+        parsed = urlparse(href)
+        if kind not in format_priority or parsed.scheme != "https" or not str(parsed.hostname or "").endswith("gutenberg.org"):
+            continue
+        try:
+            length = int(link.attrib.get("length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        candidates.append((format_priority.index(kind), length or 2**63, href))
+    if not candidates:
+        raise BookServiceError("Project Gutenberg did not expose a supported EPUB or Kindle file")
+    candidates.sort()
+    enriched = dict(metadata or {})
+    enriched.update(
+        {
+            "gutenberg_id": normalized_id,
+            "source_provider": "project_gutenberg",
+            "license_url": "https://www.gutenberg.org/policy/license.html",
+            "rights": "Project Gutenberg license and applicable public-domain terms",
+        }
+    )
+    return acquire_book_url(config, candidates[0][2], enriched)
 
 
 def _write_sidecar(path: Path, metadata: dict[str, Any]) -> Path:

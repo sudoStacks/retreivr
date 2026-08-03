@@ -123,6 +123,10 @@ const state = {
   booksResults: [],
   booksLibrary: [],
   booksSearchStarted: false,
+  booksFeaturedLoaded: false,
+  booksResultsHeading: "Books",
+  booksDetailsItem: null,
+  booksDetailsCache: {},
   booksSelectedMetadata: null,
   setupStatus: null,
   setupWizard: null,
@@ -1831,11 +1835,11 @@ function setPage(page) {
     if (state.config?.books?.enabled) {
       mountTopbarForPage("books");
       setBooksSection(state.booksSection || "search");
-      loadBooksStatus().catch(() => {});
       if ((state.booksSection || "search") === "library") {
         loadBooksLibrary().catch(() => {});
       }
     }
+    activateBooksPage().catch(() => {});
   } else if (target === "config") {
     mountSettingsSubpages();
     ensureSettingsLayoutVisible();
@@ -1918,6 +1922,24 @@ function syncBooksNavigation() {
   }
 }
 
+async function activateBooksPage() {
+  try {
+    const status = await loadBooksStatus();
+    if (state.currentPage !== "books" || !status?.enabled) return;
+    mountTopbarForPage("books");
+    setBooksSection(state.booksSection || "search");
+    if ((state.booksSection || "search") === "library") {
+      await loadBooksLibrary();
+    } else if (!state.booksSearchStarted && !state.booksFeaturedLoaded) {
+      await loadFeaturedBooks();
+    }
+  } catch (err) {
+    if (state.currentPage === "books") {
+      setNotice($("#books-message"), `Could not refresh Books settings: ${toUserErrorMessage(err)}`, true);
+    }
+  }
+}
+
 function setBooksSection(section) {
   const normalized = section === "library" ? "library" : "search";
   state.booksSection = normalized;
@@ -1947,8 +1969,16 @@ function bookMetadataFromResult(item) {
     cover_url: item?.cover_url || "",
     work_id: item?.work_id || "",
     edition_id: item?.edition_id || "",
+    gutenberg_id: item?.gutenberg_id || "",
     provider: item?.provider || "openlibrary",
   };
+}
+
+function bookHasDirectDownload(item) {
+  if (!item?.download_available) return false;
+  const provider = String(item?.download_provider || "").trim().toLowerCase();
+  if (provider === "project_gutenberg") return !!String(item?.gutenberg_id || "").trim();
+  return Array.isArray(item?.archive_identifiers) && item.archive_identifiers.length > 0;
 }
 
 function renderBookCover(item, { library = false } = {}) {
@@ -1964,6 +1994,8 @@ function renderBooksResults() {
   const host = $("#books-results-list");
   if (!host) return;
   const results = Array.isArray(state.booksResults) ? state.booksResults : [];
+  const heading = $("#books-results-heading");
+  if (heading) heading.textContent = state.booksResultsHeading || "Books";
   $("#books-results-status").textContent = results.length
     ? `${results.length} matches`
     : (state.booksSearchStarted ? "No matches" : "Ready to discover");
@@ -1976,14 +2008,17 @@ function renderBooksResults() {
   host.innerHTML = results.map((item, index) => {
     const year = item?.first_publish_year ? String(item.first_publish_year) : "Year unknown";
     const subjects = (Array.isArray(item?.subjects) ? item.subjects : []).slice(0, 3).join(" · ");
-    const downloadAvailable = !!item?.download_available && Array.isArray(item?.archive_identifiers) && item.archive_identifiers.length > 0;
+    const downloadAvailable = bookHasDirectDownload(item);
+    const downloadSource = String(item?.download_provider || "").toLowerCase() === "project_gutenberg"
+      ? "Project Gutenberg"
+      : "Internet Archive";
     const access = downloadAvailable
-      ? "Free download"
+      ? `Free download · ${downloadSource}`
       : (item?.public_readable ? "Read online" : (item?.has_fulltext ? "Preview available" : "Metadata"));
     const detailsUrl = String(item?.details_url || "").trim();
     return `
       <article class="home-result-card music-meta-card music-grid-card movies-tv-card books-card" data-book-index="${index}">
-        <div class="home-candidate-artwork movies-tv-artwork books-artwork">${renderBookCover(item)}</div>
+        <button class="home-candidate-artwork movies-tv-artwork books-artwork books-artwork-button" data-book-action="details" data-book-index="${index}" type="button" aria-label="View details for ${escapeHtml(item?.title || "this book")}">${renderBookCover(item)}</button>
         <div class="movies-tv-overlay books-card-overlay">
           <div class="home-candidate-main movies-tv-main">
             <div class="home-candidate-title">${escapeHtml(item?.title || "Untitled")}</div>
@@ -1995,11 +2030,112 @@ function renderBooksResults() {
             ${detailsUrl ? `<a class="button ghost small" href="${escapeHtml(detailsUrl)}" target="_blank" rel="noreferrer">${item?.public_readable ? "Read / Preview" : "Details"}</a>` : ""}
             ${downloadAvailable
               ? `<button class="button primary small" data-book-action="download" data-book-index="${index}" type="button" title="Download the best public EPUB or PDF and add it to My Library">Download</button>`
-              : `<button class="button primary small" data-book-action="use-metadata" data-book-index="${index}" type="button">Import my file</button>`}
+              : `<button class="button primary small" data-book-action="details" data-book-index="${index}" type="button">View options</button>`}
           </div>
         </div>
       </article>`;
   }).join("");
+}
+
+function renderBooksDetailsSubjects(subjects) {
+  const host = $("#books-details-subjects");
+  if (!host) return;
+  const values = Array.isArray(subjects) ? subjects.filter(Boolean).slice(0, 12) : [];
+  host.innerHTML = values.length
+    ? values.map((subject) => `<span class="arr-details-chip"><span class="arr-details-chip-value">${escapeHtml(subject)}</span></span>`).join("")
+    : '<span class="meta">No subjects listed.</span>';
+}
+
+async function loadBookDetails(item) {
+  const workId = String(item?.work_id || "").trim();
+  if (!workId) {
+    if (state.booksDetailsItem === item) {
+      $("#books-details-overview").textContent = String(item?.description || "").trim()
+        || (item?.provider === "project_gutenberg"
+          ? "A free ebook edition provided through Project Gutenberg's official OPDS catalog."
+          : "No additional description is available for this title.");
+    }
+    return;
+  }
+  let details = state.booksDetailsCache[workId];
+  if (!details) {
+    try {
+      details = await fetchJson(`/api/books/details/${encodeURIComponent(workId)}`);
+      state.booksDetailsCache[workId] = details;
+    } catch (err) {
+      if (state.booksDetailsItem === item) {
+        $("#books-details-overview").textContent = `More details are unavailable: ${toUserErrorMessage(err)}`;
+      }
+      return;
+    }
+  }
+  if (state.booksDetailsItem !== item) return;
+  const description = String(details?.description || "").trim();
+  $("#books-details-overview").textContent = description || "No description is available for this title.";
+  const subjects = Array.isArray(details?.subjects) && details.subjects.length ? details.subjects : item.subjects;
+  renderBooksDetailsSubjects(subjects);
+}
+
+function openBooksDetailsModal(item) {
+  const modal = $("#books-details-modal");
+  if (!modal || !item) return;
+  state.booksDetailsItem = item;
+  $("#books-details-title").textContent = String(item.title || "Book Details");
+  $("#books-details-authors").textContent = bookAuthorsLabel(item);
+  const cover = $("#books-details-cover");
+  cover.src = String(item.cover_url || "").trim() || "assets/no_artwork.png";
+  cover.alt = `${String(item.title || "Book")} cover`;
+  const chips = [];
+  if (item.first_publish_year) chips.push(`<span class="arr-details-chip"><span class="arr-details-chip-label">First published</span><span class="arr-details-chip-value">${escapeHtml(String(item.first_publish_year))}</span></span>`);
+  if (item.page_count) chips.push(`<span class="arr-details-chip"><span class="arr-details-chip-label">Pages</span><span class="arr-details-chip-value">${escapeHtml(String(item.page_count))}</span></span>`);
+  if (Number(item.edition_count || 0)) chips.push(`<span class="arr-details-chip"><span class="arr-details-chip-label">Editions</span><span class="arr-details-chip-value">${escapeHtml(String(item.edition_count))}</span></span>`);
+  const languages = Array.isArray(item.languages) ? item.languages.slice(0, 3).map((value) => String(value).toUpperCase()).join(", ") : "";
+  if (languages) chips.push(`<span class="arr-details-chip"><span class="arr-details-chip-label">Language</span><span class="arr-details-chip-value">${escapeHtml(languages)}</span></span>`);
+  const isbn = Array.isArray(item.isbn) ? item.isbn[0] : "";
+  if (isbn) chips.push(`<span class="arr-details-chip"><span class="arr-details-chip-label">ISBN</span><span class="arr-details-chip-value">${escapeHtml(String(isbn))}</span></span>`);
+  $("#books-details-meta").innerHTML = chips.join("");
+  const downloadable = bookHasDirectDownload(item);
+  const downloadSource = String(item?.download_provider || "").toLowerCase() === "project_gutenberg"
+    ? "Project Gutenberg"
+    : "Internet Archive";
+  const status = $("#books-details-status");
+  status.textContent = downloadable
+    ? `A verified public ebook from ${downloadSource} can be downloaded directly into My Library.`
+    : "No unrestricted file is attached to this result. You can preview it or import a file you own.";
+  status.classList.toggle("running", downloadable);
+  const download = $("#books-details-download");
+  download.classList.toggle("hidden", !downloadable);
+  download.disabled = false;
+  download.textContent = "Download";
+  const preview = $("#books-details-preview");
+  preview.href = String(item.details_url || item.read_url || "#").trim() || "#";
+  preview.textContent = item.public_readable ? "Read / Preview" : "Open Library Details";
+  const storeQuery = encodeURIComponent([item.title, ...(Array.isArray(item.authors) ? item.authors.slice(0, 1) : [])].filter(Boolean).join(" "));
+  $("#books-details-apple").href = `https://books.apple.com/us/search?term=${storeQuery}`;
+  $("#books-details-google").href = `https://play.google.com/store/search?q=${storeQuery}&c=books`;
+  $("#books-details-kindle").href = `https://www.amazon.com/s?k=${storeQuery}&i=digital-text`;
+  renderBooksDetailsSubjects(item.subjects);
+  $("#books-details-overview").textContent = "Loading book details…";
+  modal.classList.remove("hidden");
+  updatePollingState();
+  loadBookDetails(item);
+}
+
+function closeBooksDetailsModal() {
+  $("#books-details-modal")?.classList.add("hidden");
+  state.booksDetailsItem = null;
+  updatePollingState();
+}
+
+function selectBookMetadataForImport(item) {
+  if (!item) return;
+  state.booksSelectedMetadata = bookMetadataFromResult(item);
+  closeBooksDetailsModal();
+  setBooksSection("search");
+  const input = $("#books-direct-url");
+  input?.focus();
+  setNotice($("#books-message"), `Metadata selected for “${item.title}”. Paste its authorized PDF or ebook URL, or import the file.`, false);
+  $("#books-search-view")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function renderBooksLibrary() {
@@ -2034,10 +2170,42 @@ function renderBooksLibrary() {
 
 async function loadBooksStatus() {
   const status = await fetchJson("/api/books/status");
+  state.config = state.config && typeof state.config === "object" ? state.config : {};
+  state.config.books = {
+    ...((state.config.books && typeof state.config.books === "object") ? state.config.books : {}),
+    enabled: !!status?.enabled,
+    library_path: String(status?.library_path || state.config.books?.library_path || "./media/books"),
+    metadata_provider: String(status?.metadata_provider || state.config.books?.metadata_provider || "openlibrary"),
+    allow_direct_urls: status?.allow_direct_urls !== false,
+    allow_private_source_urls: !!status?.allow_private_source_urls,
+    max_download_mb: Number(status?.max_download_mb || state.config.books?.max_download_mb || 500),
+  };
+  syncBooksNavigation();
   const chip = $("#books-provider-chip");
-  if (chip) chip.textContent = status?.readarr_configured ? "Open Library · legacy Readarr connected" : "Open Library discovery";
+  if (chip) chip.textContent = "Gutenberg · Open Library · Internet Archive";
   const detail = $("#books-library-detail");
   if (detail) detail.textContent = `Library: ${status?.library_path || "./media/books"}`;
+  return status;
+}
+
+async function loadFeaturedBooks() {
+  state.booksResultsHeading = "Free books to download";
+  state.booksSearchStarted = true;
+  const status = $("#books-results-status");
+  if (status) status.textContent = "Finding public EPUB and PDF titles…";
+  setNotice($("#books-message"), "Loading free public books…", false);
+  try {
+    const payload = await fetchJson("/api/books/search?q=classic%20literature&limit=24&downloadable_only=true");
+    state.booksResults = Array.isArray(payload?.results) ? payload.results : [];
+    state.booksFeaturedLoaded = true;
+    renderBooksResults();
+    setNotice($("#books-message"), state.booksResults.length ? "" : "No downloadable titles are available right now.", false);
+  } catch (err) {
+    state.booksSearchStarted = false;
+    state.booksResultsHeading = "Books";
+    renderBooksResults();
+    setNotice($("#books-message"), `Could not load free books: ${toUserErrorMessage(err)}`, true);
+  }
 }
 
 async function performBooksSearch() {
@@ -2048,6 +2216,7 @@ async function performBooksSearch() {
   }
   const button = $("#books-search-button");
   state.booksSearchStarted = true;
+  state.booksResultsHeading = `Results for “${query}”`;
   if (button) { button.disabled = true; button.textContent = "Searching…"; }
   setNotice($("#books-message"), "Searching Open Library…", false);
   try {
@@ -2076,37 +2245,44 @@ async function loadBooksLibrary() {
   }
 }
 
-async function downloadOpenLibraryBook(item, button) {
+async function downloadOpenLibraryBook(item, button, { noticeEl = $("#books-message") } = {}) {
   if (!item || !button) return;
+  const provider = String(item.download_provider || "").trim().toLowerCase();
   const identifiers = Array.isArray(item.archive_identifiers)
     ? item.archive_identifiers.filter(Boolean).slice(0, 6)
     : [];
-  if (!item.download_available || !identifiers.length) {
-    setNotice($("#books-message"), "This edition does not expose a public downloadable EPUB or PDF.", true);
+  const gutenbergId = String(item.gutenberg_id || "").trim();
+  if (!bookHasDirectDownload(item)) {
+    setNotice(noticeEl, "This edition does not expose a public downloadable EPUB or PDF.", true);
     return;
   }
   const originalText = button.textContent;
   button.disabled = true;
   button.textContent = "Downloading…";
-  setNotice($("#books-message"), `Downloading “${item.title || "book"}” and embedding its metadata…`, false);
+  setNotice(noticeEl, `Downloading “${item.title || "book"}” and embedding its metadata…`, false);
   try {
-    const result = await fetchJson("/api/books/acquire/openlibrary", {
+    const endpoint = provider === "project_gutenberg"
+      ? "/api/books/acquire/gutenberg"
+      : "/api/books/acquire/openlibrary";
+    const acquisition = provider === "project_gutenberg"
+      ? { gutenberg_id: gutenbergId, preferred_format: "epub" }
+      : { archive_identifiers: identifiers, preferred_format: "epub" };
+    const result = await fetchJson(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        archive_identifiers: identifiers,
-        preferred_format: "epub",
+        ...acquisition,
         metadata: bookMetadataFromResult(item),
       }),
     });
     const format = String(result?.metadata?.file_format || "book").toUpperCase();
     button.textContent = "In Library";
-    setNotice($("#books-message"), `Added “${item.title || "book"}” to My Library as ${format}.`, false);
+    setNotice(noticeEl, `Added “${item.title || "book"}” to My Library as ${format}.`, false);
     await loadBooksLibrary();
   } catch (err) {
     button.disabled = false;
     button.textContent = originalText;
-    setNotice($("#books-message"), `Book download failed: ${toUserErrorMessage(err)}`, true);
+    setNotice(noticeEl, `Book download failed: ${toUserErrorMessage(err)}`, true);
   }
 }
 
@@ -2168,7 +2344,13 @@ function initializeBooksUi() {
     if (input) input.value = "";
     state.booksResults = [];
     state.booksSearchStarted = false;
+    state.booksResultsHeading = "Books";
     renderBooksResults();
+  });
+  $("#books-featured-downloads")?.addEventListener("click", () => {
+    const input = $("#books-search-input");
+    if (input) input.value = "";
+    loadFeaturedBooks();
   });
   $$('[data-books-browse-query]').forEach((button) => {
     button.addEventListener("click", () => {
@@ -2183,6 +2365,28 @@ function initializeBooksUi() {
     window.location.hash = "settings-core";
     requestAnimationFrame(() => $("#cfg-books-enabled")?.focus());
   });
+  $("#books-details-close")?.addEventListener("click", closeBooksDetailsModal);
+  $("#books-details-download")?.addEventListener("click", () => {
+    const item = state.booksDetailsItem;
+    const button = $("#books-details-download");
+    if (!item || !button || button.disabled) return;
+    downloadOpenLibraryBook(item, button, { noticeEl: $("#books-details-status") });
+  });
+  $("#books-details-import")?.addEventListener("click", () => {
+    selectBookMetadataForImport(state.booksDetailsItem);
+  });
+  $("#books-details-cover")?.addEventListener("click", () => {
+    const url = String(state.booksDetailsItem?.details_url || state.booksDetailsItem?.read_url || "").trim();
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
+  });
+  $("#books-details-modal")?.addEventListener("click", (event) => {
+    if (event.target === $("#books-details-modal")) closeBooksDetailsModal();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("#books-details-modal")?.classList.contains("hidden")) {
+      closeBooksDetailsModal();
+    }
+  });
   $("#books-direct-add")?.addEventListener("click", acquireBookFromUrl);
   $("#books-import-file")?.addEventListener("change", (event) => {
     const file = event.target.files?.[0];
@@ -2194,16 +2398,16 @@ function initializeBooksUi() {
     if (!button) return;
     const item = state.booksResults[Number(button.dataset.bookIndex)];
     if (!item) return;
+    if (button.dataset.bookAction === "details") {
+      openBooksDetailsModal(item);
+      return;
+    }
     if (button.dataset.bookAction === "download") {
       downloadOpenLibraryBook(item, button);
       return;
     }
     if (button.dataset.bookAction !== "use-metadata") return;
-    state.booksSelectedMetadata = bookMetadataFromResult(item);
-    const input = $("#books-direct-url");
-    input?.focus();
-    setNotice($("#books-message"), `Metadata selected for “${item.title}”. Paste its authorized PDF or ebook URL, or import the file.`, false);
-    $("#books-search-view")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    selectBookMetadataForImport(item);
   });
   renderBooksResults();
 }

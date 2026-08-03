@@ -124,6 +124,164 @@ def test_one_click_open_library_download_resolves_public_epub(monkeypatch, tmp_p
     ]
 
 
+def test_open_library_work_details_normalize_description_and_subjects(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "title": "Detailed Book",
+                "description": {"type": "/type/text", "value": "A rich description."},
+                "subjects": ["Adventure", "Classics"],
+                "first_publish_date": "1895",
+                "links": [{"title": "Reference", "url": "https://example.test/reference"}],
+            }
+
+    monkeypatch.setattr(book_services.requests, "get", lambda *args, **kwargs: Response())
+    details = book_services.get_open_library_work("ol52267w")
+
+    assert details["work_id"] == "OL52267W"
+    assert details["description"] == "A rich description."
+    assert details["subjects"] == ["Adventure", "Classics"]
+    assert details["details_url"].endswith("/works/OL52267W")
+
+
+def test_project_gutenberg_opds_search_normalizes_free_results(monkeypatch):
+    xml = b'''<?xml version="1.0" encoding="utf-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>https://www.gutenberg.org/ebooks/1342.opds</id>
+        <title>Pride and Prejudice</title>
+        <content type="text">Jane Austen</content>
+      </entry>
+    </feed>'''
+
+    class Response:
+        content = xml
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(book_services.requests, "get", lambda *args, **kwargs: Response())
+    result = book_services.search_project_gutenberg("pride prejudice")
+
+    row = result["results"][0]
+    assert row["provider"] == "project_gutenberg"
+    assert row["gutenberg_id"] == "1342"
+    assert row["download_available"] is True
+    assert row["authors"] == ["Jane Austen"]
+
+
+def test_project_gutenberg_one_click_prefers_small_epub(monkeypatch, tmp_path):
+    xml = b'''<?xml version="1.0" encoding="utf-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <link rel="http://opds-spec.org/acquisition" type="application/epub+zip"
+          length="500" href="https://www.gutenberg.org/ebooks/1342.epub.images" />
+        <link rel="http://opds-spec.org/acquisition" type="application/epub+zip"
+          length="100" href="https://www.gutenberg.org/ebooks/1342.epub.noimages" />
+      </entry>
+    </feed>'''
+
+    class OpdsResponse:
+        content = xml
+
+        def raise_for_status(self):
+            return None
+
+    class DownloadResponse:
+        status_code = 200
+        url = "https://www.gutenberg.org/ebooks/1342.epub.noimages"
+        headers = {"Content-Type": "application/epub+zip", "Content-Length": "9"}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            yield b"free-epub"
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return OpdsResponse() if url.endswith("/ebooks/1342.opds") else DownloadResponse()
+
+    monkeypatch.setattr(book_services.requests, "get", fake_get)
+    result = book_services.acquire_project_gutenberg_book(
+        _config(tmp_path),
+        "1342",
+        {"title": "Pride and Prejudice", "authors": ["Jane Austen"]},
+    )
+
+    assert Path(result["path"]).read_bytes() == b"free-epub"
+    assert result["metadata"]["source_provider"] == "project_gutenberg"
+    assert result["metadata"]["gutenberg_id"] == "1342"
+    assert calls[-1].endswith("1342.epub.noimages")
+
+
+def test_multi_source_sort_prioritizes_free_downloads() -> None:
+    rows = book_services._merge_book_results(
+        [
+            {"title": "Paid Book", "authors": ["Writer"], "download_available": False, "has_fulltext": False, "search_rank": 0},
+            {"title": "Archive Book", "authors": ["Writer"], "download_available": True, "download_provider": "internet_archive", "search_rank": 1},
+        ],
+        [
+            {"title": "Gutenberg Book", "authors": ["Writer"], "download_available": True, "download_provider": "project_gutenberg", "gutenberg_id": "1", "search_rank": 0},
+        ],
+    )
+
+    assert [row["title"] for row in rows] == ["Gutenberg Book", "Archive Book", "Paid Book"]
+
+
+def test_multi_source_merge_deduplicates_catalog_author_order() -> None:
+    rows = book_services._merge_book_results(
+        [
+            {
+                "title": "Pride and Prejudice",
+                "authors": ["Austen, Jane"],
+                "download_available": True,
+                "download_provider": "internet_archive",
+                "archive_identifiers": ["prideprejudice00aust"],
+                "cover_url": "https://covers.openlibrary.org/example.jpg",
+                "search_rank": 0,
+            },
+            {
+                "title": "Pride and Prejudice",
+                "authors": ["Jane Austen"],
+                "download_available": True,
+                "download_provider": "internet_archive",
+                "archive_identifiers": ["prideprejudice0000jane"],
+                "search_rank": 1,
+            },
+        ],
+        [
+            {
+                "title": "Pride and Prejudice",
+                "authors": ["Jane Austen"],
+                "download_available": True,
+                "download_provider": "project_gutenberg",
+                "gutenberg_id": "1342",
+                "search_rank": 0,
+            },
+            {
+                "title": "Pride and Prejudice",
+                "authors": ["Austen, Jane"],
+                "download_available": True,
+                "download_provider": "project_gutenberg",
+                "gutenberg_id": "42671",
+                "search_rank": 1,
+            },
+        ],
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["download_provider"] == "project_gutenberg"
+    assert rows[0]["gutenberg_id"] == "1342"
+    assert rows[0]["archive_identifiers"] == ["prideprejudice00aust", "prideprejudice0000jane"]
+    assert rows[0]["cover_url"].startswith("https://covers.openlibrary.org/")
+
+
 def test_import_book_writes_deterministic_sidecar_and_library_record(tmp_path):
     source = tmp_path / "incoming.txt"
     source.write_text("book body", encoding="utf-8")
