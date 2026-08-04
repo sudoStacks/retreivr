@@ -5,6 +5,9 @@ monitoring systems such as Home Assistant. JSON responses aim to be stable and
 backwards-compatible: keys are always present, and new fields are additive.
 
 Key endpoints
+- GET /health/live (constant-time process and event-loop liveness; use for restart watchdogs)
+- GET /health/ready (dependency readiness; returns 503 when a required subsystem is unavailable)
+- GET /health/details (readiness diagnostics without changing the response status)
 - GET /api/status
 - GET /api/schedule
 - GET /api/metrics
@@ -12,6 +15,13 @@ Key endpoints
 - POST /api/intake
 - GET /api/history
 - GET /api/logs
+
+Health monitoring
+- `/health` is a compatibility alias for `/health/live`.
+- Restart automation should use `/health/live` and require repeated failures.
+- Alerting and deployment readiness checks should use `/health/ready`.
+- A rebuilding music index remains readable from its last completed snapshot and is
+  reported as `building` in readiness details.
 
 External intake
 `POST /api/intake` accepts a normalized acquisition package from external tools

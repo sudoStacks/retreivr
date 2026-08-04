@@ -81,9 +81,9 @@ def test_runtime_resolution_uses_publisher_outbox_and_enforces_score(api_module,
     client = TestClient(api_module.app)
 
     high = client.post("/api/music/runtime-resolution", json={
-        "recording_mbid": "recording-high",
-        "release_mbid": "release-1",
-        "release_group_mbid": "release-group-1",
+        "recording_mbid": "11111111-1111-4111-8111-111111111111",
+        "release_mbid": "22222222-2222-4222-8222-222222222222",
+        "release_group_mbid": "33333333-3333-4333-8333-333333333333",
         "source": "youtube",
         "source_url": "https://www.youtube.com/watch?v=highScore01",
         "selected_score": 0.93,
@@ -94,12 +94,12 @@ def test_runtime_resolution_uses_publisher_outbox_and_enforces_score(api_module,
     assert high.json()["community_publish"]["status"] == "written"
     outbox = main_dir / "run_summaries" / "community_publish_outbox"
     lines = [json.loads(line) for path in outbox.glob("*.jsonl") for line in path.read_text().splitlines() if line]
-    assert lines[0]["release_mbid"] == "release-1"
-    assert lines[0]["release_group_mbid"] == "release-group-1"
+    assert lines[0]["release_mbid"] == "22222222-2222-4222-8222-222222222222"
+    assert lines[0]["release_group_mbid"] == "33333333-3333-4333-8333-333333333333"
     assert not (search_dir / "run_summaries" / "community_publish_outbox").exists()
 
     low = client.post("/api/music/runtime-resolution", json={
-        "recording_mbid": "recording-low",
+        "recording_mbid": "44444444-4444-4444-8444-444444444444",
         "source": "youtube",
         "source_url": "https://www.youtube.com/watch?v=lowScore001",
         "selected_score": 0.55,

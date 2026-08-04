@@ -281,7 +281,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `1.1.1`, pull the latest image and restart:
+If you are upgrading to `1.1.2`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull

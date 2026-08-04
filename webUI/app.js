@@ -159,6 +159,15 @@ const state = {
   playerStationPrimingTimer: null,
   playerHistory: [],
   playerMissingHistory: [],
+  musicDatasets: {
+    library: { status: "idle", error: null, updatedAt: null },
+    summary: { status: "idle", error: null, updatedAt: null },
+    favorites: { status: "idle", error: null, updatedAt: null },
+    history: { status: "idle", error: null, updatedAt: null },
+    stations: { status: "idle", error: null, updatedAt: null },
+    playlists: { status: "idle", error: null, updatedAt: null },
+    community: { status: "idle", error: null, updatedAt: null },
+  },
   playerCurrent: null,
   playerCurrentHasVideo: false,
   playerVideoVisible: false,
@@ -1775,6 +1784,9 @@ function setPage(page) {
       loadMusicLibrarySection().catch(() => {});
       const requestedMusicSection = requested === "music-player" ? "player" : (state.musicSection || "browse");
       setMusicSection(requestedMusicSection);
+      if (requestedMusicSection === "browse") {
+        loadMusicPlayerView().catch(() => {});
+      }
     }
     if (state.homeSearchRequestId) {
       startHomeResultPolling(state.homeSearchRequestId);
@@ -4821,7 +4833,7 @@ function renderMusicPlayerPlaylistsPanel() {
       <span class="music-player-track-title">${escapeHtml(playlist.name || "Playlist")}</span>
       <span class="music-player-track-meta">${escapeHtml(`${playlist.item_count || 0} tracks`)}</span>
     </button>
-  `).join("") : `<div class="home-results-empty">No playlists yet.</div>`;
+  `).join("") : `<div class="home-results-empty">${escapeHtml(musicDatasetEmptyMessage("playlists", "No playlists yet."))}</div>`;
   const selectedMarkup = selected ? `
     <div class="group music-player-playlist-detail">
       <div class="panel-header-row compact">
@@ -4921,7 +4933,7 @@ function renderMusicPlayerHome() {
               </button>
               <button class="button ghost small" type="button" data-action="player-play-next" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.source_kind || "local")}">Play Next</button>
             </article>
-          `).join("") : `<div class="home-results-empty">Start playing something from Library or Radio to build your listening history.</div>`}
+          `).join("") : `<div class="home-results-empty">${escapeHtml(musicDatasetEmptyMessage("history", "Start playing something from Library or Radio to build your listening history."))}</div>`}
         </div>
       </section>
       <section class="group">
@@ -4947,7 +4959,7 @@ function renderMusicPlayerHome() {
                 <button class="button ghost small" type="button" data-action="player-open-album" data-artist-key="${escapeAttr(album.artist_key || "")}" data-album-key="${escapeAttr(album.album_key || "")}">Open Album</button>
               </div>
             </article>
-          `).join("") : `<div class="home-results-empty">Downloaded albums will appear here.</div>`}
+          `).join("") : `<div class="home-results-empty">${escapeHtml(musicDatasetEmptyMessage("summary", "Downloaded albums will appear here."))}</div>`}
         </div>
       </section>
       <section class="group">
@@ -4972,7 +4984,7 @@ function renderMusicPlayerHome() {
                 <button class="button ghost small" type="button" data-action="player-open-album" data-artist-key="${escapeAttr(album.artist_key || "")}" data-album-key="${escapeAttr(album.album_key || "")}">Open Album</button>
               </div>
             </article>
-          `).join("") : `<div class="home-results-empty">Favorite more artists or download more albums to fill this section.</div>`}
+          `).join("") : `<div class="home-results-empty">${escapeHtml(musicDatasetEmptyMessage("favorites", "Favorite more artists or download more albums to fill this section."))}</div>`}
         </div>
       </section>
       <section class="group">
@@ -5020,7 +5032,7 @@ function renderMusicPlayerLibrary() {
   const selectedPlaylistId = Number(state.playerSelectedPlaylistId || 0);
   const libraryMode = String(state.playerLibraryMode || "artists");
   const rootsLabel = getMusicLibraryRootsLabel();
-  let browserMarkup = `<div class="home-results-empty">No local library tracks found yet.</div>`;
+  let browserMarkup = `<div class="home-results-empty">${escapeHtml(musicDatasetEmptyMessage("summary", "No local library tracks found yet."))}</div>`;
   let detailHero = "";
 
   if (artists.length) {
@@ -5219,7 +5231,7 @@ function renderMusicPlayerStations() {
     return { label: "Needs Matches", className: "is-warning" };
   };
   if (!stations.length) {
-    stationsEl.innerHTML = `<div class="home-results-empty">No stations yet — create one above to start your first radio mix.</div>`;
+    stationsEl.innerHTML = `<div class="home-results-empty">${escapeHtml(musicDatasetEmptyMessage("stations", "No stations yet — create one above to start your first radio mix."))}</div>`;
     return;
   }
   stationsEl.innerHTML = `<div class="music-shelf-grid music-station-grid">${stations.map((station) => {
@@ -5287,7 +5299,7 @@ function renderMusicPlayerCommunityCache() {
         </article>
       `).join("")}
     </div>
-  ` : `<div class="home-results-empty">Verified community-cache matches will appear here when available.</div>`;
+  ` : `<div class="home-results-empty">${escapeHtml(musicDatasetEmptyMessage("community", "Verified community-cache matches will appear here when available."))}</div>`;
 }
 
 function renderMusicPlayerQueue() {
@@ -5605,7 +5617,7 @@ function renderMusicPlayerHistory() {
           </article>
         `).join("")}
       </div>
-    ` : `<div class="home-results-empty">No recent playback yet.</div>`;
+    ` : `<div class="home-results-empty">${escapeHtml(musicDatasetEmptyMessage("history", "No recent playback yet."))}</div>`;
   }
   if (favoritesEl) {
     const favoriteArtists = Array.isArray(state.musicPreferences?.favorite_artists) ? state.musicPreferences.favorite_artists : [];
@@ -5635,7 +5647,7 @@ function renderMusicPlayerHistory() {
           `;
         }).join("")}
       </div>
-    ` : `<div class="home-results-empty">Favorite artists appear here for quick access. Favorites are not the same as downloaded music.</div>`;
+    ` : `<div class="home-results-empty">${escapeHtml(musicDatasetEmptyMessage("favorites", "Favorite artists appear here for quick access. Favorites are not the same as downloaded music."))}</div>`;
   }
 }
 
@@ -6084,25 +6096,150 @@ function findLocalPlayerTrackByRecordingMbid(recordingMbid) {
   ) || null;
 }
 
+const MUSIC_DATASET_TERMINAL_STATES = new Set(["loaded", "empty", "failed"]);
+
+function getMusicDatasetState(name) {
+  const current = state.musicDatasets?.[name];
+  return current && typeof current === "object"
+    ? current
+    : { status: "idle", error: null, updatedAt: null };
+}
+
+function setMusicDatasetState(name, status, error = null) {
+  const allowed = new Set(["idle", "loading", "loaded", "empty", "failed", "stale"]);
+  const normalized = allowed.has(status) ? status : "failed";
+  if (!state.musicDatasets || typeof state.musicDatasets !== "object") {
+    state.musicDatasets = {};
+  }
+  state.musicDatasets[name] = {
+    status: normalized,
+    error: error ? toUserErrorMessage(error) : null,
+    updatedAt: MUSIC_DATASET_TERMINAL_STATES.has(normalized) ? Date.now() : getMusicDatasetState(name).updatedAt,
+  };
+  return state.musicDatasets[name];
+}
+
+function beginMusicDatasetLoad(name) {
+  const current = getMusicDatasetState(name);
+  const hasUsableData = current.status === "loaded" || current.status === "empty" || current.status === "stale";
+  return setMusicDatasetState(name, hasUsableData ? "stale" : "loading");
+}
+
+function completeMusicDatasetLoad(name, itemCount, { stale = false } = {}) {
+  const count = Math.max(0, Number(itemCount || 0));
+  return setMusicDatasetState(name, stale ? "stale" : (count > 0 ? "loaded" : "empty"));
+}
+
+function failMusicDatasetLoad(name, error) {
+  return setMusicDatasetState(name, "failed", error);
+}
+
+function musicDatasetCountLabel(name, count) {
+  const dataset = getMusicDatasetState(name);
+  if (dataset.status === "idle" || dataset.status === "loading") return "—";
+  if (dataset.status === "failed") return "!";
+  return String(Math.max(0, Number(count || 0)));
+}
+
+function musicDatasetEmptyMessage(name, emptyMessage) {
+  const dataset = getMusicDatasetState(name);
+  if (dataset.status === "idle" || dataset.status === "loading") return "Loading…";
+  if (dataset.status === "stale") return "Refreshing…";
+  if (dataset.status === "failed") return dataset.error ? `Unavailable: ${dataset.error}` : "Temporarily unavailable.";
+  return emptyMessage;
+}
+
 async function loadMusicPlayerView() {
   const messageEl = $("#music-player-message");
   if (messageEl) {
     setInlineStatus(messageEl, { kind: "info", message: "Loading music player…" });
   }
+  const refreshLanding = () => {
+    if (state.currentPage === "music" && String(state.musicSection || "browse") === "browse") {
+      renderMusicLanding();
+    }
+  };
+  const trackedRequest = (name, promise, applyPayload) => {
+    beginMusicDatasetLoad(name);
+    return promise.then((payload) => {
+      applyPayload(payload);
+      return payload;
+    }).catch((error) => {
+      failMusicDatasetLoad(name, error);
+      renderMusicPlayerLibrary();
+      renderMusicPlayerHistory();
+      renderMusicPlayerPlaylistsView();
+      renderMusicPlayerStations();
+      renderMusicPlayerCommunityCache();
+      refreshLanding();
+      throw error;
+    });
+  };
+  const requests = [
+    trackedRequest("library", fetchJson("/api/player/library"), (payload) => {
+      state.playerLibrary = Array.isArray(payload?.items) ? payload.items : [];
+      completeMusicDatasetLoad("library", state.playerLibrary.length, {
+        stale: String(payload?.index_state?.status || "ready") !== "ready",
+      });
+      renderMusicPlayerLibrary();
+      renderMusicPlayerQueue();
+    }),
+    trackedRequest("summary", fetchJson("/api/player/library/summary"), (payload) => {
+      state.playerLibrarySummary = (payload?.summary && typeof payload.summary === "object")
+        ? payload.summary
+        : { artists: [], albums: [], tracks: [] };
+      const indexStatus = String(payload?.index_state?.status || "ready");
+      completeMusicDatasetLoad("summary", state.playerLibrarySummary.tracks?.length || 0, {
+        stale: indexStatus !== "ready",
+      });
+      renderMusicPlayerLibrary();
+      refreshLanding();
+      if (indexStatus !== "ready" && !state.musicLibraryIndexRefreshTimer) {
+        if (messageEl) {
+          setInlineStatus(messageEl, { kind: "info", message: "Indexing music library…" });
+        }
+        state.musicLibraryIndexRefreshTimer = window.setTimeout(() => {
+          state.musicLibraryIndexRefreshTimer = null;
+          loadMusicPlayerView().catch(() => {});
+        }, 1200);
+      }
+    }),
+    trackedRequest("stations", fetchJson("/api/player/stations"), (payload) => {
+      state.playerStations = Array.isArray(payload?.stations) ? payload.stations : [];
+      completeMusicDatasetLoad("stations", state.playerStations.length);
+      renderMusicPlayerStations();
+    }),
+    trackedRequest("history", fetchJson("/api/player/history"), (payload) => {
+      const history = Array.isArray(payload?.history) ? payload.history : [];
+      state.playerMissingHistory = history.filter((item) => !!item?.is_missing_local);
+      state.playerHistory = history.filter((item) => !item?.is_missing_local);
+      completeMusicDatasetLoad("history", state.playerHistory.length);
+      renderMusicPlayerHistory();
+      refreshLanding();
+    }),
+    trackedRequest("playlists", fetchJson("/api/player/playlists"), (payload) => {
+      state.playerPlaylists = Array.isArray(payload?.playlists) ? payload.playlists : [];
+      completeMusicDatasetLoad("playlists", state.playerPlaylists.length);
+      renderMusicPlayerPlaylistsView();
+    }),
+    trackedRequest("community", fetchJson("/api/player/community-cache"), (payload) => {
+      state.playerCommunityCache = Array.isArray(payload?.items) ? payload.items : [];
+      completeMusicDatasetLoad("community", state.playerCommunityCache.length);
+      renderMusicPlayerCommunityCache();
+    }),
+    trackedRequest("favorites", fetchJson("/api/music/preferences"), (payload) => {
+      syncMusicPreferencesFromConfig({ music_preferences: payload || {} });
+      completeMusicDatasetLoad(
+        "favorites",
+        state.musicPreferences.favorite_artists.length + state.musicPreferences.favorite_genres.length
+      );
+      renderMusicPlayerLibrary();
+      renderMusicPlayerHistory();
+      refreshLanding();
+    }),
+  ];
   try {
-    const [libraryPayload, librarySummaryPayload, stationsPayload, historyPayload, playlistsPayload, communityPayload] = await Promise.all([
-      fetchJson("/api/player/library"),
-      fetchJson("/api/player/library/summary"),
-      fetchJson("/api/player/stations"),
-      fetchJson("/api/player/history"),
-      fetchJson("/api/player/playlists"),
-      fetchJson("/api/player/community-cache"),
-    ]);
-    state.playerLibrary = Array.isArray(libraryPayload?.items) ? libraryPayload.items : [];
-    state.playerLibrarySummary = (librarySummaryPayload?.summary && typeof librarySummaryPayload.summary === "object")
-      ? librarySummaryPayload.summary
-      : { artists: [], albums: [], tracks: [] };
-    state.playerStations = Array.isArray(stationsPayload?.stations) ? stationsPayload.stations : [];
+    const results = await Promise.allSettled(requests);
     if (Number(state.playerActiveStationId || 0) && !state.playerStations.some((entry) => Number(entry?.id || 0) === Number(state.playerActiveStationId || 0))) {
       clearActiveStationPlayback();
     }
@@ -6110,11 +6247,6 @@ async function loadMusicPlayerView() {
       const activeStation = state.playerStations.find((entry) => Number(entry?.id || 0) === Number(state.playerActiveStationId || 0)) || null;
       state.playerActiveStationRuntime = activeStation?.runtime || state.playerActiveStationRuntime;
     }
-    state.playerCommunityCache = Array.isArray(communityPayload?.items) ? communityPayload.items : [];
-    state.playerHistory = Array.isArray(historyPayload?.history) ? historyPayload.history : [];
-    state.playerMissingHistory = state.playerHistory.filter((item) => !!item?.is_missing_local);
-    state.playerHistory = state.playerHistory.filter((item) => !item?.is_missing_local);
-    state.playerPlaylists = Array.isArray(playlistsPayload?.playlists) ? playlistsPayload.playlists : [];
     if (!state.playerSelectedPlaylistId && state.playerPlaylists[0]) {
       state.playerSelectedPlaylistId = Number(state.playerPlaylists[0].id || 0) || null;
     }
@@ -6135,7 +6267,12 @@ async function loadMusicPlayerView() {
     syncBottomPlayerShell();
     syncMusicPlayerVideoShell();
     if (messageEl) {
-      setInlineStatus(messageEl, { kind: "info", message: "" });
+      const failedCount = results.filter((result) => result.status === "rejected").length;
+      setInlineStatus(messageEl, failedCount
+        ? { kind: "warning", message: `Music player loaded with ${failedCount} unavailable section${failedCount === 1 ? "" : "s"}.` }
+        : (state.musicLibraryIndexRefreshTimer
+          ? { kind: "info", message: "Indexing music library…" }
+          : { kind: "info", message: "" }));
     }
   } catch (err) {
     if (messageEl) {
@@ -8979,16 +9116,21 @@ async function loadMusicLibrarySection({ force = false } = {}) {
     renderMusicLibrarySection();
     return;
   }
+  beginMusicDatasetLoad("summary");
   setMediaLibraryNotice(messageEl, "Loading music library…", false);
   try {
     const data = await fetchJson("/api/player/library/summary?limit=2000");
     state.playerLibrarySummary = (data?.summary && typeof data.summary === "object")
       ? data.summary
       : { artists: [], albums: [], tracks: [] };
+    completeMusicDatasetLoad("summary", state.playerLibrarySummary.tracks?.length || 0, {
+      stale: String(data?.index_state?.status || "ready") !== "ready",
+    });
     state.musicLibraryLoaded = true;
     renderMusicLibrarySection();
     setMediaLibraryNotice(messageEl, "", false);
   } catch (err) {
+    failMusicDatasetLoad("summary", err);
     setMediaLibraryNotice(messageEl, `Music library failed to load: ${toUserErrorMessage(err)}`, true);
   }
 }
@@ -12948,6 +13090,9 @@ function normalizeMusicPreferences(payload = {}) {
 function syncMusicPreferencesFromConfig(cfg = {}) {
   const next = normalizeMusicPreferences(cfg?.music_preferences || {});
   state.musicPreferences = next;
+  if (typeof completeMusicDatasetLoad === "function") {
+    completeMusicDatasetLoad("favorites", next.favorite_artists.length + next.favorite_genres.length);
+  }
   if (state.config && typeof state.config === "object") {
     state.config.music_preferences = next;
   }
@@ -13955,15 +14100,15 @@ function renderMusicLanding() {
     </div>
     <div class="music-home-summary">
       <div class="music-home-summary-pill">
-        <span class="music-home-summary-value">${libraryAlbums.length}</span>
+        <span class="music-home-summary-value">${musicDatasetCountLabel("summary", libraryAlbums.length)}</span>
         <span class="music-home-summary-label">Albums in library</span>
       </div>
       <div class="music-home-summary-pill">
-        <span class="music-home-summary-value">${visibleFavoriteArtists.length}</span>
+        <span class="music-home-summary-value">${musicDatasetCountLabel("favorites", visibleFavoriteArtists.length)}</span>
         <span class="music-home-summary-label">Favorite artists</span>
       </div>
       <div class="music-home-summary-pill">
-        <span class="music-home-summary-value">${recentTracks.length}</span>
+        <span class="music-home-summary-value">${musicDatasetCountLabel("history", recentTracks.length)}</span>
         <span class="music-home-summary-label">Recent plays</span>
       </div>
     </div>

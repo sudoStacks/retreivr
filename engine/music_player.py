@@ -12,6 +12,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 from typing import Any
 
+from library.music_index import list_indexed_music
+
 from engine.musicbrainz_binding import search_artists_by_genre
 
 try:
@@ -826,7 +828,10 @@ def _fetch_resolution_candidates(conn: sqlite3.Connection, terms: list[str], *, 
 
 
 def _station_context(conn: sqlite3.Connection, config: dict[str, Any], station: dict[str, Any]) -> dict[str, Any]:
-    summary = summarize_library(scan_local_library(config, limit=1200))
+    database_row = conn.execute("PRAGMA database_list").fetchone()
+    database_path = str(database_row[2] if database_row and len(database_row) > 2 else "").strip()
+    indexed_items = list_indexed_music(database_path, limit=1200) if database_path else []
+    summary = summarize_library(indexed_items)
     history = _fetch_history(conn, limit=120)
     prefs = _normalized_music_preferences(config)
     favorite_artist_names = [str(entry.get("name") or "").strip() for entry in prefs.get("favorite_artists", []) if str(entry.get("name") or "").strip()]

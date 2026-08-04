@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.2 — Music Responsiveness and Runtime Stability
+
+### Added
+- Persistent SQLite-backed Music library index for fast artist, album, and track browsing without filesystem traversal during page requests.
+- Background Music index refresh at startup and at bounded intervals, with stale-index signaling after completed music downloads and automatic refresh after reconciliation or applied tag repair.
+- Dedicated health contracts: constant-time `/health/live`, dependency-aware `/health/ready`, and diagnostic `/health/details`; `/health` remains a compatibility alias for liveness monitors.
+- Explicit Music dataset states for Library, Summary, Favorites, Recent Plays, Stations, Playlists, and Community matches: loading, loaded, empty, failed, and stale.
+- Regression enforcement that prevents synchronous FastAPI handlers from being introduced as false-async routes.
+
+### Changed
+- Music library and radio/station reads now use the persistent index instead of rescanning local or mounted storage.
+- Music landing and player datasets load independently, allowing Favorites and Recent Plays to render without waiting for library indexing or unrelated services.
+- Blocking setup, service-health, ARR, Music, video-library, file-browsing, and maintenance routes now execute in FastAPI's worker pool instead of occupying the event loop.
+- Concurrent Music index rebuilds are deduplicated, while the last completed index remains available for browsing.
+- Release and deployment metadata now consistently target `v1.1.2`.
+
+### Fixed
+- Prevented cold or remote library scans from freezing the API event loop and causing watchdog false positives.
+- Prevented unloaded or failed Favorites and Recent Plays requests from being displayed as legitimate zero counts.
+- Prevented one failed Music dataset request from blanking otherwise available player sections.
+- Corrected Music index refresh behavior following downloads, reconciliation, and tag repairs.
+- Updated the runtime community-publish contract test to use valid MusicBrainz identifiers required by the hardened public dataset schema.
+
 ## v1.1.1 — Release Metadata Correction
 
 ### Fixed

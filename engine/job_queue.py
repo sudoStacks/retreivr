@@ -45,6 +45,7 @@ except Exception:  # pragma: no cover - optional in tests with stubbed metadata.
     process_metadata_now = None
 from metadata.services.musicbrainz_service import get_musicbrainz_service
 from library.provenance import build_file_provenance, get_retreivr_version
+from library.music_index import mark_music_library_index_stale
 from library.review_queue import record_completed_review_item
 
 try:
@@ -9014,6 +9015,11 @@ def record_download_history(db_path, job, filepath, *, meta=None):
         conn.commit()
     finally:
         conn.close()
+    if os.path.splitext(str(filepath))[1].lower() in {".mp3", ".m4a", ".flac", ".ogg", ".oga", ".opus", ".wav", ".aac", ".alac", ".wma"}:
+        try:
+            mark_music_library_index_stale(db_path)
+        except Exception:
+            logger.warning("Failed to mark music library index stale", exc_info=True)
 
 
 def extract_video_id(url):

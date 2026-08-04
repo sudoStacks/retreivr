@@ -242,6 +242,12 @@ from engine.import_pipeline import (
 )
 from engine.import_m3u_builder import resolve_import_playlist_root, write_import_m3u_from_batch
 from library.reconcile import reconcile_library
+from library.music_index import (
+    ensure_music_library_index,
+    get_music_library_index_state,
+    list_indexed_music,
+    rebuild_music_library_index,
+)
 from library.provenance import get_retreivr_version
 from library.review_queue import (
     REVIEW_STATUS_PENDING,
@@ -3346,6 +3352,44 @@ async def webui_cache_control_middleware(request: Request, call_next):
     return response
 
 
+MUSIC_LIBRARY_INDEX_JOB_ID = "music_library_index_refresh"
+MUSIC_LIBRARY_INDEX_INTERVAL_MINUTES = 5
+
+
+def _refresh_music_library_index() -> dict[str, Any]:
+    lock = getattr(app.state, "music_library_index_lock", None)
+    if lock is None or not lock.acquire(blocking=False):
+        return {"status": "already_running"}
+    try:
+        config = get_loaded_config()
+        result = rebuild_music_library_index(
+            app.state.paths.db_path,
+            config if isinstance(config, dict) else {},
+            scanner=scan_local_library,
+        )
+        logging.info("Music library index refreshed: %s", safe_json_dumps(result))
+        return result
+    except Exception as exc:
+        logging.exception("Music library index refresh failed")
+        return {"status": "error", "error": str(exc)}
+    finally:
+        lock.release()
+
+
+def _music_library_index_tick() -> None:
+    _refresh_music_library_index()
+
+
+def _ensure_music_library_index_refresh_task() -> bool:
+    task = getattr(app.state, "music_library_index_manual_task", None)
+    if task is not None and not task.done():
+        return False
+    app.state.music_library_index_manual_task = asyncio.create_task(
+        anyio.to_thread.run_sync(_refresh_music_library_index)
+    )
+    return True
+
+
 @app.on_event("startup")
 async def startup():
     _log_transition("APP_STARTUP", phase="begin")
@@ -3374,6 +3418,8 @@ async def startup():
     app.state.ytdlp_update_lock = threading.Lock()
     app.state.ytdlp_update_running = False
     app.state.cancel_requested = False
+    app.state.music_library_index_lock = threading.Lock()
+    app.state.music_library_index_startup_task = None
     app.state.scheduler = BackgroundScheduler(timezone="UTC")
     app.state.watch_config_cache = None
     app.state.was_in_downtime = False
@@ -3447,6 +3493,7 @@ async def startup():
         _ensure_run_summary_dispatch_table(_conn)
         _ensure_music_artwork_cache_table(_conn)
         ensure_music_player_tables(_conn)
+        ensure_music_library_index(_conn)
     _ensure_watch_tables(app.state.paths.db_path)
     app.state.search_db_path = resolve_search_db_path(app.state.paths.db_path, startup_cfg)
     logging.info("Search DB path: %s", app.state.search_db_path)
@@ -3471,6 +3518,18 @@ async def startup():
     app.state.search_service.request_overrides = app.state.search_request_overrides
     # Ensure search DB schema exists before any read operations.
     SearchJobStore(app.state.search_db_path).ensure_schema()
+    app.state.music_library_index_startup_task = asyncio.create_task(
+        anyio.to_thread.run_sync(_refresh_music_library_index)
+    )
+    app.state.scheduler.add_job(
+        _music_library_index_tick,
+        trigger=IntervalTrigger(minutes=MUSIC_LIBRARY_INDEX_INTERVAL_MINUTES),
+        id=MUSIC_LIBRARY_INDEX_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=60,
+    )
     json_sanity_check()
     if os.environ.get("RETREIVR_DIAG", "").strip().lower() in {"1", "true", "yes"}:
         diag_url = os.environ.get("RETREIVR_DIAG_URL", "https://youtu.be/PmtGDk0c-JM")
@@ -7349,7 +7408,7 @@ def _acoustid_runtime_status(config: dict | None) -> dict[str, object]:
 
 
 @app.get("/api/status")
-async def api_status():
+def api_status():
     status = get_status(app.state.status)
     last_path = status.pop("last_completed_path", None)
     status["last_completed_file_id"] = _file_id_from_path(last_path) if last_path else None
@@ -7453,12 +7512,12 @@ async def api_status():
 
 
 @app.get("/api/schedule")
-async def api_get_schedule():
+def api_get_schedule():
     return _schedule_response()
 
 
 @app.post("/api/schedule")
-async def api_update_schedule(payload: ScheduleRequest):
+def api_update_schedule(payload: ScheduleRequest):
     config = _read_config_or_404()
     current = _merge_schedule_config(config.get("schedule"))
     updates = payload.dict(exclude_unset=True)
@@ -7499,7 +7558,7 @@ async def api_update_schedule(payload: ScheduleRequest):
 
 
 @app.get("/api/metrics")
-async def api_metrics():
+def api_metrics():
     files_count, bytes_count = _downloads_metrics(DOWNLOADS_DIR)
     disk = _disk_usage(DOWNLOADS_DIR)
     return {
@@ -7517,12 +7576,12 @@ async def api_metrics():
 
 
 @app.get("/api/version")
-async def api_version():
+def api_version():
     return get_runtime_info()
 
 
 @app.get("/api/version/latest")
-async def api_version_latest():
+def api_version_latest():
     runtime = get_runtime_info() or {}
     latest_tag, source = _resolve_latest_version_tag()
     current = str(runtime.get("app_version") or "").strip()
@@ -7541,7 +7600,7 @@ async def api_version_latest():
 
 
 @app.get("/resolve/recording/{mbid}")
-async def resolution_api_resolve_recording(mbid: str):
+def resolution_api_resolve_recording(mbid: str):
     payload = resolve_resolution_recording(app.state.search_db_path, mbid)
     if str(((payload.get("availability") or {}).get("status") or "")).strip() == "not_found":
         try:
@@ -7557,7 +7616,7 @@ async def resolution_api_resolve_recording(mbid: str):
 
 
 @app.post("/resolve/bulk")
-async def resolution_api_resolve_bulk(payload: ResolutionBulkRequest):
+def resolution_api_resolve_bulk(payload: ResolutionBulkRequest):
     result = resolve_resolution_bulk(app.state.search_db_path, list(payload.mbids or []))
     for item in result.get("results") if isinstance(result.get("results"), list) else []:
         if str((((item.get("availability") or {}).get("status")) or "")).strip() != "not_found":
@@ -7575,19 +7634,19 @@ async def resolution_api_resolve_bulk(payload: ResolutionBulkRequest):
 
 
 @app.get("/resolve/snapshot")
-async def resolution_api_snapshot(limit: int = Query(500, ge=1, le=5000)):
+def resolution_api_snapshot(limit: int = Query(500, ge=1, le=5000)):
     payload = build_resolution_snapshot(app.state.search_db_path, limit=limit)
     return safe_json(payload)
 
 
 @app.get("/resolve/diff")
-async def resolution_api_diff(since: str = Query(...), limit: int = Query(500, ge=1, le=5000)):
+def resolution_api_diff(since: str = Query(...), limit: int = Query(500, ge=1, le=5000)):
     payload = build_resolution_diff(app.state.search_db_path, since=since, limit=limit)
     return safe_json(payload)
 
 
 @app.post("/submit", status_code=202)
-async def resolution_api_submit(payload: ResolutionSubmitRequest, request: Request):
+def resolution_api_submit(payload: ResolutionSubmitRequest, request: Request):
     cfg = get_loaded_config() or {}
     try:
         auth = resolve_node_auth(
@@ -7621,7 +7680,7 @@ async def resolution_api_submit(payload: ResolutionSubmitRequest, request: Reque
 
 
 @app.post("/verify")
-async def resolution_api_verify(payload: ResolutionVerifyRequest, request: Request):
+def resolution_api_verify(payload: ResolutionVerifyRequest, request: Request):
     cfg = get_loaded_config() or {}
     try:
         auth = resolve_node_auth(
@@ -7654,15 +7713,72 @@ async def resolution_api_verify(payload: ResolutionVerifyRequest, request: Reque
 
 
 @app.get("/stats")
-async def resolution_api_stats():
+def resolution_api_stats():
     payload = build_resolution_stats(app.state.search_db_path)
     return safe_json(payload)
 
 
+def _readiness_snapshot() -> dict[str, Any]:
+    checks: dict[str, dict[str, Any]] = {}
+    try:
+        with sqlite3.connect(app.state.paths.db_path, timeout=2) as conn:
+            conn.execute("PRAGMA busy_timeout=2000")
+            conn.execute("SELECT 1").fetchone()
+        checks["main_database"] = {"status": "ok"}
+    except Exception as exc:
+        checks["main_database"] = {"status": "error", "error": str(exc)[:300]}
+    try:
+        resolution = build_resolution_health(app.state.search_db_path)
+        checks["resolution_database"] = {
+            "status": str(resolution.get("status") or "unknown"),
+            "stats": resolution.get("stats") or {},
+        }
+    except Exception as exc:
+        checks["resolution_database"] = {"status": "error", "error": str(exc)[:300]}
+    try:
+        index_state = get_music_library_index_state(app.state.paths.db_path)
+        index_status = str(index_state.get("status") or "unknown")
+        checks["music_library_index"] = {
+            **index_state,
+            "status": "ok" if index_status in {"ready", "building", "stale"} else index_status,
+            "index_status": index_status,
+        }
+    except Exception as exc:
+        checks["music_library_index"] = {"status": "error", "error": str(exc)[:300]}
+    worker = getattr(app.state, "worker_thread", None)
+    checks["download_worker"] = {"status": "ok" if worker is not None and worker.is_alive() else "error"}
+    scheduler = getattr(app.state, "scheduler", None)
+    checks["scheduler"] = {"status": "ok" if scheduler is not None and scheduler.running else "error"}
+    blocking = [name for name, check in checks.items() if str(check.get("status")) == "error"]
+    return {
+        "schema_version": 1,
+        "status": "ready" if not blocking else "not_ready",
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+        "blocking_checks": blocking,
+    }
+
+
 @app.get("/health")
-async def resolution_api_health():
-    payload = build_resolution_health(app.state.search_db_path)
-    return safe_json(payload)
+@app.get("/health/live")
+async def api_health_live():
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "service": "retreivr",
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/health/ready")
+async def api_health_ready():
+    payload = await anyio.to_thread.run_sync(_readiness_snapshot)
+    return JSONResponse(content=safe_json(payload), status_code=200 if payload["status"] == "ready" else 503)
+
+
+@app.get("/health/details")
+async def api_health_details():
+    return safe_json(await anyio.to_thread.run_sync(_readiness_snapshot))
 
 
 @app.post("/api/yt-dlp/update")
@@ -7689,7 +7805,7 @@ async def api_update_ytdlp():
 
 
 @app.get("/api/paths")
-async def api_paths():
+def api_paths():
     import pathlib
     host_browse_start = ""
     if os.path.isdir("/hostfs"):
@@ -7713,7 +7829,7 @@ async def api_paths():
 
 
 @app.post("/api/oauth/start")
-async def api_oauth_start(payload: OAuthStartRequest):
+def api_oauth_start(payload: OAuthStartRequest):
     _purge_oauth_sessions()
     try:
         client_secret_file = resolve_dir(payload.client_secret, TOKENS_DIR)
@@ -7736,7 +7852,7 @@ async def api_oauth_start(payload: OAuthStartRequest):
 
 
 @app.post("/api/oauth/complete")
-async def api_oauth_complete(payload: OAuthCompleteRequest):
+def api_oauth_complete(payload: OAuthCompleteRequest):
     _purge_oauth_sessions()
     with _OAUTH_LOCK:
         session = _OAUTH_SESSIONS.pop(payload.session_id, None)
@@ -7769,12 +7885,12 @@ async def api_oauth_complete(payload: OAuthCompleteRequest):
 
 
 @app.get("/api/config/path")
-async def api_get_config_path():
+def api_get_config_path():
     return {"path": app.state.config_path}
 
 
 @app.put("/api/config/path")
-async def api_put_config_path(request: Request, payload: ConfigPathRequest):
+def api_put_config_path(request: Request, payload: ConfigPathRequest):
     _require_admin_session(request)
     path = payload.path.strip()
     if not path:
@@ -7898,7 +8014,7 @@ def _build_home_direct_resolve_payload(*, url: str, preview: dict, playlist_id: 
     return {"home_item": item, "home_candidates": [candidate]}
 
 @app.post("/api/direct-url/resolve")
-async def api_direct_url_resolve(request: DirectUrlResolveRequest):
+def api_direct_url_resolve(request: DirectUrlResolveRequest):
     url = request.url.strip() if request.url else ""
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
@@ -7950,7 +8066,7 @@ async def api_direct_url_resolve(request: DirectUrlResolveRequest):
     return safe_json({"result_type": "home_result", "preview": preview, **payload})
 
 @app.post("/api/cancel")
-async def api_cancel():
+def api_cancel():
     logging.info("Cancel requested by user")
     store = DownloadJobStore(app.state.paths.db_path)
     store.cancel_active_jobs(reason="cancel_requested")
@@ -7970,12 +8086,12 @@ async def api_cancel():
 
 
 @app.get("/api/logs", response_class=PlainTextResponse)
-async def api_logs(lines: int = Query(200, ge=1, le=5000)):
+def api_logs(lines: int = Query(200, ge=1, le=5000)):
     return _tail_lines(app.state.log_path, lines)
 
 
 @app.post("/api/search/requests")
-async def create_search_request(request: dict = Body(...)):
+def create_search_request(request: dict = Body(...)):
     service = app.state.search_service
     raw_payload = request if isinstance(request, dict) else {}
     enabled_sources = list(getattr(service, "adapters", {}).keys())
@@ -8136,7 +8252,7 @@ async def import_playlist(
 
 
 @app.get("/api/import/playlist/jobs/{job_id}")
-async def get_import_playlist_job(job_id: str):
+def get_import_playlist_job(job_id: str):
     normalized = str(job_id or "").strip()
     if not normalized:
         raise HTTPException(status_code=400, detail="job_id_required")
@@ -8157,7 +8273,7 @@ async def get_import_playlist_job(job_id: str):
 
 
 @app.post("/api/import/playlist/{batch_id}/finalize")
-async def finalize_import_playlist(batch_id: str, payload: dict = Body(default=None)):
+def finalize_import_playlist(batch_id: str, payload: dict = Body(default=None)):
     import_batch_id = str(batch_id or "").strip()
     if not import_batch_id:
         raise HTTPException(status_code=400, detail="import_batch_id_required")
@@ -8208,7 +8324,7 @@ async def execute_intent(payload: dict = Body(...)):
 
 
 @app.post("/api/intake", status_code=202)
-async def intake_external_package(payload: IntakeRequestPayload):
+def intake_external_package(payload: IntakeRequestPayload):
     """Accept a normalized acquisition package from external integrations."""
     adapter_payload, effective_media_type = _normalize_intake_payload(payload)
     result = _IntentQueueAdapter().enqueue(adapter_payload)
@@ -8225,7 +8341,7 @@ async def intake_external_package(payload: IntakeRequestPayload):
 
 
 @app.post("/api/intent/preview")
-async def preview_intent(payload: dict = Body(...)):
+def preview_intent(payload: dict = Body(...)):
     """Fetch metadata preview for supported intents (plumbing only)."""
     intent_raw = str((payload or {}).get("intent_type") or "").strip()
     identifier = str((payload or {}).get("identifier") or "").strip()
@@ -8280,7 +8396,7 @@ async def preview_intent(payload: dict = Body(...)):
 
 
 @app.get("/api/search/requests")
-async def list_search_requests(status: str | None = None, limit: int | None = None):
+def list_search_requests(status: str | None = None, limit: int | None = None):
     try:
         store = SearchJobStore(app.state.search_db_path)
         requests = store.list_requests(status=status, limit=limit)
@@ -8295,7 +8411,7 @@ async def list_search_requests(status: str | None = None, limit: int | None = No
 
 
 @app.get("/api/search/requests/{request_id}")
-async def get_search_request(request_id: str):
+def get_search_request(request_id: str):
     service = app.state.search_service
     result = service.get_search_request(request_id)
     if not result:
@@ -8308,7 +8424,7 @@ async def get_search_request(request_id: str):
 
 
 @app.post("/api/search/requests/{request_id}/cancel")
-async def cancel_search_request(request_id: str):
+def cancel_search_request(request_id: str):
     store = SearchJobStore(app.state.search_db_path)
     store.mark_request_cancelled(request_id)
     return {"ok": True, "request_id": request_id, "status": "cancelled"}
@@ -10118,12 +10234,12 @@ async def import_spotify_playlist(payload: SpotifyPlaylistImportPayload):
 
 
 @app.get("/api/spotify/playlists/status")
-async def spotify_playlist_status():
+def spotify_playlist_status():
     return {"statuses": app.state.spotify_import_status}
 
 
 @app.get("/api/spotify/oauth/connect")
-async def spotify_oauth_connect():
+def spotify_oauth_connect():
     """Build Spotify OAuth connect URL and store anti-CSRF state in memory."""
     config = _read_config_or_404()
     spotify_cfg = (config.get("spotify") or {}) if isinstance(config, dict) else {}
@@ -10156,7 +10272,7 @@ async def spotify_oauth_connect():
 
 
 @app.get("/api/spotify/oauth/status")
-async def spotify_oauth_status():
+def spotify_oauth_status():
     """Return Spotify OAuth connection status without exposing sensitive tokens."""
     store = SpotifyOAuthStore(Path(app.state.paths.db_path))
     token = store.load()
@@ -10293,7 +10409,7 @@ async def spotify_oauth_callback(code: str | None = None, state: str | None = No
 
 
 @app.post("/api/spotify/oauth/disconnect")
-async def spotify_oauth_disconnect():
+def spotify_oauth_disconnect():
     """Clear stored Spotify OAuth token state."""
     store = SpotifyOAuthStore(Path(app.state.paths.db_path))
     store.clear()
@@ -10301,7 +10417,7 @@ async def spotify_oauth_disconnect():
 
 
 @app.get("/api/search/items/{item_id}/candidates")
-async def get_search_candidates(item_id: str):
+def get_search_candidates(item_id: str):
     service = app.state.search_service
     candidates = service.list_item_candidates(item_id)
     return JSONResponse(
@@ -10311,7 +10427,7 @@ async def get_search_candidates(item_id: str):
 
 
 @app.get("/api/search/sources")
-async def get_search_sources():
+def get_search_sources():
     service = app.state.search_service
     adapters = getattr(service, "adapters", {}) or {}
     keys = [str(key).strip() for key in adapters.keys() if str(key).strip()]
@@ -10689,7 +10805,7 @@ async def enqueue_search_candidate(item_id: str, payload: EnqueueCandidatePayloa
 
 
 @app.get("/api/download_jobs")
-async def list_download_jobs(limit: int = 100, status: str | None = None):
+def list_download_jobs(limit: int = 100, status: str | None = None):
     def _display_title(media_intent: str | None, url: str | None, output_template_raw: str | None) -> str:
         media_intent_value = str(media_intent or "").strip().lower()
         fallback = str(url or "").strip()
@@ -10819,7 +10935,7 @@ async def list_download_jobs(limit: int = 100, status: str | None = None):
 
 
 @app.post("/api/download_jobs/clear_failed")
-async def clear_failed_download_jobs():
+def clear_failed_download_jobs():
     conn = sqlite3.connect(app.state.paths.db_path)
     try:
         cur = conn.cursor()
@@ -10834,7 +10950,7 @@ async def clear_failed_download_jobs():
 
 
 @app.post("/api/download_jobs/cancel_active")
-async def cancel_active_download_jobs():
+def cancel_active_download_jobs():
     store = DownloadJobStore(app.state.paths.db_path)
     cancelled = int(
         store.cancel_jobs_by_statuses(
@@ -10847,14 +10963,14 @@ async def cancel_active_download_jobs():
 
 
 @app.post("/api/download_jobs/recover_stale")
-async def recover_stale_download_jobs():
+def recover_stale_download_jobs():
     store = DownloadJobStore(app.state.paths.db_path)
     result = store.recover_stale_jobs(reason="manual_stale_recovery")
     return safe_json(result if isinstance(result, dict) else {"recovered": 0, "job_ids": []})
 
 
 @app.post("/api/download_jobs/clear_queue")
-async def clear_pending_download_jobs():
+def clear_pending_download_jobs():
     store = DownloadJobStore(app.state.paths.db_path)
     deleted = int(
         store.clear_jobs_by_statuses(
@@ -10953,7 +11069,7 @@ def api_reject_review_queue(payload: ReviewQueueActionPayload):
 
 
 @app.get("/api/review_queue/{item_id}/preview")
-async def api_review_queue_preview(item_id: str, request: Request):
+def api_review_queue_preview(item_id: str, request: Request):
     item = get_review_queue_item(app.state.paths.db_path, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Review item not found")
@@ -10976,7 +11092,7 @@ async def api_review_queue_preview(item_id: str, request: Request):
 
 
 @app.get("/api/music/failures")
-async def list_music_failures(limit: int = Query(50, ge=1, le=500)):
+def list_music_failures(limit: int = Query(50, ge=1, le=500)):
     conn = sqlite3.connect(app.state.paths.db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -11023,7 +11139,7 @@ async def list_music_failures(limit: int = Query(50, ge=1, le=500)):
 
 
 @app.delete("/api/music/failures")
-async def delete_music_failures(
+def delete_music_failures(
     before: str | None = Query(None),
     keep_latest: int | None = Query(None, ge=0),
 ):
@@ -11062,7 +11178,7 @@ async def clear_music_failures_compat(
 
 
 @app.get("/api/config")
-async def api_get_config():
+def api_get_config():
     return _read_config_or_404()
 
 
@@ -11112,14 +11228,14 @@ async def api_put_config(request: Request, payload: dict = Body(...)):
 
 
 @app.get("/api/config/ui-preferences")
-async def api_get_ui_preferences():
+def api_get_ui_preferences():
     cfg = _current_loaded_config()
     prefs = cfg.get("ui_preferences") if isinstance(cfg.get("ui_preferences"), dict) else {}
     return safe_json(prefs)
 
 
 @app.put("/api/config/ui-preferences")
-async def api_put_ui_preferences(payload: dict = Body(...)):
+def api_put_ui_preferences(payload: dict = Body(...)):
     current = dict(_current_loaded_config() or _read_config_or_404())
     existing = current.get("ui_preferences") if isinstance(current.get("ui_preferences"), dict) else {}
     next_prefs = {**existing}
@@ -11144,13 +11260,13 @@ async def api_put_ui_preferences(payload: dict = Body(...)):
 
 
 @app.get("/api/admin/security/status")
-async def api_admin_security_status(request: Request):
+def api_admin_security_status(request: Request):
     cfg = _current_loaded_config()
     return safe_json(_admin_security_status(cfg, request=request))
 
 
 @app.post("/api/admin/pin/verify")
-async def api_admin_pin_verify(payload: dict = Body(...)):
+def api_admin_pin_verify(payload: dict = Body(...)):
     cfg = _current_loaded_config()
     security = _security_config(cfg)
     if not security.get("admin_pin_enabled"):
@@ -11163,7 +11279,7 @@ async def api_admin_pin_verify(payload: dict = Body(...)):
 
 
 @app.post("/api/admin/pin/configure")
-async def api_admin_pin_configure(request: Request, payload: dict = Body(...)):
+def api_admin_pin_configure(request: Request, payload: dict = Body(...)):
     cfg = dict(_current_loaded_config())
     security = _security_config(cfg)
     desired_enabled = bool(payload.get("admin_pin_enabled"))
@@ -11193,13 +11309,13 @@ async def api_admin_pin_configure(request: Request, payload: dict = Body(...)):
 
 
 @app.get("/api/setup/status")
-async def api_setup_status():
+def api_setup_status():
     cfg = _current_loaded_config()
     return safe_json({**_build_stack_payload(cfg), "security": _admin_security_status(cfg)})
 
 
 @app.post("/api/setup/managed/plan")
-async def api_setup_managed_plan(request: Request, payload: dict = Body(...)):
+def api_setup_managed_plan(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
     cfg = _current_loaded_config()
     plan = normalize_managed_plan(cfg, payload)
@@ -11228,7 +11344,7 @@ async def api_setup_managed_plan(request: Request, payload: dict = Body(...)):
 
 
 @app.post("/api/setup/managed/apply")
-async def api_setup_managed_apply(request: Request):
+def api_setup_managed_apply(request: Request):
     _require_admin_session(request)
     cfg = _current_loaded_config()
     setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
@@ -11376,7 +11492,7 @@ async def api_setup_managed_apply(request: Request):
 
 
 @app.get("/api/setup/managed/status")
-async def api_setup_managed_status():
+def api_setup_managed_status():
     cfg = _current_loaded_config()
     status = build_managed_status(cfg)
     setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
@@ -11413,7 +11529,7 @@ async def api_setup_managed_status():
 
 
 @app.post("/api/setup/managed/retry")
-async def api_setup_managed_retry(request: Request):
+def api_setup_managed_retry(request: Request):
     _require_admin_session(request)
     cfg = _current_loaded_config()
     setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
@@ -11477,7 +11593,7 @@ def _build_jellyfin_discovery_candidates(request: Request) -> list[tuple[str, st
 
 
 @app.get("/api/setup/jellyfin/discover")
-async def api_setup_jellyfin_discover(request: Request):
+def api_setup_jellyfin_discover(request: Request):
     _require_admin_session(request)
     suggestions: list[dict[str, Any]] = []
     for label, base_url in _build_jellyfin_discovery_candidates(request):
@@ -11497,7 +11613,7 @@ async def api_setup_jellyfin_discover(request: Request):
 
 
 @app.post("/api/setup/existing/discover")
-async def api_setup_existing_discover(request: Request, payload: dict = Body(...)):
+def api_setup_existing_discover(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
     normalized = normalize_existing_stack_payload(payload)
     discovered: dict[str, Any] = {}
@@ -11546,7 +11662,7 @@ async def api_setup_existing_discover(request: Request, payload: dict = Body(...
 
 
 @app.post("/api/setup/existing/connect")
-async def api_setup_existing_connect(request: Request, payload: dict = Body(...)):
+def api_setup_existing_connect(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
     normalized = normalize_existing_stack_payload(payload)
     key_discovery_policy = _key_discovery_policy(_current_loaded_config())
@@ -11626,7 +11742,7 @@ async def api_setup_existing_connect(request: Request, payload: dict = Body(...)
 
 
 @app.post("/api/setup/stack")
-async def api_setup_stack_update(request: Request, payload: dict = Body(...)):
+def api_setup_stack_update(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
     cfg = dict(_current_loaded_config())
     setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
@@ -11658,7 +11774,7 @@ async def api_setup_stack_update(request: Request, payload: dict = Body(...)):
 
 
 @app.get("/api/setup/command")
-async def api_setup_command():
+def api_setup_command():
     cfg = _current_loaded_config()
     stack = normalize_stack_config(cfg)
     summary = build_stack_apply_summary(cfg, stack)
@@ -11667,14 +11783,14 @@ async def api_setup_command():
 
 
 @app.get("/api/setup/preflight")
-async def api_setup_preflight():
+def api_setup_preflight():
     cfg = _current_loaded_config()
     stack = normalize_stack_config(cfg)
     return safe_json({"preflight": build_stack_preflight(cfg, stack, project_dir=str(_repo_root()))})
 
 
 @app.post("/api/setup/preflight")
-async def api_setup_preflight_with_draft(request: Request, payload: dict = Body(...)):
+def api_setup_preflight_with_draft(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
     cfg = _current_loaded_config()
     stack_payload = payload.get("stack") if isinstance(payload.get("stack"), dict) else {}
@@ -11683,7 +11799,7 @@ async def api_setup_preflight_with_draft(request: Request, payload: dict = Body(
 
 
 @app.post("/api/setup/apply-stack")
-async def api_setup_apply_stack(request: Request):
+def api_setup_apply_stack(request: Request):
     _require_admin_session(request)
     cfg = _current_loaded_config()
     stack = normalize_stack_config(cfg)
@@ -11716,13 +11832,13 @@ async def api_setup_apply_stack(request: Request):
 
 
 @app.get("/api/setup/key-discovery")
-async def api_setup_key_discovery_status():
+def api_setup_key_discovery_status():
     cfg = _current_loaded_config()
     return safe_json({"key_discovery": _key_discovery_policy(cfg)})
 
 
 @app.post("/api/setup/key-discovery")
-async def api_setup_key_discovery_update(request: Request, payload: dict = Body(...)):
+def api_setup_key_discovery_update(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
     cfg = dict(_current_loaded_config())
     setup_cfg = dict(cfg.get("setup") or {})
@@ -11752,7 +11868,7 @@ async def api_setup_key_discovery_update(request: Request, payload: dict = Body(
 
 
 @app.post("/api/setup/key-discovery/disable-clear")
-async def api_setup_key_discovery_disable_clear(request: Request):
+def api_setup_key_discovery_disable_clear(request: Request):
     _require_admin_session(request)
     cfg = dict(_current_loaded_config())
     arr_cfg = dict(cfg.get("arr") or {})
@@ -11784,7 +11900,7 @@ async def api_setup_key_discovery_disable_clear(request: Request):
 
 
 @app.get("/api/services/health")
-async def api_services_health():
+def api_services_health():
     services = _service_health_summary(_current_loaded_config())
     summary = {
         "connected": sum(1 for entry in services.values() if isinstance(entry, dict) and str(entry.get("state") or "").lower() == "connected"),
@@ -11796,7 +11912,7 @@ async def api_services_health():
 
 
 @app.post("/api/services/autoconfigure")
-async def api_services_autoconfigure(request: Request):
+def api_services_autoconfigure(request: Request):
     _require_admin_session(request)
     cfg = _current_loaded_config()
     services = auto_configure_services(cfg)
@@ -11810,19 +11926,24 @@ async def api_services_autoconfigure(request: Request):
 
 @app.get("/api/player/library")
 async def api_player_library(limit: int = Query(250, ge=1, le=1000)):
-    cfg = _current_loaded_config()
-    items = scan_local_library(cfg, limit=limit)
+    items = await anyio.to_thread.run_sync(
+        functools.partial(list_indexed_music, app.state.paths.db_path, limit=limit)
+    )
     for item in items:
         artwork_local_path = str(item.get("artwork_local_path") or "").strip()
         if artwork_local_path:
             item["artwork_url"] = f"/api/player/art/local?path={quote(artwork_local_path, safe='')}"
-    return safe_json({"items": items})
+    index_state = await anyio.to_thread.run_sync(get_music_library_index_state, app.state.paths.db_path)
+    if str(index_state.get("status") or "") in {"never_built", "stale", "error"}:
+        _ensure_music_library_index_refresh_task()
+    return safe_json({"items": items, "index_state": index_state})
 
 
 @app.get("/api/player/library/summary")
 async def api_player_library_summary(limit: int = Query(1000, ge=1, le=5000)):
-    cfg = _current_loaded_config()
-    items = scan_local_library(cfg, limit=limit)
+    items = await anyio.to_thread.run_sync(
+        functools.partial(list_indexed_music, app.state.paths.db_path, limit=limit)
+    )
     summary = summarize_library(items)
     for bucket in ("artists", "albums", "tracks"):
         values = summary.get(bucket)
@@ -11832,11 +11953,24 @@ async def api_player_library_summary(limit: int = Query(1000, ge=1, le=5000)):
             artwork_local_path = str(item.get("artwork_local_path") or "").strip()
             if artwork_local_path:
                 item["artwork_url"] = f"/api/player/art/local?path={quote(artwork_local_path, safe='')}"
-    return safe_json({"summary": summary})
+    index_state = await anyio.to_thread.run_sync(get_music_library_index_state, app.state.paths.db_path)
+    if str(index_state.get("status") or "") in {"never_built", "stale", "error"}:
+        _ensure_music_library_index_refresh_task()
+    return safe_json({"summary": summary, "index_state": index_state})
+
+
+@app.get("/api/player/library/index/status")
+async def api_player_library_index_status():
+    return safe_json(await anyio.to_thread.run_sync(get_music_library_index_state, app.state.paths.db_path))
+
+
+@app.post("/api/player/library/index/refresh", status_code=202)
+async def api_player_library_index_refresh():
+    return {"status": "started" if _ensure_music_library_index_refresh_task() else "already_running"}
 
 
 @app.post("/api/player/library/repair-tags")
-async def api_player_library_repair_tags(
+def api_player_library_repair_tags(
     limit: int = Query(500, ge=1, le=5000),
     dry_run: bool = Query(True),
     queue_review: bool = Query(False),
@@ -11849,11 +11983,13 @@ async def api_player_library_repair_tags(
         dry_run=dry_run,
         queue_review=queue_review,
     )
+    if not dry_run:
+        result["music_index"] = _refresh_music_library_index()
     return safe_json(result)
 
 
 @app.get("/api/player/stations")
-async def api_player_stations():
+def api_player_stations():
     cfg = _current_loaded_config()
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -11862,7 +11998,7 @@ async def api_player_stations():
 
 
 @app.post("/api/player/stations")
-async def api_player_create_station(payload: dict = Body(...)):
+def api_player_create_station(payload: dict = Body(...)):
     seed_type = str(payload.get("seed_type") or "artist").strip() or "artist"
     seed_value = str(payload.get("seed_value") or "").strip()
     if seed_type != "favorites" and not seed_value:
@@ -11878,14 +12014,14 @@ async def api_player_create_station(payload: dict = Body(...)):
 
 
 @app.delete("/api/player/stations/{station_id}")
-async def api_player_delete_station(station_id: int):
+def api_player_delete_station(station_id: int):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         delete_station(conn, station_id)
     return safe_json({"status": "deleted", "station_id": int(station_id)})
 
 
 @app.get("/api/player/stations/{station_id}")
-async def api_player_station_detail(station_id: int, preview_limit: int = Query(10, ge=1, le=24)):
+def api_player_station_detail(station_id: int, preview_limit: int = Query(10, ge=1, le=24)):
     cfg = _current_loaded_config()
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -11896,7 +12032,7 @@ async def api_player_station_detail(station_id: int, preview_limit: int = Query(
 
 
 @app.post("/api/player/stations/{station_id}/start")
-async def api_player_station_start(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
+def api_player_station_start(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
     cfg = _current_loaded_config()
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -11917,7 +12053,7 @@ async def api_player_station_start(station_id: int, queue_target: int = Query(ST
 
 
 @app.post("/api/player/stations/{station_id}/next")
-async def api_player_station_next(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
+def api_player_station_next(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
     cfg = _current_loaded_config()
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -11938,7 +12074,7 @@ async def api_player_station_next(station_id: int, queue_target: int = Query(STA
 
 
 @app.post("/api/player/stations/{station_id}/prime")
-async def api_player_station_prime(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
+def api_player_station_prime(station_id: int, queue_target: int = Query(STATION_TOTAL_TARGET, ge=6, le=40)):
     cfg = _current_loaded_config()
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -11952,7 +12088,7 @@ async def api_player_station_prime(station_id: int, queue_target: int = Query(ST
 
 
 @app.post("/api/player/stations/{station_id}/queue")
-async def api_player_station_queue(station_id: int, limit: int = Query(25, ge=1, le=100)):
+def api_player_station_queue(station_id: int, limit: int = Query(25, ge=1, le=100)):
     cfg = _current_loaded_config()
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -11964,7 +12100,7 @@ async def api_player_station_queue(station_id: int, limit: int = Query(25, ge=1,
 
 
 @app.get("/api/player/community-cache")
-async def api_player_community_cache(limit: int = Query(60, ge=1, le=120)):
+def api_player_community_cache(limit: int = Query(60, ge=1, le=120)):
     with sqlite3.connect(app.state.search_db_path) as conn:
         conn.row_factory = sqlite3.Row
         items = list_cached_matches(conn, limit=limit)
@@ -11973,6 +12109,10 @@ async def api_player_community_cache(limit: int = Query(60, ge=1, le=120)):
 
 @app.get("/api/player/history")
 async def api_player_history(limit: int = Query(50, ge=1, le=200)):
+    return await anyio.to_thread.run_sync(_player_history_payload, limit)
+
+
+def _player_history_payload(limit: int) -> dict[str, Any]:
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         history_rows = list_history(conn, limit=limit)
@@ -11987,7 +12127,7 @@ async def api_player_history(limit: int = Query(50, ge=1, le=200)):
 
 
 @app.delete("/api/player/history/{history_id}")
-async def api_player_history_delete(history_id: int):
+def api_player_history_delete(history_id: int):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         delete_history_entry(conn, history_id)
@@ -11995,7 +12135,7 @@ async def api_player_history_delete(history_id: int):
 
 
 @app.post("/api/player/history/{history_id}/redownload")
-async def api_player_history_redownload(history_id: int):
+def api_player_history_redownload(history_id: int):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         history_rows = list_history(conn, limit=500)
@@ -12023,7 +12163,7 @@ async def api_player_history_redownload(history_id: int):
 
 
 @app.get("/api/player/playlists")
-async def api_player_playlists():
+def api_player_playlists():
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         playlists = list_playlists(conn)
@@ -12031,7 +12171,7 @@ async def api_player_playlists():
 
 
 @app.post("/api/player/playlists")
-async def api_player_create_playlist(payload: dict = Body(...)):
+def api_player_create_playlist(payload: dict = Body(...)):
     name = str(payload.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail={"error": "name is required"})
@@ -12045,7 +12185,7 @@ async def api_player_create_playlist(payload: dict = Body(...)):
 
 
 @app.get("/api/player/playlists/{playlist_id}")
-async def api_player_playlist_detail(playlist_id: int):
+def api_player_playlist_detail(playlist_id: int):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         playlists = list_playlists(conn)
@@ -12057,7 +12197,7 @@ async def api_player_playlist_detail(playlist_id: int):
 
 
 @app.post("/api/player/playlists/{playlist_id}/items")
-async def api_player_playlist_add_item(playlist_id: int, payload: dict = Body(...)):
+def api_player_playlist_add_item(playlist_id: int, payload: dict = Body(...)):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         playlists = list_playlists(conn)
@@ -12069,7 +12209,7 @@ async def api_player_playlist_add_item(playlist_id: int, payload: dict = Body(..
 
 
 @app.delete("/api/player/playlists/{playlist_id}/items/{item_id}")
-async def api_player_playlist_delete_item(playlist_id: int, item_id: int):
+def api_player_playlist_delete_item(playlist_id: int, item_id: int):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         remove_playlist_item(conn, playlist_id, item_id)
@@ -12077,7 +12217,7 @@ async def api_player_playlist_delete_item(playlist_id: int, item_id: int):
 
 
 @app.post("/api/player/playlists/{playlist_id}/reorder")
-async def api_player_playlist_reorder(playlist_id: int, payload: dict = Body(...)):
+def api_player_playlist_reorder(playlist_id: int, payload: dict = Body(...)):
     ordered_ids = payload.get("item_ids")
     if not isinstance(ordered_ids, list):
         raise HTTPException(status_code=400, detail={"error": "item_ids must be a list"})
@@ -12088,7 +12228,7 @@ async def api_player_playlist_reorder(playlist_id: int, payload: dict = Body(...
 
 
 @app.delete("/api/player/playlists/{playlist_id}")
-async def api_player_delete_playlist(playlist_id: int):
+def api_player_delete_playlist(playlist_id: int):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         delete_playlist(conn, playlist_id)
@@ -12096,14 +12236,14 @@ async def api_player_delete_playlist(playlist_id: int):
 
 
 @app.post("/api/player/history")
-async def api_player_history_add(payload: dict = Body(...)):
+def api_player_history_add(payload: dict = Body(...)):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         add_history_entry(conn, payload)
     return safe_json({"status": "recorded"})
 
 
 @app.get("/api/player/stream/local")
-async def api_player_stream_local(path: str = Query(...)):
+def api_player_stream_local(path: str = Query(...)):
     cfg = _current_loaded_config()
     if not is_local_player_path_allowed(cfg, path, allowed_extensions=AUDIO_EXTENSIONS):
         raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
@@ -12114,7 +12254,7 @@ async def api_player_stream_local(path: str = Query(...)):
 
 
 @app.get("/api/player/art/local")
-async def api_player_art_local(path: str = Query(...)):
+def api_player_art_local(path: str = Query(...)):
     cfg = _current_loaded_config()
     art_cache_root = _local_art_cache_dir()
     if not is_local_player_path_allowed(cfg, path, allowed_extensions=IMAGE_EXTENSIONS, extra_roots=[art_cache_root]):
@@ -12471,12 +12611,12 @@ def _normalized_music_preferences(config: dict | None) -> dict:
 
 
 @app.get("/api/music/preferences")
-async def api_music_preferences_get():
+def api_music_preferences_get():
     return _normalized_music_preferences(_read_config_or_404())
 
 
 @app.put("/api/music/preferences")
-async def api_music_preferences_put(payload: dict = Body(...)):
+def api_music_preferences_put(payload: dict = Body(...)):
     current = _read_config_or_404()
     next_config = dict(current)
     next_config["music_preferences"] = _normalized_music_preferences({"music_preferences": payload})
@@ -12488,12 +12628,12 @@ async def api_music_preferences_put(payload: dict = Body(...)):
 
 
 @app.get("/api/arr/radarr/health")
-async def api_arr_radarr_health():
+def api_arr_radarr_health():
     return safe_json(test_radarr_connection(_current_loaded_config()))
 
 
 @app.get("/api/arr/sonarr/health")
-async def api_arr_sonarr_health():
+def api_arr_sonarr_health():
     return safe_json(test_sonarr_connection(_current_loaded_config()))
 
 
@@ -12564,7 +12704,7 @@ def _build_saved_titles_shelf(kind: str, *, limit: int) -> dict[str, Any]:
 
 
 @app.get("/api/arr/search/movies")
-async def api_arr_search_movies(
+def api_arr_search_movies(
     q: str = Query("", min_length=1),
     limit: int = Query(20, ge=1, le=50),
     year: int | None = Query(None, ge=1888, le=2100),
@@ -12744,7 +12884,7 @@ def api_books_import(
 
 
 @app.get("/api/arr/genres")
-async def api_arr_genres(kind: str = Query(...)):
+def api_arr_genres(kind: str = Query(...)):
     try:
         return safe_json({"kind": kind, "genres": get_tmdb_genres(_current_loaded_config(), kind)})
     except ArrServiceError as exc:
@@ -12752,7 +12892,7 @@ async def api_arr_genres(kind: str = Query(...)):
 
 
 @app.get("/api/arr/genre/browse")
-async def api_arr_genre_browse(
+def api_arr_genre_browse(
     kind: str = Query(...),
     genre_id: int = Query(...),
     limit: int = Query(24, ge=1, le=50),
@@ -12766,7 +12906,7 @@ async def api_arr_genre_browse(
 
 
 @app.get("/api/arr/editorial")
-async def api_arr_editorial(
+def api_arr_editorial(
     kind: str = Query(...),
     shelf: str = Query(...),
     limit: int = Query(12, ge=1, le=24),
@@ -12782,7 +12922,7 @@ async def api_arr_editorial(
 
 
 @app.get("/api/arr/editorial-sources")
-async def api_arr_editorial_sources():
+def api_arr_editorial_sources():
     try:
         return safe_json(get_arr_editorial_sources(_current_loaded_config()))
     except ArrServiceError as exc:
@@ -12790,7 +12930,7 @@ async def api_arr_editorial_sources():
 
 
 @app.get("/api/arr/editorial/shelves")
-async def api_arr_editorial_shelves(
+def api_arr_editorial_shelves(
     kind: str = Query(...),
 ):
     try:
@@ -12800,7 +12940,7 @@ async def api_arr_editorial_shelves(
 
 
 @app.get("/api/arr/editorial/shelf")
-async def api_arr_editorial_shelf(
+def api_arr_editorial_shelf(
     kind: str = Query(...),
     shelf: str = Query(...),
     limit: int = Query(12, ge=1, le=24),
@@ -12816,7 +12956,7 @@ async def api_arr_editorial_shelf(
 
 
 @app.get("/api/arr/search/tv")
-async def api_arr_search_tv(
+def api_arr_search_tv(
     q: str = Query("", min_length=1),
     limit: int = Query(20, ge=1, le=50),
     year: int | None = Query(None, ge=1888, le=2100),
@@ -12829,7 +12969,7 @@ async def api_arr_search_tv(
 
 
 @app.post("/api/arr/radarr/add")
-async def api_arr_add_movie(payload: dict = Body(...)):
+def api_arr_add_movie(payload: dict = Body(...)):
     try:
         tmdb_id = int(payload.get("tmdb_id"))
     except Exception:
@@ -12842,7 +12982,7 @@ async def api_arr_add_movie(payload: dict = Body(...)):
 
 
 @app.post("/api/arr/sonarr/add")
-async def api_arr_add_series(payload: dict = Body(...)):
+def api_arr_add_series(payload: dict = Body(...)):
     try:
         tmdb_id = int(payload.get("tmdb_id"))
     except Exception:
@@ -12855,7 +12995,7 @@ async def api_arr_add_series(payload: dict = Body(...)):
 
 
 @app.post("/api/arr/status/bulk")
-async def api_arr_status_bulk(payload: dict = Body(...)):
+def api_arr_status_bulk(payload: dict = Body(...)):
     kind = str(payload.get("kind") or "").strip().lower()
     tmdb_ids = payload.get("tmdb_ids")
     if not isinstance(tmdb_ids, list):
@@ -12868,13 +13008,13 @@ async def api_arr_status_bulk(payload: dict = Body(...)):
 
 
 @app.get("/api/arr/saved")
-async def api_arr_saved_titles(kind: str = Query(...), limit: int = Query(10, ge=1, le=24)):
+def api_arr_saved_titles(kind: str = Query(...), limit: int = Query(10, ge=1, le=24)):
     normalized_kind = _normalize_arr_saved_kind(kind)
     return safe_json(_build_saved_titles_shelf(normalized_kind, limit=limit))
 
 
 @app.post("/api/arr/saved/toggle")
-async def api_arr_saved_toggle(payload: dict = Body(...)):
+def api_arr_saved_toggle(payload: dict = Body(...)):
     normalized_kind = _normalize_arr_saved_kind(str(payload.get("kind") or ""))
     item = payload.get("item")
     if not isinstance(item, dict):
@@ -12898,7 +13038,7 @@ async def api_arr_saved_toggle(payload: dict = Body(...)):
 
 
 @app.get("/api/arr/trailer")
-async def api_arr_trailer(kind: str = Query(...), tmdb_id: int = Query(...)):
+def api_arr_trailer(kind: str = Query(...), tmdb_id: int = Query(...)):
     try:
         return safe_json(get_tmdb_trailer(_current_loaded_config(), kind, tmdb_id))
     except ArrServiceError as exc:
@@ -12906,7 +13046,7 @@ async def api_arr_trailer(kind: str = Query(...), tmdb_id: int = Query(...)):
 
 
 @app.get("/api/arr/cast")
-async def api_arr_cast(kind: str = Query(...), tmdb_id: int = Query(...), limit: int = Query(8, ge=1, le=20)):
+def api_arr_cast(kind: str = Query(...), tmdb_id: int = Query(...), limit: int = Query(8, ge=1, le=20)):
     try:
         return safe_json(get_tmdb_cast(_current_loaded_config(), kind, tmdb_id, limit=limit))
     except ArrServiceError as exc:
@@ -12914,7 +13054,7 @@ async def api_arr_cast(kind: str = Query(...), tmdb_id: int = Query(...), limit:
 
 
 @app.get("/api/arr/person")
-async def api_arr_person_titles(person_id: int = Query(...), kind: str = Query(...), limit: int = Query(24, ge=1, le=50)):
+def api_arr_person_titles(person_id: int = Query(...), kind: str = Query(...), limit: int = Query(24, ge=1, le=50)):
     try:
         payload = get_tmdb_person_titles(_current_loaded_config(), person_id, kind=kind, limit=limit)
         return safe_json(_attach_saved_titles_to_payload(payload, kind=kind))
@@ -12923,7 +13063,7 @@ async def api_arr_person_titles(person_id: int = Query(...), kind: str = Query(.
 
 
 @app.get("/api/community-cache/publish/status")
-async def api_community_cache_publish_status():
+def api_community_cache_publish_status():
     config = get_loaded_config() or _read_config_or_404()
     status = summarize_publish_runtime(
         config=config if isinstance(config, dict) else {},
@@ -12939,7 +13079,7 @@ async def api_community_cache_publish_status():
 
 
 @app.get("/api/music/long-term-retry/status")
-async def api_music_long_term_retry_status():
+def api_music_long_term_retry_status():
     worker_engine = getattr(app.state, "worker_engine", None)
     if worker_engine is None:
         raise HTTPException(status_code=503, detail="worker_engine_unavailable")
@@ -12960,7 +13100,7 @@ async def api_music_long_term_retry_status():
 
 
 @app.post("/api/music/long-term-retry/run")
-async def api_music_long_term_retry_run():
+def api_music_long_term_retry_run():
     worker_engine = getattr(app.state, "worker_engine", None)
     if worker_engine is None:
         raise HTTPException(status_code=503, detail="worker_engine_unavailable")
@@ -12974,7 +13114,7 @@ async def api_music_long_term_retry_run():
 
 
 @app.get("/api/community-cache/sync/status")
-async def api_community_cache_sync_status():
+def api_community_cache_sync_status():
     config = get_loaded_config() or _read_config_or_404()
     resolution_cfg = _resolution_config(config if isinstance(config, dict) else {})
     status = {
@@ -12991,7 +13131,7 @@ async def api_community_cache_sync_status():
 
 
 @app.post("/api/community-cache/publish/run", status_code=202)
-async def api_community_cache_publish_run():
+def api_community_cache_publish_run():
     worker = getattr(app.state, "community_publish_worker", None)
     if worker is None:
         raise HTTPException(status_code=503, detail="community_publish_worker_unavailable")
@@ -13006,7 +13146,7 @@ async def api_community_cache_publish_run():
 
 
 @app.post("/api/community-cache/sync/run", status_code=202)
-async def api_community_cache_sync_run():
+def api_community_cache_sync_run():
     config = get_loaded_config() or _read_config_or_404()
     resolution_cfg = _resolution_config(config if isinstance(config, dict) else {})
     if not str(resolution_cfg.get("upstream_base_url") or "").strip():
@@ -13020,7 +13160,7 @@ async def api_community_cache_sync_run():
 
 
 @app.post("/api/community-cache/publish/backfill", status_code=202)
-async def api_community_cache_publish_backfill(payload: dict | None = Body(default=None)):
+def api_community_cache_publish_backfill(payload: dict | None = Body(default=None)):
     options = payload if isinstance(payload, dict) else {}
     dry_run = bool(options.get("dry_run", False))
     limit = options.get("limit")
@@ -13050,11 +13190,15 @@ async def api_community_cache_publish_backfill(payload: dict | None = Body(defau
 @app.post("/api/library/reconcile")
 async def api_reconcile_library():
     config = _read_config_or_404()
-    summary = reconcile_library(
-        db_path=app.state.paths.db_path,
-        config=config if isinstance(config, dict) else {},
+    summary = await anyio.to_thread.run_sync(
+        functools.partial(
+            reconcile_library,
+            db_path=app.state.paths.db_path,
+            config=config if isinstance(config, dict) else {},
+        )
     )
-    return safe_json({"status": "completed", **summary})
+    index_summary = await anyio.to_thread.run_sync(_refresh_music_library_index)
+    return safe_json({"status": "completed", **summary, "music_index": index_summary})
 
 
 _VIDEO_LIBRARY_EXTENSIONS = {
@@ -13240,7 +13384,7 @@ def _list_video_library_items(db_path: str, *, limit: int = 24) -> list[dict[str
 
 
 @app.get("/api/history")
-async def api_history(
+def api_history(
     limit: int = Query(200, ge=1, le=5000),
     search: str | None = Query(None, max_length=200),
     playlist_id: str | None = Query(None, max_length=200),
@@ -13280,12 +13424,12 @@ async def api_history(
 
 
 @app.get("/api/library/videos")
-async def api_video_library(limit: int = Query(24, ge=1, le=200)):
+def api_video_library(limit: int = Query(24, ge=1, le=200)):
     return safe_json({"items": _list_video_library_items(app.state.paths.db_path, limit=limit)})
 
 
 @app.get("/api/library/videos/thumbnail")
-async def api_video_library_thumbnail(file_id: str = Query(..., min_length=1, max_length=1000)):
+def api_video_library_thumbnail(file_id: str = Query(..., min_length=1, max_length=1000)):
     try:
         rel = _decode_file_id(file_id)
     except (ValueError, UnicodeDecodeError, binascii.Error):
@@ -13311,7 +13455,7 @@ async def api_video_library_thumbnail(file_id: str = Query(..., min_length=1, ma
 
 
 @app.get("/api/files")
-async def api_files():
+def api_files():
     return _list_download_files(DOWNLOADS_DIR)
 
 
@@ -13333,7 +13477,7 @@ async def api_files_open_location(payload: FileLocationOpenRequest):
 
 
 @app.get("/api/files/{file_id}/download")
-async def api_file_download(file_id: str):
+def api_file_download(file_id: str):
     try:
         rel = _decode_file_id(file_id)
     except (ValueError, UnicodeDecodeError, binascii.Error):
@@ -13352,7 +13496,7 @@ async def api_file_download(file_id: str):
 
 
 @app.get("/api/files/{file_id}/stream")
-async def api_file_stream(file_id: str, request: Request):
+def api_file_stream(file_id: str, request: Request):
     try:
         rel = _decode_file_id(file_id)
     except (ValueError, UnicodeDecodeError, binascii.Error):
@@ -13373,7 +13517,7 @@ async def api_file_stream(file_id: str, request: Request):
 
 
 @app.get("/api/deliveries/{delivery_id}/download")
-async def api_delivery_download(delivery_id: str):
+def api_delivery_download(delivery_id: str):
     entry = _acquire_client_delivery(delivery_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Delivery not available")
@@ -13412,7 +13556,7 @@ async def api_delivery_download(delivery_id: str):
 
 
 @app.post("/api/cleanup")
-async def api_cleanup():
+def api_cleanup():
     paths = app.state.paths
     deleted_files = 0
     deleted_bytes = 0
@@ -13437,7 +13581,7 @@ async def api_cleanup():
 
 
 @app.get("/api/browse")
-async def api_browse(
+def api_browse(
     root: str = Query(..., description="Browse root key"),
     path: str = Query("", description="Relative path within the root"),
     mode: str = Query("dir", description="dir or file"),

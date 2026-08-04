@@ -4,6 +4,6 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "retreivr"
-version = "1.1.1"
+version = "1.1.2"
 requires-python = ">=3.11,<3.12"
 readme = "README.md"
