@@ -264,6 +264,27 @@ def test_reject_review_queue_item_deletes_quarantine_file(tmp_path: Path) -> Non
     assert rejected_item["status"] == review_queue.REVIEW_STATUS_REJECTED
     assert rejected_item["file_path"] is None
 
+    replacement = quarantine_root / "replacement.m4a"
+    replacement.parent.mkdir(parents=True, exist_ok=True)
+    replacement.write_bytes(b"replacement")
+    repeated = review_queue.record_completed_review_item(db_path, review_job, str(replacement), meta={"title": "Song"})
+    assert repeated["status"] == review_queue.REVIEW_STATUS_REJECTED
+    assert replacement.exists() is False
+
+
+def test_rejected_tag_repair_item_is_not_reopened_by_rescan(tmp_path: Path) -> None:
+    _, review_queue = _load_review_modules()
+    db_path = str(tmp_path / "db.sqlite")
+    file_path = tmp_path / "Music" / "Artist" / "Album" / "01 - Song.mp3"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(b"audio-data")
+
+    item = review_queue.record_tag_repair_review_item(db_path, str(file_path), proposed_tags={"title": "Song"})
+    assert review_queue.reject_review_queue_items(db_path, [item["id"]])["rejected"] == 1
+
+    repeated = review_queue.record_tag_repair_review_item(db_path, str(file_path), proposed_tags={"title": "Song"})
+    assert repeated["status"] == review_queue.REVIEW_STATUS_REJECTED
+
 
 def test_compact_review_queue_omits_heavy_payloads_but_keeps_render_metrics(tmp_path: Path) -> None:
     _, review_queue = _load_review_modules()

@@ -37,6 +37,70 @@ def test_build_stack_preflight_reports_port_conflicts(monkeypatch: pytest.Monkey
     assert preflight["checks"]["docker_compose"]["ok"] is True
 
 
+def test_build_stack_preflight_reports_managed_port_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
+    stack = {
+        "enable_arr_stack": True,
+        "enable_radarr": True,
+        "enable_vpn": True,
+    }
+    monkeypatch.setattr(stack_setup, "_docker_compose_available", lambda: (True, "ok"))
+    monkeypatch.setattr(stack_setup, "_resolve_compose_file", lambda _root: Path("/tmp/docker-compose.yml"))
+    monkeypatch.setattr(stack_setup, "_is_local_port_available", lambda _port: True)
+    monkeypatch.setattr(
+        stack_setup,
+        "PROFILE_HOST_PORTS",
+        {
+            "arr": [{"service": "radarr", "host_port": 7878, "container_port": 7878}],
+            "vpn": [{"service": "gluetun", "host_port": 7878, "container_port": 8080}],
+        },
+    )
+
+    preflight = stack_setup.build_stack_preflight({}, stack, project_dir="/tmp")
+
+    assert preflight["ok"] is False
+    assert any(item.get("type") == "port_overlap" and item.get("services") == ["radarr", "gluetun"] for item in preflight["conflicts"])
+
+
+def test_wireguard_config_is_preserved_exported_and_preflighted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "provider.conf"
+    config_path.write_text("[Interface]\nPrivateKey = secret\n", encoding="utf-8")
+    plan = stack_setup.normalize_managed_plan(
+        {},
+        {"vpn": True, "vpn_wireguard_config_path": str(config_path)},
+    )
+    configured = stack_setup.apply_managed_service_defaults({}, plan)
+    stack = dict(plan["stack"])
+
+    assert configured["arr"]["vpn"]["wireguard_config_path"] == str(config_path)
+    assert configured["arr"]["vpn"]["provider"] == "custom"
+    env = stack_setup.managed_env_values(configured, stack)
+    assert env["GLUETUN_WIREGUARD_CONFIG"] == str(config_path)
+    assert env["GLUETUN_VPN_TYPE"] == "wireguard"
+
+    monkeypatch.setattr(stack_setup, "_docker_compose_available", lambda: (True, "ok"))
+    monkeypatch.setattr(stack_setup, "_resolve_compose_file", lambda _root: Path("/tmp/docker-compose.yml"))
+    monkeypatch.setattr(stack_setup, "_is_local_port_available", lambda _port: True)
+    preflight = stack_setup.build_stack_preflight(configured, stack, project_dir=tmp_path)
+    assert preflight["ok"] is True
+    assert preflight["checks"]["wireguard_config"]["status"] == "ready"
+
+
+def test_wireguard_config_preflight_rejects_missing_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = {
+        "arr": {"vpn": {"wireguard_config_path": str(tmp_path / "missing.conf")}},
+        "setup": {"stack": {"enable_vpn": True}},
+    }
+    stack = stack_setup.normalize_stack_config(config)
+    monkeypatch.setattr(stack_setup, "_docker_compose_available", lambda: (True, "ok"))
+    monkeypatch.setattr(stack_setup, "_resolve_compose_file", lambda _root: Path("/tmp/docker-compose.yml"))
+    monkeypatch.setattr(stack_setup, "_is_local_port_available", lambda _port: True)
+
+    preflight = stack_setup.build_stack_preflight(config, stack, project_dir=tmp_path)
+
+    assert preflight["ok"] is False
+    assert any(item.get("type") == "wireguard_config_invalid" for item in preflight["conflicts"])
+
+
 def test_build_connections_status_includes_reason_and_state() -> None:
     services = stack_setup.build_connections_status({})
     assert isinstance(services, dict)

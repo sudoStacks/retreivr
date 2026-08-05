@@ -3000,6 +3000,7 @@ function buildSetupWizardDraft() {
     vpn_openvpn_user: "",
     vpn_openvpn_password: "",
     vpn_wireguard_private_key: "",
+    vpn_wireguard_config_path: String(vpn.wireguard_config_path || ""),
     vpn_server_countries: "",
     vpn_route_qbittorrent: vpn.route_qbittorrent !== false,
     vpn_route_prowlarr: !!vpn.route_prowlarr,
@@ -3488,6 +3489,7 @@ async function saveSetupWizardConfig() {
   base.arr.vpn.enabled = !!(draft.arr_setup_mode === "managed" ? draft.managed_vpn : draft.enable_vpn);
   base.arr.vpn.provider = String(draft.vpn_provider || "gluetun").trim() || "gluetun";
   base.arr.vpn.control_url = String(draft.vpn_control_url || "").trim();
+  base.arr.vpn.wireguard_config_path = String(draft.vpn_wireguard_config_path || "").trim();
   base.arr.vpn.route_qbittorrent = !!draft.vpn_route_qbittorrent;
   base.arr.vpn.route_prowlarr = !!draft.vpn_route_prowlarr;
   base.arr.vpn.route_retreivr = !!draft.vpn_route_retreivr;
@@ -3524,6 +3526,7 @@ async function saveSetupWizardConfig() {
         vpn_openvpn_user: String(draft.vpn_openvpn_user || ""),
         vpn_openvpn_password: String(draft.vpn_openvpn_password || ""),
         vpn_wireguard_private_key: String(draft.vpn_wireguard_private_key || ""),
+        vpn_wireguard_config_path: String(draft.vpn_wireguard_config_path || ""),
         vpn_server_countries: String(draft.vpn_server_countries || ""),
       }),
     });
@@ -3795,6 +3798,14 @@ function renderSetupWizard() {
             <label class="field full">
               <span>WireGuard private key</span>
               <input data-setup-input="vpn_wireguard_private_key" type="password" value="${escapeAttr(draft.vpn_wireguard_private_key || "")}" placeholder="Only if your provider uses WireGuard">
+            </label>
+            <label class="field full">
+              <span>WireGuard configuration file</span>
+              <div class="row path-picker">
+                <input data-setup-input="vpn_wireguard_config_path" data-browser-absolute="1" type="text" value="${escapeAttr(draft.vpn_wireguard_config_path || "")}" placeholder="Choose a .conf file from the Docker host">
+                <button type="button" class="button ghost small" data-setup-browse="vpn_wireguard_config_path">Browse</button>
+              </div>
+              <small>Optional alternative to entering WireGuard values. The file stays on the host and is mounted read-only.</small>
             </label>
             <label class="field full">
               <span>Preferred countries</span>
@@ -4555,9 +4566,8 @@ async function disableAndClearSetupKeyDiscovery() {
 async function saveSetupWizardProgress() {
   syncSetupWizardToLegacyFields();
   await saveSetupWizardConfig();
-  if (state.setupWizard?.draft?.arr_setup_mode === "none") {
-    await saveSetupStack();
-  }
+  // Storage mappings belong to setup.stack in every setup mode.
+  await saveSetupStack();
   if (state.setupWizard?.draft) {
     state.setupWizard.draft.__hydrated = true;
   }
@@ -5526,6 +5536,13 @@ function activePlayerPlay() {
 function activePlayerPause() {
   if (activePlayerIsYT()) { try { state.playerYT.pauseVideo(); } catch (_e) {} return; }
   const a = $("#music-player-audio"); if (a) a.pause();
+}
+
+function pauseMusicForExternalMedia() {
+  if (!state.playerCurrent) return;
+  activePlayerPause();
+  updateMusicPlayerTransportUI();
+  syncBottomPlayerShell();
 }
 function activePlayerIsPaused() {
   if (activePlayerIsYT()) {
@@ -6788,6 +6805,9 @@ function openHomePreviewModal(descriptor) {
   if (!modal || !frame || !audioWrap || !audioEl || !titleEl || !sourceEl || !downloadButton || !detailsWrap || !detailsMetaEl || !descriptionEl) {
     return;
   }
+  if (String(descriptor.mediaType || "video").toLowerCase() === "video") {
+    pauseMusicForExternalMedia();
+  }
   const sourceLabels = {
     youtube: "YouTube",
     youtube_music: "YouTube Music",
@@ -7727,7 +7747,8 @@ function availableBrowserRootsForMode(mode = "dir") {
     }
     result.push(rootKey);
   });
-  return result;
+  const allowedRoots = Array.isArray(browserState.allowedRoots) ? browserState.allowedRoots : null;
+  return allowedRoots ? result.filter((rootKey) => allowedRoots.includes(rootKey)) : result;
 }
 
 function preferredMusicLibraryBrowseRoot(value = "") {
@@ -8523,6 +8544,7 @@ function openLibraryVideoModal(payload) {
   const modal = $("#library-video-modal");
   const player = $("#library-video-player");
   if (!modal || !player || !payload?.file_id) return;
+  pauseMusicForExternalMedia();
   $("#library-video-title").textContent = String(payload.title || "Watch Video");
   $("#library-video-subtitle").textContent = [payload.source || payload.media_type, payload.file_ext].filter(Boolean).join(" • ");
   player.poster = String(payload.thumbnail_url || "").trim() || "assets/no_artwork.png";
@@ -9320,7 +9342,7 @@ async function loadPaths() {
   }
 }
 
-function openBrowser(target, root, mode = "dir", ext = "", startPath = "", showHidden = false) {
+function openBrowser(target, root, mode = "dir", ext = "", startPath = "", showHidden = false, allowedRoots = null) {
   browserState.open = true;
   browserState.root = root;
   browserState.mode = mode;
@@ -9330,6 +9352,9 @@ function openBrowser(target, root, mode = "dir", ext = "", startPath = "", showH
   browserState.selected = "";
   browserState.target = target;
   browserState.showHidden = showHidden;
+  browserState.allowedRoots = Array.isArray(allowedRoots) && allowedRoots.length
+    ? [...new Set(allowedRoots.map((value) => String(value || "").trim()).filter(Boolean))]
+    : null;
   updateBrowserRootSelect();
   updatePollingState();
   $("#browser-modal").classList.remove("hidden");
@@ -9342,6 +9367,7 @@ function closeBrowser() {
   $("#browser-modal").classList.add("hidden");
   browserState.target = null;
   browserState.selected = "";
+  browserState.allowedRoots = null;
   updatePollingState();
 }
 
@@ -12999,14 +13025,15 @@ function snapshotMusicResultsView(response = {}, query = "") {
   };
 }
 
-function getMusicArtistAlbumsCacheKey(artist) {
+function getMusicArtistAlbumsCacheKey(artist, limit = 32) {
   const name = typeof artist === "object" && artist !== null
     ? String(artist.name || "").trim()
     : String(artist || "").trim();
   const artistMbid = typeof artist === "object" && artist !== null
     ? String(artist.artist_mbid || "").trim()
     : "";
-  return `${artistMbid || name}`.trim().toLowerCase();
+  const cappedLimit = Number.isFinite(Number(limit)) ? Math.min(100, Math.max(1, Number(limit))) : 32;
+  return `${artistMbid || name}::limit:${cappedLimit}`.trim().toLowerCase();
 }
 
 function getMusicGenreBrowseCacheKey(genre) {
@@ -13667,7 +13694,7 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
     try {
       const albums = await fetchMusicAlbumsByArtist(
         { name: nextQuery, artist_mbid: nextArtistMbid },
-        { limit: 48, bypassInFlight: true }
+        { limit: 48, bypassInFlight: true, bypassCache: true }
       );
       renderMusicModeResults(
         { artists: [], albums, tracks: [], mode_used: "album" },
@@ -13767,12 +13794,20 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
 
 function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued } = {}) {
   const releaseGroupMbid = getMusicReleaseGroupId(albumItem);
+  const albumTitle = String(albumItem?.title || albumItem?.album || "").trim();
+  const albumArtist = String(albumItem?.artist || "").trim();
+  const localAlbumTracks = (Array.isArray(state.playerLibrarySummary?.tracks) ? state.playerLibrarySummary.tracks : [])
+    .filter((track) => (
+      String(track?.artist_key || track?.artist || "").trim().toLowerCase() === String(albumItem?.artist_key || albumArtist).trim().toLowerCase()
+      && String(track?.album_key || track?.album || "").trim().toLowerCase() === String(albumItem?.album_key || albumTitle).trim().toLowerCase()
+    ));
+  const hasLocalAlbum = localAlbumTracks.length > 0;
   const directPlaylistUrl = String(albumItem?.direct_playlist_url || "").trim();
   const card = document.createElement("article");
   card.className = "home-result-card album-card music-meta-card music-grid-card music-album-grid-card";
   card.dataset.releaseGroupMbid = releaseGroupMbid;
   const albumThumb = createMusicCardThumb(
-    albumItem?.title ? `${albumItem.title} cover` : "Album cover"
+    albumTitle ? `${albumTitle} cover` : "Album cover"
   );
   const immediateAlbumArt = getImmediateAlbumArtworkUrl(albumItem);
   if (immediateAlbumArt) {
@@ -13783,7 +13818,7 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   content.className = "music-meta-main";
   const title = document.createElement("div");
   title.className = "home-candidate-title";
-  title.textContent = albumItem?.title || "";
+  title.textContent = albumTitle;
   content.appendChild(title);
   const meta = document.createElement("div");
   meta.className = "home-candidate-meta";
@@ -13813,10 +13848,10 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   viewTracksButton.className = "button ghost small album-view-tracks-btn";
   viewTracksButton.dataset.releaseGroupMbid = releaseGroupMbid;
   viewTracksButton.dataset.releaseGroupId = releaseGroupMbid;
-  viewTracksButton.dataset.albumTitle = String(albumItem?.title || "");
+  viewTracksButton.dataset.albumTitle = albumTitle;
   viewTracksButton.dataset.artistCredit = String(albumItem?.artist || "");
   viewTracksButton.textContent = "View Tracks";
-  if (!releaseGroupMbid) {
+  if (!releaseGroupMbid && !hasLocalAlbum) {
     viewTracksButton.disabled = true;
     viewTracksButton.title = "Track listing is unavailable for this direct playlist preview.";
   }
@@ -13828,14 +13863,14 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   button.textContent = "Download";
   const runViewTracks = async () => {
     const releaseGroupMbidValue = String(viewTracksButton.dataset.releaseGroupMbid || "").trim();
-    const artistQuery = String(albumItem?.artist || "").trim();
-    const albumTitle = String(albumItem?.title || "").trim();
-    if (!artistQuery && !albumTitle) return;
+    const artistQuery = albumArtist;
+    const selectedAlbumTitle = albumTitle;
+    if (!artistQuery && !selectedAlbumTitle) return;
     const artistInput = document.getElementById("search-artist");
     const albumInput = document.getElementById("search-album");
     const trackInput = document.getElementById("search-track");
     if (artistInput) artistInput.value = artistQuery;
-    if (albumInput) albumInput.value = albumTitle;
+    if (albumInput) albumInput.value = selectedAlbumTitle;
     if (trackInput) trackInput.value = "";
     setMusicModeSelection("track");
 
@@ -13844,11 +13879,11 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
     const previousViewLabel = viewTracksButton.textContent;
     const previousDownloadLabel = button.textContent;
     viewTracksButton.textContent = "Loading...";
-    setMusicPageNotice(`Loading tracks for ${albumTitle || "album"}...`, false);
+    setMusicPageNotice(`Loading tracks for ${selectedAlbumTitle || "album"}...`, false);
     try {
       const tracks = await fetchMusicTracksByAlbum({
         artist: artistQuery,
-        album: albumTitle,
+        album: selectedAlbumTitle,
         releaseGroupMbid: releaseGroupMbidValue,
         limit: 100,
       });
@@ -13859,10 +13894,10 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
       });
       renderMusicModeResults(
         { artists: [], albums: [], tracks: hydratedTracks, mode_used: "track" },
-        `${artistQuery} ${albumTitle}`.trim(),
+        `${artistQuery} ${selectedAlbumTitle}`.trim(),
         { pushHistory: true }
       );
-      setMusicPageNotice(`Loaded ${hydratedTracks.length} tracks for ${albumTitle || "album"}.`, false);
+      setMusicPageNotice(`Loaded ${hydratedTracks.length} tracks for ${selectedAlbumTitle || "album"}.`, false);
     } catch (err) {
       viewTracksButton.disabled = false;
       button.disabled = false;
@@ -13887,7 +13922,7 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
     const releaseGroupMbidValue = String(button.dataset.releaseGroupMbid || "").trim();
     button.disabled = true;
     button.textContent = "Queueing...";
-    setMusicPageNotice(`Queueing ${albumItem?.title || "album"}...`, false);
+    setMusicPageNotice(`Queueing ${albumTitle || "album"}...`, false);
     try {
       if (!releaseGroupMbidValue) {
         throw new Error("Album metadata is unavailable.");
@@ -13903,7 +13938,7 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
         button.textContent = "Download";
       }
       console.info("[MUSIC UI] album queued", { release_group_mbid: releaseGroupMbidValue, tracks_enqueued: count });
-      renderAlbumQueueSummary(result, { albumTitle: albumItem?.title || "Album" });
+      renderAlbumQueueSummary(result, { albumTitle: albumTitle || "Album" });
       if (typeof onQueued === "function") {
         onQueued(result, albumItem);
       }
@@ -13916,10 +13951,10 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   const playAlbumButton = document.createElement("button");
   playAlbumButton.className = "button primary small music-search-album-play-btn home-candidate-download-primary";
   playAlbumButton.dataset.releaseGroupMbid = releaseGroupMbid;
-  playAlbumButton.dataset.albumTitle = String(albumItem?.title || "");
-  playAlbumButton.dataset.artistCredit = String(albumItem?.artist || "");
+  playAlbumButton.dataset.albumTitle = albumTitle;
+  playAlbumButton.dataset.artistCredit = albumArtist;
   playAlbumButton.textContent = "Play Album";
-  if (!releaseGroupMbid) {
+  if (!releaseGroupMbid && !hasLocalAlbum) {
     playAlbumButton.disabled = true;
     playAlbumButton.title = "Playback is unavailable for this direct playlist preview.";
   }
@@ -13929,7 +13964,15 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
     playAlbumButton.disabled = true;
     playAlbumButton.textContent = "Loading...";
     try {
-      await playMusicAlbumFromSearch(albumItem);
+      if (hasLocalAlbum) {
+        const queue = localAlbumTracks.map((track) => normalizePlayableItem(track)).filter(Boolean);
+        clearActiveStationPlayback();
+        setPlayerQueue(queue);
+        setMusicPlayerView("queue");
+        await playPlayerQueueIndex(0);
+      } else {
+        await playMusicAlbumFromSearch(albumItem);
+      }
     } catch (err) {
       setMusicPageNotice(`Play Album failed: ${toUserErrorMessage(err)}`, true);
     } finally {
@@ -15355,7 +15398,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
   focusMusicResults();
 }
 
-async function fetchMusicAlbumsByArtist(artist, { limit = 32, bypassInFlight = false } = {}) {
+async function fetchMusicAlbumsByArtist(artist, { limit = 32, bypassInFlight = false, bypassCache = false } = {}) {
   const query = typeof artist === "object" && artist !== null
     ? String(artist.name || "").trim()
     : String(artist || "").trim();
@@ -15363,8 +15406,8 @@ async function fetchMusicAlbumsByArtist(artist, { limit = 32, bypassInFlight = f
     ? String(artist.artist_mbid || "").trim()
     : "";
   const cappedLimit = Number.isFinite(Number(limit)) ? Math.min(100, Math.max(1, Number(limit))) : 32;
-  const cacheKey = getMusicArtistAlbumsCacheKey(artist);
-  if (cacheKey && Array.isArray(state.musicArtistAlbumsCache[cacheKey])) {
+  const cacheKey = getMusicArtistAlbumsCacheKey(artist, cappedLimit);
+  if (!bypassCache && cacheKey && Array.isArray(state.musicArtistAlbumsCache[cacheKey])) {
     return state.musicArtistAlbumsCache[cacheKey].map((item) => ({ ...item }));
   }
   if (!bypassInFlight && cacheKey && state.musicArtistAlbumsInFlight[cacheKey]) {
@@ -21284,7 +21327,10 @@ function bindEvents() {
       const nextValue = String(chip.dataset.videoSuggestion || chip.textContent || "").trim();
       if (!nextValue) return;
       input.value = nextValue;
-      input.focus();
+      const searchButton = $("#home-search-only");
+      if (searchButton && !searchButton.disabled) {
+        searchButton.click();
+      }
     });
   }
   const homeViewAdvanced = $("#home-view-advanced");
@@ -21942,6 +21988,7 @@ function bindEvents() {
           tv_root: { root: "host", mode: "dir", ext: "" },
           downloads_root: { root: "host", mode: "dir", ext: "" },
           books_root: { root: "host", mode: "dir", ext: "" },
+          vpn_wireguard_config_path: { root: "host", mode: "file", ext: ".conf", showHidden: true },
         };
         const spec = browseSpec[key];
         if (spec) {
@@ -21952,7 +21999,8 @@ function bindEvents() {
             const start = currentValue.startsWith("/")
               ? currentValue.replace(/^\//, "")
               : (BROWSE_DEFAULTS.hostBrowseStart || "");
-            openBrowser(targetInput, spec.root, spec.mode, spec.ext, start, !!spec.showHidden);
+            // Compose path fields must never switch into container-internal roots.
+            openBrowser(targetInput, spec.root, spec.mode, spec.ext, start, !!spec.showHidden, ["host"]);
           }
         }
       }

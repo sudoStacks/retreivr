@@ -163,8 +163,12 @@ def test_liked_songs_sync_exits_cleanly_when_oauth_token_missing(monkeypatch) ->
     assert db.store_calls == []
 
 
-def test_liked_songs_sync_counts_skipped_from_enqueue_result(monkeypatch) -> None:
-    config = {"spotify": {"client_id": "cid", "client_secret": "csec"}}
+def test_liked_songs_sync_counts_skipped_from_enqueue_result(monkeypatch, tmp_path) -> None:
+    config = {
+        "spotify": {"client_id": "cid", "client_secret": "csec"},
+        "music_download_folder": str(tmp_path / "Music"),
+        "playlists_folder": str(tmp_path / "Playlists"),
+    }
     db = _FakeSnapshotStore(latest_snapshot=None)
     queue = object()
     search_service = object()

@@ -38,6 +38,7 @@ def test_worker_sets_validation_failed_and_skips_record(monkeypatch, tmp_path: P
     worker = DownloadWorker(_MockDownloader(file_path))
     job = SimpleNamespace(
         payload={
+            "music_root": str(tmp_path / "Music"),
             "playlist_id": "playlist-1",
             "spotify_track_id": "track-1",
             "resolved_media": {"media_url": "https://example.test/audio"},

@@ -46,6 +46,11 @@ def test_idempotency_full_pipeline_two_tracks(tmp_path, monkeypatch) -> None:
     import db.downloaded_tracks as _dlt
     import scheduler.jobs.spotify_playlist_watch as _spw
     monkeypatch.setattr("download.worker.tag_file", lambda _file_path, _metadata, **_kwargs: None)
+    monkeypatch.setattr(
+        DownloadWorker,
+        "_resolve_music_root",
+        staticmethod(lambda _payload: tmp_path / "Music"),
+    )
 
     playlist_id = "playlist-42"
     tracks = [

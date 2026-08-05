@@ -78,6 +78,16 @@ def ensure_review_queue_table(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_review_queue_artist_status ON review_queue_items (artist, status, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_review_queue_album_status ON review_queue_items (album, status, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_review_queue_parent_job ON review_queue_items (parent_job_id)")
+    # Older upserts could reopen resolved rows as pending while leaving the
+    # resolution timestamp intact. Repair those rows when the queue is opened.
+    cur.execute(
+        "UPDATE review_queue_items SET status='rejected' "
+        "WHERE status='pending' AND rejected_at IS NOT NULL"
+    )
+    cur.execute(
+        "UPDATE review_queue_items SET status='accepted' "
+        "WHERE status='pending' AND accepted_at IS NOT NULL"
+    )
     conn.commit()
 
 
@@ -275,6 +285,15 @@ def record_completed_review_item(db_path: str, job, file_path: str, *, meta: dic
     conn = _connect(db_path)
     try:
         cur = conn.cursor()
+        cur.execute("SELECT * FROM review_queue_items WHERE id=? LIMIT 1", (payload["id"],))
+        existing_item = _row_to_item(cur.fetchone())
+        if existing_item and existing_item.get("status") in {REVIEW_STATUS_ACCEPTED, REVIEW_STATUS_REJECTED}:
+            existing_path = str(existing_item.get("file_path") or "").strip()
+            incoming_path = str(file_path or "").strip()
+            if incoming_path and incoming_path != existing_path and os.path.exists(incoming_path):
+                os.remove(incoming_path)
+                _cleanup_empty_review_dirs(incoming_path, payload.get("quarantine_root"))
+            return existing_item
         cur.execute(
             """
             INSERT INTO review_queue_items (
@@ -297,7 +316,10 @@ def record_completed_review_item(db_path: str, job, file_path: str, *, meta: dic
             ON CONFLICT(id) DO UPDATE SET
                 job_id=excluded.job_id,
                 parent_job_id=excluded.parent_job_id,
-                status=excluded.status,
+                status=CASE
+                    WHEN review_queue_items.status IN ('accepted', 'rejected') THEN review_queue_items.status
+                    ELSE excluded.status
+                END,
                 media_type=excluded.media_type,
                 media_intent=excluded.media_intent,
                 source=excluded.source,
@@ -310,7 +332,10 @@ def record_completed_review_item(db_path: str, job, file_path: str, *, meta: dic
                 canonical_metadata_json=excluded.canonical_metadata_json,
                 target_destination=excluded.target_destination,
                 quarantine_root=excluded.quarantine_root,
-                file_path=excluded.file_path,
+                file_path=CASE
+                    WHEN review_queue_items.status IN ('accepted', 'rejected') THEN review_queue_items.file_path
+                    ELSE excluded.file_path
+                END,
                 filename=excluded.filename,
                 mime_type=excluded.mime_type,
                 file_size_bytes=excluded.file_size_bytes,
@@ -323,7 +348,10 @@ def record_completed_review_item(db_path: str, job, file_path: str, *, meta: dic
                 recording_mbid=excluded.recording_mbid,
                 mb_release_id=excluded.mb_release_id,
                 trace_id=excluded.trace_id,
-                updated_at=excluded.updated_at
+                updated_at=CASE
+                    WHEN review_queue_items.status IN ('accepted', 'rejected') THEN review_queue_items.updated_at
+                    ELSE excluded.updated_at
+                END
             """,
             payload,
         )
@@ -424,7 +452,10 @@ def record_tag_repair_review_item(
                 :created_at, :updated_at, :resolved_at, :accepted_at, :rejected_at, :resolution_note
             )
             ON CONFLICT(id) DO UPDATE SET
-                status=CASE WHEN review_queue_items.status = 'pending' THEN 'pending' ELSE excluded.status END,
+                status=CASE
+                    WHEN review_queue_items.status IN ('accepted', 'rejected') THEN review_queue_items.status
+                    ELSE excluded.status
+                END,
                 failure_reason=excluded.failure_reason,
                 top_failed_gate=excluded.top_failed_gate,
                 candidate_details_json=excluded.candidate_details_json,

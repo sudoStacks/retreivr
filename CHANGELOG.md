@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.3 — Setup Safety, Review Durability, and Playback Fixes
+
+### Changed
+- Managed Gluetun setup accepts a host-side WireGuard `.conf` file, validates it before apply, and mounts it read-only at Gluetun's supported `wg0.conf` path without copying its contents into Retreivr configuration.
+- Managed-stack preflight reports both occupied host ports and accidental duplicate port assignments across enabled services; qBittorrent remains intentionally exposed through Gluetun's network namespace on port 8080.
+- Guided Setup storage pickers are constrained to the configured host browse root instead of offering container-internal download, config, data, or workspace paths.
+- Docker examples default host browsing to the project media directory and document using a narrow storage parent on Linux instead of exposing the entire host filesystem.
+- Recent Video searches execute immediately when selected, matching the existing Music recent-search behavior.
+- Starting an in-app video or trailer pauses Music playback while preserving the current track and queue.
+- Downloaded album cards build playback queues directly from indexed local-library tracks, including albums without MusicBrainz release-group metadata.
+- Explicit View Albums actions request a complete artist catalog independently of partial artwork and recommendation warmup requests.
+
+### Fixed
+- Guided Setup now persists storage path mappings for managed, existing-service, and Retreivr-only setup modes.
+- The setup API rejects container-only storage destinations and paths that escape the Compose project.
+- Accepted and rejected Review items retain their terminal decision when completion events or tag-repair scans encounter the same item again.
+- Previously reopened Review rows are repaired from their retained accepted/rejected timestamps, and duplicate quarantine files for resolved items are removed.
+- Downloaded library album cards now use the correct album-title field and keep Play Album available for local content.
+- Artist album caches are keyed by requested result limit, preventing small background warmup results from truncating user-requested album catalogs.
+
+### Release
+- Updated Python package metadata, Docker build defaults, Compose examples, Portainer instructions, runtime provenance tests, and upgrade guidance for `v1.1.3`.
+
 ## v1.1.2 — Music Responsiveness and Runtime Stability
 
 ### Added

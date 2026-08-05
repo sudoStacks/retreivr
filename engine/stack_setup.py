@@ -204,8 +204,11 @@ def normalize_managed_plan(config: dict[str, Any] | None, payload: dict[str, Any
         "openvpn_user": _trimmed(source.get("vpn_openvpn_user")),
         "openvpn_password": _trimmed(source.get("vpn_openvpn_password")),
         "wireguard_private_key": _trimmed(source.get("vpn_wireguard_private_key")),
+        "wireguard_config_path": _trimmed(source.get("vpn_wireguard_config_path")) or _trimmed(vpn_cfg.get("wireguard_config_path")),
         "server_countries": _trimmed(source.get("vpn_server_countries")),
     }
+    if vpn_credentials["wireguard_config_path"] and vpn_credentials["provider"].lower() == "gluetun":
+        vpn_credentials["provider"] = "custom"
     internal_urls = {
         "radarr": MANAGED_INTERNAL_URLS["radarr"] if next_stack.get("enable_radarr") else "",
         "sonarr": MANAGED_INTERNAL_URLS["sonarr"] if next_stack.get("enable_sonarr") else "",
@@ -420,22 +423,32 @@ def build_stack_preflight(
         warnings.append("No compose file was found in expected locations.")
         fix_hints.append("Create docker-compose.yml or use docker/docker-compose.yml.example with `docker compose -f ... up -d`.")
 
-    seen_ports: set[int] = set()
+    seen_ports: dict[int, dict[str, Any]] = {}
     required_ports: list[dict[str, Any]] = []
     for profile in profiles:
         for item in PROFILE_HOST_PORTS.get(profile, []):
             host_port = int(item["host_port"])
-            if host_port in seen_ports:
+            prior = seen_ports.get(host_port)
+            if prior is not None:
+                fatal = True
+                conflicts.append(
+                    {
+                        "type": "port_overlap",
+                        "severity": "fatal",
+                        "host_port": host_port,
+                        "services": [prior["service"], item["service"]],
+                        "message": f"Host port {host_port} is assigned to more than one managed service.",
+                    }
+                )
                 continue
-            seen_ports.add(host_port)
-            required_ports.append(
-                {
+            port_item = {
                     "profile": profile,
                     "service": item["service"],
                     "host_port": host_port,
                     "container_port": int(item["container_port"]),
                 }
-            )
+            seen_ports[host_port] = port_item
+            required_ports.append(port_item)
             if not _is_local_port_available(host_port):
                 fatal = True
                 conflicts.append(
@@ -450,8 +463,32 @@ def build_stack_preflight(
                     }
                 )
     checks["required_host_ports"] = required_ports
-    if any(item.get("type") == "port_conflict" for item in conflicts):
+    if any(item.get("type") in {"port_conflict", "port_overlap"} for item in conflicts):
         fix_hints.append("Stop the process using the conflicting host port(s), or remap ports in compose before apply.")
+
+    vpn_cfg = (config.get("arr") or {}).get("vpn") if isinstance(config.get("arr"), dict) else {}
+    vpn_cfg = vpn_cfg if isinstance(vpn_cfg, dict) else {}
+    wireguard_config = _trimmed(vpn_cfg.get("wireguard_config_path"))
+    checks["wireguard_config"] = {"ok": True, "path": wireguard_config, "status": "not_configured"}
+    if stack.get("enable_vpn") and wireguard_config:
+        candidate = Path(wireguard_config).expanduser()
+        if not candidate.is_absolute():
+            candidate = (root / candidate).resolve()
+        valid = candidate.is_file() and candidate.suffix.lower() == ".conf" and os.access(candidate, os.R_OK)
+        checks["wireguard_config"] = {
+            "ok": valid,
+            "path": str(candidate),
+            "status": "ready" if valid else "invalid",
+        }
+        if not valid:
+            fatal = True
+            conflicts.append({
+                "type": "wireguard_config_invalid",
+                "severity": "fatal",
+                "path": str(candidate),
+                "message": "The WireGuard configuration must be a readable .conf file on the Docker host.",
+            })
+            fix_hints.append("Choose a readable WireGuard .conf file from the host filesystem, or clear the field to use provider credentials instead.")
 
     if stack.get("enable_hostctl") and "hostctl" not in profiles:
         warnings.append("Hostctl is enabled in stack settings but hostctl profile is not active.")
@@ -508,6 +545,12 @@ def managed_env_values(config: dict[str, Any], stack: dict[str, Any]) -> dict[st
         "RETREIVR_VPN_ROUTE_RETREIVR": "1" if vpn_cfg.get("route_retreivr") else "0",
         "RETREIVR_HOSTCTL_URL": os.environ.get("RETREIVR_HOSTCTL_URL") or "http://retreivr-hostctl:8010",
         "GLUETUN_PROVIDER": _trimmed(vpn_cfg.get("provider")),
+        "GLUETUN_OPENVPN_USER": _trimmed(vpn_cfg.get("openvpn_user")),
+        "GLUETUN_OPENVPN_PASSWORD": _trimmed(vpn_cfg.get("openvpn_password")),
+        "GLUETUN_WIREGUARD_PRIVATE_KEY": _trimmed(vpn_cfg.get("wireguard_private_key")),
+        "GLUETUN_WIREGUARD_CONFIG": _trimmed(vpn_cfg.get("wireguard_config_path")) or "/dev/null",
+        "GLUETUN_VPN_TYPE": "wireguard" if _trimmed(vpn_cfg.get("wireguard_config_path")) else "",
+        "GLUETUN_SERVER_COUNTRIES": _trimmed(vpn_cfg.get("server_countries")),
     }
 
 
@@ -684,6 +727,8 @@ def apply_managed_service_defaults(config: dict[str, Any], plan: dict[str, Any])
     vpn_data = plan.get("vpn") if isinstance(plan.get("vpn"), dict) else {}
     if vpn_data:
         vpn_cfg["provider"] = _trimmed(vpn_data.get("provider")) or _trimmed(vpn_cfg.get("provider")) or "gluetun"
+        for key in ("openvpn_user", "openvpn_password", "wireguard_private_key", "wireguard_config_path", "server_countries"):
+            vpn_cfg[key] = _trimmed(vpn_data.get(key))
     vpn_cfg["enabled"] = bool(stack.get("enable_vpn"))
     vpn_cfg["route_qbittorrent"] = True
     arr_cfg["vpn"] = vpn_cfg

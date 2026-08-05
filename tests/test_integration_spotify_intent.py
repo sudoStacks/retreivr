@@ -52,6 +52,7 @@ def test_spotify_playlist_intent_ingestion_enqueues_music_track_jobs(
     api_module,
     api_client: TestClient,
     monkeypatch,
+    tmp_path: Path,
 ) -> None:
     class _FakeSpotifyClient:
         def get_playlist_items(self, playlist_id: str):
@@ -69,7 +70,15 @@ def test_spotify_playlist_intent_ingestion_enqueues_music_track_jobs(
                 }
             ]
 
-    monkeypatch.setattr(api_module, "_read_config_or_404", lambda: {"spotify_playlists": []})
+    monkeypatch.setattr(
+        api_module,
+        "_read_config_or_404",
+        lambda: {
+            "spotify_playlists": [],
+            "music_download_folder": str(tmp_path / "Music"),
+            "playlists_folder": str(tmp_path / "Music" / "Playlists"),
+        },
+    )
     monkeypatch.setattr(api_module, "_build_spotify_client_with_optional_oauth", lambda _cfg: _FakeSpotifyClient())
 
     response = api_client.post(

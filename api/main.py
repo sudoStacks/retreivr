@@ -11317,6 +11317,7 @@ def api_setup_status():
 @app.post("/api/setup/managed/plan")
 def api_setup_managed_plan(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
+    _validate_stack_path_payload(payload)
     cfg = _current_loaded_config()
     plan = normalize_managed_plan(cfg, payload)
     updated_cfg = _managed_setup_config_update(
@@ -11741,9 +11742,42 @@ def api_setup_existing_connect(request: Request, payload: dict = Body(...)):
     return safe_json({"status": "connected", "existing_stack": build_existing_status(cfg), "configure_result": configure_result, "key_discovery": {"enabled": bool(key_discovery_policy.get("enabled")), "results": preview}})
 
 
+_CONTAINER_ONLY_STACK_ROOTS = (
+    "/app",
+    "/config",
+    "/data",
+    "/downloads",
+    "/logs",
+    "/media",
+    "/tokens",
+    "/workspace",
+)
+
+
+def _validate_stack_path_payload(payload: dict) -> None:
+    """Reject paths that can only refer to Retreivr's container filesystem."""
+    for key in ("media_root", "movies_root", "tv_root", "downloads_root", "books_root"):
+        if key not in payload:
+            continue
+        raw = str(payload.get(key) or "").strip()
+        normalized = os.path.normpath(raw) if raw else ""
+        if normalized == ".." or normalized.startswith(f"..{os.sep}"):
+            raise HTTPException(status_code=422, detail={"error": "storage_path_outside_host_root", "field": key})
+        if any(normalized == root or normalized.startswith(f"{root}/") for root in _CONTAINER_ONLY_STACK_ROOTS):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "container_storage_path_not_allowed",
+                    "field": key,
+                    "message": "Choose a host storage folder or a path relative to the Compose project.",
+                },
+            )
+
+
 @app.post("/api/setup/stack")
 def api_setup_stack_update(request: Request, payload: dict = Body(...)):
     _require_admin_session(request)
+    _validate_stack_path_payload(payload)
     cfg = dict(_current_loaded_config())
     setup_cfg = cfg.get("setup") if isinstance(cfg.get("setup"), dict) else {}
     stack_cfg = setup_cfg.get("stack") if isinstance(setup_cfg.get("stack"), dict) else {}

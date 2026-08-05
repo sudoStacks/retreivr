@@ -33,6 +33,13 @@ Retreivr is not intended to replace a full media server. It is the resolution an
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
+## 1.1.3 Highlights
+- Safer Guided Setup storage selection that excludes container-only paths and persists path choices in every setup mode
+- Guided Gluetun setup with a host-side WireGuard `.conf` picker, read-only mounting, and preflight validation for VPN files and managed-service port conflicts
+- Durable Review decisions so rejected or accepted music items cannot reappear after rescans or repeated completion events
+- Coordinated media playback that pauses music for videos and trailers without clearing the current queue
+- More reliable local-library playback, complete artist album browsing, and one-click recent searches
+
 ## 1.1.0 Highlights
 - Persistent Music playback across navigation, with minimized controls, full-player video docking, authoritative queues, artist shuffle, and diverse genre radio
 - MusicBrainz-to-YouTube resolution lookahead that prepares upcoming songs and retains qualified source matches before playback
@@ -281,7 +288,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `1.1.2`, pull the latest image and restart:
+If you are upgrading to `1.1.3`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
