@@ -56,6 +56,24 @@ def test_music_library_index_is_persistent_and_queryable(tmp_path: Path) -> None
     assert list_indexed_music(db_path, limit=10)[0]["title"] == "Indexed Track"
 
 
+def test_music_library_index_hides_applemusic_staging_rows(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "library.sqlite")
+    library_path = tmp_path / "Artist" / "Album" / "Track.flac"
+    staging_path = tmp_path / "_AppleMusic" / "Staged.m4a"
+    rebuild_music_library_index(
+        db_path,
+        {},
+        scanner=lambda _config, *, limit: [
+            _indexed_track(staging_path, title="Staged Track"),
+            _indexed_track(library_path, title="Library Track"),
+        ],
+    )
+
+    items = list_indexed_music(db_path, limit=10)
+
+    assert [item["title"] for item in items] == ["Library Track"]
+
+
 def test_completed_music_download_marks_index_stale(tmp_path: Path) -> None:
     db_path = str(tmp_path / "library.sqlite")
     media_path = tmp_path / "Track.flac"

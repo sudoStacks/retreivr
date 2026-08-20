@@ -5247,8 +5247,10 @@ function renderMusicPlayerStations() {
             ? `<button class="button ghost small music-shelf-card-primary" type="button" disabled>Now Playing</button>`
             : `<button class="button ${needsMatches ? "ghost" : "primary"} small music-shelf-card-primary" type="button" data-action="player-load-station" data-station-id="${escapeAttr(station.id)}">${needsMatches ? "Play Anyway" : "Play Station"}</button>`
           }
-          <button class="button ghost small" type="button" data-action="player-prime-station" data-station-id="${escapeAttr(station.id)}">Prime</button>
-          <button class="button ghost small" type="button" data-action="player-delete-station" data-station-id="${escapeAttr(station.id)}">Delete</button>
+          <div class="music-station-secondary-actions">
+            <button class="button ghost small" type="button" data-action="player-prime-station" data-station-id="${escapeAttr(station.id)}" aria-label="Prime ${escapeAttr(station.name || "station")}" title="Prime station">Prime</button>
+            <button class="button ghost small" type="button" data-action="player-delete-station" data-station-id="${escapeAttr(station.id)}" aria-label="Delete ${escapeAttr(station.name || "station")}" title="Delete station">Delete</button>
+          </div>
         </div>
       </article>
     `;

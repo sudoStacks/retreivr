@@ -192,6 +192,15 @@ def _is_path_under_root(path: Path, root: Path) -> bool:
         return False
 
 
+def _is_import_staging_path(path: Path) -> bool:
+    return any(str(part).lower() == "_applemusic" for part in path.parts)
+
+
+def _is_import_staging_local_path(path: Any) -> bool:
+    normalized = str(path or "").replace("\\", "/").lower()
+    return "/_applemusic/" in normalized or normalized.endswith("/_applemusic")
+
+
 def is_local_player_path_allowed(
     config: dict[str, Any],
     path: str | Path,
@@ -353,8 +362,23 @@ def _cached_embedded_album_art(path: Path, album_dir: Path) -> str | None:
     return None
 
 
-def _extract_embedded_album_art(path: Path, album_dir: Path, cache: dict[str, str | None]) -> str | None:
-    key = f"embedded:{album_dir.resolve()}"
+def _embedded_art_group_key(path: Path, album_dir: Path, artist: str, album: str) -> str:
+    artist_key = str(artist or "").strip().lower()
+    album_key = str(album or "").strip().lower()
+    if artist_key or album_key:
+        return f"embedded:{album_dir.resolve()}:{artist_key}:{album_key}"
+    return f"embedded:{album_dir.resolve()}:{path.resolve()}"
+
+
+def _extract_embedded_album_art(
+    path: Path,
+    album_dir: Path,
+    cache: dict[str, str | None],
+    *,
+    artist: str = "",
+    album: str = "",
+) -> str | None:
+    key = _embedded_art_group_key(path, album_dir, artist, album)
     if key in cache:
         return cache[key]
     cached_art = _cached_embedded_album_art(path, album_dir)
@@ -441,6 +465,8 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                 resolved_path = path.resolve()
                 if not _is_path_under_root(resolved_path, root):
                     continue
+                if _is_import_staging_path(resolved_path):
+                    continue
                 resolved = str(resolved_path)
                 if resolved in seen:
                     continue
@@ -456,7 +482,13 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
                 stat = resolved_path.stat()
                 artwork_local_path = _find_album_art(resolved_path.parent, artwork_cache, [root])
                 if not artwork_local_path:
-                    artwork_local_path = _extract_embedded_album_art(resolved_path, resolved_path.parent, artwork_cache)
+                    artwork_local_path = _extract_embedded_album_art(
+                        resolved_path,
+                        resolved_path.parent,
+                        artwork_cache,
+                        artist=artist,
+                        album=album,
+                    )
                 items.append(
                     {
                         "id": resolved,
@@ -484,9 +516,54 @@ def scan_local_library(config: dict[str, Any], *, limit: int = 250) -> list[dict
 
 
 def summarize_library(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    tracks = list(items or [])
+    tracks = [
+        item
+        for item in list(items or [])
+        if not _is_import_staging_local_path(item.get("local_path") or item.get("id"))
+    ]
     artists_map: dict[str, dict[str, Any]] = {}
     albums_map: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def artwork_stats_for(entry: dict[str, Any]) -> dict[str, dict[str, int]]:
+        stats = entry.setdefault("_artwork_stats", {})
+        return stats if isinstance(stats, dict) else {}
+
+    def add_artwork_candidate(entry: dict[str, Any], item: dict[str, Any]) -> None:
+        artwork_path = str(item.get("artwork_local_path") or "").strip()
+        if not artwork_path:
+            return
+        local_path = str(item.get("local_path") or item.get("id") or "").strip()
+        if _is_import_staging_local_path(local_path):
+            return
+        stats = artwork_stats_for(entry).setdefault(
+            artwork_path,
+            {"count": 0, "structured_count": 0, "latest_downloaded_at": 0},
+        )
+        stats["count"] += 1
+        if "/_AppleMusic/" not in local_path:
+            stats["structured_count"] += 1
+        stats["latest_downloaded_at"] = max(
+            int(stats.get("latest_downloaded_at") or 0),
+            int(item.get("downloaded_at") or 0),
+        )
+
+    def finalize_artwork(entry: dict[str, Any]) -> None:
+        stats = artwork_stats_for(entry)
+        if not stats:
+            entry.pop("_artwork_stats", None)
+            return
+        chosen, _details = max(
+            stats.items(),
+            key=lambda pair: (
+                int(pair[1].get("structured_count") or 0),
+                int(pair[1].get("count") or 0),
+                int(pair[1].get("latest_downloaded_at") or 0),
+                pair[0],
+            ),
+        )
+        entry["artwork_local_path"] = chosen
+        entry.pop("_artwork_stats", None)
+
     for item in tracks:
         artist = str(item.get("artist") or "Unknown Artist").strip() or "Unknown Artist"
         album = str(item.get("album") or "Unknown Album").strip() or "Unknown Album"
@@ -519,12 +596,13 @@ def summarize_library(items: list[dict[str, Any]]) -> dict[str, list[dict[str, A
         )
         album_entry["track_count"] += 1
         album_entry["latest_downloaded_at"] = max(int(album_entry.get("latest_downloaded_at") or 0), int(item.get("downloaded_at") or 0))
-        if not album_entry.get("artwork_local_path"):
-            album_entry["artwork_local_path"] = str(item.get("artwork_local_path") or "").strip() or None
-        if not artist_entry.get("artwork_local_path"):
-            artist_entry["artwork_local_path"] = str(item.get("artwork_local_path") or "").strip() or None
+        add_artwork_candidate(album_entry, item)
+        add_artwork_candidate(artist_entry, item)
     for artist_key, artist_entry in artists_map.items():
         artist_entry["album_count"] = sum(1 for (a_key, _), _album in albums_map.items() if a_key == artist_key)
+        finalize_artwork(artist_entry)
+    for album_entry in albums_map.values():
+        finalize_artwork(album_entry)
     artists = sorted(artists_map.values(), key=lambda entry: (-int(entry.get("latest_downloaded_at") or 0), entry["artist"].lower()))
     albums = sorted(albums_map.values(), key=lambda entry: (-int(entry.get("latest_downloaded_at") or 0), entry["artist"].lower(), entry["album"].lower()))
     tracks = sorted(tracks, key=lambda entry: (-int(entry.get("downloaded_at") or 0), str(entry.get("artist") or "").lower(), str(entry.get("album") or "").lower(), str(entry.get("title") or "").lower()))

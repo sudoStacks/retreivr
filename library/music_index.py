@@ -115,6 +115,7 @@ def list_indexed_music(db_path: str, *, limit: int = 250) -> list[dict[str, Any]
                    artwork_local_path, recording_mbid, mb_release_id,
                    mb_release_group_id
             FROM music_library_index
+            WHERE instr(lower(path), '/_applemusic/') = 0
             ORDER BY downloaded_at DESC, artist_key, album_key, title
             LIMIT ?
             """,

@@ -49,8 +49,9 @@ def test_radio_and_favorites_use_dedicated_music_shelf_cards() -> None:
     assert ".music-shelf-card-art" in CSS
     assert "aspect-ratio: 1 / 1" in CSS
     assert ".music-shelf-card-actions" in CSS
-    assert "grid-template-columns: repeat(auto-fill, minmax(var(--music-card-min, 210px), 1fr))" in CSS
+    assert "grid-template-columns: repeat(auto-fill, minmax(var(--music-card-min, 230px), 1fr))" in CSS
     assert ".music-station-grid-card .music-shelf-card-actions" in CSS
+    assert "music-station-secondary-actions" in APP
     assert "text-overflow: ellipsis" in CSS
     assert f"styles.css?v={PROJECT_VERSION}" in HTML
     assert f"app.js?v={PROJECT_VERSION}" in HTML
