@@ -5467,6 +5467,30 @@ function destroyYTPlayer() {
   resetYouTubePlayerHost();
 }
 
+function pauseAndDetachMediaElement(element) {
+  if (!element) return;
+  try { element.pause(); } catch (_err) {}
+  element.removeAttribute("src");
+  try { element.load(); } catch (_err) {}
+}
+
+function stopTransientPlayback({ closeModals = false } = {}) {
+  try { activePlayerPause(); } catch (_err) {}
+  destroyYTPlayer();
+  pauseAndDetachMediaElement($("#music-player-audio"));
+  pauseAndDetachMediaElement($("#library-video-player"));
+  pauseAndDetachMediaElement($("#home-preview-audio"));
+  const homePreviewFrame = $("#home-preview-frame");
+  if (homePreviewFrame) homePreviewFrame.src = "about:blank";
+  if (closeModals) {
+    $("#home-preview-modal")?.classList.add("hidden");
+    $("#library-video-modal")?.classList.add("hidden");
+  }
+  updateMusicPlayerTransportUI();
+  syncBottomPlayerShell();
+  syncMusicPlayerVideoShell();
+}
+
 // Create a YT.Player for the given videoId. Resolves when the player is ready.
 function createYTPlayer(videoId) {
   return new Promise((resolve, reject) => {
@@ -6846,7 +6870,7 @@ function openHomePreviewModal(descriptor) {
     audioWrap.classList.remove("hidden");
     audioEl.src = descriptor.streamUrl || "";
   } else {
-    audioEl.removeAttribute("src");
+    pauseAndDetachMediaElement(audioEl);
     audioWrap.classList.add("hidden");
     frame.closest(".home-preview-frame-wrap")?.classList.remove("hidden");
     frame.src = descriptor.embedUrl || "about:blank";
@@ -6863,15 +6887,7 @@ function closeHomePreviewModal() {
   if (frame) {
     frame.src = "about:blank";
   }
-  if (audioEl) {
-    try {
-      audioEl.pause();
-    } catch (_err) {
-      // ignore
-    }
-    audioEl.removeAttribute("src");
-    audioEl.load();
-  }
+  pauseAndDetachMediaElement(audioEl);
   if (audioWrap) {
     audioWrap.classList.add("hidden");
   }
@@ -8603,9 +8619,7 @@ function closeLibraryVideoModal() {
   const modal = $("#library-video-modal");
   const player = $("#library-video-player");
   if (player) {
-    player.pause();
-    player.removeAttribute("src");
-    player.load();
+    pauseAndDetachMediaElement(player);
   }
   if (modal) {
     modal.classList.add("hidden");
@@ -23296,6 +23310,7 @@ async function init() {
   setupHeaderScrollVisibility();
   applyHomeVideoCardSize(state.homeVideoCardSize);
   applyArrCardSize(state.arrCardSize);
+  stopTransientPlayback({ closeModals: true });
   syncBottomPlayerShell();
   updateReviewPendingIndicators();
   try {
@@ -23339,6 +23354,8 @@ async function init() {
 window.addEventListener("DOMContentLoaded", init);
 // Pre-load the YouTube IFrame API in the background so it's ready when the user first plays a track.
 window.addEventListener("DOMContentLoaded", () => { ensureYouTubeAPILoaded(); });
+window.addEventListener("pagehide", () => { stopTransientPlayback({ closeModals: true }); });
+window.addEventListener("beforeunload", () => { stopTransientPlayback({ closeModals: true }); });
 
 // Add Enter key handler for home search input to trigger "Search Only"
 document.addEventListener("DOMContentLoaded", () => {
