@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.4 — Music Import Tab and Radio Card Fixes
+
+### Added
+- Added a first-class Music `Import` tab next to `Radio`, with file selection, accepted-file guidance, local preflight review, import options, inline progress, result counts, rejection details, and recent import history.
+- Added `POST /api/import/playlist/preflight` for local-only parser review of `.m3u`, `.m3u8`, `.csv`, `.xml`, `.plist`, and `.json` import files without writing jobs or calling MusicBrainz.
+- Added per-import-batch download concurrency controls with a default cap of `2` and validated `1..6` bounds.
+
+### Changed
+- Playlist imports now persist the selected batch download cap onto import-created jobs while keeping global worker/source concurrency separate.
+- Queue claiming now skips capped import-batch jobs while allowing unrelated ready jobs to continue.
+- Apple Music XML preflight now reports parser strain, duplicate rows, missing metadata counts, metadata richness, and conversion guidance for large exports.
+- Music import progress now renders directly in the Import tab instead of relying only on the modal flow.
+
+### Fixed
+- Radio station cards now use Browse-like card proportions, square artwork, compact/clamped text, and responsive action rows that do not overflow on mobile or narrow desktop.
+- Playlist import starts are guarded server-side so a second concurrent import returns `409 import_already_running`.
+
+### Release
+- Updated Python package metadata, Docker build defaults, Compose examples, Portainer instructions, runtime provenance tests, cache-busting frontend asset versions, README guidance, and upgrade notes for `v1.1.4`.
+
 ## v1.1.3 — Setup Safety, Review Durability, and Playback Fixes
 
 ### Changed
