@@ -34,6 +34,7 @@ import secrets
 import tempfile
 import threading
 import time
+from collections import Counter
 from types import SimpleNamespace
 import requests
 import musicbrainzngs
@@ -233,6 +234,7 @@ from scheduler.jobs.spotify_playlist_watch import (
     spotify_saved_albums_watch_job,
     spotify_user_playlists_watch_job,
 )
+from metadata.importers.dispatcher import detect_format as detect_import_format
 from metadata.importers.dispatcher import import_playlist as import_playlist_file_bytes
 from engine.import_pipeline import (
     get_import_batch_summary,
@@ -374,6 +376,9 @@ _MUSIC_GENRE_ALIAS_MAP = {
 WEBUI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webUI"))
 MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024
 SUPPORTED_IMPORT_EXTENSIONS = {".m3u", ".m3u8", ".csv", ".xml", ".plist", ".json"}
+DEFAULT_IMPORT_MAX_CONCURRENT_DOWNLOADS = 2
+MIN_IMPORT_MAX_CONCURRENT_DOWNLOADS = 1
+MAX_IMPORT_MAX_CONCURRENT_DOWNLOADS = 6
 IMPORT_JOB_TTL_SECONDS = 6 * 60 * 60
 _LAST_TRANSITION_EVENT: str | None = None
 
@@ -1030,6 +1035,99 @@ def _playlist_imports_active() -> bool:
     return _playlist_imports_active_count() > 0
 
 
+def _validate_playlist_import_filename(filename: str) -> str:
+    normalized = str(filename or "").strip()
+    ext = Path(normalized).suffix.lower()
+    if ext not in SUPPORTED_IMPORT_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="unsupported_file_extension")
+    return normalized
+
+
+async def _read_playlist_import_payload(file: UploadFile) -> tuple[str, bytes]:
+    filename = _validate_playlist_import_filename(str(getattr(file, "filename", "") or "").strip())
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="empty_file")
+    if len(payload) > MAX_IMPORT_FILE_BYTES:
+        raise HTTPException(status_code=400, detail="file_too_large")
+    return filename, payload
+
+
+def _normalize_import_max_concurrent_downloads(value: Any, *, default: int = DEFAULT_IMPORT_MAX_CONCURRENT_DOWNLOADS) -> int:
+    if value is None or str(value).strip() == "":
+        return int(default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid_max_concurrent_downloads") from exc
+    if parsed < MIN_IMPORT_MAX_CONCURRENT_DOWNLOADS or parsed > MAX_IMPORT_MAX_CONCURRENT_DOWNLOADS:
+        raise HTTPException(status_code=400, detail="invalid_max_concurrent_downloads")
+    return parsed
+
+
+def _playlist_import_dedupe_key(intent) -> tuple[str, str, str]:
+    def _clean(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        return " ".join(text.split())
+
+    return (_clean(getattr(intent, "artist", None)), _clean(getattr(intent, "title", None)), _clean(getattr(intent, "album", None)))
+
+
+def _playlist_import_preflight_summary(filename: str, payload: bytes) -> dict:
+    importer = detect_import_format(filename, payload)
+    track_intents = importer.parse(payload)
+    total_tracks = len(track_intents)
+    keys = [_playlist_import_dedupe_key(intent) for intent in track_intents]
+    populated_keys = [key for key in keys if any(key)]
+    key_counts = Counter(populated_keys)
+    duplicate_rows = sum(count - 1 for count in key_counts.values() if count > 1)
+    missing_artist = sum(1 for intent in track_intents if not str(getattr(intent, "artist", "") or "").strip())
+    missing_title = sum(1 for intent in track_intents if not str(getattr(intent, "title", "") or "").strip())
+    missing_album = sum(1 for intent in track_intents if not str(getattr(intent, "album", "") or "").strip())
+    metadata_counts = {
+        "artist": total_tracks - missing_artist,
+        "title": total_tracks - missing_title,
+        "album": total_tracks - missing_album,
+        "album_artist": sum(1 for intent in track_intents if str(getattr(intent, "album_artist", "") or "").strip()),
+        "track_number": sum(1 for intent in track_intents if getattr(intent, "track_number", None) is not None),
+        "disc_number": sum(1 for intent in track_intents if getattr(intent, "disc_number", None) is not None),
+        "release_date": sum(1 for intent in track_intents if str(getattr(intent, "release_date", "") or "").strip()),
+        "genre": sum(1 for intent in track_intents if str(getattr(intent, "genre", "") or "").strip()),
+        "duration_ms": sum(1 for intent in track_intents if getattr(intent, "duration_ms", None) is not None),
+    }
+    source_format = str(getattr(importer, "SOURCE_FORMAT", "") or Path(filename).suffix.lower().lstrip(".") or "unknown")
+    file_size_mb = len(payload) / (1024 * 1024)
+    if source_format == "apple_xml" and (file_size_mb >= 5 or total_tracks >= 3000):
+        parser_strain = "moderate"
+        recommendation = "Apple Music XML is supported, but CSV or JSON with the same metadata would parse lighter. The main cost is still metadata resolution and downloads."
+    elif total_tracks >= 10000 or file_size_mb >= 9:
+        parser_strain = "high"
+        recommendation = "This file is close to the import size/track-count limits. Use a lower download concurrency and consider splitting very large libraries."
+    else:
+        parser_strain = "low"
+        recommendation = "This file is suitable for direct import. Parsing is expected to be a small part of total import time."
+    return {
+        "filename": filename,
+        "detected_format": source_format,
+        "file_size_bytes": int(len(payload)),
+        "file_size_mb": round(file_size_mb, 2),
+        "total_tracks": int(total_tracks),
+        "unique_track_estimate": int(len(key_counts)),
+        "duplicate_in_file_count": int(duplicate_rows),
+        "missing": {
+            "artist": int(missing_artist),
+            "title": int(missing_title),
+            "album": int(missing_album),
+        },
+        "metadata_richness": metadata_counts,
+        "estimated_parser_strain": parser_strain,
+        "recommendation": recommendation,
+        "max_concurrent_downloads_default": DEFAULT_IMPORT_MAX_CONCURRENT_DOWNLOADS,
+        "max_concurrent_downloads_min": MIN_IMPORT_MAX_CONCURRENT_DOWNLOADS,
+        "max_concurrent_downloads_max": MAX_IMPORT_MAX_CONCURRENT_DOWNLOADS,
+    }
+
+
 def _trim_playlist_import_jobs_locked() -> None:
     jobs = getattr(app.state, "playlist_import_jobs", None)
     if not isinstance(jobs, dict):
@@ -1306,6 +1404,7 @@ def _run_playlist_import_job(
     media_mode: str = "music",
     destination_dir: str | None = None,
     final_format: str | None = None,
+    max_concurrent_downloads: int = DEFAULT_IMPORT_MAX_CONCURRENT_DOWNLOADS,
 ) -> None:
     try:
         _update_playlist_import_job(
@@ -1379,6 +1478,7 @@ def _run_playlist_import_job(
                 "destination_dir": str(destination_dir or "").strip() or None,
                 "final_format": str(final_format or "").strip() or None,
                 "playlist_name": playlist_name,
+                "import_max_concurrent_downloads": int(max_concurrent_downloads),
                 "progress_callback": _progress,
             },
         )
@@ -8186,23 +8286,27 @@ def create_search_request(request: dict = Body(...)):
     }
 
 
+@app.post("/api/import/playlist/preflight")
+async def import_playlist_preflight(file: UploadFile = File(...)):
+    filename, payload = await _read_playlist_import_payload(file)
+    try:
+        return _playlist_import_preflight_summary(filename, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"preflight_failed: {exc}") from exc
+
+
 @app.post("/api/import/playlist")
 async def import_playlist(
     file: UploadFile = File(...),
     media_mode: str = Form("music"),
     destination_dir: str | None = Form(None),
     final_format: str | None = Form(None),
+    max_concurrent_downloads: int | None = Form(None),
 ):
-    filename = str(getattr(file, "filename", "") or "").strip()
-    ext = Path(filename).suffix.lower()
-    if ext not in SUPPORTED_IMPORT_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="unsupported_file_extension")
-
-    payload = await file.read()
-    if not payload:
-        raise HTTPException(status_code=400, detail="empty_file")
-    if len(payload) > MAX_IMPORT_FILE_BYTES:
-        raise HTTPException(status_code=400, detail="file_too_large")
+    filename, payload = await _read_playlist_import_payload(file)
+    import_download_cap = _normalize_import_max_concurrent_downloads(max_concurrent_downloads)
 
     job_id = uuid4().hex
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -8218,7 +8322,9 @@ async def import_playlist(
         "unresolved": 0,
         "enqueued": 0,
         "failed": 0,
+        "duplicate_skipped": 0,
         "import_batch_id": "",
+        "max_concurrent_downloads": int(import_download_cap),
         "error": None,
         "started_at": now_iso,
         "finished_at": None,
@@ -8230,6 +8336,8 @@ async def import_playlist(
     if lock is None or not isinstance(jobs, dict):
         raise HTTPException(status_code=503, detail="import_state_unavailable")
     with lock:
+        if _playlist_imports_active_count() > 0:
+            raise HTTPException(status_code=409, detail="import_already_running")
         jobs[job_id] = status_entry
         app.state.playlist_import_active_count = _playlist_imports_active_count() + 1
         _trim_playlist_import_jobs_locked()
@@ -8243,6 +8351,7 @@ async def import_playlist(
             str(media_mode or "music").strip().lower() or "music",
             str(destination_dir or "").strip() or None,
             str(final_format or "").strip() or None,
+            import_download_cap,
         ),
         name=f"playlist-import-{job_id[:8]}",
         daemon=True,
@@ -8270,6 +8379,11 @@ def get_import_playlist_job(job_id: str):
         except Exception:
             logging.exception("Failed to load import batch summary")
     return {"job_id": normalized, "status": status_entry}
+
+
+@app.get("/api/import/playlist")
+def get_import_playlist_snapshot():
+    return _get_playlist_import_snapshot()
 
 
 @app.post("/api/import/playlist/{batch_id}/finalize")

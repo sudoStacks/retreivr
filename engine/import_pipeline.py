@@ -819,6 +819,7 @@ def _enqueue_music_track_job(
     mb_recording_title: str | None = None,
     mb_youtube_urls: list[str] | None = None,
     media_mode: str = "music",
+    import_max_concurrent_downloads: int | None = None,
     force_requeue: bool = False,
 ) -> tuple[str | None, bool, str | None]:
     canonical_id = build_music_track_canonical_id(
@@ -885,6 +886,7 @@ def _enqueue_music_track_job(
             "track_disambiguation": track_disambiguation,
             "mb_recording_title": mb_recording_title,
             "mb_youtube_urls": list(mb_youtube_urls or []),
+            "import_max_concurrent_downloads": int(import_max_concurrent_downloads) if import_max_concurrent_downloads else None,
             "audio_mode": media_type == "music",
         },
         canonical_id=canonical_id,
@@ -911,6 +913,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     base_dir = "/downloads"
     destination = None
     final_format_override = None
+    import_max_concurrent_downloads = None
     if isinstance(config, dict):
         threshold_source = config
         if isinstance(runtime_config, dict) and runtime_config:
@@ -932,6 +935,12 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
         base_dir = config.get("base_dir") or base_dir
         destination = config.get("destination_dir")
         final_format_override = config.get("final_format")
+        cap_value = config.get("import_max_concurrent_downloads")
+        if cap_value is not None:
+            try:
+                import_max_concurrent_downloads = max(1, int(cap_value))
+            except (TypeError, ValueError):
+                import_max_concurrent_downloads = None
     if isinstance(runtime_config, dict):
         effective_defaults = resolve_effective_download_settings(
             runtime_config,
@@ -1399,6 +1408,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     mb_recording_title=selected_recording_title,
                     mb_youtube_urls=normalized_mb_youtube_urls,
                     media_mode=media_mode,
+                    import_max_concurrent_downloads=import_max_concurrent_downloads,
                     force_requeue=force_requeue,
                 )
                 resolved_count += 1
@@ -1753,6 +1763,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     mb_recording_title=selected_recording_title,
                     mb_youtube_urls=normalized_mb_youtube_urls,
                     media_mode=media_mode,
+                    import_max_concurrent_downloads=import_max_concurrent_downloads,
                     force_requeue=force_requeue,
                 )
                 resolved_count += 1

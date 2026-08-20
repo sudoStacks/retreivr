@@ -1,10 +1,12 @@
 from pathlib import Path
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "webUI" / "app.js").read_text(encoding="utf-8")
 CSS = (ROOT / "webUI" / "styles.css").read_text(encoding="utf-8")
 HTML = (ROOT / "webUI" / "index.html").read_text(encoding="utf-8")
+PROJECT_VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
 
 
 def test_prebuilt_mix_queues_obey_visible_order() -> None:
@@ -47,6 +49,22 @@ def test_radio_and_favorites_use_dedicated_music_shelf_cards() -> None:
     assert ".music-shelf-card-art" in CSS
     assert "aspect-ratio: 1 / 1" in CSS
     assert ".music-shelf-card-actions" in CSS
-    assert "grid-template-columns: repeat(auto-fill, minmax(250px, 1fr))" in CSS
-    assert "styles.css?v=1.0.12" in HTML
-    assert "app.js?v=1.0.12" in HTML
+    assert "grid-template-columns: repeat(auto-fill, minmax(var(--music-card-min, 210px), 1fr))" in CSS
+    assert ".music-station-grid-card .music-shelf-card-actions" in CSS
+    assert "text-overflow: ellipsis" in CSS
+    assert f"styles.css?v={PROJECT_VERSION}" in HTML
+    assert f"app.js?v={PROJECT_VERSION}" in HTML
+
+
+def test_music_import_is_first_class_music_tab() -> None:
+    radio_index = HTML.index('data-music-section="radio"')
+    import_index = HTML.index('data-music-section="import"')
+    assert radio_index < import_index
+    assert 'id="music-import-view"' in HTML
+    assert 'id="music-import-preflight-button"' in HTML
+    assert 'id="music-import-concurrency"' in HTML
+    assert 'id="music-import-progress-stats"' in HTML
+    assert 'id="music-import-history"' in HTML
+    assert '"/api/import/playlist/preflight"' in APP
+    assert '"max_concurrent_downloads"' in APP
+    assert 'renderMusicImportTab();' in APP

@@ -6,8 +6,8 @@
   <title>Retreivr - Self-Hosted Media Retrieval</title>
   <link rel="icon" href="app_icon.png" type="image/png">
   <link rel="apple-touch-icon" href="app_icon.png">
-  <link rel="stylesheet" href="styles.css?v=1.0.12">
-  <script defer src="app.js?v=1.0.12"></script>
+  <link rel="stylesheet" href="styles.css?v=1.1.3">
+  <script defer src="app.js?v=1.1.3"></script>
 </head>
 <body>
   <div class="backdrop"></div>
@@ -389,6 +389,7 @@
               <button class="button ghost small music-app-nav" data-music-section="playlists" type="button">Playlists</button>
               <button class="button ghost small music-app-nav" data-music-section="player" type="button">Player</button>
               <button class="button ghost small music-app-nav" data-music-section="radio" type="button">Radio</button>
+              <button class="button ghost small music-app-nav" data-music-section="import" type="button">Import</button>
             </div>
             <div id="music-toolbar-slot" class="music-toolbar-slot"></div>
           </div>
@@ -522,6 +523,79 @@
                 <div id="music-player-queue" class="music-player-view hidden"></div>
                 <div id="music-player-recent" class="music-player-view hidden"></div>
                 <div id="music-player-favorites" class="music-player-view hidden"></div>
+              </div>
+            </section>
+            <section id="music-import-view" class="music-view hidden">
+              <div class="music-import-shell">
+                <section class="music-import-panel">
+                  <div class="panel-header-row compact">
+                    <div>
+                      <div class="group-title">Import Music Library</div>
+                      <div class="meta">Bring in Apple Music XML, M3U, CSV, plist, or JSON exports, review them locally, then queue only the missing tracks.</div>
+                    </div>
+                  </div>
+                  <div class="music-import-grid">
+                    <label class="music-import-file-drop">
+                      <span class="music-import-file-label">Import file</span>
+                      <input id="music-import-file" type="file" accept=".m3u,.m3u8,.csv,.xml,.plist,.json">
+                      <span id="music-import-file-name" class="meta">Supported: .m3u, .m3u8, .csv, .xml, .plist, .json</span>
+                    </label>
+                    <div class="music-import-controls">
+                      <label class="music-import-range" for="music-import-concurrency">
+                        <span>Max concurrent downloads</span>
+                        <input id="music-import-concurrency" type="range" min="1" max="6" step="1" value="2">
+                        <strong id="music-import-concurrency-value">2</strong>
+                      </label>
+                      <div class="meta">This cap applies only to downloads created by this import batch.</div>
+                    </div>
+                  </div>
+                  <div class="row compact music-import-actions">
+                    <button id="music-import-preflight-button" class="button ghost small" type="button">Review File</button>
+                    <button id="music-import-start-button" class="button primary small" type="button" disabled>Start Import</button>
+                    <div id="music-import-message" class="notice hidden" role="status"></div>
+                  </div>
+                </section>
+                <section id="music-import-preflight" class="music-import-panel hidden">
+                  <div class="panel-header-row compact">
+                    <div>
+                      <div class="group-title">Preflight Review</div>
+                      <div id="music-import-preflight-recommendation" class="meta"></div>
+                    </div>
+                  </div>
+                  <div id="music-import-preflight-stats" class="music-import-stat-grid"></div>
+                </section>
+                <section class="music-import-panel">
+                  <div class="panel-header-row compact">
+                    <div>
+                      <div class="group-title">Import Progress</div>
+                      <div id="music-import-progress-message" class="meta">No import running.</div>
+                    </div>
+                  </div>
+                  <div class="progress music-import-progress">
+                    <div id="music-import-progress-bar" class="progress-bar"></div>
+                  </div>
+                  <div id="music-import-progress-stats" class="music-import-stat-grid">
+                    <div class="stat"><span class="label">Status</span><span id="music-import-progress-state">idle</span></div>
+                    <div class="stat"><span class="label">Processed</span><span id="music-import-progress-processed">0 / 0</span></div>
+                    <div class="stat"><span class="label">Resolved</span><span id="music-import-progress-resolved">0</span></div>
+                    <div class="stat"><span class="label">Already Existing</span><span id="music-import-progress-duplicates">0</span></div>
+                    <div class="stat"><span class="label">Enqueued</span><span id="music-import-progress-enqueued">0</span></div>
+                    <div class="stat"><span class="label">Unresolved</span><span id="music-import-progress-unresolved">0</span></div>
+                    <div class="stat"><span class="label">Failed</span><span id="music-import-progress-failed">0</span></div>
+                    <div class="stat"><span class="label">Playlist Entries</span><span id="music-import-progress-playlist">0</span></div>
+                  </div>
+                  <div id="music-import-progress-detail" class="music-import-detail-grid"></div>
+                </section>
+                <section class="music-import-panel">
+                  <div class="panel-header-row compact">
+                    <div>
+                      <div class="group-title">Recent Imports</div>
+                      <div class="meta">Completed and failed import batches from the local Retreivr database.</div>
+                    </div>
+                    <button id="music-import-refresh-history" class="button ghost small" type="button">Refresh</button>
+                  </div>
+                  <div id="music-import-history" class="music-import-history"></div>
+                </section>
               </div>
             </section>
           </div>

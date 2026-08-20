@@ -699,6 +699,38 @@ def _candidate_canonical_ids(canonical_id: str | None) -> list[str]:
         candidates.append(f"{parts[0]}:{parts[1]}:unknown-release:{parts[3]}:{parts[4]}")
     return candidates
 
+
+def _parse_output_template_payload(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _import_batch_claim_metadata(row) -> tuple[str | None, int | None]:
+    if not row:
+        return None, None
+    if isinstance(row, sqlite3.Row):
+        row = dict(row)
+    payload = _parse_output_template_payload(row.get("output_template"))
+    batch_id = str(payload.get("import_batch_id") or payload.get("import_batch") or "").strip()
+    if not batch_id:
+        return None, None
+    raw_cap = payload.get("import_max_concurrent_downloads")
+    try:
+        cap = int(raw_cap)
+    except (TypeError, ValueError):
+        cap = None
+    if cap is None or cap <= 0:
+        return batch_id, None
+    return batch_id, cap
+
+
 class DownloadJobStore:
     def __init__(self, db_path):
         self.db_path = db_path
@@ -713,13 +745,7 @@ class DownloadJobStore:
             return None
         if isinstance(row, sqlite3.Row):
             row = dict(row)
-        output_template = row["output_template"]
-        parsed_output = None
-        if output_template:
-            try:
-                parsed_output = json.loads(output_template)
-            except json.JSONDecodeError:
-                parsed_output = None
+        parsed_output = _parse_output_template_payload(row["output_template"]) or None
         return DownloadJob(
             id=row["id"],
             origin=row["origin"],
@@ -1941,16 +1967,33 @@ class DownloadJobStore:
             if active_count >= active_limit:
                 conn.commit()
                 return None
+            def _active_import_count(batch_id: str) -> int:
+                cur.execute(
+                    "SELECT output_template FROM download_jobs WHERE status IN (?, ?)",
+                    (JOB_STATUS_CLAIMED, JOB_STATUS_DOWNLOADING),
+                )
+                total = 0
+                for active_row in cur.fetchall():
+                    active_batch_id, _active_cap = _import_batch_claim_metadata(active_row)
+                    if active_batch_id == batch_id:
+                        total += 1
+                return total
+
             cur.execute(
                 """
                 SELECT * FROM download_jobs
                 WHERE status=? AND source=? AND (queued IS NULL OR queued<=?)
                 ORDER BY created_at ASC
-                LIMIT 1
                 """,
                 (JOB_STATUS_QUEUED, source, now),
             )
-            row = cur.fetchone()
+            row = None
+            for candidate in cur.fetchall():
+                batch_id, batch_cap = _import_batch_claim_metadata(candidate)
+                if batch_id and batch_cap and _active_import_count(batch_id) >= batch_cap:
+                    continue
+                row = candidate
+                break
             if not row:
                 conn.commit()
                 return None

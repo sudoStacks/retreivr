@@ -480,6 +480,45 @@ def _build_webui_test_app() -> FastAPI:
             },
         }
 
+    @app.post("/api/import/playlist/preflight")
+    async def api_import_playlist_preflight() -> dict[str, Any]:
+        return {
+            "filename": "music_import.m3u",
+            "detected_format": "m3u",
+            "file_size_bytes": 64,
+            "file_size_mb": 0.01,
+            "total_tracks": 4,
+            "unique_track_estimate": 4,
+            "duplicate_in_file_count": 0,
+            "missing": {"artist": 0, "title": 0, "album": 4},
+            "metadata_richness": {"artist": 4, "title": 4, "album": 0, "duration_ms": 4},
+            "estimated_parser_strain": "low",
+            "recommendation": "This file is suitable for direct import.",
+            "max_concurrent_downloads_default": 2,
+            "max_concurrent_downloads_min": 1,
+            "max_concurrent_downloads_max": 6,
+        }
+
+    @app.get("/api/import/playlist")
+    async def api_import_playlist_snapshot() -> dict[str, Any]:
+        return {
+            "active": False,
+            "active_count": 0,
+            "current_job": None,
+            "recent_batches": [
+                {
+                    "batch_id": "batch-smoke",
+                    "source_format": "m3u",
+                    "started_at": "2026-01-01T00:00:00+00:00",
+                    "finished_at": "2026-01-01T00:01:00+00:00",
+                    "total_tracks": 4,
+                    "resolved_count": 3,
+                    "enqueued_count": 3,
+                    "unresolved_count": 1,
+                }
+            ],
+        }
+
     @app.get("/api/import/playlist/jobs/{job_id}")
     async def api_import_playlist_job(job_id: str) -> dict[str, Any]:
         return {
@@ -493,6 +532,8 @@ def _build_webui_test_app() -> FastAPI:
                 "enqueued": 3,
                 "failed": 0,
                 "unresolved": 1,
+                "duplicate_skipped": 0,
+                "playlist_entries": 2,
             },
         }
 
@@ -764,56 +805,48 @@ def test_webui_music_direct_url_is_blocked_with_warning(webui_server: str, page)
     assert not console_errors, f"Console errors detected: {console_errors}"
 
 
-def test_webui_music_toolbar_import_button_autosubmits_from_file(
+def test_webui_music_import_tab_preflights_and_starts_import(
     webui_server: str, page, tmp_path: Path
 ) -> None:
     console_errors: list[str] = []
     page_errors: list[str] = []
-    dialogs: list[str] = []
 
     def on_console(msg) -> None:
         if msg.type == "error":
             console_errors.append(msg.text)
 
-    def on_dialog(dialog) -> None:
-        dialogs.append(dialog.message)
-        dialog.accept()
-
     page.on("console", on_console)
     page.on("pageerror", lambda err: page_errors.append(str(err)))
-    page.on("dialog", on_dialog)
 
     import_file = tmp_path / "music_import.m3u"
     import_file.write_text("#EXTM3U\n#EXTINF:123,Artist One - Alpha Track 1\ntrack.mp3\n", encoding="utf-8")
 
     page.goto(f"{webui_server}#music", wait_until="networkidle")
-    page.wait_for_selector("#music-toolbar-slot .music-import-toolbar-button", timeout=10000)
+    page.click('button[data-music-section="import"]')
+    page.wait_for_selector("#music-import-view.active", timeout=10000)
+    page.set_input_files("#music-import-file", str(import_file))
+    page.click("#music-import-preflight-button")
     page.wait_for_function(
         """() => {
-          const toolbarBtn = document.querySelector("#music-toolbar-slot .music-import-toolbar-button");
-          const groupedBtn = document.querySelector(".music-section-toggle .music-import-toolbar-button");
-          return !!toolbarBtn && !groupedBtn && /Import from File/i.test(toolbarBtn.textContent || "");
-        }""",
-        timeout=10000,
-    )
-
-    with page.expect_file_chooser() as fc_info:
-        page.click("#music-toolbar-slot .music-import-toolbar-button")
-    chooser = fc_info.value
-    chooser.set_files(str(import_file))
-
-    page.wait_for_function(
-        """() => {
-          const el = document.querySelector("#home-import-summary");
+          const el = document.querySelector("#music-import-preflight-stats");
           const text = (el && el.textContent) || "";
-          return text.includes("Total: 4")
-            && text.includes("Resolved: 3")
-            && text.includes("Enqueued: 3")
-            && text.includes("Unresolved: 1");
+          return text.includes("Tracks") && text.includes("4") && text.includes("m3u");
         }""",
         timeout=10000,
     )
-    assert dialogs, "Expected confirmation dialog to be shown for playlist import."
+    page.eval_on_selector("#music-import-concurrency", "el => { el.value = '1'; el.dispatchEvent(new Event('input', { bubbles: true })); }")
+    page.click("#music-import-start-button")
+
+    page.wait_for_function(
+        """() => {
+          const el = document.querySelector("#music-import-progress-stats");
+          const text = (el && el.textContent) || "";
+          return text.includes("Resolved") && text.includes("3")
+            && text.includes("Enqueued") && text.includes("3")
+            && text.includes("Unresolved") && text.includes("1");
+        }""",
+        timeout=10000,
+    )
     assert not page_errors, f"Page JS errors detected: {page_errors}"
     assert not console_errors, f"Console errors detected: {console_errors}"
 

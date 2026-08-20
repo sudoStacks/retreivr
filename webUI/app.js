@@ -84,6 +84,8 @@ const state = {
   playlistImportJobId: null,
   playlistImportPollTimer: null,
   playlistImportInProgress: false,
+  playlistImportPreflight: null,
+  playlistImportSelectedFile: null,
   communityPublishStatusTimer: null,
   communityPublishStatus: null,
   arrMode: "movies",
@@ -972,45 +974,6 @@ function prefetchMusicAlbumsForArtists(artists = [], { limit = 6 } = {}) {
   items.forEach((artist) => {
     fetchMusicAlbumsByArtist(artist).catch(() => {});
   });
-}
-
-function openMusicImportFilePicker() {
-  const inputEl = $("#home-import-file");
-  if (!inputEl) {
-    setMusicPageNotice("Import file input is unavailable.", true);
-    return;
-  }
-  if (state.playlistImportInProgress) {
-    openImportProgressModal();
-    return;
-  }
-  inputEl.dataset.autoSubmit = "1";
-  inputEl.value = "";
-  inputEl.click();
-}
-
-function renderMusicImportToolbarButton(actionsContainer) {
-  if (!actionsContainer) return;
-  const importButton = document.createElement("button");
-  importButton.className = "button ghost small music-import-toolbar-button";
-  importButton.type = "button";
-  importButton.textContent = "Import from File";
-  importButton.disabled = !!state.playlistImportInProgress;
-  importButton.addEventListener("click", openMusicImportFilePicker);
-  actionsContainer.appendChild(importButton);
-}
-
-function renderMusicToolbarImportOnly() {
-  const toolbarSlot = getMusicToolbarSlot();
-  if (!toolbarSlot) return;
-  toolbarSlot.innerHTML = "";
-  const toolbar = document.createElement("div");
-  toolbar.className = "music-results-toolbar music-results-toolbar-import-only";
-  const actions = document.createElement("div");
-  actions.className = "music-results-toolbar-actions";
-  renderMusicImportToolbarButton(actions);
-  toolbar.appendChild(actions);
-  toolbarSlot.appendChild(toolbar);
 }
 
 function scheduleAlbumCardArtworkLoads(cards = [], candidates = [], { visibleCount = 10 } = {}) {
@@ -2736,6 +2699,7 @@ function setMusicSection(section) {
   const browseView = $("#music-browse-view");
   const libraryView = $("#music-library-view");
   const playerView = $("#music-player-view");
+  const importView = $("#music-import-view");
   const showPlayerHost = normalized === "favorites" || normalized === "playlists" || normalized === "player" || normalized === "radio";
   if (browseView) {
     browseView.classList.toggle("hidden", normalized !== "browse");
@@ -2750,6 +2714,10 @@ function setMusicSection(section) {
     playerView.classList.toggle("active", showPlayerHost);
     playerView.classList.toggle("music-player-full", normalized === "player");
   }
+  if (importView) {
+    importView.classList.toggle("hidden", normalized !== "import");
+    importView.classList.toggle("active", normalized === "import");
+  }
   const messageRegion = $("#music-page-message-region");
   const reviewRegion = $("#music-page-review-region");
   const toolbarSlot = getMusicToolbarSlot();
@@ -2761,13 +2729,17 @@ function setMusicSection(section) {
     reviewRegion.classList.toggle("hidden", normalized !== "browse");
   }
   if (toolbarSlot && normalized !== "browse") {
-    renderMusicToolbarImportOnly();
+    toolbarSlot.innerHTML = "";
   }
   if (navSlot && normalized !== "browse") {
     navSlot.innerHTML = "";
   }
   if (normalized === "browse") {
     renderMusicLanding();
+  }
+  if (normalized === "import") {
+    renderMusicImportTab();
+    refreshMusicImportHistory().catch(() => {});
   }
   const playerViewMap = {
     radio: "radio",
@@ -9543,12 +9515,25 @@ function setPlaylistImportControlsEnabled(enabled) {
   if (importButton) {
     importButton.disabled = !enabled;
   }
-  document.querySelectorAll(".music-import-toolbar-button").forEach((button) => {
-    button.disabled = !enabled;
-  });
+  const preflightButton = $("#music-import-preflight-button");
+  if (preflightButton) {
+    preflightButton.disabled = !enabled || !$("#music-import-file")?.files?.length;
+  }
+  const startButton = $("#music-import-start-button");
+  if (startButton) {
+    startButton.disabled = !enabled || !state.playlistImportPreflight || !$("#music-import-file")?.files?.length;
+  }
   const importFile = $("#home-import-file");
   if (importFile) {
     importFile.disabled = !enabled;
+  }
+  const musicImportFile = $("#music-import-file");
+  if (musicImportFile) {
+    musicImportFile.disabled = !enabled;
+  }
+  const concurrency = $("#music-import-concurrency");
+  if (concurrency) {
+    concurrency.disabled = !enabled;
   }
 }
 
@@ -9569,6 +9554,90 @@ function closeImportProgressModal() {
   updatePollingState();
 }
 
+function renderMusicImportMap(container, title, valueMap) {
+  if (!container || !valueMap || typeof valueMap !== "object" || !Object.keys(valueMap).length) {
+    return "";
+  }
+  const rows = Object.entries(valueMap)
+    .slice(0, 6)
+    .map(([key, value]) => `<span class="music-import-chip"><strong>${escapeHtml(String(key))}</strong>${escapeHtml(String(value))}</span>`)
+    .join("");
+  return `<div class="music-import-detail-block"><div class="meta">${escapeHtml(title)}</div><div class="music-import-chip-row">${rows}</div></div>`;
+}
+
+function renderMusicImportPreflight(summary) {
+  const panel = $("#music-import-preflight");
+  const stats = $("#music-import-preflight-stats");
+  const recommendation = $("#music-import-preflight-recommendation");
+  if (!panel || !stats) return;
+  if (!summary) {
+    panel.classList.add("hidden");
+    stats.innerHTML = "";
+    if (recommendation) recommendation.textContent = "";
+    return;
+  }
+  panel.classList.remove("hidden");
+  if (recommendation) {
+    recommendation.textContent = summary.recommendation || "";
+  }
+  const missing = summary.missing || {};
+  const rich = summary.metadata_richness || {};
+  stats.innerHTML = `
+    <div class="stat"><span class="label">Format</span><span>${escapeHtml(summary.detected_format || "unknown")}</span></div>
+    <div class="stat"><span class="label">File Size</span><span>${escapeHtml(`${summary.file_size_mb || 0} MB`)}</span></div>
+    <div class="stat"><span class="label">Tracks</span><span>${escapeHtml(String(summary.total_tracks || 0))}</span></div>
+    <div class="stat"><span class="label">Unique Estimate</span><span>${escapeHtml(String(summary.unique_track_estimate || 0))}</span></div>
+    <div class="stat"><span class="label">File Duplicates</span><span>${escapeHtml(String(summary.duplicate_in_file_count || 0))}</span></div>
+    <div class="stat"><span class="label">Parser Strain</span><span>${escapeHtml(summary.estimated_parser_strain || "low")}</span></div>
+    <div class="stat"><span class="label">Missing Artist</span><span>${escapeHtml(String(missing.artist || 0))}</span></div>
+    <div class="stat"><span class="label">Missing Title</span><span>${escapeHtml(String(missing.title || 0))}</span></div>
+    <div class="stat"><span class="label">Missing Album</span><span>${escapeHtml(String(missing.album || 0))}</span></div>
+    <div class="stat"><span class="label">Duration</span><span>${escapeHtml(String(rich.duration_ms || 0))}</span></div>
+  `;
+}
+
+function renderMusicImportHistoryRows(rows = []) {
+  const container = $("#music-import-history");
+  if (!container) return;
+  const items = Array.isArray(rows) ? rows : [];
+  if (!items.length) {
+    container.innerHTML = `<div class="home-results-empty">No recent imports yet.</div>`;
+    return;
+  }
+  container.innerHTML = items.map((item) => `
+    <article class="music-import-history-row">
+      <div>
+        <div class="music-import-history-title">${escapeHtml(item.source_format || item.batch_id || "Import batch")}</div>
+        <div class="meta">${escapeHtml(item.started_at || "")}${item.finished_at ? ` · ${escapeHtml(item.finished_at)}` : ""}</div>
+      </div>
+      <div class="music-import-history-counts">
+        <span>${escapeHtml(String(item.total_tracks || 0))} total</span>
+        <span>${escapeHtml(String(item.resolved_count || 0))} resolved</span>
+        <span>${escapeHtml(String(item.enqueued_count || 0))} enqueued</span>
+        <span>${escapeHtml(String(item.unresolved_count || 0))} unresolved</span>
+      </div>
+    </article>
+  `).join("");
+}
+
+async function refreshMusicImportHistory() {
+  const data = await fetchJson("/api/import/playlist");
+  renderMusicImportHistoryRows(data.recent_batches || []);
+  if (data.current_job) {
+    renderPlaylistImportStatus(data.current_job);
+  }
+}
+
+function renderMusicImportTab() {
+  const slider = $("#music-import-concurrency");
+  const sliderValue = $("#music-import-concurrency-value");
+  if (slider && sliderValue) {
+    sliderValue.textContent = String(slider.value || "2");
+  }
+  renderMusicImportPreflight(state.playlistImportPreflight);
+  setPlaylistImportControlsEnabled(!state.playlistImportInProgress);
+}
+
 function renderPlaylistImportStatus(status) {
   const safe = status || {};
   const phase = String(safe.phase || safe.state || "queued");
@@ -9586,6 +9655,9 @@ function renderPlaylistImportStatus(status) {
   const resolved = Number.isFinite(Number(safe.resolved)) ? Number(safe.resolved) : 0;
   const enqueued = Number.isFinite(Number(safe.enqueued)) ? Number(safe.enqueued) : 0;
   const failed = Number.isFinite(Number(safe.failed)) ? Number(safe.failed) : 0;
+  const unresolved = Number.isFinite(Number(safe.unresolved)) ? Number(safe.unresolved) : 0;
+  const duplicateSkipped = Number.isFinite(Number(safe.duplicate_skipped)) ? Number(safe.duplicate_skipped) : 0;
+  const playlistEntries = Number.isFinite(Number(safe.playlist_entries)) ? Number(safe.playlist_entries) : 0;
   const visibleProcessed = phaseLower === "resolving" && processed === 0 && resolutionTotal > 0
     ? resolutionProcessed
     : processed;
@@ -9620,6 +9692,33 @@ function renderPlaylistImportStatus(status) {
   const progressBar = $("#import-progress-bar");
   if (progressBar) {
     progressBar.style.width = `${percent}%`;
+  }
+  const inlineState = $("#music-import-progress-state");
+  if (inlineState) inlineState.textContent = phase;
+  const inlineMessage = $("#music-import-progress-message");
+  if (inlineMessage) inlineMessage.textContent = safe.message || "No import running.";
+  const inlineProcessed = $("#music-import-progress-processed");
+  if (inlineProcessed) inlineProcessed.textContent = `${visibleProcessed} / ${visibleTotal}`;
+  const inlineResolved = $("#music-import-progress-resolved");
+  if (inlineResolved) inlineResolved.textContent = String(resolved);
+  const inlineDuplicates = $("#music-import-progress-duplicates");
+  if (inlineDuplicates) inlineDuplicates.textContent = String(duplicateSkipped);
+  const inlineEnqueued = $("#music-import-progress-enqueued");
+  if (inlineEnqueued) inlineEnqueued.textContent = String(enqueued);
+  const inlineUnresolved = $("#music-import-progress-unresolved");
+  if (inlineUnresolved) inlineUnresolved.textContent = String(unresolved);
+  const inlineFailed = $("#music-import-progress-failed");
+  if (inlineFailed) inlineFailed.textContent = String(failed);
+  const inlinePlaylist = $("#music-import-progress-playlist");
+  if (inlinePlaylist) inlinePlaylist.textContent = String(playlistEntries);
+  const inlineBar = $("#music-import-progress-bar");
+  if (inlineBar) inlineBar.style.width = `${percent}%`;
+  const detail = $("#music-import-progress-detail");
+  if (detail) {
+    detail.innerHTML = [
+      renderMusicImportMap(detail, "Top Rejection Reasons", safe.top_rejection_reasons || {}),
+      renderMusicImportMap(detail, "Selected Buckets", safe.selected_bucket_counts || {}),
+    ].join("");
   }
   const closeBtn = $("#import-progress-close");
   if (closeBtn) {
@@ -9666,6 +9765,7 @@ async function pollPlaylistImportStatus() {
       stopPlaylistImportPolling();
       if (phase === "completed") {
         setMusicPageNotice("Playlist resolved. Downloads and the local playlist will continue updating in the queue.", false);
+        setNotice($("#music-import-message"), "Import completed. Downloads and playlist updates continue in the queue.", false);
         const summaryEl = $("#home-import-summary");
         if (summaryEl) {
           summaryEl.textContent =
@@ -9676,8 +9776,10 @@ async function pollPlaylistImportStatus() {
               : "");
         }
         loadMusicPlayerView().catch(() => {});
+        refreshMusicImportHistory().catch(() => {});
       } else {
         setMusicPageNotice(`Import failed: ${status.error || "unknown error"}`, true);
+        setNotice($("#music-import-message"), `Import failed: ${status.error || "unknown error"}`, true);
       }
     }
   } catch (err) {
@@ -9692,7 +9794,9 @@ function startPlaylistImportPolling(jobId, initialStatus = null) {
   state.playlistImportJobId = jobId;
   state.playlistImportInProgress = true;
   setPlaylistImportControlsEnabled(false);
-  openImportProgressModal();
+  if (!(state.currentPage === "music" && state.musicSection === "import")) {
+    openImportProgressModal();
+  }
   if (initialStatus) {
     renderPlaylistImportStatus(initialStatus);
   }
@@ -9701,6 +9805,64 @@ function startPlaylistImportPolling(jobId, initialStatus = null) {
     pollPlaylistImportStatus();
   }, 1500);
   pollPlaylistImportStatus();
+}
+
+async function preflightMusicImportFile() {
+  const inputEl = $("#music-import-file");
+  const messageEl = $("#music-import-message");
+  const file = inputEl?.files?.[0];
+  if (!file) {
+    setNotice(messageEl, "Select an import file first.", true);
+    return;
+  }
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+  setNotice(messageEl, "Reviewing file...", false);
+  const summary = await fetchJson("/api/import/playlist/preflight", {
+    method: "POST",
+    body: formData,
+  });
+  state.playlistImportPreflight = summary;
+  renderMusicImportPreflight(summary);
+  setPlaylistImportControlsEnabled(!state.playlistImportInProgress);
+  setNotice(messageEl, `Ready to import ${summary.total_tracks || 0} tracks.`, false);
+}
+
+async function startMusicImportFromTab() {
+  const inputEl = $("#music-import-file");
+  const messageEl = $("#music-import-message");
+  const file = inputEl?.files?.[0];
+  if (!file) {
+    setNotice(messageEl, "Select an import file first.", true);
+    return;
+  }
+  if (state.playlistImportInProgress) {
+    setNotice(messageEl, "A playlist import is already running.", true);
+    return;
+  }
+  if (!state.playlistImportPreflight) {
+    await preflightMusicImportFile();
+  }
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+  formData.append("media_mode", state.homeMediaMode === "music_video" ? "music_video" : "music");
+  const destinationValue = getMusicModeDestinationValue();
+  const finalFormat = getMusicModeFinalFormatOverride();
+  const concurrency = Number.parseInt(String($("#music-import-concurrency")?.value || "2"), 10) || 2;
+  if (destinationValue) formData.append("destination_dir", destinationValue);
+  if (finalFormat) formData.append("final_format", finalFormat);
+  formData.append("max_concurrent_downloads", String(Math.max(1, Math.min(6, concurrency))));
+  setNotice(messageEl, "Import started. Tracking progress here.", false);
+  setPlaylistImportControlsEnabled(false);
+  const payload = await fetchJson("/api/import/playlist", {
+    method: "POST",
+    body: formData,
+  });
+  const jobId = String(payload.job_id || "").trim();
+  if (!jobId) {
+    throw new Error("missing_job_id");
+  }
+  startPlaylistImportPolling(jobId, payload.status || null);
 }
 
 async function startOauthForRow(row) {
@@ -11162,7 +11324,6 @@ function renderMusicResultsControls({ artists = [], albums = [], tracks = [], ba
   }
   const actions = document.createElement("div");
   actions.className = "music-results-toolbar-actions";
-  renderMusicImportToolbarButton(actions);
 
   if (showSize) {
     const sizeLabel = document.createElement("label");
@@ -14086,7 +14247,7 @@ function createMusicLandingTrackRow(item) {
 
 function renderMusicLanding() {
   const toolbarSlot = getMusicToolbarSlot();
-  if (toolbarSlot) renderMusicToolbarImportOnly();
+  if (toolbarSlot) toolbarSlot.innerHTML = "";
   const navSlot = getMusicNavSlot();
   if (navSlot) navSlot.innerHTML = "";
   const container = document.getElementById("music-results-container");
@@ -21034,6 +21195,55 @@ function bindEvents() {
         .finally(() => {
           homeImportFileInput.value = "";
         });
+    });
+  }
+  const musicImportFileInput = $("#music-import-file");
+  if (musicImportFileInput) {
+    musicImportFileInput.addEventListener("change", () => {
+      const file = musicImportFileInput.files?.[0] || null;
+      state.playlistImportSelectedFile = file;
+      state.playlistImportPreflight = null;
+      const nameEl = $("#music-import-file-name");
+      if (nameEl) {
+        nameEl.textContent = file
+          ? `${file.name} · ${(file.size / (1024 * 1024)).toFixed(2)} MB`
+          : "Supported: .m3u, .m3u8, .csv, .xml, .plist, .json";
+      }
+      renderMusicImportPreflight(null);
+      setPlaylistImportControlsEnabled(!state.playlistImportInProgress);
+    });
+  }
+  const musicImportPreflightButton = $("#music-import-preflight-button");
+  if (musicImportPreflightButton) {
+    musicImportPreflightButton.addEventListener("click", () => {
+      preflightMusicImportFile().catch((err) => {
+        setNotice($("#music-import-message"), `Preflight failed: ${toUserErrorMessage(err)}`, true);
+      });
+    });
+  }
+  const musicImportStartButton = $("#music-import-start-button");
+  if (musicImportStartButton) {
+    musicImportStartButton.addEventListener("click", () => {
+      startMusicImportFromTab().catch((err) => {
+        state.playlistImportInProgress = false;
+        setPlaylistImportControlsEnabled(true);
+        setNotice($("#music-import-message"), `Import failed: ${toUserErrorMessage(err)}`, true);
+      });
+    });
+  }
+  const musicImportConcurrency = $("#music-import-concurrency");
+  if (musicImportConcurrency) {
+    musicImportConcurrency.addEventListener("input", () => {
+      const valueEl = $("#music-import-concurrency-value");
+      if (valueEl) valueEl.textContent = String(musicImportConcurrency.value || "2");
+    });
+  }
+  const musicImportRefreshHistory = $("#music-import-refresh-history");
+  if (musicImportRefreshHistory) {
+    musicImportRefreshHistory.addEventListener("click", () => {
+      refreshMusicImportHistory().catch((err) => {
+        setNotice($("#music-import-message"), `History refresh failed: ${toUserErrorMessage(err)}`, true);
+      });
     });
   }
   const moviesTvSearchButton = $("#movies-tv-search-button");
