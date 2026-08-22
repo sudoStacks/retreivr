@@ -7819,8 +7819,7 @@ def build_audio_filename(meta, ext, *, template=None, fallback_id=None, require_
     _ = template
     _ = fallback_id
 
-    _ = track_number
-    track_label = f"{track or 'media'}.{ext}"
+    track_label = f"{track_number} - {track or 'media'}.{ext}"
     return build_music_relative_layout(
         album_artist=album_artist,
         album_folder=album_folder,

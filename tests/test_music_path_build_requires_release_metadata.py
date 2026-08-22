@@ -120,7 +120,7 @@ def test_worker_does_not_build_unknown_album_when_mb_pair_present(jq, monkeypatc
         assert "Unknown Album" not in final_path
         assert "Bound Album (2012)" in final_path
         assert "/Disc 1/" not in final_path
-        assert "/Track Name.mp3" in final_path
+        assert "/04 - Track Name.mp3" in final_path
         assert meta.get("genre") == "Country"
 
 

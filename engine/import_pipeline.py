@@ -4,6 +4,7 @@ import importlib.util
 import logging
 import sqlite3
 import json
+import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -49,6 +50,10 @@ _STALE_IMPORT_BATCH_PHASES = {"queued", "parsing", "resolving", "enqueueing", "f
 logger = logging.getLogger(__name__)
 
 
+_LIBRARY_YEAR_SUFFIX_RE = re.compile(r"\s*\((?:19|20)\d{2}\)\s*$")
+_LIBRARY_PUNCT_RE = re.compile(r"[^a-z0-9]+")
+
+
 @dataclass(frozen=True)
 class ImportResult:
     total_tracks: int
@@ -69,6 +74,146 @@ def _safe_json_dumps(value: Any) -> str:
         return json.dumps(value, sort_keys=True)
     except Exception:
         return json.dumps({})
+
+
+def _normalize_library_dedupe_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("&", " and ")
+    text = _LIBRARY_PUNCT_RE.sub(" ", text)
+    return " ".join(text.split())
+
+
+def _normalize_library_dedupe_album(value: Any) -> str:
+    text = _LIBRARY_YEAR_SUFFIX_RE.sub("", str(value or "").strip())
+    return _normalize_library_dedupe_text(text)
+
+
+def _library_row_path_exists(path: Any) -> bool:
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return False
+    try:
+        return Path(raw_path).exists()
+    except OSError:
+        return False
+
+
+def _load_library_duplicate_index(db_path: str | None) -> dict[str, Any]:
+    empty = {
+        "metadata_keys": {},
+        "recording_metadata_keys": {},
+        "release_metadata_keys": {},
+        "release_group_metadata_keys": {},
+    }
+    if not db_path:
+        return empty
+    try:
+        conn = sqlite3.connect(db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT path, title, artist, album, recording_mbid, mb_release_id, mb_release_group_id
+            FROM music_library_index
+            WHERE instr(lower(path), '/_applemusic/') = 0
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return empty
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    index = {
+        "metadata_keys": {},
+        "recording_metadata_keys": {},
+        "release_metadata_keys": {},
+        "release_group_metadata_keys": {},
+    }
+    for row in rows:
+        if not _library_row_path_exists(row["path"]):
+            continue
+        title_key = _normalize_library_dedupe_text(row["title"])
+        artist_key = _normalize_library_dedupe_text(row["artist"])
+        album_key = _normalize_library_dedupe_album(row["album"])
+        if not (title_key and artist_key and album_key):
+            continue
+        payload = {
+            "path": row["path"],
+            "title": row["title"],
+            "artist": row["artist"],
+            "album": row["album"],
+            "recording_mbid": row["recording_mbid"],
+            "mb_release_id": row["mb_release_id"],
+            "mb_release_group_id": row["mb_release_group_id"],
+        }
+        recording_mbid = str(row["recording_mbid"] or "").strip()
+        metadata_key = (artist_key, album_key, title_key)
+        index["metadata_keys"].setdefault(metadata_key, payload)
+        if recording_mbid:
+            index["recording_metadata_keys"].setdefault((recording_mbid, *metadata_key), payload)
+        release_mbid = str(row["mb_release_id"] or "").strip()
+        if release_mbid:
+            index["release_metadata_keys"].setdefault((release_mbid, *metadata_key), payload)
+        release_group_mbid = str(row["mb_release_group_id"] or "").strip()
+        if release_group_mbid:
+            index["release_group_metadata_keys"].setdefault((release_group_mbid, *metadata_key), payload)
+    return index
+
+
+def _classify_library_duplicate(
+    library_duplicate_index: dict[str, Any] | None,
+    *,
+    artist: str | None,
+    album: str | None,
+    title: str | None,
+    album_artist: str | None = None,
+    recording_mbid: str | None = None,
+    mb_release_id: str | None = None,
+    mb_release_group_id: str | None = None,
+) -> dict[str, Any] | None:
+    if not library_duplicate_index:
+        return None
+    title_key = _normalize_library_dedupe_text(title)
+    album_key = _normalize_library_dedupe_album(album)
+    artist_candidates = [
+        _normalize_library_dedupe_text(value)
+        for value in (artist, album_artist)
+        if _normalize_library_dedupe_text(value)
+    ]
+    if not (title_key and album_key and artist_candidates):
+        return None
+
+    metadata_keys = [(artist_key, album_key, title_key) for artist_key in dict.fromkeys(artist_candidates)]
+    recording_mbid = str(recording_mbid or "").strip()
+    if recording_mbid:
+        for metadata_key in metadata_keys:
+            match = library_duplicate_index.get("recording_metadata_keys", {}).get((recording_mbid, *metadata_key))
+            if match:
+                return {"classification": "library_present", **match}
+
+    release_mbid = str(mb_release_id or "").strip()
+    if release_mbid:
+        for metadata_key in metadata_keys:
+            match = library_duplicate_index.get("release_metadata_keys", {}).get((release_mbid, *metadata_key))
+            if match:
+                return {"classification": "library_present", **match}
+
+    release_group_mbid = str(mb_release_group_id or "").strip()
+    if release_group_mbid:
+        for metadata_key in metadata_keys:
+            match = library_duplicate_index.get("release_group_metadata_keys", {}).get((release_group_mbid, *metadata_key))
+            if match:
+                return {"classification": "library_present", **match}
+
+    for metadata_key in metadata_keys:
+        match = library_duplicate_index.get("metadata_keys", {}).get(metadata_key)
+        if match:
+            return {"classification": "library_present", **match}
+    return None
 
 
 def ensure_import_batch_tables(conn: sqlite3.Connection) -> None:
@@ -972,6 +1117,7 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
     selected_bucket_counts: Counter[str] = Counter()
     started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     batch_db_path = failure_db_path
+    library_duplicate_index = _load_library_duplicate_index(batch_db_path)
 
     mb_binding_workers = _DEFAULT_MB_BINDING_WORKERS
     if isinstance(runtime_config, dict):
@@ -1355,6 +1501,40 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     mb_release_group_id=release_group_mbid,
                     disc_number=disc_number,
                 )
+                library_duplicate = _classify_library_duplicate(
+                    library_duplicate_index,
+                    artist=canonical_artist,
+                    album=canonical_album,
+                    title=canonical_title,
+                    album_artist=entry.get("album_artist"),
+                    recording_mbid=recording_mbid,
+                    mb_release_id=release_mbid,
+                    mb_release_group_id=release_group_mbid,
+                )
+                if library_duplicate:
+                    duplicate_skipped_count += 1
+                    resolved_count += 1
+                    resolved_mbids.append(recording_mbid)
+                    _record_item(
+                        entry,
+                        outcome="resolved_duplicate_existing",
+                        item_state="duplicate",
+                        source_resolution_state="skipped_existing",
+                        resolution_attempts=1,
+                        canonical_id=canonical_id,
+                        linked_job_id=None,
+                        linked_job_status="library_present",
+                        recording_mbid=recording_mbid,
+                        mb_release_id=release_mbid,
+                        mb_release_group_id=release_group_mbid,
+                        rejection_category=None,
+                        scoring_breakdown=scoring_breakdown,
+                        selected_bucket=selected_bucket,
+                        failure_reasons=None,
+                    )
+                    processed_tracks += 1
+                    _emit_progress(phase="resolving", processed_tracks=processed_tracks, current_phase_detail="metadata_resolved_streaming")
+                    continue
                 duplicate = _classify_duplicate(canonical_id, placeholder_url=f"musicbrainz://recording/{recording_mbid}")
                 force_requeue = bool(duplicate and str(duplicate.get("classification") or "").startswith("stale_"))
                 if duplicate and str(duplicate.get("classification") or "") in {"completed_valid", "active_existing"}:
@@ -1710,6 +1890,40 @@ def process_imported_tracks(track_intents: list[TrackIntent], config) -> ImportR
                     mb_release_group_id=release_group_mbid,
                     disc_number=disc_number,
                 )
+                library_duplicate = _classify_library_duplicate(
+                    library_duplicate_index,
+                    artist=canonical_artist,
+                    album=canonical_album,
+                    title=canonical_title,
+                    album_artist=entry.get("album_artist"),
+                    recording_mbid=recording_mbid,
+                    mb_release_id=release_mbid,
+                    mb_release_group_id=release_group_mbid,
+                )
+                if library_duplicate:
+                    duplicate_skipped_count += 1
+                    resolved_count += 1
+                    resolved_mbids.append(recording_mbid)
+                    _record_item(
+                        entry,
+                        outcome="resolved_duplicate_existing",
+                        item_state="duplicate",
+                        source_resolution_state="skipped_existing",
+                        resolution_attempts=1,
+                        canonical_id=canonical_id,
+                        linked_job_id=None,
+                        linked_job_status="library_present",
+                        recording_mbid=recording_mbid,
+                        mb_release_id=release_mbid,
+                        mb_release_group_id=release_group_mbid,
+                        rejection_category=None,
+                        scoring_breakdown=scoring_breakdown,
+                        selected_bucket=selected_bucket,
+                        failure_reasons=None,
+                    )
+                    processed_tracks += 1
+                    _emit_progress(phase="enqueueing", processed_tracks=processed_tracks, current_phase_detail="queueing_resolved_tracks")
+                    continue
                 duplicate = _classify_duplicate(canonical_id, placeholder_url=f"musicbrainz://recording/{recording_mbid}")
                 force_requeue = bool(duplicate and str(duplicate.get("classification") or "").startswith("stale_"))
                 if duplicate and str(duplicate.get("classification") or "") in {"completed_valid", "active_existing"}:

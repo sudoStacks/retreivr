@@ -78,6 +78,29 @@ def test_video_template_is_ignored_for_clean_title_only_filename() -> None:
     assert "20240131" not in name
 
 
+def test_music_filename_includes_track_number_prefix() -> None:
+    name = build_output_filename(
+        {
+            "artist": "ERNEST",
+            "album_artist": "ERNEST",
+            "album": "Live From The South",
+            "track": "Hate A Small Town",
+            "release_date": "2025",
+            "track_number": 3,
+            "disc_number": 1,
+            "disc_total": 1,
+            "mb_release_group_id": "rg-live-from-the-south",
+        },
+        "fallback-id",
+        "m4a",
+        None,
+        True,
+        enforce_music_contract=True,
+    )
+
+    assert name == "ERNEST/Live From The South (2025)/03 - Hate A Small Town.m4a"
+
+
 def test_collision_path_appends_counter(tmp_path) -> None:
     first = tmp_path / "Track.mp3"
     first.write_bytes(b"a")

@@ -6,6 +6,7 @@ import sqlite3
 import sys
 
 from metadata.importers.base import TrackIntent
+from library.music_index import ensure_music_library_index
 
 _CANONICAL_IDS_PATH = Path(__file__).resolve().parent.parent / "engine" / "canonical_ids.py"
 _CANONICAL_SPEC = importlib.util.spec_from_file_location("engine_canonical_ids_for_import_resolution_test", _CANONICAL_IDS_PATH)
@@ -179,6 +180,42 @@ def _spy_job_payload_builder(*, config, **kwargs):
         "canonical_id": kwargs.get("canonical_id"),
         "force_requeue": bool(kwargs.get("force_requeue")),
     }
+
+
+def _insert_indexed_track(
+    db_path: Path,
+    *,
+    file_path: Path,
+    artist: str,
+    title: str,
+    album: str,
+    recording_mbid: str | None = None,
+    mb_release_id: str | None = None,
+    mb_release_group_id: str | None = None,
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        ensure_music_library_index(conn)
+        conn.execute(
+            """
+            INSERT INTO music_library_index (
+                path, title, artist, artist_key, album, album_key, stream_url,
+                downloaded_at, size_bytes, file_ext, media_type, artwork_local_path,
+                recording_mbid, mb_release_id, mb_release_group_id, indexed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, '', 0, 1, 'mp3', 'audio', NULL, ?, ?, ?, '2026-08-22T00:00:00+00:00')
+            """,
+            (
+                str(file_path),
+                title,
+                artist,
+                artist.lower(),
+                album,
+                album.lower(),
+                recording_mbid,
+                mb_release_id,
+                mb_release_group_id,
+            ),
+        )
+        conn.commit()
 
 
 def test_import_pipeline_resolves_musicbrainz_and_enqueues_music_track() -> None:
@@ -676,6 +713,178 @@ def test_import_pipeline_skips_enqueue_when_canonical_job_already_exists() -> No
     assert result.duplicate_skipped_count == 1
     assert result.failed_count == 0
     assert len(queue_store.enqueued) == 0
+
+
+def test_import_pipeline_skips_enqueue_when_track_is_already_in_library_index(tmp_path: Path) -> None:
+    existing = tmp_path / "ERNEST" / "Album (2025)" / "03 - Hate A Small Town.mp3"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"existing mp3")
+    db_path = tmp_path / "queue.sqlite"
+    _insert_indexed_track(
+        db_path,
+        file_path=existing,
+        artist="ERNEST",
+        title="Hate A Small Town",
+        album="Album (2025)",
+    )
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-ernest-1",
+                        "title": "Hate A Small Town",
+                        "ext:score": "96",
+                        "artist-credit": [{"name": "ERNEST"}],
+                        "release-list": [{"id": "release-ernest-1"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    queue_store.db_path = str(db_path)
+
+    result = process_imported_tracks(
+        [
+            TrackIntent(
+                artist="ERNEST",
+                title="Hate A Small Town",
+                album="Album",
+                raw_line="",
+                source_format="apple_xml",
+            )
+        ],
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+        },
+    )
+
+    assert result.resolved_count == 1
+    assert result.enqueued_count == 0
+    assert result.duplicate_skipped_count == 1
+    assert len(queue_store.enqueued) == 0
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT item_state, source_resolution_state, linked_job_status
+            FROM import_batch_items
+            WHERE batch_id=?
+            """,
+            (result.import_batch_id,),
+        ).fetchone()
+    assert row == ("duplicate", "skipped_existing", "library_present")
+
+
+def test_import_pipeline_ignores_stale_library_index_row_with_missing_file(tmp_path: Path) -> None:
+    missing = tmp_path / "missing" / "Album (2025)" / "03 - Hate A Small Town.mp3"
+    db_path = tmp_path / "queue.sqlite"
+    _insert_indexed_track(
+        db_path,
+        file_path=missing,
+        artist="ERNEST",
+        title="Hate A Small Town",
+        album="Album (2025)",
+    )
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-ernest-2",
+                        "title": "Hate A Small Town",
+                        "ext:score": "96",
+                        "artist-credit": [{"name": "ERNEST"}],
+                        "release-list": [{"id": "release-ernest-2"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    queue_store.db_path = str(db_path)
+
+    result = process_imported_tracks(
+        [
+            TrackIntent(
+                artist="ERNEST",
+                title="Hate A Small Town",
+                album="Album",
+                raw_line="",
+                source_format="apple_xml",
+            )
+        ],
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+        },
+    )
+
+    assert result.resolved_count == 1
+    assert result.enqueued_count == 1
+    assert result.duplicate_skipped_count == 0
+    assert len(queue_store.enqueued) == 1
+
+
+def test_import_pipeline_does_not_skip_same_recording_on_different_album(tmp_path: Path) -> None:
+    existing = tmp_path / "ERNEST" / "Live From The South" / "03 - Hate A Small Town.mp3"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"existing mp3")
+    db_path = tmp_path / "queue.sqlite"
+    _insert_indexed_track(
+        db_path,
+        file_path=existing,
+        artist="ERNEST",
+        title="Hate A Small Town",
+        album="Live From The South",
+        recording_mbid="mbid-ernest-3",
+    )
+    mb = FakeMusicBrainzService(
+        [
+            {
+                "recording-list": [
+                    {
+                        "id": "mbid-ernest-3",
+                        "title": "Hate A Small Town",
+                        "ext:score": "96",
+                        "artist-credit": [{"name": "ERNEST"}],
+                        "release-list": [{"id": "release-ernest-3"}],
+                    }
+                ]
+            }
+        ]
+    )
+    queue_store = FakeQueueStore()
+    queue_store.db_path = str(db_path)
+
+    result = process_imported_tracks(
+        [
+            TrackIntent(
+                artist="ERNEST",
+                title="Hate A Small Town",
+                album="Greatest Hits",
+                raw_line="",
+                source_format="apple_xml",
+            )
+        ],
+        {
+            "musicbrainz_service": mb,
+            "queue_store": queue_store,
+            "job_payload_builder": _spy_job_payload_builder,
+            "app_config": {},
+        },
+    )
+
+    assert result.resolved_count == 1
+    assert result.enqueued_count == 1
+    assert result.duplicate_skipped_count == 0
+    assert len(queue_store.enqueued) == 1
 
 
 def test_import_pipeline_requeues_stale_duplicate_job() -> None:
