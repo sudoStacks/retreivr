@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import shutil
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -66,17 +65,10 @@ def file_hash(path: Path) -> str:
 
 def is_stable(path: Path) -> bool:
     try:
-        before = path.stat()
+        stat_result = path.stat()
     except OSError:
         return False
-    if time.time() - before.st_mtime < MIN_AGE_SECONDS:
-        return False
-    time.sleep(STABILITY_WAIT_SECONDS)
-    try:
-        after = path.stat()
-    except OSError:
-        return False
-    return before.st_size == after.st_size and before.st_mtime == after.st_mtime
+    return time.time() - stat_result.st_mtime >= MIN_AGE_SECONDS
 
 
 def unique_path(directory: Path, name: str) -> Path:
@@ -93,13 +85,14 @@ def unique_path(directory: Path, name: str) -> Path:
         index += 1
 
 
-def build_local_hashes() -> set[str]:
+def build_existing_hashes() -> set[str]:
     hashes: set[str] = set()
-    for path in audio_files(LOCAL_LIBRARY):
-        try:
-            hashes.add(file_hash(path))
-        except OSError as exc:
-            log(f"local_hash_failed path={json.dumps(str(path))} error={json.dumps(str(exc))}")
+    for root, label in ((LOCAL_LIBRARY, "local_library"), (AUTO_ADD, "auto_add")):
+        for path in audio_files(root):
+            try:
+                hashes.add(file_hash(path))
+            except OSError as exc:
+                log(f"{label}_hash_failed path={json.dumps(str(path))} error={json.dumps(str(exc))}")
     return hashes
 
 
@@ -114,7 +107,21 @@ def move_duplicate(path: Path, reason: str) -> None:
 def import_file(path: Path) -> None:
     AUTO_ADD.mkdir(parents=True, exist_ok=True)
     target = unique_path(AUTO_ADD, path.name)
-    shutil.move(str(path), str(target))
+    temp = unique_path(AUTO_ADD, f".retreivr-import-{os.getpid()}-{path.name}.tmp")
+    try:
+        with path.open("rb") as src, temp.open("xb") as dst:
+            for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                dst.write(chunk)
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(str(temp), str(target))
+        path.unlink()
+    except Exception:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     log(f"moved_for_import src={json.dumps(str(path))} dst={json.dumps(str(target))}")
 
 
@@ -129,7 +136,7 @@ def main() -> int:
         log(f"local_library_missing path={json.dumps(str(LOCAL_LIBRARY))}")
         return 0
 
-    local_hashes = build_local_hashes()
+    existing_hashes = build_existing_hashes()
     seen_this_run: set[str] = set()
     moved = skipped = pending = failed = 0
     for path in sorted(SOURCE.iterdir()):
@@ -140,8 +147,8 @@ def main() -> int:
             continue
         try:
             digest = file_hash(path)
-            if digest in local_hashes:
-                move_duplicate(path, "already_in_local_library")
+            if digest in existing_hashes:
+                move_duplicate(path, "already_in_local_or_auto_add")
                 skipped += 1
             elif digest in seen_this_run:
                 move_duplicate(path, "duplicate_in_handoff_queue")
@@ -149,6 +156,7 @@ def main() -> int:
             else:
                 import_file(path)
                 seen_this_run.add(digest)
+                existing_hashes.add(digest)
                 moved += 1
         except Exception as exc:
             failed += 1
