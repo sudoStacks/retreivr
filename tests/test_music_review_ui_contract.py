@@ -24,6 +24,13 @@ def test_consequential_review_actions_require_confirmation() -> None:
     assert "from this album?" in _APP_JS
 
 
+def test_review_queue_has_select_all_action() -> None:
+    index_html = (Path(__file__).resolve().parents[1] / "webUI" / "index.html").read_text(encoding="utf-8")
+    assert 'id="review-select-all"' in index_html
+    assert 'const reviewSelectAll = $("#review-select-all")' in _APP_JS
+    assert "state.reviewSelectedIds = new Set(ids)" in _APP_JS
+
+
 def test_album_artwork_does_not_wait_for_backend_probe() -> None:
     function_body = _APP_JS.split("async function fetchHomeAlbumCoverUrl(albumId)", 1)[1].split(
         "function buildHomeResultsStatusInfo", 1

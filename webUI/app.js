@@ -20174,14 +20174,17 @@ function getSelectedReviewIds() {
 function updateReviewToolbarState() {
   const selectedCount = getSelectedReviewIds().length;
   const hasPending = Array.isArray(state.reviewItems) && state.reviewItems.length > 0;
+  const pendingIds = (state.reviewItems || []).map((item) => String(item.id || "").trim()).filter(Boolean);
   const acceptSelected = $("#review-accept-selected");
   const rejectSelected = $("#review-reject-selected");
   const clearSelection = $("#review-clear-selection");
   const acceptAll = $("#review-accept-all");
+  const selectAll = $("#review-select-all");
   if (acceptSelected) acceptSelected.disabled = selectedCount === 0;
   if (rejectSelected) rejectSelected.disabled = selectedCount === 0;
   if (clearSelection) clearSelection.disabled = selectedCount === 0;
   if (acceptAll) acceptAll.disabled = !hasPending;
+  if (selectAll) selectAll.disabled = !pendingIds.length || selectedCount >= pendingIds.length;
 }
 
 function updateReviewPendingIndicators() {
@@ -23391,6 +23394,15 @@ function bindEvents() {
     musicReviewAlertOpen.addEventListener("click", () => {
       setPage("review");
       window.location.hash = "review";
+    });
+  }
+  const reviewSelectAll = $("#review-select-all");
+  if (reviewSelectAll) {
+    reviewSelectAll.addEventListener("click", () => {
+      const ids = (state.reviewItems || []).map((item) => String(item.id || "").trim()).filter(Boolean);
+      state.reviewSelectedIds = new Set(ids);
+      renderReviewQueue();
+      setNotice($("#review-message"), ids.length ? `Selected ${ids.length} pending review item${ids.length === 1 ? "" : "s"}.` : "", false);
     });
   }
   const reviewAcceptSelected = $("#review-accept-selected");
