@@ -73,6 +73,14 @@ def test_validate_config_rejects_non_string_download_defaults() -> None:
     assert "home_music_video_download_folder must be a string" in errors
 
 
+def test_validate_config_rejects_invalid_music_review_min_score() -> None:
+    core = _load_engine_core()
+
+    errors = core.validate_config({"music_low_confidence_review_min_score": 1.25})
+
+    assert "music_low_confidence_review_min_score must be between 0 and 1" in errors
+
+
 def test_validate_config_rejects_invalid_music_export_targets() -> None:
     core = _load_engine_core()
 

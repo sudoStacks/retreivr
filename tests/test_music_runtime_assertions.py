@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import tempfile
 import sys
 import threading
@@ -857,7 +858,7 @@ def test_import_failure_does_not_enqueue_review_for_variant_rejection(monkeypatc
         assert captured_enqueue["count"] == 0
 
 
-def test_import_failure_enqueues_review_for_likely_artist_metadata_mismatch(monkeypatch) -> None:
+def test_import_failure_does_not_enqueue_review_below_review_min_score(monkeypatch) -> None:
     jq = _load_job_queue()
     with tempfile.TemporaryDirectory() as tmp:
         db_path = str(Path(tmp) / "db.sqlite")
@@ -972,9 +973,167 @@ def test_import_failure_enqueues_review_for_likely_artist_metadata_mismatch(monk
 
         resolved = engine._resolve_music_track_job(job)
         assert resolved is None
-        assert captured_enqueue["origin"] == "music_review"
-        assert captured_enqueue["media_intent"] == "music_track_review"
-        assert captured_enqueue.get("output_template", {}).get("review_parent_job_id") == "job-import-artist-mismatch-1"
+        assert captured_enqueue == {}
+
+
+def test_review_candidate_min_score_can_be_lowered() -> None:
+    jq = _load_job_queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        engine = jq.DownloadWorkerEngine(
+            db_path=str(Path(tmp) / "db.sqlite"),
+            config={
+                "music_low_confidence_review_enabled": True,
+                "music_low_confidence_review_min_score": 0.40,
+            },
+            paths=jq.EnginePaths(
+                log_dir=tmp,
+                db_path=str(Path(tmp) / "db.sqlite"),
+                temp_downloads_dir=tmp,
+                single_downloads_dir=tmp,
+                lock_file=str(Path(tmp) / "retreivr.lock"),
+                ytdlp_temp_dir=tmp,
+                thumbs_dir=tmp,
+            ),
+            adapters={},
+            search_service=None,
+        )
+
+        candidate = engine._select_low_confidence_review_candidate(
+            {
+                "decision_edge": {
+                    "rejected_candidates": [
+                        {
+                            "candidate_id": "cand-artist-mismatch",
+                            "source": "youtube_music",
+                            "url": "https://www.youtube.com/watch?v=abc123xyz00",
+                            "rejection_reason": "low_artist_similarity",
+                            "top_failed_gate": "artist_similarity",
+                            "nearest_pass_margin": {
+                                "name": "artist_similarity",
+                                "value": 0.0,
+                                "threshold": 0.625,
+                                "margin_to_pass": 0.625,
+                                "direction": ">=",
+                            },
+                            "final_score": 0.40,
+                            "title_similarity": 1.0,
+                            "artist_similarity": 0.0,
+                            "duration_delta_ms": 2000,
+                        }
+                    ]
+                }
+            }
+        )
+
+        assert candidate is not None
+        assert candidate["candidate_id"] == "cand-artist-mismatch"
+
+
+def test_review_duplicate_guard_skips_completed_library_recording() -> None:
+    jq = _load_job_queue()
+    review_queue = _load_module("library_review_queue_duplicate_guard_tests", _ROOT / "library" / "review_queue.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        conn = sqlite3.connect(db_path)
+        try:
+            jq.ensure_download_jobs_table(conn)
+            review_queue.ensure_review_queue_table(conn)
+            conn.execute(
+                """
+                INSERT INTO download_jobs (
+                    id, origin, origin_id, media_type, media_intent, source, url, status,
+                    attempts, max_attempts, created_at, updated_at, trace_id, resolved_destination, canonical_id, file_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "completed-track",
+                    "import",
+                    "batch",
+                    "music",
+                    "music_track",
+                    "youtube_music",
+                    "https://example.test/track",
+                    jq.JOB_STATUS_COMPLETED,
+                    0,
+                    3,
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                    "trace",
+                    tmp,
+                    "music_track:rec-dup:rel-dup:d1:t1",
+                    str(Path(tmp) / "Artist" / "Album" / "01 - Song.m4a"),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={"music_low_confidence_review_min_score": 0.60},
+            paths=jq.EnginePaths(
+                log_dir=tmp,
+                db_path=db_path,
+                temp_downloads_dir=tmp,
+                single_downloads_dir=tmp,
+                lock_file=str(Path(tmp) / "retreivr.lock"),
+                ytdlp_temp_dir=tmp,
+                thumbs_dir=tmp,
+            ),
+            adapters={},
+            search_service=None,
+        )
+
+        assert engine._recording_already_in_review_or_library(recording_mbid="rec-dup", release_mbid="rel-dup") is True
+
+
+def test_review_duplicate_guard_skips_existing_pending_review_recording() -> None:
+    jq = _load_job_queue()
+    review_queue = _load_module("library_review_queue_pending_guard_tests", _ROOT / "library" / "review_queue.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "db.sqlite")
+        conn = sqlite3.connect(db_path)
+        try:
+            jq.ensure_download_jobs_table(conn)
+            review_queue.ensure_review_queue_table(conn)
+            conn.execute(
+                """
+                INSERT INTO review_queue_items (
+                    id, job_id, status, media_type, media_intent, recording_mbid, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "review:rec-pending:candidate",
+                    "review-job",
+                    review_queue.REVIEW_STATUS_PENDING,
+                    "music",
+                    "music_track_review",
+                    "rec-pending",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        engine = jq.DownloadWorkerEngine(
+            db_path=db_path,
+            config={"music_low_confidence_review_min_score": 0.60},
+            paths=jq.EnginePaths(
+                log_dir=tmp,
+                db_path=db_path,
+                temp_downloads_dir=tmp,
+                single_downloads_dir=tmp,
+                lock_file=str(Path(tmp) / "retreivr.lock"),
+                ytdlp_temp_dir=tmp,
+                thumbs_dir=tmp,
+            ),
+            adapters={},
+            search_service=None,
+        )
+
+        assert engine._recording_already_in_review_or_library(recording_mbid="rec-pending") is True
 
 
 def test_review_job_output_dir_allows_internal_review_root() -> None:

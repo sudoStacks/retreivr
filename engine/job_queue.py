@@ -3803,6 +3803,64 @@ class DownloadWorkerEngine:
             return False
         return True
 
+    def _music_review_min_score(self) -> float:
+        try:
+            value = float(self.config.get("music_low_confidence_review_min_score", 0.60))
+        except Exception:
+            value = 0.60
+        return max(0.0, min(1.0, value))
+
+    def _recording_already_in_review_or_library(self, *, recording_mbid: str, release_mbid: str | None = None) -> bool:
+        rec = str(recording_mbid or "").strip()
+        rel = str(release_mbid or "").strip()
+        if not rec and not rel:
+            return False
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+        try:
+            cur = conn.cursor()
+            clauses = []
+            params = []
+            if rec:
+                clauses.append("canonical_id LIKE ?")
+                params.append(f"music_track:{rec}:%")
+            if rec and rel:
+                clauses.append("canonical_id LIKE ?")
+                params.append(f"music_track:{rec}:{rel}:%")
+            if clauses:
+                cur.execute(
+                    f"""
+                    SELECT 1
+                    FROM download_jobs
+                    WHERE status=?
+                      AND file_path IS NOT NULL
+                      AND file_path != ''
+                      AND ({' OR '.join(clauses)})
+                    LIMIT 1
+                    """,
+                    (JOB_STATUS_COMPLETED, *params),
+                )
+                if cur.fetchone():
+                    return True
+            if rec:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM review_queue_items
+                    WHERE status=?
+                      AND recording_mbid=?
+                    LIMIT 1
+                    """,
+                    ("pending", rec),
+                )
+                if cur.fetchone():
+                    return True
+        except sqlite3.Error:
+            logger.exception("[MUSIC] failed review duplicate guard recording_mbid=%s release_mbid=%s", rec, rel)
+            return False
+        finally:
+            conn.close()
+        return False
+
     def _select_low_confidence_review_candidate(self, search_meta):
         if not isinstance(search_meta, dict):
             return None
@@ -3839,6 +3897,9 @@ class DownloadWorkerEngine:
             if gate == "variant_alignment":
                 return False
             if reason in {"disallowed_variant", "preview_variant", "session_variant", "cover_artist_mismatch"}:
+                return False
+            final_score = _as_float(item.get("final_score"), 0.0)
+            if final_score < self._music_review_min_score():
                 return False
             margin_value = _margin(item)
             title_similarity = _as_float(item.get("title_similarity"), 0.0)
@@ -3903,6 +3964,20 @@ class DownloadWorkerEngine:
         candidate_id = str(review_candidate.get("candidate_id") or "").strip()
         review_key = candidate_id or hashlib.sha1(candidate_url.encode("utf-8")).hexdigest()[:12]
         review_canonical_id = f"review:{recording_mbid or job.id}:{review_key}"
+        release_mbid = str(
+            canonical.get("mb_release_id")
+            or payload.get("mb_release_id")
+            or ""
+        ).strip()
+        if self._recording_already_in_review_or_library(recording_mbid=recording_mbid, release_mbid=release_mbid):
+            _log_event(
+                logging.INFO,
+                "music_review_skipped_duplicate_recording",
+                failed_job_id=job.id,
+                recording_mbid=recording_mbid,
+                release_mbid=release_mbid,
+            )
+            return False
 
         public_music_root = resolve_dir(
             payload.get("output_dir")

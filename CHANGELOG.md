@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.6 — Music Review Threshold and De-dupe
+
+### Added
+- Added `music_low_confidence_review_min_score`, defaulting to `0.60`, so Music Review only receives medium-confidence near-miss candidates.
+- Added a Settings control beside the Music match threshold for changing the Music Review admission threshold.
+
+### Changed
+- Music Review indicators now use the API's real pending summary count instead of the loaded-card limit, so badges do not incorrectly cap at 300.
+- The Review page now reports when it is showing only the first page of a larger pending queue.
+
+### Fixed
+- Future Music Review enqueue attempts now skip candidates below the configured Review threshold.
+- Future Music Review enqueue attempts now skip recordings already pending in Review or already completed in the music library.
+
+### Release
+- Updated Python package metadata, Docker build defaults, Compose examples, Portainer instructions, runtime provenance tests, cache-busting frontend asset versions, README guidance, and upgrade notes for `v1.1.6`.
+
 ## v1.1.5 — Spotify Playlist Browse and Import
 
 ### Added

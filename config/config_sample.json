@@ -64,6 +64,7 @@
   },
   "filename_template": "%(title)s.%(ext)s",
   "music_filename_template": "%(artist)s/%(album)s/%(track)s.%(ext)s",
+  "music_low_confidence_review_min_score": 0.6,
   "music_metadata": {
     "enabled": true,
     "confidence_threshold": 70,

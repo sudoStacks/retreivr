@@ -14,6 +14,7 @@ const state = {
   currentPage: "home",
   lastMusicMode: "music",
   reviewItems: [],
+  reviewSummary: { pending: 0, accepted: 0, rejected: 0 },
   reviewItemsSignature: "",
   reviewSelectedIds: new Set(),
   reviewPreviewItemId: null,
@@ -19076,10 +19077,14 @@ function renderConfig(cfg) {
     : (Number.isFinite(cfg.music_mb_binding_threshold)
       ? Math.round(Number(cfg.music_mb_binding_threshold) * 100)
       : 78);
+  const musicReviewThresholdPercent = Number.isFinite(cfg.music_low_confidence_review_min_score)
+    ? Math.round(Number(cfg.music_low_confidence_review_min_score) * 100)
+    : 60;
   $("#cfg-music-meta-enabled").checked = typeof musicMeta.enabled === "boolean"
     ? musicMeta.enabled
     : musicMetaDefaults.enabled;
   $("#cfg-music-meta-threshold").value = musicMatchThresholdPercent;
+  $("#cfg-music-review-threshold").value = musicReviewThresholdPercent;
   $("#cfg-music-enrich-threshold").value = Number.isFinite(musicMeta.confidence_threshold)
     ? musicMeta.confidence_threshold
     : musicMetaDefaults.confidence_threshold;
@@ -19639,14 +19644,19 @@ function buildConfigFromForm() {
     dry_run: false,
   };
   const matchThresholdPercent = parseInt($("#cfg-music-meta-threshold").value, 10);
+  const reviewThresholdPercent = parseInt($("#cfg-music-review-threshold").value, 10);
   const enrichThreshold = parseInt($("#cfg-music-enrich-threshold").value, 10);
   const metaArtworkSize = parseInt($("#cfg-music-meta-artwork-size").value, 10);
   const metaRate = parseFloat($("#cfg-music-meta-rate").value);
   const normalizedMatchThresholdPercent = Number.isInteger(matchThresholdPercent)
     ? Math.max(0, Math.min(100, matchThresholdPercent))
     : 78;
+  const normalizedReviewThresholdPercent = Number.isInteger(reviewThresholdPercent)
+    ? Math.max(0, Math.min(100, reviewThresholdPercent))
+    : 60;
   base.music_mb_binding_threshold = normalizedMatchThresholdPercent / 100;
   base.music_source_match_threshold = normalizedMatchThresholdPercent / 100;
+  base.music_low_confidence_review_min_score = normalizedReviewThresholdPercent / 100;
   base.music_metadata = {
     enabled: $("#cfg-music-meta-enabled").checked,
     confidence_threshold: Number.isInteger(enrichThreshold) ? enrichThreshold : metaDefaults.confidence_threshold,
@@ -20220,7 +20230,9 @@ function updateReviewToolbarState() {
 }
 
 function updateReviewPendingIndicators() {
-  const pendingCount = Array.isArray(state.reviewItems) ? state.reviewItems.length : 0;
+  const pendingCount = Number.isFinite(Number(state.reviewSummary?.pending))
+    ? Number(state.reviewSummary.pending)
+    : (Array.isArray(state.reviewItems) ? state.reviewItems.length : 0);
   const reviewNavButton = document.querySelector('.nav-button[data-page="review"]');
   if (reviewNavButton) {
     reviewNavButton.classList.toggle("hidden", pendingCount <= 0);
@@ -20276,8 +20288,13 @@ function renderReviewQueue() {
   if (!listEl || !summaryEl) {
     return;
   }
-  const pendingCount = Array.isArray(state.reviewItems) ? state.reviewItems.length : 0;
-  summaryEl.textContent = `Pending: ${pendingCount}`;
+  const pendingCount = Number.isFinite(Number(state.reviewSummary?.pending))
+    ? Number(state.reviewSummary.pending)
+    : (Array.isArray(state.reviewItems) ? state.reviewItems.length : 0);
+  const loadedCount = Array.isArray(state.reviewItems) ? state.reviewItems.length : 0;
+  summaryEl.textContent = loadedCount < pendingCount
+    ? `Pending: ${pendingCount} — showing ${loadedCount}`
+    : `Pending: ${pendingCount}`;
   updateReviewPendingIndicators();
   const validIds = new Set((state.reviewItems || []).map((item) => String(item.id || "").trim()).filter(Boolean));
   state.reviewSelectedIds = new Set(getSelectedReviewIds().filter((id) => validIds.has(id)));
@@ -20389,6 +20406,7 @@ async function refreshReviewQueue() {
     }
     const data = await fetchJson("/api/review_queue?status=pending&limit=300&compact=true");
     const nextItems = Array.isArray(data.items) ? data.items : [];
+    state.reviewSummary = (data.summary && typeof data.summary === "object") ? data.summary : { pending: nextItems.length };
     const nextSignature = JSON.stringify(nextItems);
     const reviewChanged = nextSignature !== state.reviewItemsSignature;
     state.reviewItems = nextItems;
@@ -20402,12 +20420,18 @@ async function refreshReviewQueue() {
       renderReviewQueue();
       state.reviewItemsSignature = nextSignature;
     } else {
-      if (summaryEl) summaryEl.textContent = `Pending: ${state.reviewItems.length}`;
+      const pendingCount = Number.isFinite(Number(state.reviewSummary?.pending))
+        ? Number(state.reviewSummary.pending)
+        : state.reviewItems.length;
+      if (summaryEl) summaryEl.textContent = state.reviewItems.length < pendingCount
+        ? `Pending: ${pendingCount} — showing ${state.reviewItems.length}`
+        : `Pending: ${pendingCount}`;
       updateReviewPendingIndicators();
       updateReviewToolbarState();
     }
   } catch (err) {
     state.reviewItems = [];
+    state.reviewSummary = { pending: 0, accepted: 0, rejected: 0 };
     state.reviewItemsSignature = "";
     state.reviewPreviewItemId = null;
     updateReviewPendingIndicators();

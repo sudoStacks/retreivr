@@ -108,6 +108,7 @@ def test_apply_config_defaults_preserves_user_values() -> None:
     assert normalized["music_metadata"]["enabled"] is False
     assert normalized["music_metadata"]["use_acoustid"] is True
     assert normalized["music_skip_metadata_probe"] is False
+    assert normalized["music_low_confidence_review_min_score"] == 0.60
     assert normalized["accounts"] == {"my_account": {"client_secret": "a.json", "token": "b.json"}}
 
 

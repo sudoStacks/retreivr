@@ -362,6 +362,7 @@ def apply_config_defaults(config):
     normalized.setdefault("community_cache_publish_token_env", "RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN")
     normalized.setdefault("community_cache_publish_batch_size", 25)
     normalized.setdefault("community_cache_publish_publisher", "")
+    normalized.setdefault("music_low_confidence_review_min_score", 0.60)
     normalized.setdefault(
         "resolution_api",
         {
@@ -894,6 +895,16 @@ def validate_config(config):
         else:
             if min_score < 0.0 or min_score > 1.0:
                 errors.append("community_cache_publish_min_score must be between 0 and 1")
+
+    review_min_score = config.get("music_low_confidence_review_min_score")
+    if review_min_score is not None:
+        try:
+            min_score = float(review_min_score)
+        except (TypeError, ValueError):
+            errors.append("music_low_confidence_review_min_score must be a number")
+        else:
+            if min_score < 0.0 or min_score > 1.0:
+                errors.append("music_low_confidence_review_min_score must be between 0 and 1")
 
     community_cache_publish_outbox_dir = config.get("community_cache_publish_outbox_dir")
     if community_cache_publish_outbox_dir is not None and not isinstance(community_cache_publish_outbox_dir, str):
