@@ -33,12 +33,12 @@ Retreivr is not intended to replace a full media server. It is the resolution an
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 1.1.4 Highlights
-- First-class Music Import tab with local preflight review, inline progress, import history, and accepted-file guidance
-- Import batch download concurrency controls so large library imports can be capped without changing global queue behavior
-- Server-side import guardrails for duplicate active imports, invalid file types, invalid download caps, and large Apple Music XML preflight feedback
-- Radio station cards now follow Browse card proportions with stable artwork, compact text, and non-overflowing actions
-- Apple Music XML remains supported directly; CSV/JSON conversion is optional and only recommended for lighter parsing of very large exports
+## 1.1.5 Highlights
+- Spotify playlist URLs and bare playlist IDs can now be pasted directly into the Music search bar
+- Browse includes a smart `Spotify Playlists` section that appears only when public Spotify playlists can be parsed
+- Spotify playlist cards support preview, direct Retreivr import, CSV export, M3U export, and opening the source playlist
+- Public Spotify playlist parsing uses bounded retries to keep the best no-auth result without aggressive polling
+- OAuth/API-backed Spotify credentials remain an optional fallback for incomplete public playlist payloads
 
 ## 1.1.0 Highlights
 - Persistent Music playback across navigation, with minimized controls, full-player video docking, authoritative queues, artist shuffle, and diverse genre radio
@@ -288,7 +288,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `1.1.4`, pull the latest image and restart:
+If you are upgrading to `1.1.5`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull

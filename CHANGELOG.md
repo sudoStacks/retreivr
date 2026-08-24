@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.5 — Spotify Playlist Browse and Import
+
+### Added
+- Added public Spotify playlist resolution for Music Mode, using no-auth playlist page parsing first with optional Spotify API/OAuth fallback for incomplete public payloads.
+- Added `GET /api/music/spotify/playlists` for parseable curated playlist cards in Browse and Music search results.
+- Added `POST /api/music/spotify/playlist/preflight` for pasted Spotify playlist URL or ID review through the existing playlist import parser.
+- Added `POST /api/music/spotify/playlist/import` to queue Spotify playlist imports directly into Retreivr without downloading an intermediate file.
+- Added `GET /api/music/spotify/playlist/export` for generated CSV and M3U playlist files.
+- Added a Music Browse section named `Spotify Playlists` with preview, import, CSV, M3U, and open-on-Spotify actions.
+
+### Changed
+- Music search now accepts Spotify playlist URLs, `spotify:playlist:` URIs, and bare 22-character Spotify playlist IDs.
+- Spotify playlist resolution now makes a small bounded set of public-page attempts, keeps the best result, stops immediately when complete, and avoids unbounded polling.
+- Spotify playlist cards and search sections hide automatically when no parseable playlists are available.
+
+### Release
+- Updated Python package metadata, Docker build defaults, Compose examples, Portainer instructions, runtime provenance tests, cache-busting frontend asset versions, README guidance, and upgrade notes for `v1.1.5`.
+
 ## v1.1.4 — Music Import Tab and Radio Card Fixes
 
 ### Added

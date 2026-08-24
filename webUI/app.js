@@ -73,6 +73,10 @@ const state = {
   homeSearchControlsEnabled: true,
   pendingAdvancedRequestId: null,
   spotifyPlaylistStatus: {},
+  spotifyPlaylistCards: [],
+  spotifyPlaylistCardsLoaded: false,
+  spotifyPlaylistCardsLoading: false,
+  spotifyPlaylistCardStatus: {},
   homeNoCandidateStreaks: {},
   homeDestinationInvalid: false,
   homeLastDefaultDestination: "",
@@ -6252,6 +6256,13 @@ async function loadMusicPlayerView() {
       renderMusicPlayerHistory();
       refreshLanding();
     }),
+    trackedRequest("spotify-playlists", fetchJson("/api/music/spotify/playlists"), (payload) => {
+      state.spotifyPlaylistCards = Array.isArray(payload?.playlists) ? payload.playlists : [];
+      state.spotifyPlaylistCardsLoaded = true;
+      completeMusicDatasetLoad("spotify-playlists", state.spotifyPlaylistCards.length);
+      renderMusicPlayerHome();
+      refreshLanding();
+    }),
   ];
   try {
     const results = await Promise.allSettled(requests);
@@ -7964,6 +7975,11 @@ function parseMusicHeaderQuery(rawQuery, mode = "auto") {
 async function runMusicHeaderSearch() {
   const query = $("#music-header-query")?.value || "";
   const trimmedQuery = String(query || "").trim();
+  if (isLikelySpotifyPlaylistIdentifier(trimmedQuery)) {
+    clearMusicResultsHistory();
+    await runMusicSpotifyPlaylistSearch(trimmedQuery);
+    return;
+  }
   if (isValidHttpUrl(trimmedQuery)) {
     warnMusicDirectUrlBlocked();
     return;
@@ -14247,6 +14263,203 @@ function createMusicLandingTrackRow(item) {
   `;
 }
 
+function getSpotifyPlaylistCardMeta(card) {
+  const trackCount = Number(card?.track_count || 0);
+  const totalTracks = Number(card?.total_tracks || trackCount);
+  const parts = [];
+  if (trackCount || totalTracks) {
+    parts.push(trackCount === totalTracks ? `${trackCount} tracks` : `${trackCount}/${totalTracks} tracks`);
+  }
+  if (card?.owner) parts.push(`by ${card.owner}`);
+  if (card?.complete === false) parts.push("partial public preview");
+  return parts.join(" • ");
+}
+
+function renderSpotifyPlaylistCard(card = {}) {
+  const url = String(card.playlist_url || "").trim();
+  const title = String(card.title || card.seed_title || "Spotify Playlist").trim();
+  const imageUrl = String(card.image_url || "assets/no_artwork.png").trim();
+  const status = state.spotifyPlaylistCardStatus[url] || null;
+  const previewTracks = Array.isArray(card.tracks_preview) ? card.tracks_preview.slice(0, 4) : [];
+  const statusMarkup = status ? `<div class="spotify-playlist-card-status meta">${escapeHtml(status.message || "")}</div>` : "";
+  const previewMarkup = previewTracks.length
+    ? `<div class="spotify-playlist-preview-list meta">${previewTracks.map((track) => escapeHtml([track.artist, track.title].filter(Boolean).join(" - "))).join("<br>")}</div>`
+    : "";
+  return `
+    <article class="music-player-browser-card music-player-browser-card-rich spotify-playlist-card" data-playlist-url="${escapeAttr(url)}">
+      <div class="music-player-browser-card-art">
+        <img src="${escapeAttr(imageUrl)}" alt="${escapeAttr(title)}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
+      </div>
+      <div class="music-player-browser-card-copy">
+        <span class="music-player-track-title">${escapeHtml(title)}</span>
+        <span class="music-player-track-meta">${escapeHtml(getSpotifyPlaylistCardMeta(card))}</span>
+        ${card.warning ? `<div class="meta">${escapeHtml(card.warning)}</div>` : ""}
+        ${statusMarkup || previewMarkup}
+      </div>
+      <div class="music-player-browser-card-actions">
+        <button class="button ghost small" type="button" data-action="spotify-playlist-preview" data-playlist-url="${escapeAttr(url)}">Preview</button>
+        <button class="button primary small" type="button" data-action="spotify-playlist-import" data-playlist-url="${escapeAttr(url)}">Import to Retreivr</button>
+        <button class="button ghost small" type="button" data-action="spotify-playlist-export" data-format="csv" data-playlist-url="${escapeAttr(url)}">CSV</button>
+        <button class="button ghost small" type="button" data-action="spotify-playlist-export" data-format="m3u" data-playlist-url="${escapeAttr(url)}">M3U</button>
+        <button class="button ghost small" type="button" data-action="spotify-playlist-open" data-playlist-url="${escapeAttr(url)}">Spotify</button>
+      </div>
+    </article>
+  `;
+}
+
+async function loadSpotifyPlaylistCards({ query = "", render = true } = {}) {
+  if (state.spotifyPlaylistCardsLoading) return state.spotifyPlaylistCards;
+  state.spotifyPlaylistCardsLoading = true;
+  const suffix = String(query || "").trim() ? `?q=${encodeURIComponent(String(query || "").trim())}` : "";
+  try {
+    const payload = await fetchJson(`/api/music/spotify/playlists${suffix}`);
+    const cards = Array.isArray(payload?.playlists) ? payload.playlists : [];
+    if (!query) {
+      state.spotifyPlaylistCards = cards;
+      state.spotifyPlaylistCardsLoaded = true;
+      if (render) {
+        renderMusicPlayerHome();
+        renderMusicLanding();
+      }
+    }
+    return cards;
+  } finally {
+    state.spotifyPlaylistCardsLoading = false;
+  }
+}
+
+function appendSpotifyPlaylistsSection(container, cards, { title = "Spotify Playlists", subtitle = "Public Spotify playlists Retreivr can parse and import without Spotify login." } = {}) {
+  const visibleCards = Array.isArray(cards) ? cards.filter((card) => card?.playlist_url && Number(card?.track_count || 0) > 0) : [];
+  if (!container || !visibleCards.length) return null;
+  const section = document.createElement("section");
+  section.className = "music-mode-section music-mode-section-grid";
+  section.dataset.discoverySection = "spotify-playlists";
+  section.innerHTML = `
+    <div class="music-home-section-header">
+      <div class="music-discovery-section-header">
+        <div class="group-title">${escapeHtml(title)}</div>
+        <div class="music-discovery-section-subtitle">${escapeHtml(subtitle)}</div>
+      </div>
+    </div>
+    <div class="music-meta-grid">
+      ${visibleCards.map((card) => renderSpotifyPlaylistCard(card)).join("")}
+    </div>
+  `;
+  container.appendChild(section);
+  return section;
+}
+
+async function appendSpotifyPlaylistSearchResults(container, query) {
+  const searchQuery = String(query || "").trim();
+  if (!searchQuery || !container) return;
+  try {
+    const cards = await loadSpotifyPlaylistCards({ query: searchQuery, render: false });
+    appendSpotifyPlaylistsSection(container, cards, {
+      title: "Spotify Playlists",
+      subtitle: `Spotify playlist matches for "${searchQuery}".`,
+    });
+  } catch (_err) {
+    // Search result cards are opportunistic; metadata search should not fail because Spotify is unavailable.
+  }
+}
+
+async function runMusicSpotifyPlaylistSearch(rawValue) {
+  const input = String(rawValue || "").trim();
+  const playlistId = normalize_spotify_playlist_identifier(input);
+  const playlistUrl = input.startsWith("http") || input.startsWith("spotify:")
+    ? input
+    : `https://open.spotify.com/playlist/${encodeURIComponent(playlistId)}`;
+  const container = $("#music-results-container");
+  if (!container) return;
+  setMusicSection("browse");
+  setMusicPageNotice("Resolving Spotify playlist…", false);
+  container.innerHTML = '<div class="home-results-empty">Resolving Spotify playlist…</div>';
+  try {
+    const payload = await fetchJson("/api/music/spotify/playlist/preflight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playlist_url: playlistUrl }),
+    });
+    const playlist = payload?.playlist || {};
+    container.innerHTML = "";
+    appendSpotifyPlaylistsSection(container, [playlist], {
+      title: "Spotify Playlists",
+      subtitle: "Pasted Spotify playlist resolved. Preview, import, export, or open it on Spotify.",
+    });
+    if (!container.children.length) {
+      container.innerHTML = '<div class="home-results-empty">Spotify playlist did not expose importable tracks.</div>';
+      setMusicPageNotice("Spotify playlist did not expose importable tracks.", true);
+      return;
+    }
+    const trackCount = Number(playlist.track_count || 0);
+    const totalTracks = Number(playlist.total_tracks || trackCount);
+    const countText = trackCount === totalTracks ? `${trackCount} tracks` : `${trackCount}/${totalTracks} tracks`;
+    setMusicPageNotice(`Spotify playlist resolved: ${countText}.`, false);
+    persistRecentMusicSearch(input);
+    focusMusicResults();
+  } catch (err) {
+    container.innerHTML = '<div class="home-results-empty">Spotify playlist could not be resolved.</div>';
+    setMusicPageNotice(`Spotify playlist failed: ${toUserErrorMessage(err)}`, true);
+  }
+}
+
+async function previewSpotifyPlaylistUrl(playlistUrl, button = null) {
+  const url = String(playlistUrl || "").trim();
+  if (!url) return;
+  if (button) button.disabled = true;
+  state.spotifyPlaylistCardStatus[url] = { message: "Previewing playlist…" };
+  renderMusicLanding();
+  try {
+    const payload = await fetchJson("/api/music/spotify/playlist/preflight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playlist_url: url }),
+    });
+    const total = Number(payload?.preflight?.total_tracks || payload?.playlist?.track_count || 0);
+    const matched = Number(payload?.preflight?.tracks?.length || 0);
+    state.spotifyPlaylistCardStatus[url] = { message: `Preview ready: ${matched || total} of ${total} tracks parsed.` };
+    setMusicPageNotice(`Spotify playlist preview ready: ${total} tracks.`, false);
+  } catch (err) {
+    state.spotifyPlaylistCardStatus[url] = { message: `Preview failed: ${toUserErrorMessage(err)}` };
+    setMusicPageNotice(`Spotify playlist preview failed: ${toUserErrorMessage(err)}`, true);
+  } finally {
+    if (button) button.disabled = false;
+    renderMusicLanding();
+  }
+}
+
+async function importSpotifyPlaylistUrl(playlistUrl, button = null) {
+  const url = String(playlistUrl || "").trim();
+  if (!url) return;
+  if (state.playlistImportInProgress) {
+    setMusicPageNotice("A playlist import is already running.", true);
+    return;
+  }
+  if (button) button.disabled = true;
+  const concurrency = Number.parseInt(String($("#music-import-concurrency")?.value || "2"), 10) || 2;
+  try {
+    const payload = await fetchJson("/api/music/spotify/playlist/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        playlist_url: url,
+        media_mode: state.homeMediaMode === "music_video" ? "music_video" : "music",
+        destination_dir: getMusicModeDestinationValue() || null,
+        final_format: getMusicModeFinalFormatOverride(),
+        max_concurrent_downloads: Math.max(1, Math.min(6, concurrency)),
+      }),
+    });
+    const jobId = String(payload.job_id || "").trim();
+    if (!jobId) throw new Error("missing_job_id");
+    setMusicPageNotice("Spotify playlist import started.", false);
+    startPlaylistImportPolling(jobId, payload.status || null);
+  } catch (err) {
+    setMusicPageNotice(`Spotify playlist import failed: ${toUserErrorMessage(err)}`, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function renderMusicLanding() {
   const toolbarSlot = getMusicToolbarSlot();
   if (toolbarSlot) toolbarSlot.innerHTML = "";
@@ -14476,6 +14689,11 @@ function renderMusicLanding() {
       libraryGrid.appendChild(createMusicAlbumCard(album, thumbnailJobs, renderToken));
     });
   }
+
+  appendSpotifyPlaylistsSection(container, state.spotifyPlaylistCards, {
+    title: "Spotify Playlists",
+    subtitle: "Public Spotify country playlists Retreivr can preview, import, or export without Spotify login.",
+  });
 
   if (visibleFavoriteArtists.length) {
     const favoriteArtistGrid = appendSection(
@@ -15463,6 +15681,13 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
     empty.textContent = "No music metadata matches found.";
     container.appendChild(empty);
     setMusicPageNotice("No music metadata matches found. Try a different query or mode.", true);
+    appendSpotifyPlaylistSearchResults(container, query).then(() => {
+      const hasSpotifySection = !!container.querySelector('[data-discovery-section="spotify-playlists"]');
+      if (hasSpotifySection) {
+        empty.remove();
+        setMusicPageNotice("", false);
+      }
+    });
     return;
   }
 
@@ -15566,6 +15791,7 @@ function renderMusicModeResults(response, query = "", { pushHistory = false, bro
       trackStack.appendChild(createMusicTrackResultCard(result, thumbnailJobs, renderToken));
     });
   }
+  appendSpotifyPlaylistSearchResults(container, query);
   runPrioritizedThumbnailJobs(thumbnailJobs, renderToken, {
     visibleCount: filteredTracks.length ? 10 : 12,
     immediateConcurrency: filteredTracks.length ? 8 : 10,
@@ -17288,6 +17514,14 @@ function normalize_spotify_playlist_identifier(value) {
     return raw.split(":").pop();
   }
   return raw;
+}
+
+function isLikelySpotifyPlaylistIdentifier(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  if (detectSpotifyUrlIntent(raw)?.intentType === "spotify_playlist") return true;
+  const normalized = normalize_spotify_playlist_identifier(raw);
+  return /^[A-Za-z0-9]{22}$/.test(normalized);
 }
 
 function detectSpotifyUrlIntent(raw) {
@@ -21521,6 +21755,7 @@ function bindEvents() {
     const maybeWarnMusicUrl = () => {
       const value = String(musicHeaderQuery.value || "").trim();
       if (!isValidHttpUrl(value)) return;
+      if (isLikelySpotifyPlaylistIdentifier(value)) return;
       const now = Date.now();
       if (now - musicUrlWarnedAt < 1800) return;
       musicUrlWarnedAt = now;
@@ -21731,6 +21966,30 @@ function bindEvents() {
     }
   });
   document.addEventListener("click", async (event) => {
+    const spotifyBtn = event.target.closest('button[data-action^="spotify-playlist-"]');
+    if (spotifyBtn) {
+      const playlistUrl = String(spotifyBtn.dataset.playlistUrl || "").trim();
+      const action = String(spotifyBtn.dataset.action || "").trim();
+      if (!playlistUrl) return;
+      if (action === "spotify-playlist-open") {
+        window.open(playlistUrl, "_blank", "noopener");
+        return;
+      }
+      if (action === "spotify-playlist-export") {
+        const format = String(spotifyBtn.dataset.format || "csv").trim().toLowerCase() === "m3u" ? "m3u" : "csv";
+        window.location.href = `/api/music/spotify/playlist/export?playlist_url=${encodeURIComponent(playlistUrl)}&format=${encodeURIComponent(format)}`;
+        return;
+      }
+      if (action === "spotify-playlist-preview") {
+        await previewSpotifyPlaylistUrl(playlistUrl, spotifyBtn);
+        return;
+      }
+      if (action === "spotify-playlist-import") {
+        await importSpotifyPlaylistUrl(playlistUrl, spotifyBtn);
+        return;
+      }
+    }
+
     const btn = event.target.closest(".music-download-btn");
     if (!btn) return;
     if (btn.disabled) return;
@@ -23578,6 +23837,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!state.homeMusicMode) return;
       const value = String(homeSearchInput.value || "").trim();
       if (!isValidHttpUrl(value)) return;
+      if (isLikelySpotifyPlaylistIdentifier(value)) return;
       const now = Date.now();
       if (now - homeMusicUrlWarnedAt < 1800) return;
       homeMusicUrlWarnedAt = now;

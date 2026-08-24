@@ -243,6 +243,13 @@ from engine.import_pipeline import (
     process_imported_tracks,
 )
 from engine.import_m3u_builder import resolve_import_playlist_root, write_import_m3u_from_batch
+from engine.spotify_public_playlists import (
+    COUNTRY_SPOTIFY_PLAYLIST_SEEDS,
+    SpotifyPlaylistResolver,
+    SpotifyPublicPlaylistError,
+    spotify_tracks_to_csv_bytes,
+    spotify_tracks_to_m3u,
+)
 from library.reconcile import reconcile_library
 from library.music_index import (
     ensure_music_library_index,
@@ -1126,6 +1133,30 @@ def _playlist_import_preflight_summary(filename: str, payload: bytes) -> dict:
         "max_concurrent_downloads_min": MIN_IMPORT_MAX_CONCURRENT_DOWNLOADS,
         "max_concurrent_downloads_max": MAX_IMPORT_MAX_CONCURRENT_DOWNLOADS,
     }
+
+
+def _spotify_public_resolver(config: dict | None = None) -> SpotifyPlaylistResolver:
+    config = config if isinstance(config, dict) else {}
+    try:
+        client = _build_spotify_client_with_optional_oauth(config)
+        if not client.client_id and not getattr(client, "_provided_access_token", None):
+            client = None
+    except Exception:
+        client = None
+    return SpotifyPlaylistResolver(spotify_client=client)
+
+
+def _resolve_spotify_playlist_for_import(playlist_url: str) -> tuple[str, bytes, dict]:
+    config = _read_config_or_404()
+    try:
+        resolved = _spotify_public_resolver(config).resolve(playlist_url, prefer_api=True)
+    except SpotifyPublicPlaylistError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not resolved.tracks:
+        raise HTTPException(status_code=400, detail="Spotify playlist did not expose importable tracks")
+    filename = f"{resolved.title or resolved.playlist_id}.csv"
+    payload = spotify_tracks_to_csv_bytes(resolved.tracks)
+    return filename, payload, resolved.to_summary(preview_limit=10)
 
 
 def _trim_playlist_import_jobs_locked() -> None:
@@ -3260,6 +3291,14 @@ class EnqueueCandidatePayload(BaseModel):
 
 class SpotifyPlaylistImportPayload(BaseModel):
     playlist_url: str
+
+
+class SpotifyPlaylistUrlPayload(BaseModel):
+    playlist_url: str
+    max_concurrent_downloads: Optional[int] = None
+    media_mode: Optional[str] = "music"
+    destination_dir: Optional[str] = None
+    final_format: Optional[str] = None
 
 
 class IntentExecutePayload(BaseModel):
@@ -8295,6 +8334,127 @@ async def import_playlist_preflight(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"preflight_failed: {exc}") from exc
+
+
+@app.get("/api/music/spotify/playlists")
+def list_spotify_playlist_cards(q: str | None = Query(None)):
+    """Return parseable curated Spotify playlist cards for Music Browse/Search."""
+    query = str(q or "").strip().lower()
+    config = _read_config_or_404()
+    resolver = _spotify_public_resolver(config)
+    cards = []
+    for seed in COUNTRY_SPOTIFY_PLAYLIST_SEEDS:
+        haystack = " ".join([seed.title, seed.description, seed.genre]).lower()
+        if query and query not in haystack:
+            continue
+        try:
+            resolved = resolver.resolve(seed.playlist_url, prefer_api=True)
+        except Exception:
+            continue
+        if not resolved.tracks:
+            continue
+        cards.append(
+            {
+                **resolved.to_summary(preview_limit=5),
+                "seed_title": seed.title,
+                "genre": seed.genre,
+                "source": seed.source,
+            }
+        )
+    return {"section": "Spotify Playlists", "playlists": cards}
+
+
+@app.post("/api/music/spotify/playlist/preflight")
+def preflight_spotify_playlist_url(payload: SpotifyPlaylistUrlPayload):
+    playlist_url = str(payload.playlist_url or "").strip()
+    if not playlist_url:
+        raise HTTPException(status_code=400, detail="playlist_url is required")
+    _, csv_payload, summary = _resolve_spotify_playlist_for_import(playlist_url)
+    preflight = _playlist_import_preflight_summary(f"{summary.get('title') or 'Spotify Playlist'}.csv", csv_payload)
+    return {"playlist": summary, "preflight": preflight}
+
+
+@app.post("/api/music/spotify/playlist/import")
+def import_spotify_playlist_url(payload: SpotifyPlaylistUrlPayload):
+    playlist_url = str(payload.playlist_url or "").strip()
+    if not playlist_url:
+        raise HTTPException(status_code=400, detail="playlist_url is required")
+    filename, csv_payload, summary = _resolve_spotify_playlist_for_import(playlist_url)
+    import_download_cap = _normalize_import_max_concurrent_downloads(payload.max_concurrent_downloads)
+
+    job_id = uuid4().hex
+    now_iso = datetime.now(timezone.utc).isoformat()
+    status_entry = {
+        "job_id": job_id,
+        "filename": filename,
+        "state": "queued",
+        "phase": "queued",
+        "message": "Spotify playlist import queued.",
+        "total_tracks": int(summary.get("track_count") or 0),
+        "processed_tracks": 0,
+        "resolved": 0,
+        "unresolved": 0,
+        "enqueued": 0,
+        "failed": 0,
+        "duplicate_skipped": 0,
+        "import_batch_id": "",
+        "playlist_name": str(summary.get("title") or Path(filename).stem),
+        "spotify_playlist": summary,
+        "max_concurrent_downloads": int(import_download_cap),
+        "error": None,
+        "started_at": now_iso,
+        "finished_at": None,
+        "updated_at": now_iso,
+        "updated_ts": time.time(),
+    }
+    lock = getattr(app.state, "playlist_import_jobs_lock", None)
+    jobs = getattr(app.state, "playlist_import_jobs", None)
+    if lock is None or not isinstance(jobs, dict):
+        raise HTTPException(status_code=503, detail="import_state_unavailable")
+    with lock:
+        if _playlist_imports_active_count() > 0:
+            raise HTTPException(status_code=409, detail="import_already_running")
+        jobs[job_id] = status_entry
+        app.state.playlist_import_active_count = _playlist_imports_active_count() + 1
+        _trim_playlist_import_jobs_locked()
+
+    thread = threading.Thread(
+        target=_run_playlist_import_job,
+        args=(
+            job_id,
+            filename,
+            csv_payload,
+            str(payload.media_mode or "music").strip().lower() or "music",
+            str(payload.destination_dir or "").strip() or None,
+            str(payload.final_format or "").strip() or None,
+            import_download_cap,
+        ),
+        name=f"spotify-playlist-import-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return JSONResponse(status_code=202, content={"job_id": job_id, "status": status_entry})
+
+
+@app.get("/api/music/spotify/playlist/export")
+def export_spotify_playlist_url(playlist_url: str = Query(...), format: str = Query("csv")):
+    filename, csv_payload, summary = _resolve_spotify_playlist_for_import(playlist_url)
+    requested_format = str(format or "csv").strip().lower()
+    safe_name = re.sub(r'[\\/:*?"<>|]+', "-", str(summary.get("title") or Path(filename).stem)).strip() or "Spotify Playlist"
+    if requested_format == "m3u":
+        resolved = _spotify_public_resolver(_read_config_or_404()).resolve(playlist_url, prefer_api=True)
+        return StreamingResponse(
+            iter([spotify_tracks_to_m3u(resolved.tracks).encode("utf-8")]),
+            media_type="audio/x-mpegurl",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.m3u"'},
+        )
+    if requested_format != "csv":
+        raise HTTPException(status_code=400, detail="format must be csv or m3u")
+    return StreamingResponse(
+        iter([csv_payload]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.csv"'},
+    )
 
 
 @app.post("/api/import/playlist")
