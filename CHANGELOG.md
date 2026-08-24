@@ -16,6 +16,8 @@ All notable changes to this project will be documented here.
 - Music search now accepts Spotify playlist URLs, `spotify:playlist:` URIs, and bare 22-character Spotify playlist IDs.
 - Spotify playlist resolution now makes a small bounded set of public-page attempts, keeps the best result, stops immediately when complete, and avoids unbounded polling.
 - Spotify playlist cards and search sections hide automatically when no parseable playlists are available.
+- Spotify playlist cards now match the Music Browse card proportions, keep artwork dominant, hide actions until hover/focus, preview inline, and start imports in the background without opening the blocking progress modal.
+- Apple Music handoff automation now targets the active local auto-add folder and cleans up files from the legacy nested auto-add path if that stale folder reappears.
 
 ### Release
 - Updated Python package metadata, Docker build defaults, Compose examples, Portainer instructions, runtime provenance tests, cache-busting frontend asset versions, README guidance, and upgrade notes for `v1.1.5`.

@@ -9808,11 +9808,11 @@ async function pollPlaylistImportStatus() {
   }
 }
 
-function startPlaylistImportPolling(jobId, initialStatus = null) {
+function startPlaylistImportPolling(jobId, initialStatus = null, { suppressModal = false } = {}) {
   state.playlistImportJobId = jobId;
   state.playlistImportInProgress = true;
   setPlaylistImportControlsEnabled(false);
-  if (!(state.currentPage === "music" && state.musicSection === "import")) {
+  if (!suppressModal && !(state.currentPage === "music" && state.musicSection === "import")) {
     openImportProgressModal();
   }
   if (initialStatus) {
@@ -14281,30 +14281,62 @@ function renderSpotifyPlaylistCard(card = {}) {
   const imageUrl = String(card.image_url || "assets/no_artwork.png").trim();
   const status = state.spotifyPlaylistCardStatus[url] || null;
   const previewTracks = Array.isArray(card.tracks_preview) ? card.tracks_preview.slice(0, 4) : [];
-  const statusMarkup = status ? `<div class="spotify-playlist-card-status meta">${escapeHtml(status.message || "")}</div>` : "";
+  const statusMarkup = status ? `<div class="spotify-playlist-card-status home-candidate-meta">${escapeHtml(status.message || "")}</div>` : "";
   const previewMarkup = previewTracks.length
-    ? `<div class="spotify-playlist-preview-list meta">${previewTracks.map((track) => escapeHtml([track.artist, track.title].filter(Boolean).join(" - "))).join("<br>")}</div>`
+    ? `<div class="spotify-playlist-preview-list home-candidate-meta">${previewTracks.map((track) => escapeHtml([track.artist, track.title].filter(Boolean).join(" - "))).join("<br>")}</div>`
     : "";
   return `
-    <article class="music-player-browser-card music-player-browser-card-rich spotify-playlist-card" data-playlist-url="${escapeAttr(url)}">
-      <div class="music-player-browser-card-art">
-        <img src="${escapeAttr(imageUrl)}" alt="${escapeAttr(title)}" loading="lazy" onerror="this.onerror=null;this.src='assets/no_artwork.png';">
+    <article class="home-result-card music-meta-card music-grid-card spotify-playlist-card" data-playlist-url="${escapeAttr(url)}" tabindex="0">
+      <div class="music-card-thumb-shell${imageUrl ? " loaded" : " no-art"}">
+        <img class="music-card-thumb" src="${escapeAttr(imageUrl)}" alt="${escapeAttr(title)}" loading="lazy" onerror="this.closest('.music-card-thumb-shell')?.classList.add('no-art');this.removeAttribute('src');">
+        <div class="music-card-thumb-placeholder" aria-hidden="true"></div>
       </div>
-      <div class="music-player-browser-card-copy">
-        <span class="music-player-track-title">${escapeHtml(title)}</span>
-        <span class="music-player-track-meta">${escapeHtml(getSpotifyPlaylistCardMeta(card))}</span>
-        ${card.warning ? `<div class="meta">${escapeHtml(card.warning)}</div>` : ""}
+      <div class="music-meta-main">
+        <div class="home-candidate-title">${escapeHtml(title)}</div>
+        <div class="home-candidate-meta">${escapeHtml(getSpotifyPlaylistCardMeta(card))}</div>
+        <div class="music-status-row">
+          <span class="music-status-badge">${escapeHtml(card.complete === false ? "Partial" : "Ready")}</span>
+          <span class="music-status-badge">Spotify</span>
+        </div>
         ${statusMarkup || previewMarkup}
       </div>
-      <div class="music-player-browser-card-actions">
+      <div class="home-candidate-action spotify-playlist-actions">
+        <button class="button primary small home-candidate-download-primary" type="button" data-action="spotify-playlist-import" data-playlist-url="${escapeAttr(url)}">Import</button>
         <button class="button ghost small" type="button" data-action="spotify-playlist-preview" data-playlist-url="${escapeAttr(url)}">Preview</button>
-        <button class="button primary small" type="button" data-action="spotify-playlist-import" data-playlist-url="${escapeAttr(url)}">Import to Retreivr</button>
         <button class="button ghost small" type="button" data-action="spotify-playlist-export" data-format="csv" data-playlist-url="${escapeAttr(url)}">CSV</button>
         <button class="button ghost small" type="button" data-action="spotify-playlist-export" data-format="m3u" data-playlist-url="${escapeAttr(url)}">M3U</button>
         <button class="button ghost small" type="button" data-action="spotify-playlist-open" data-playlist-url="${escapeAttr(url)}">Spotify</button>
       </div>
     </article>
   `;
+}
+
+function updateSpotifyPlaylistCardStatus(playlistUrl, message, { previewTracks = null } = {}) {
+  const url = String(playlistUrl || "").trim();
+  if (!url) return;
+  state.spotifyPlaylistCardStatus[url] = { message: String(message || "").trim() };
+  document.querySelectorAll(".spotify-playlist-card").forEach((card) => {
+    if (String(card.dataset.playlistUrl || "").trim() !== url) return;
+    const main = card.querySelector(".music-meta-main");
+    if (!main) return;
+    let statusEl = card.querySelector(".spotify-playlist-card-status");
+    if (!statusEl) {
+      statusEl = document.createElement("div");
+      statusEl.className = "spotify-playlist-card-status home-candidate-meta";
+      main.appendChild(statusEl);
+    }
+    statusEl.textContent = message || "";
+    let previewEl = card.querySelector(".spotify-playlist-preview-list");
+    const tracks = Array.isArray(previewTracks) ? previewTracks.slice(0, 8) : [];
+    if (tracks.length) {
+      if (!previewEl) {
+        previewEl = document.createElement("div");
+        previewEl.className = "spotify-playlist-preview-list home-candidate-meta";
+        main.appendChild(previewEl);
+      }
+      previewEl.innerHTML = tracks.map((track) => escapeHtml([track.artist, track.title].filter(Boolean).join(" - "))).join("<br>");
+    }
+  });
 }
 
 async function loadSpotifyPlaylistCards({ query = "", render = true } = {}) {
@@ -14407,8 +14439,7 @@ async function previewSpotifyPlaylistUrl(playlistUrl, button = null) {
   const url = String(playlistUrl || "").trim();
   if (!url) return;
   if (button) button.disabled = true;
-  state.spotifyPlaylistCardStatus[url] = { message: "Previewing playlist…" };
-  renderMusicLanding();
+  updateSpotifyPlaylistCardStatus(url, "Previewing playlist…");
   try {
     const payload = await fetchJson("/api/music/spotify/playlist/preflight", {
       method: "POST",
@@ -14416,15 +14447,15 @@ async function previewSpotifyPlaylistUrl(playlistUrl, button = null) {
       body: JSON.stringify({ playlist_url: url }),
     });
     const total = Number(payload?.preflight?.total_tracks || payload?.playlist?.track_count || 0);
-    const matched = Number(payload?.preflight?.tracks?.length || 0);
-    state.spotifyPlaylistCardStatus[url] = { message: `Preview ready: ${matched || total} of ${total} tracks parsed.` };
+    const trackCount = Number(payload?.playlist?.track_count || total || 0);
+    const previewTracks = Array.isArray(payload?.playlist?.tracks_preview) ? payload.playlist.tracks_preview : [];
+    updateSpotifyPlaylistCardStatus(url, `Preview ready: ${trackCount}/${total || trackCount} tracks parsed.`, { previewTracks });
     setMusicPageNotice(`Spotify playlist preview ready: ${total} tracks.`, false);
   } catch (err) {
-    state.spotifyPlaylistCardStatus[url] = { message: `Preview failed: ${toUserErrorMessage(err)}` };
+    updateSpotifyPlaylistCardStatus(url, `Preview failed: ${toUserErrorMessage(err)}`);
     setMusicPageNotice(`Spotify playlist preview failed: ${toUserErrorMessage(err)}`, true);
   } finally {
     if (button) button.disabled = false;
-    renderMusicLanding();
   }
 }
 
@@ -14451,8 +14482,9 @@ async function importSpotifyPlaylistUrl(playlistUrl, button = null) {
     });
     const jobId = String(payload.job_id || "").trim();
     if (!jobId) throw new Error("missing_job_id");
-    setMusicPageNotice("Spotify playlist import started.", false);
-    startPlaylistImportPolling(jobId, payload.status || null);
+    updateSpotifyPlaylistCardStatus(url, "Import started. Progress continues in the background.");
+    setMusicPageNotice("Spotify playlist import started in the background. Open Import for detailed progress.", false);
+    startPlaylistImportPolling(jobId, payload.status || null, { suppressModal: true });
   } catch (err) {
     setMusicPageNotice(`Spotify playlist import failed: ${toUserErrorMessage(err)}`, true);
   } finally {

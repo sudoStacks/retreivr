@@ -3969,6 +3969,32 @@ body.home-page .music-search-header-row .panel-title {
   gap: 10px;
 }
 
+.spotify-playlist-card .home-candidate-title,
+.spotify-playlist-card .home-candidate-meta,
+.spotify-playlist-card-status,
+.spotify-playlist-preview-list {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+}
+
+.spotify-playlist-card .home-candidate-title {
+  -webkit-line-clamp: 2;
+}
+
+.spotify-playlist-card .home-candidate-meta,
+.spotify-playlist-card-status {
+  -webkit-line-clamp: 2;
+}
+
+.spotify-playlist-preview-list {
+  -webkit-line-clamp: 3;
+}
+
+.spotify-playlist-card .spotify-playlist-actions .button {
+  min-width: 74px;
+}
+
 body.home-page .home-candidate-source-tag {
   display: inline-flex;
   align-items: center;

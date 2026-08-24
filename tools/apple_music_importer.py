@@ -13,8 +13,13 @@ from pathlib import Path
 
 
 SOURCE = Path("/Volumes/Media/Music/_AppleMusic")
-LOCAL_LIBRARY = Path("/Users/logan/Music/Music/Media.localized/Music")
-AUTO_ADD = Path("/Users/logan/Music/Music/Media.localized/Automatically Add to Music.localized")
+LOCAL_LIBRARY = Path("/Users/logan/Music/Music/Music")
+# This is the auto-add folder Apple Music created for the active local library.
+# Do not nest this under Media.localized unless Apple Music recreates the
+# library that way; the current macOS Music layout keeps it beside the media
+# folder.
+AUTO_ADD = Path("/Users/logan/Music/Music/Automatically Add to Music.localized")
+LEGACY_AUTO_ADD = Path("/Users/logan/Music/Music/Media.localized/Automatically Add to Music.localized")
 QUARANTINE = Path("/Volumes/Media/Music/_AppleMusic_skipped_duplicates")
 LOG = Path("/private/tmp/retreivr-apple-music-importer.log")
 LOCK = Path("/tmp/retreivr-apple-music-importer.lock")
@@ -104,7 +109,7 @@ def move_duplicate(path: Path, reason: str) -> None:
     log(f"duplicate_skipped reason={reason} src={json.dumps(str(path))} dst={json.dumps(str(target))}")
 
 
-def import_file(path: Path) -> None:
+def import_file(path: Path, remove_source: bool = True) -> None:
     AUTO_ADD.mkdir(parents=True, exist_ok=True)
     target = unique_path(AUTO_ADD, path.name)
     temp = unique_path(AUTO_ADD, f".retreivr-import-{os.getpid()}-{path.name}.tmp")
@@ -115,7 +120,8 @@ def import_file(path: Path) -> None:
             dst.flush()
             os.fsync(dst.fileno())
         os.replace(str(temp), str(target))
-        path.unlink()
+        if remove_source:
+            path.unlink()
     except Exception:
         try:
             temp.unlink()
@@ -123,6 +129,37 @@ def import_file(path: Path) -> None:
             pass
         raise
     log(f"moved_for_import src={json.dumps(str(path))} dst={json.dumps(str(target))}")
+
+
+def clean_legacy_auto_add(existing_hashes: set[str]) -> tuple[int, int, int]:
+    if not LEGACY_AUTO_ADD.exists() or LEGACY_AUTO_ADD == AUTO_ADD:
+        return 0, 0, 0
+
+    moved = skipped = failed = 0
+    for path in sorted(audio_files(LEGACY_AUTO_ADD)):
+        if not is_stable(path):
+            continue
+        try:
+            digest = file_hash(path)
+            if digest in existing_hashes:
+                move_duplicate(path, "already_in_local_or_auto_add_from_legacy_auto_add")
+                skipped += 1
+            else:
+                import_file(path)
+                existing_hashes.add(digest)
+                moved += 1
+        except Exception as exc:
+            failed += 1
+            log(f"legacy_auto_add_failed path={json.dumps(str(path))} error={json.dumps(str(exc))}")
+
+    try:
+        if not any(LEGACY_AUTO_ADD.iterdir()):
+            LEGACY_AUTO_ADD.rmdir()
+            log(f"legacy_auto_add_removed path={json.dumps(str(LEGACY_AUTO_ADD))}")
+    except OSError as exc:
+        log(f"legacy_auto_add_cleanup_skipped path={json.dumps(str(LEGACY_AUTO_ADD))} error={json.dumps(str(exc))}")
+
+    return moved, skipped, failed
 
 
 def main() -> int:
@@ -137,6 +174,7 @@ def main() -> int:
         return 0
 
     existing_hashes = build_existing_hashes()
+    legacy_moved, legacy_skipped, legacy_failed = clean_legacy_auto_add(existing_hashes)
     seen_this_run: set[str] = set()
     moved = skipped = pending = failed = 0
     for path in sorted(SOURCE.iterdir()):
@@ -161,8 +199,13 @@ def main() -> int:
         except Exception as exc:
             failed += 1
             log(f"file_failed path={json.dumps(str(path))} error={json.dumps(str(exc))}")
-    log(f"run_complete moved={moved} skipped={skipped} pending={pending} failed={failed}")
-    return 1 if failed else 0
+    total_failed = failed + legacy_failed
+    log(
+        "run_complete "
+        f"moved={moved} skipped={skipped} pending={pending} failed={failed} "
+        f"legacy_moved={legacy_moved} legacy_skipped={legacy_skipped} legacy_failed={legacy_failed}"
+    )
+    return 1 if total_failed else 0
 
 
 if __name__ == "__main__":
