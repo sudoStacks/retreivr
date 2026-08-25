@@ -2506,6 +2506,124 @@ def _send_watcher_batch_telegram(config: dict, message: str) -> dict:
         return {"sent": False, "message_id": None}
 
 
+def _ensure_watcher_failure_notification_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS watcher_failure_notifications (
+            failure_key TEXT PRIMARY KEY,
+            first_job_id TEXT,
+            last_job_id TEXT,
+            first_notified_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            notify_count INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+
+
+def _watcher_failure_keys_for_jobs(db_path: str | None, job_ids: list[str]) -> list[str]:
+    valid_job_ids = [str(job_id or "").strip() for job_id in job_ids if re.fullmatch(r"[0-9a-f]{32}", str(job_id or "").strip())]
+    if not db_path or not valid_job_ids:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        placeholders = ",".join("?" for _ in valid_job_ids)
+        cur.execute(
+            f"SELECT id, external_id, url, input_url, canonical_url FROM download_jobs WHERE id IN ({placeholders})",
+            valid_job_ids,
+        )
+        keys: list[str] = []
+        seen: set[str] = set()
+        for job_id, external_id, url, input_url, canonical_url in cur.fetchall():
+            video_id = str(external_id or "").strip()
+            if not video_id:
+                for candidate_url in (url, input_url, canonical_url):
+                    parsed = extract_video_id(str(candidate_url or "").strip())
+                    if parsed:
+                        video_id = parsed
+                        break
+            key = f"youtube:{video_id}" if video_id else f"job:{job_id}"
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+        return keys
+    except Exception:
+        logging.exception("Watcher failure notification key lookup failed")
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _should_send_watcher_failure_notification(db_path: str | None, failed_job_ids: list[str]) -> tuple[bool, list[str]]:
+    keys = _watcher_failure_keys_for_jobs(db_path, failed_job_ids)
+    if not db_path or not keys:
+        return True, keys
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        _ensure_watcher_failure_notification_table(conn)
+        placeholders = ",".join("?" for _ in keys)
+        existing = {
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT failure_key FROM watcher_failure_notifications WHERE failure_key IN ({placeholders})",
+                keys,
+            ).fetchall()
+        }
+        return any(key not in existing for key in keys), keys
+    except Exception:
+        logging.exception("Watcher failure notification dedupe check failed")
+        return True, keys
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _record_watcher_failure_notification(db_path: str | None, failed_job_ids: list[str], keys: list[str] | None = None) -> None:
+    if not db_path:
+        return
+    resolved_keys = list(keys or _watcher_failure_keys_for_jobs(db_path, failed_job_ids))
+    if not resolved_keys:
+        return
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        _ensure_watcher_failure_notification_table(conn)
+        for index, key in enumerate(resolved_keys):
+            job_id = str(failed_job_ids[index] if index < len(failed_job_ids) else "").strip() or None
+            conn.execute(
+                """
+                INSERT INTO watcher_failure_notifications
+                    (failure_key, first_job_id, last_job_id, first_notified_at, last_seen_at, notify_count)
+                VALUES (?, ?, ?, ?, ?, 1)
+                ON CONFLICT(failure_key) DO UPDATE SET
+                    last_job_id=excluded.last_job_id,
+                    last_seen_at=excluded.last_seen_at,
+                    notify_count=watcher_failure_notifications.notify_count + 1
+                """,
+                (key, job_id, job_id, now_iso, now_iso),
+            )
+        conn.commit()
+    except Exception:
+        logging.exception("Watcher failure notification dedupe record failed")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _telegram_preflight_error(config) -> str | None:
     telegram_cfg = config.get("telegram") if isinstance(config, dict) else None
     if not isinstance(telegram_cfg, dict):
@@ -7099,31 +7217,59 @@ async def _watcher_supervisor():
                             attempted_total,
                         )
                     else:
-                        batch_finished_at = datetime.now(timezone.utc).isoformat()
-                        summary_job_ids = (
-                            list(completed_job_ids) + list(failed_job_ids)
-                            if (completed_job_ids or failed_job_ids)
-                            else list(attempted_job_ids)
-                        )
-                        watcher_summary_status = SimpleNamespace(
-                            run_successes=summary_job_ids,
-                            run_failures=0,
-                        )
-                        result = notify_run_summary(
-                            config,
-                            run_type="watcher",
-                            status=watcher_summary_status,
-                            started_at=batch_started_at,
-                            finished_at=batch_finished_at,
-                            attempted_override=attempted_total,
-                        )
-                        if isinstance(result, dict) and bool(result.get("sent")):
-                            batch_state["last_telegram_sent_ts"] = time.monotonic()
-                        logging.info(
-                            "Watcher: batch telegram dispatched sent=%s attempted=%s",
-                            bool(result.get("sent")) if isinstance(result, dict) else False,
-                            int(result.get("attempted") or 0) if isinstance(result, dict) else 0,
-                        )
+                        suppress_failure_only_notification = False
+                        failure_notification_keys: list[str] = []
+                        if attempted_success == 0 and attempted_failed > 0:
+                            should_send_failure, failure_notification_keys = _should_send_watcher_failure_notification(
+                                getattr(app.state.paths, "db_path", None),
+                                failed_job_ids,
+                            )
+                            suppress_failure_only_notification = not should_send_failure
+                        if suppress_failure_only_notification:
+                            _record_telegram_delivery(
+                                run_type="watcher",
+                                sent=False,
+                                skipped=True,
+                                error="duplicate_failure_only_batch",
+                                message_id=None,
+                            )
+                            logging.info(
+                                "Watcher: batch telegram skipped (duplicate failure-only notification) attempted=%s failed=%s",
+                                attempted_total,
+                                attempted_failed,
+                            )
+                        else:
+                            batch_finished_at = datetime.now(timezone.utc).isoformat()
+                            summary_job_ids = (
+                                list(completed_job_ids) + list(failed_job_ids)
+                                if (completed_job_ids or failed_job_ids)
+                                else list(attempted_job_ids)
+                            )
+                            watcher_summary_status = SimpleNamespace(
+                                run_successes=summary_job_ids,
+                                run_failures=0,
+                            )
+                            result = notify_run_summary(
+                                config,
+                                run_type="watcher",
+                                status=watcher_summary_status,
+                                started_at=batch_started_at,
+                                finished_at=batch_finished_at,
+                                attempted_override=attempted_total,
+                            )
+                            if isinstance(result, dict) and bool(result.get("sent")):
+                                batch_state["last_telegram_sent_ts"] = time.monotonic()
+                                if attempted_success == 0 and attempted_failed > 0:
+                                    _record_watcher_failure_notification(
+                                        getattr(app.state.paths, "db_path", None),
+                                        failed_job_ids,
+                                        failure_notification_keys,
+                                    )
+                            logging.info(
+                                "Watcher: batch telegram dispatched sent=%s attempted=%s",
+                                bool(result.get("sent")) if isinstance(result, dict) else False,
+                                int(result.get("attempted") or 0) if isinstance(result, dict) else 0,
+                            )
                 elif batch_playlists:
                     logging.info(
                         "Watcher: batch telegram skipped (no attempted downloads) playlists=%s",

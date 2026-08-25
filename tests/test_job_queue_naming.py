@@ -222,3 +222,26 @@ def test_finalize_audio_uses_actual_output_extension_over_config(tmp_path) -> No
 
     assert final_path.endswith(".mp3")
     assert Path(final_path).exists()
+
+
+def test_finalize_download_artifact_normalizes_file_permissions(tmp_path) -> None:
+    local_file = tmp_path / "downloaded.mkv"
+    local_file.write_bytes(b"video-bytes")
+    local_file.chmod(0o600)
+
+    final_path, _meta = finalize_download_artifact(
+        local_file=str(local_file),
+        meta={
+            "title": "Video",
+            "uploader": "Artist",
+        },
+        fallback_id="abc123",
+        destination_dir=str(tmp_path / "out"),
+        audio_mode=False,
+        final_format="mkv",
+        template=None,
+        paths=None,
+        config={},
+    )
+
+    assert Path(final_path).stat().st_mode & 0o777 == 0o644

@@ -98,3 +98,13 @@ def test_video_mp4_cli_translation_includes_recode_video() -> None:
 
     assert "--merge-output-format" in argv and argv[argv.index("--merge-output-format") + 1] == "mp4"
     assert "--recode-video" in argv and argv[argv.index("--recode-video") + 1] == "mp4"
+
+
+def test_youtube_android_client_retry_opts_render_extractor_args() -> None:
+    jq = _load_job_queue()
+    opts = jq._with_youtube_android_client({"format": "best", "outtmpl": "%(id)s.%(ext)s"})
+    argv = jq._render_ytdlp_cli_argv(opts, "https://www.youtube.com/watch?v=abc123xyz00")
+
+    assert jq._opts_use_youtube_android_client(opts) is True
+    assert "--extractor-args" in argv
+    assert argv[argv.index("--extractor-args") + 1] == "youtube:player_client=android"

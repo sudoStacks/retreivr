@@ -167,6 +167,45 @@ def test_send_watcher_batch_telegram_returns_message_id(monkeypatch) -> None:
     assert result["message_id"] == 777
 
 
+def test_watcher_failure_notification_dedupes_by_video_id() -> None:
+    module = _load_api_main()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "db.sqlite")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE download_jobs (
+                id TEXT PRIMARY KEY,
+                external_id TEXT,
+                url TEXT,
+                input_url TEXT,
+                canonical_url TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO download_jobs (id, external_id, url) VALUES (?, ?, ?)",
+            ("a" * 32, "k3LWiKE3b6c", "https://www.youtube.com/watch?v=k3LWiKE3b6c"),
+        )
+        conn.execute(
+            "INSERT INTO download_jobs (id, external_id, url) VALUES (?, ?, ?)",
+            ("b" * 32, "k3LWiKE3b6c", "https://www.youtube.com/watch?v=k3LWiKE3b6c"),
+        )
+        conn.commit()
+        conn.close()
+
+        should_send, keys = module._should_send_watcher_failure_notification(db_path, ["a" * 32])
+        assert should_send is True
+        assert keys == ["youtube:k3LWiKE3b6c"]
+
+        module._record_watcher_failure_notification(db_path, ["a" * 32], keys)
+
+        should_send_again, keys_again = module._should_send_watcher_failure_notification(db_path, ["b" * 32])
+        assert should_send_again is False
+        assert keys_again == ["youtube:k3LWiKE3b6c"]
+
+
 def test_restart_watcher_supervisor_respects_lock_recovery(monkeypatch) -> None:
     module = _load_api_main()
     starts = {"count": 0}

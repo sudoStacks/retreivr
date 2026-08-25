@@ -171,6 +171,7 @@ def test_metadata_probe_fallback_fails_after_second_probe(tmp_path, monkeypatch)
 def test_ytdlp_unavailability_classifier_maps_known_signals() -> None:
     jq = _load_job_queue()
     assert jq._classify_ytdlp_unavailability("Video unavailable. This video has been removed by the uploader") == "removed_or_deleted"
+    assert jq._classify_ytdlp_unavailability("ERROR: [youtube] k3LWiKE3b6c: This video is not available") == "removed_or_deleted"
     assert jq._classify_ytdlp_unavailability("ERROR: Requested format is not available") == "format_unavailable"
     assert jq._classify_ytdlp_unavailability("Sign in to confirm your age") == "age_restricted"
     assert jq._classify_ytdlp_unavailability("The uploader has not made this video available in your country") == "region_restricted"

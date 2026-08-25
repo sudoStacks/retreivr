@@ -184,6 +184,7 @@ _YTDLP_UNAVAILABLE_SIGNAL_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
             "video unavailable. this video has been removed by the uploader",
             "has been removed by the uploader",
             "video has been removed",
+            "this video is not available",
             "this video is unavailable",
         ),
     ),
@@ -6699,6 +6700,31 @@ def _render_ytdlp_cli_argv(opts, url):
     return argv
 
 
+def _opts_use_youtube_android_client(opts) -> bool:
+    extractor_args = (opts or {}).get("extractor_args")
+    if not isinstance(extractor_args, dict):
+        return False
+    youtube_args = extractor_args.get("youtube")
+    if not isinstance(youtube_args, dict):
+        return False
+    player_client = str(youtube_args.get("player_client") or "").strip().lower()
+    return "android" in {part.strip() for part in player_client.split(",") if part.strip()}
+
+
+def _with_youtube_android_client(opts):
+    updated = dict(opts or {})
+    extractor_args = dict(updated.get("extractor_args") or {})
+    youtube_args = dict(extractor_args.get("youtube") or {})
+    existing = str(youtube_args.get("player_client") or "").strip()
+    clients = [part.strip() for part in existing.split(",") if part.strip()]
+    if not any(part.lower() == "android" for part in clients):
+        clients.append("android")
+    youtube_args["player_client"] = ",".join(clients)
+    extractor_args["youtube"] = youtube_args
+    updated["extractor_args"] = extractor_args
+    return updated
+
+
 def _argv_to_redacted_cli(argv):
     """Render argv as a single command string with shell-escaping, redacting sensitive paths."""
     redacted = []
@@ -7332,12 +7358,27 @@ def download_with_ytdlp(
                 "cookie",
             )
         )
+        should_try_android_client = bool(
+            not audio_mode
+            and extract_video_id(url)
+            and not _opts_use_youtube_android_client(opts_for_run)
+            and (
+                unavailable_class
+                or "requested format is not available" in lower_error
+                or "only images are available" in lower_error
+                or "sabr-only streaming" in lower_error
+            )
+        )
 
+        first_attempt_had_js = bool(opts_for_run.get("js_runtimes"))
+        first_attempt_had_cookies = bool(opts_for_run.get("cookiefile"))
         retry_attempts = []
         if audio_mode and "requested format is not available" in lower_error and not is_music_track_download:
             retry_attempts.append("audio_best")
-        first_attempt_had_js = bool(opts_for_run.get("js_runtimes"))
-        first_attempt_had_cookies = bool(opts_for_run.get("cookiefile"))
+        if should_try_android_client:
+            retry_attempts.append("youtube_android")
+            if configured_cookiefile and not first_attempt_had_cookies:
+                retry_attempts.append("youtube_android+cookies")
         if should_escalate_js and not first_attempt_had_js:
             retry_attempts.append("js")
         if should_try_cookies and configured_cookiefile and not first_attempt_had_cookies:
@@ -7353,10 +7394,12 @@ def download_with_ytdlp(
             retry_opts = dict(opts_for_run)
             if attempt == "audio_best":
                 retry_opts["format"] = "best"
+            if attempt in {"youtube_android", "youtube_android+cookies"}:
+                retry_opts = _with_youtube_android_client(retry_opts)
             if attempt in {"js", "js+cookies"} and js_runtime_map:
                 retry_opts["js_runtimes"] = js_runtime_map
                 retry_opts["remote_components"] = "ejs:github"
-            if attempt in {"cookies", "js+cookies"} and configured_cookiefile:
+            if attempt in {"cookies", "js+cookies", "youtube_android+cookies"} and configured_cookiefile:
                 retry_opts["cookiefile"] = configured_cookiefile
 
             cmd_retry_argv = _render_ytdlp_cli_argv(retry_opts, url)
@@ -8402,6 +8445,7 @@ def finalize_download_artifact(
         embed_metadata(local_file, meta, fallback_id, paths.thumbs_dir)
 
     atomic_move(local_file, final_path)
+    normalize_output_file_permissions(final_path)
 
     if audio_mode and enqueue_audio_metadata and isinstance(config, dict):
         try:
@@ -8447,6 +8491,13 @@ def atomic_move(src, dst):
             except Exception:
                 pass
             raise
+
+
+def normalize_output_file_permissions(path, *, mode=0o644):
+    try:
+        os.chmod(path, mode)
+    except Exception:
+        logging.warning("Unable to normalize output file permissions for %s", path, exc_info=True)
 
 
 def embed_metadata(local_file, meta, video_id, thumbs_dir):
