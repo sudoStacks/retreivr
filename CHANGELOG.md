@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.7 — Community Cache Backfill and Artist Album Lookup
+
+### Changed
+- Community-cache publish pull requests now include recording/source counts in the title and body so merge notifications show how many mappings were added.
+- Community-cache backfill can recover canonical YouTube IDs from retained source URLs when historical rows stored an internal candidate ID.
+- Artist album lookup now over-fetches MusicBrainz release groups before filtering singles, improving album/EP discovery for artists with many singles.
+
+### Fixed
+- Dry-run community-cache backfills no longer repair or retag local files.
+- Backfill proposals now reuse verified `resolution_sources` rows before falling back to older download-job hints.
+- Album search by artist name now falls back through an exact artist MusicBrainz match when direct release-group search returns no album candidates.
+
+### Release
+- Updated Python package metadata, Docker build defaults, Compose examples, Portainer instructions, runtime provenance tests, cache-busting frontend asset versions, README guidance, and upgrade notes for `v1.1.7`.
+
 ## v1.1.6 — Music Review Threshold and De-dupe
 
 ### Added

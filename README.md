@@ -33,15 +33,12 @@ Retreivr is not intended to replace a full media server. It is the resolution an
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 1.1.6 Highlights
-- Music Review now has a configurable minimum candidate score, defaulting to `0.60`, so low-confidence rejects do not clutter manual review
-- Review Queue badges now show the real pending count instead of capping at the first loaded page
-- Review enqueueing now skips recordings already pending in Review or already completed in the local music library
-- Spotify playlist URLs and bare playlist IDs can now be pasted directly into the Music search bar
-- Browse includes a smart `Spotify Playlists` section that appears only when public Spotify playlists can be parsed
-- Spotify playlist cards support preview, direct Retreivr import, CSV export, M3U export, and opening the source playlist
-- Public Spotify playlist parsing uses bounded retries to keep the best no-auth result without aggressive polling
-- OAuth/API-backed Spotify credentials remain an optional fallback for incomplete public playlist payloads
+## 1.1.7 Highlights
+- Community-cache publishing now labels pull requests with recording/source counts so merge emails show how many mappings were added
+- Historical community-cache backfills can reuse retained resolution-source rows and recover canonical YouTube IDs from stored URLs
+- Dry-run backfills stay read-only and no longer repair or retag local files
+- Artist album lookup is more reliable for artists with many singles because Retreivr over-fetches MusicBrainz release groups before filtering
+- Artist-name album searches can fall back through an exact MusicBrainz artist match when direct release-group search returns no albums
 
 ## 1.1.0 Highlights
 - Persistent Music playback across navigation, with minimized controls, full-player video docking, authoritative queues, artist shuffle, and diverse genre radio
@@ -291,7 +288,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `1.1.6`, pull the latest image and restart:
+If you are upgrading to `1.1.7`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
