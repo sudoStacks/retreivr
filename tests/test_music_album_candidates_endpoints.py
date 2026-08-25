@@ -104,7 +104,7 @@ def test_artist_mbid_album_search_filters_out_singles(monkeypatch) -> None:
     monkeypatch.setattr(
         module.musicbrainzngs,
         "search_release_groups",
-        lambda query, limit: {
+        lambda query, limit, offset=0: {
             "release-group-list": [
                 {
                     "id": "rg-album-1",
@@ -144,3 +144,73 @@ def test_artist_mbid_album_search_filters_out_singles(monkeypatch) -> None:
     assert "rg-album-1" in ids
     assert "rg-ep-1" in ids
     assert "rg-single-1" not in ids
+
+
+def test_artist_mbid_album_search_overfetches_before_filtering(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    def _fake_search_release_groups(*, query, limit, offset=0):
+        assert query == "arid:artist-mbid-123"
+        assert limit > 10
+        return {
+            "release-group-list": [
+                {
+                    "id": f"single-{idx}",
+                    "title": f"Single {idx}",
+                    "primary-type": "Single",
+                    "artist-credit": [{"artist": {"id": "artist-mbid-123"}, "name": "ERNEST"}],
+                    "ext:score": "99",
+                }
+                for idx in range(12)
+            ]
+            + [
+                {
+                    "id": "rg-album-late",
+                    "title": "Late Album",
+                    "primary-type": "Album",
+                    "artist-credit": [{"artist": {"id": "artist-mbid-123"}, "name": "ERNEST"}],
+                    "ext:score": "98",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(module.musicbrainzngs, "search_release_groups", _fake_search_release_groups)
+
+    resp = client.get(
+        "/api/music/albums/search",
+        params={"q": "ERNEST", "artist_mbid": "artist-mbid-123", "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    ids = {str(item.get("release_group_id") or "") for item in resp.json()}
+    assert ids == {"rg-album-late"}
+
+
+def test_album_search_by_artist_name_falls_back_to_strict_artist_mbid(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    monkeypatch.setattr(module, "_mb_service", lambda: type("MB", (), {"search_release_groups": lambda self, query, limit: []})())
+    monkeypatch.setattr(
+        module,
+        "search_music_metadata",
+        lambda **kwargs: {
+            "artists": [
+                {
+                    "artist_mbid": "artist-mbid-123",
+                    "name": "ERNEST",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_search_music_album_candidates_for_artist_mbid",
+        lambda artist_mbid, *, limit: [{"release_group_id": "rg-strict", "title": "Strict Album"}],
+    )
+
+    resp = client.get("/api/music/albums/search", params={"q": "ERNEST", "limit": 10})
+
+    assert resp.status_code == 200
+    assert resp.json() == [{"release_group_id": "rg-strict", "title": "Strict Album"}]

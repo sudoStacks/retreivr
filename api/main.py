@@ -451,10 +451,10 @@ def _mb_service():
 # Guardrail: api/main.py should not call musicbrainzngs request functions directly.
 # Route raw library calls through these wrappers so the shared service always sets the
 # required MusicBrainz user-agent first.
-def _mb_search_release_groups_raw(*, query: str, limit: int) -> dict[str, Any]:
+def _mb_search_release_groups_raw(*, query: str, limit: int, offset: int = 0) -> dict[str, Any]:
     mb = _mb_service()
     mb._ensure_initialized()  # noqa: SLF001
-    return musicbrainzngs.search_release_groups(query=query, limit=limit)
+    return musicbrainzngs.search_release_groups(query=query, limit=limit, offset=offset)
 
 
 def _mb_get_release_by_id_raw(release_mbid: str, *, includes: list[str]) -> dict[str, Any]:
@@ -1627,7 +1627,32 @@ def _search_music_album_candidates(query: str, *, limit: int) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:
         return []
-    return _mb_service().search_release_groups(normalized_query, limit=limit)
+    candidates = _mb_service().search_release_groups(normalized_query, limit=limit)
+    if candidates:
+        return candidates
+
+    try:
+        artist_results = search_music_metadata(
+            artist=normalized_query,
+            album="",
+            track="",
+            mode="artist",
+            offset=0,
+            limit=5,
+        )
+    except Exception:
+        logging.debug("music_album_artist_name_fallback_failed query=%s", normalized_query, exc_info=True)
+        return []
+
+    artists = artist_results.get("artists", []) if isinstance(artist_results, dict) else []
+    for artist in artists:
+        if not isinstance(artist, dict):
+            continue
+        artist_name = str(artist.get("name") or "").strip()
+        artist_mbid = str(artist.get("artist_mbid") or "").strip()
+        if artist_mbid and artist_name.lower() == normalized_query.lower():
+            return _search_music_album_candidates_for_artist_mbid(artist_mbid, limit=limit)
+    return []
 
 
 def _is_allowed_album_release_group_type(primary_type: str | None) -> bool:
@@ -1639,11 +1664,30 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
     normalized_artist_mbid = str(artist_mbid or "").strip()
     if not normalized_artist_mbid:
         return []
-    payload = _mb_search_release_groups_raw(
-        query=f"arid:{normalized_artist_mbid}",
-        limit=max(1, min(int(limit or 10), 100)),
-    )
-    groups = payload.get("release-group-list", []) if isinstance(payload, dict) else []
+    requested_limit = max(1, min(int(limit or 10), 100))
+    page_size = min(100, max(requested_limit * 3, 25))
+    groups: list[dict] = []
+    seen_ids: set[str] = set()
+    for offset in range(0, 300, page_size):
+        payload = _mb_search_release_groups_raw(
+            query=f"arid:{normalized_artist_mbid}",
+            limit=page_size,
+            offset=offset,
+        )
+        page_groups = payload.get("release-group-list", []) if isinstance(payload, dict) else []
+        if not page_groups:
+            break
+        for group in page_groups:
+            if not isinstance(group, dict):
+                continue
+            group_id = str(group.get("id") or "").strip()
+            if group_id and group_id in seen_ids:
+                continue
+            if group_id:
+                seen_ids.add(group_id)
+            groups.append(group)
+        if len(page_groups) < page_size:
+            break
     candidates: list[dict] = []
     for group in groups:
         if not isinstance(group, dict):
@@ -1682,8 +1726,10 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
                 "secondary_types": group.get("secondary-type-list") or [],
                 "score": group.get("ext:score"),
                 "track_count": None,
-            }
-        )
+                }
+            )
+        if len(candidates) >= requested_limit:
+            break
     return candidates
 
 
