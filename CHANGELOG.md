@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.8 — Watcher Video Fallbacks and Notification Dedupe
+
+### Changed
+- YouTube video downloads now retry with the Android player client when the default player path reports unavailable, image-only, SABR-only, or format-unavailable results.
+- Watcher failure-only Telegram notifications are deduped by failed YouTube video ID across repeated watcher batches, while later success notifications remain allowed.
+
+### Fixed
+- Completed downloads now normalize final file permissions to `0644` so files written by a root-running container remain readable over host shares.
+- YouTube `This video is not available` errors are now classified as source-unavailable instead of generic download failures.
+
+### Release
+- Updated Python package metadata, Docker build defaults, Compose examples, Portainer instructions, runtime provenance tests, cache-busting frontend asset versions, README guidance, and upgrade notes for `v1.1.8`.
+
 ## v1.1.7 — Community Cache Backfill and Artist Album Lookup
 
 ### Changed

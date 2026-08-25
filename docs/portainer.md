@@ -29,7 +29,7 @@ version: "3.9"
 
 services:
   retreivr:
-    image: sudostacks/retreivr:v1.1.7
+    image: sudostacks/retreivr:v1.1.8
     container_name: retreivr
     ports:
       - "8090:8000"
@@ -45,7 +45,7 @@ services:
     restart: unless-stopped
 ```
 
-If you prefer GHCR, replace the image with `ghcr.io/sudostacks/retreivr:v1.1.7`.
+If you prefer GHCR, replace the image with `ghcr.io/sudostacks/retreivr:v1.1.8`.
 
 ## 3) Configuration file
 

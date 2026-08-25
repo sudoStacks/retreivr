@@ -33,12 +33,11 @@ Retreivr is not intended to replace a full media server. It is the resolution an
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 1.1.7 Highlights
-- Community-cache publishing now labels pull requests with recording/source counts so merge emails show how many mappings were added
-- Historical community-cache backfills can reuse retained resolution-source rows and recover canonical YouTube IDs from stored URLs
-- Dry-run backfills stay read-only and no longer repair or retag local files
-- Artist album lookup is more reliable for artists with many singles because Retreivr over-fetches MusicBrainz release groups before filtering
-- Artist-name album searches can fall back through an exact MusicBrainz artist match when direct release-group search returns no albums
+## 1.1.8 Highlights
+- YouTube video downloads retry with the Android player client when the default player path reports unavailable or format-only results
+- Watcher failure-only Telegram messages are deduped by YouTube video ID while later success notifications remain allowed
+- Completed downloads normalize final file permissions so host shares can read files written by a root-running container
+- YouTube `This video is not available` errors are classified as source-unavailable instead of generic download failures
 
 ## 1.1.0 Highlights
 - Persistent Music playback across navigation, with minimized controls, full-player video docking, authoritative queues, artist shuffle, and diverse genre radio
@@ -288,7 +287,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `1.1.7`, pull the latest image and restart:
+If you are upgrading to `1.1.8`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
