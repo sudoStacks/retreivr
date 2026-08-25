@@ -181,7 +181,7 @@ def test_community_publish_worker_ingests_outbox_and_marks_rows_published(monkey
         encoding="utf-8",
     )
 
-    captured = {"puts": [], "pr_calls": 0}
+    captured = {"puts": [], "pr_calls": 0, "pr_kwargs": None}
 
     class FakePublisher:
         def __init__(self, *, repo, token, branch, target_branch, open_pr=True):
@@ -206,8 +206,9 @@ def test_community_publish_worker_ingests_outbox_and_marks_rows_published(monkey
             captured["puts"].append({"files": files, "message": message})
             return "commit-sha-1"
 
-        def ensure_pull_request(self):
+        def ensure_pull_request(self, **kwargs):
             captured["pr_calls"] += 1
+            captured["pr_kwargs"] = kwargs
             return 42
 
     monkeypatch.setenv("RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN", "token-1")
@@ -251,6 +252,7 @@ def test_community_publish_worker_ingests_outbox_and_marks_rows_published(monkey
     assert row[1] == "retreivr-community-publish/tester"
     assert row[2] == 42
     assert row[3] == "commit-sha-1"
+    assert captured["pr_kwargs"] == {"recording_count": 1, "source_count": 1}
 
 
 def test_community_publish_worker_resets_branch_when_no_open_pr(monkeypatch, tmp_path: Path) -> None:
@@ -295,7 +297,7 @@ def test_community_publish_worker_resets_branch_when_no_open_pr(monkeypatch, tmp
         def put_files(self, files, *, message):
             return "commit-sha-2"
 
-        def ensure_pull_request(self):
+        def ensure_pull_request(self, **_kwargs):
             return 43
 
     monkeypatch.setenv("RETREIVR_COMMUNITY_CACHE_GITHUB_TOKEN", "token-1")
@@ -318,6 +320,18 @@ def test_community_publish_worker_resets_branch_when_no_open_pr(monkeypatch, tmp
 
     assert summary["status"] == "ok"
     assert captured["reset_existing"] is True
+
+
+def test_format_publish_pr_summary_includes_recording_and_source_counts() -> None:
+    title, body = community_publish_worker.format_publish_pr_summary(
+        branch="retreivr-community-publish/tester",
+        recording_count=3,
+        source_count=5,
+    )
+
+    assert title == "Retreivr community cache publish: 3 recordings, 5 sources"
+    assert "Recordings updated: 3" in body
+    assert "Source mappings included: 5" in body
 
 
 def test_github_publisher_resets_existing_branch_via_git_refs_endpoint(monkeypatch) -> None:

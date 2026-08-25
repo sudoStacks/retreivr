@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ from media.ffprobe import get_media_duration
 
 
 logger = logging.getLogger(__name__)
+_YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YOUTUBE_URL_ID_RE = re.compile(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})")
 
 
 def _first_tag(tags: Any, *keys: str) -> str | None:
@@ -152,6 +155,25 @@ def _resolve_history_hint(conn: sqlite3.Connection, identity: dict[str, Any]) ->
         if recording_mbid:
             cur.execute(
                 """
+                SELECT source, source_id, source_url
+                FROM resolution_sources
+                WHERE recording_mbid=? AND source IN ('youtube', 'youtube_music')
+                ORDER BY COALESCE(last_verified_at, updated_at, added_at) DESC
+                LIMIT 1
+                """,
+                (recording_mbid,),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                source_url = str(row[2] or "").strip() or None
+                return {
+                    "source": str(row[0] or "").strip() or None,
+                    "external_id": str(row[1] or "").strip() or None,
+                    "input_url": source_url,
+                    "canonical_url": source_url,
+                }
+            cur.execute(
+                """
                 SELECT source, external_id, input_url, canonical_url
                 FROM download_jobs
                 WHERE file_path=? OR origin_id=? OR canonical_id LIKE ?
@@ -237,9 +259,13 @@ def _retag_identity_file(path: Path, identity: dict[str, Any]) -> None:
 
 
 def _build_backfill_proposal(identity: dict[str, Any], history_hint: dict[str, Any]) -> dict[str, Any]:
-    video_id = str(identity.get("retreivr_source_id") or history_hint.get("external_id") or "").strip()
     candidate_url = str(history_hint.get("canonical_url") or history_hint.get("input_url") or "").strip()
     source = str(identity.get("retreivr_source") or history_hint.get("source") or "youtube").strip() or "youtube"
+    video_id = str(identity.get("retreivr_source_id") or history_hint.get("external_id") or "").strip()
+    if not _YOUTUBE_VIDEO_ID_RE.fullmatch(video_id):
+        match = _YOUTUBE_URL_ID_RE.search(candidate_url)
+        if match:
+            video_id = match.group(1)
     if not candidate_url and video_id and source in {"youtube", "youtube_music"}:
         candidate_url = f"https://www.youtube.com/watch?v={video_id}"
     if source == "youtube_music":
@@ -329,7 +355,7 @@ def run_publish_backfill(
                 if not identity.get("retreivr_source_id"):
                     identity["retreivr_source_id"] = history_hint.get("external_id")
                 identity, repaired = _repair_identity(identity, threshold=threshold)
-                if repaired:
+                if repaired and not dry_run:
                     _retag_identity_file(path, identity)
                     summary["repaired_tags"] += 1
                 proposal = _build_backfill_proposal(identity, history_hint)

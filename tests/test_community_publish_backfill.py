@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import sqlite3
 import types
 from pathlib import Path
 
@@ -61,7 +62,7 @@ if "metadata.queue" not in sys.modules:
     metadata_queue_mod.enqueue_metadata = lambda *_args, **_kwargs: None
     sys.modules["metadata.queue"] = metadata_queue_mod
 
-from engine.community_publish_backfill import _build_backfill_proposal
+from engine.community_publish_backfill import _build_backfill_proposal, _resolve_history_hint
 
 
 def test_build_backfill_proposal_normalizes_youtube_music(monkeypatch, tmp_path: Path) -> None:
@@ -87,3 +88,85 @@ def test_build_backfill_proposal_normalizes_youtube_music(monkeypatch, tmp_path:
     assert proposal["duration_ms"] == 212400
     assert proposal["verified_by"] == "retreivr_backfill"
     assert proposal["proposal_id"].startswith("backfill-")
+
+
+def test_build_backfill_proposal_prefers_youtube_id_from_url_when_source_id_is_internal(monkeypatch, tmp_path: Path) -> None:
+    media = tmp_path / "Track 02.m4a"
+    media.write_bytes(b"audio")
+    monkeypatch.setattr("engine.community_publish_backfill.get_media_duration", lambda _path: 180.0)
+
+    proposal = _build_backfill_proposal(
+        {
+            "path": str(media),
+            "recording_mbid": "12345678-1234-1234-1234-1234567890ab",
+            "retreivr_source": "youtube_music",
+            "retreivr_source_id": "d42a99051102110f",
+        },
+        {
+            "source": "youtube_music",
+            "external_id": "d42a99051102110f",
+            "canonical_url": "https://www.youtube.com/watch?v=awO6AbnR8D4",
+        },
+    )
+
+    assert proposal["source"] == "youtube"
+    assert proposal["video_id"] == "awO6AbnR8D4"
+    assert proposal["candidate_id"] == "awO6AbnR8D4"
+
+
+def test_resolve_history_hint_falls_back_to_resolution_sources() -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE download_history (
+                source TEXT, external_id TEXT, input_url TEXT, canonical_url TEXT,
+                destination TEXT, filename TEXT, video_id TEXT, completed_at INTEGER,
+                created_at INTEGER, id INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE download_jobs (
+                source TEXT, external_id TEXT, input_url TEXT, canonical_url TEXT,
+                file_path TEXT, origin_id TEXT, canonical_id TEXT, updated_at INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE resolution_sources (
+                recording_mbid TEXT, source TEXT, source_id TEXT, source_url TEXT,
+                last_verified_at TEXT, updated_at TEXT, added_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO resolution_sources (
+                recording_mbid, source, source_id, source_url, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "12345678-1234-1234-1234-1234567890ab",
+                "youtube_music",
+                "internal-source-id",
+                "https://www.youtube.com/watch?v=awO6AbnR8D4",
+                "2026-08-25T00:00:00+00:00",
+            ),
+        )
+
+        hint = _resolve_history_hint(
+            conn,
+            {
+                "path": "/downloads/Music/Artist/Track.m4a",
+                "recording_mbid": "12345678-1234-1234-1234-1234567890ab",
+            },
+        )
+    finally:
+        conn.close()
+
+    assert hint["source"] == "youtube_music"
+    assert hint["external_id"] == "internal-source-id"
+    assert hint["canonical_url"] == "https://www.youtube.com/watch?v=awO6AbnR8D4"
