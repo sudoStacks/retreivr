@@ -80,6 +80,39 @@ def test_music_home_genres_always_have_artwork_contract(api_module, monkeypatch)
     assert "artwork_urls" in genre
 
 
+def test_music_home_genre_prefers_matching_local_artwork(api_module, monkeypatch) -> None:
+    monkeypatch.setattr(api_module, "_read_config_or_404", lambda: {
+        "music_preferences": {"favorite_genres": ["Country"]}
+    })
+    monkeypatch.setattr(api_module, "list_indexed_music", lambda *_args, **_kwargs: [
+        {
+            "title": "Rock Track",
+            "artist": "Rock Artist",
+            "album": "Rock Album",
+            "genre": "Rock",
+            "local_path": "/downloads/Music/Rock/Track.mp3",
+            "artwork_local_path": "/data/artwork_cache/local_embedded/rock.jpg",
+        },
+        {
+            "title": "Country Track",
+            "artist": "Country Artist",
+            "album": "Country Album",
+            "genre": "Country",
+            "local_path": "/downloads/Music/Country/Track.mp3",
+            "artwork_local_path": "/data/artwork_cache/local_embedded/country.jpg",
+        },
+    ])
+    monkeypatch.setattr(api_module, "list_history", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(api_module, "_music_home_spotify_cards", lambda *_args, **_kwargs: [])
+
+    payload = TestClient(api_module.app).get("/api/music/home").json()
+
+    genre = payload["genres"][0]
+    assert genre["genre"] == "Country"
+    assert genre["artwork_status"] == "ok"
+    assert "country.jpg" in genre["artwork_urls"][0]
+
+
 def test_music_home_respects_hidden_music_preferences(api_module, monkeypatch) -> None:
     monkeypatch.setattr(api_module, "_read_config_or_404", lambda: {
         "music_preferences": {

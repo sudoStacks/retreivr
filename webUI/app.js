@@ -1057,6 +1057,28 @@ function createMusicCardThumb(altText) {
   return { shell, setImage, setNoArt, setLoading };
 }
 
+function getStableArtworkFallbackUrl(kind, label) {
+  const normalizedKind = String(kind || "music").trim() || "music";
+  const normalizedLabel = String(label || "Music").trim() || "Music";
+  const theme = getMusicGenreTheme(normalizedLabel);
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+      <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="${theme.base}"/>
+          <stop offset="1" stop-color="${theme.accent}"/>
+        </linearGradient>
+      </defs>
+      <rect width="256" height="256" fill="url(#bg)"/>
+      <circle cx="198" cy="58" r="54" fill="${theme.accent}" opacity=".22"/>
+      <circle cx="62" cy="202" r="66" fill="#ffffff" opacity=".08"/>
+      <path d="M91 76v105c0 14-13 25-30 25s-30-11-30-25 13-25 30-25c7 0 13 2 18 5V76h12zm86-20v105c0 14-13 25-30 25s-30-11-30-25 13-25 30-25c7 0 13 2 18 5V56h12z" fill="#ffffff" opacity=".82"/>
+      <text x="20" y="234" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700" fill="#ffffff" opacity=".9">${escapeHtml(normalizedKind)}</text>
+    </svg>
+  `;
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
 function normalizeArtworkUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) {
@@ -13725,8 +13747,12 @@ function createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible =
   const normalizedArtworkUrls = normalizeGenreArtworkSet(artworkUrls || genre?.artwork_urls);
   if (normalizedArtworkUrls.length) {
     applyGenreTileArtwork(tile, normalizedArtworkUrls);
-  } else if (!skipArtworkHydration) {
-    queueGenreArtworkJob(displayGenre, tile, thumbnailJobs, renderToken);
+  } else {
+    applyGenreTileArtwork(tile, [getStableArtworkFallbackUrl("Genre", displayGenre)]);
+    tile.classList.add("has-generated-artwork");
+    if (!skipArtworkHydration) {
+      queueGenreArtworkJob(displayGenre, tile, thumbnailJobs, renderToken);
+    }
   }
   return card;
 }
@@ -14272,14 +14298,20 @@ function getMusicLandingRecentArtists(limit = 6) {
 }
 
 function createMusicLandingTrackRow(item) {
+  const title = String(item?.title || "Untitled").trim();
+  const artist = String(item?.artist || "").trim();
+  const album = String(item?.album || "").trim();
+  const artworkUrl = normalizeArtworkUrl(getMusicLibraryArtworkUrl(item))
+    || getStableArtworkFallbackUrl("Track", album || artist || title);
   return `
     <article class="music-player-track-row music-player-track-row-rich">
-      <div class="music-player-browser-card-art music-player-track-art">
-        <img src="${escapeAttr(getMusicLibraryArtworkUrl(item))}" alt="${escapeAttr(item.title || "Track")}" loading="lazy">
+      <div class="music-card-thumb-shell loaded music-player-track-art">
+        <img class="music-card-thumb" src="${escapeAttr(artworkUrl)}" alt="${escapeAttr(title)} artwork" loading="lazy" onerror="const s=this.closest('.music-card-thumb-shell');s?.classList.remove('loaded','loading');s?.classList.add('no-art');this.removeAttribute('src');">
+        <div class="music-card-thumb-placeholder" aria-hidden="true"></div>
       </div>
       <button class="music-player-track" type="button" data-action="player-play" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.source_kind || "local")}">
-        <span class="music-player-track-title">${escapeHtml(item.title || "Untitled")}</span>
-        <span class="music-player-track-meta">${escapeHtml([item.artist, item.album || item.played_at].filter(Boolean).join(" • "))}</span>
+        <span class="music-player-track-title">${escapeHtml(title)}</span>
+        <span class="music-player-track-meta">${escapeHtml([artist, album || item.played_at].filter(Boolean).join(" • "))}</span>
       </button>
       <button class="button ghost small" type="button" data-action="player-play-next" data-stream-url="${escapeAttr(item.stream_url || "")}" data-title="${escapeAttr(item.title || "")}" data-artist="${escapeAttr(item.artist || "")}" data-album="${escapeAttr(item.album || "")}" data-local-path="${escapeAttr(item.local_path || "")}" data-source-kind="${escapeAttr(item.source_kind || "local")}">Play Next</button>
     </article>
@@ -14301,7 +14333,8 @@ function getSpotifyPlaylistCardMeta(card) {
 function renderSpotifyPlaylistCard(card = {}) {
   const url = String(card.playlist_url || "").trim();
   const title = String(card.title || card.seed_title || "Spotify Playlist").trim();
-  const imageUrl = String(card.image_url || "assets/no_artwork.png").trim();
+  const imageUrl = normalizeArtworkUrl(card.image_url || card.artwork_url || "")
+    || getStableArtworkFallbackUrl("Spotify", card.genre || title);
   const status = state.spotifyPlaylistCardStatus[url] || null;
   const previewTracks = Array.isArray(card.tracks_preview) ? card.tracks_preview.slice(0, 4) : [];
   const statusMarkup = status ? `<div class="spotify-playlist-card-status home-candidate-meta">${escapeHtml(status.message || "")}</div>` : "";
@@ -14311,7 +14344,7 @@ function renderSpotifyPlaylistCard(card = {}) {
   return `
     <article class="home-result-card music-meta-card music-grid-card spotify-playlist-card" data-playlist-url="${escapeAttr(url)}" tabindex="0">
       <div class="music-card-thumb-shell${imageUrl ? " loaded" : " no-art"}">
-        <img class="music-card-thumb" src="${escapeAttr(imageUrl)}" alt="${escapeAttr(title)}" loading="lazy" onerror="this.closest('.music-card-thumb-shell')?.classList.add('no-art');this.removeAttribute('src');">
+        <img class="music-card-thumb" src="${escapeAttr(imageUrl)}" alt="${escapeAttr(title)}" loading="lazy" onerror="const s=this.closest('.music-card-thumb-shell');s?.classList.remove('loaded','loading');s?.classList.add('no-art');this.removeAttribute('src');">
         <div class="music-card-thumb-placeholder" aria-hidden="true"></div>
       </div>
       <div class="music-meta-main">

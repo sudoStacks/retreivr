@@ -2199,7 +2199,13 @@ def _music_home_genre_card(genre: str, summary: dict[str, list[dict[str, Any]]])
         ][:4]
     if not cover_urls:
         seen: set[str] = set()
-        for candidate in [*summary.get("albums", []), *summary.get("tracks", [])]:
+        genre_matches = [
+            candidate
+            for candidate in [*summary.get("albums", []), *summary.get("tracks", [])]
+            if _normalize_music_genre_key(candidate.get("genre")) == key
+        ]
+        fallback_candidates = [*summary.get("albums", []), *summary.get("tracks", [])]
+        for candidate in [*genre_matches, *fallback_candidates]:
             artist = str(candidate.get("artist") or "").strip().lower()
             album = str(candidate.get("album") or "").strip().lower()
             path = str(candidate.get("artwork_local_path") or "").strip()

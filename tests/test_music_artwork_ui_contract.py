@@ -59,3 +59,31 @@ def test_music_landing_uses_home_snapshot_without_initial_artwork_hydration():
     warm_index = render_source.index("warmMusicGenreArtistCaches(topGenreSeeds")
     snapshot_recs_index = render_source.index("snapshotGenreRecommendations.slice")
     assert snapshot_recs_index < warm_index
+
+
+def test_music_home_continue_rows_render_snapshot_artwork():
+    source = APP_JS.read_text()
+    row_start = source.index("function createMusicLandingTrackRow")
+    row_end = source.index("function getSpotifyPlaylistCardMeta", row_start)
+    row_source = source[row_start:row_end]
+
+    assert "getMusicLibraryArtworkUrl(item)" in row_source
+    assert "music-card-thumb-shell loaded music-player-track-art" in row_source
+    assert "classList.remove('loaded','loading')" in row_source
+    assert "classList.add('no-art')" in row_source
+
+
+def test_music_home_spotify_and_genres_have_stable_fallback_artwork():
+    source = APP_JS.read_text()
+    spotify_start = source.index("function renderSpotifyPlaylistCard")
+    spotify_end = source.index("function updateSpotifyPlaylistCardStatus", spotify_start)
+    spotify_source = source[spotify_start:spotify_end]
+
+    genre_start = source.index("function createMusicGenreCard")
+    genre_end = source.index("async function browseMusicGenre", genre_start)
+    genre_source = source[genre_start:genre_end]
+
+    assert 'getStableArtworkFallbackUrl("Spotify", card.genre || title)' in spotify_source
+    assert '"assets/no_artwork.png"' not in spotify_source
+    assert 'getStableArtworkFallbackUrl("Genre", displayGenre)' in genre_source
+    assert "skipArtworkHydration" in genre_source
