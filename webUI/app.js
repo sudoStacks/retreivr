@@ -40,6 +40,9 @@ const state = {
   homeAlbumCoverInFlight: {},
   homeArtistCoverCache: {},
   homeGenreCoverCache: {},
+  musicHomeSnapshot: null,
+  musicHomeSnapshotLoading: false,
+  musicHomeSnapshotLoaded: false,
   homeMusicRenderToken: 0,
   homeMusicResultMap: {},
   homeMusicCurrentView: null,
@@ -6208,6 +6211,7 @@ async function loadMusicPlayerView() {
       state.playerLibrarySummary = (payload?.summary && typeof payload.summary === "object")
         ? payload.summary
         : { artists: [], albums: [], tracks: [] };
+      invalidateMusicHomeSnapshot();
       const indexStatus = String(payload?.index_state?.status || "ready");
       completeMusicDatasetLoad("summary", state.playerLibrarySummary.tracks?.length || 0, {
         stale: indexStatus !== "ready",
@@ -6233,6 +6237,7 @@ async function loadMusicPlayerView() {
       const history = Array.isArray(payload?.history) ? payload.history : [];
       state.playerMissingHistory = history.filter((item) => !!item?.is_missing_local);
       state.playerHistory = history.filter((item) => !item?.is_missing_local);
+      invalidateMusicHomeSnapshot();
       completeMusicDatasetLoad("history", state.playerHistory.length);
       renderMusicPlayerHistory();
       refreshLanding();
@@ -9150,6 +9155,7 @@ async function loadMusicLibrarySection({ force = false } = {}) {
     state.playerLibrarySummary = (data?.summary && typeof data.summary === "object")
       ? data.summary
       : { artists: [], albums: [], tracks: [] };
+    invalidateMusicHomeSnapshot();
     completeMusicDatasetLoad("summary", state.playerLibrarySummary.tracks?.length || 0, {
       stale: String(data?.index_state?.status || "ready") !== "ready",
     });
@@ -13320,6 +13326,11 @@ function syncMusicPreferencesFromConfig(cfg = {}) {
   scheduleMusicGenrePrewarm();
 }
 
+function invalidateMusicHomeSnapshot() {
+  state.musicHomeSnapshot = null;
+  state.musicHomeSnapshotLoaded = false;
+}
+
 function isFavoriteGenre(genre) {
   const key = normalizeMusicGenreIntent(genre).toLowerCase();
   return !!key && state.musicPreferences.favorite_genres.some((value) => String(value || "").trim().toLowerCase() === key);
@@ -13343,6 +13354,7 @@ async function saveMusicPreferences(nextPrefs) {
     body: JSON.stringify(normalized),
   });
   syncMusicPreferencesFromConfig({ music_preferences: saved });
+  invalidateMusicHomeSnapshot();
   return state.musicPreferences;
 }
 
@@ -13581,8 +13593,8 @@ function queueGenreArtworkJob(genre, tile, thumbnailJobs, renderToken) {
   thumbnailJobs.push(thumbTask);
 }
 
-function createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible = false } = {}) {
-  const displayGenre = normalizeMusicGenreIntent(genre);
+function createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible = false, artworkUrls = null, skipArtworkHydration = false } = {}) {
+  const displayGenre = normalizeMusicGenreIntent(typeof genre === "object" ? (genre?.genre || genre?.name) : genre);
   const card = document.createElement("article");
   card.className = "home-result-card music-meta-card music-grid-card music-genre-grid-card";
   if (dismissible) {
@@ -13710,7 +13722,12 @@ function createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible =
     if (!el) return;
     el.classList.add("music-card-click-target");
   });
-  queueGenreArtworkJob(displayGenre, tile, thumbnailJobs, renderToken);
+  const normalizedArtworkUrls = normalizeGenreArtworkSet(artworkUrls || genre?.artwork_urls);
+  if (normalizedArtworkUrls.length) {
+    applyGenreTileArtwork(tile, normalizedArtworkUrls);
+  } else if (!skipArtworkHydration) {
+    queueGenreArtworkJob(displayGenre, tile, thumbnailJobs, renderToken);
+  }
   return card;
 }
 
@@ -13757,13 +13774,13 @@ async function browseMusicGenre(genre, { pushHistory = true } = {}) {
   }
 }
 
-function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismissible = false } = {}) {
+function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismissible = false, skipArtworkHydration = false } = {}) {
   const card = document.createElement("article");
   card.className = "home-result-card music-meta-card music-grid-card music-artist-grid-card";
   const artistThumb = createMusicCardThumb(
     artistItem?.name ? `${artistItem.name} artwork` : "Artist artwork"
   );
-  const immediateLocalArtistArt = getFastLocalArtistArtwork(artistItem);
+  const immediateLocalArtistArt = normalizeArtworkUrl(artistItem?.artwork_url || "") || getFastLocalArtistArtwork(artistItem);
   if (immediateLocalArtistArt) {
     artistThumb.setImage(immediateLocalArtistArt);
   }
@@ -13919,7 +13936,9 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
   card.appendChild(action);
 
   const artistMbidValue = String(artistItem?.artist_mbid || "").trim();
-  if (artistMbidValue) {
+  if (skipArtworkHydration) {
+    if (!immediateLocalArtistArt) artistThumb.setNoArt();
+  } else if (artistMbidValue) {
     const cachedCover = getCachedArtistCoverUrl(artistMbidValue);
     if (cachedCover) {
       artistThumb.setImage(cachedCover);
@@ -13986,7 +14005,7 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
   return card;
 }
 
-function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued } = {}) {
+function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued, skipArtworkHydration = false } = {}) {
   const releaseGroupMbid = getMusicReleaseGroupId(albumItem);
   const albumTitle = String(albumItem?.title || albumItem?.album || "").trim();
   const albumArtist = String(albumItem?.artist || "").trim();
@@ -14025,6 +14044,9 @@ function createMusicAlbumCard(albumItem, thumbnailJobs, renderToken, { onQueued 
   content.appendChild(statusRow);
   const albumRef = document.createElement("div");
   albumRef.className = "home-mb-entity-ref";
+  if (skipArtworkHydration) {
+    if (!immediateAlbumArt) albumThumb.setNoArt();
+  }
   if (releaseGroupMbid) {
     albumRef.textContent = `MB: release-group ${releaseGroupMbid}`;
   } else if (directPlaylistUrl) {
@@ -14361,8 +14383,34 @@ async function loadSpotifyPlaylistCards({ query = "", render = true } = {}) {
   }
 }
 
+async function loadMusicHomeSnapshot({ render = true, force = false } = {}) {
+  if (state.musicHomeSnapshotLoading) return state.musicHomeSnapshot;
+  if (!force && state.musicHomeSnapshotLoaded && state.musicHomeSnapshot) return state.musicHomeSnapshot;
+  state.musicHomeSnapshotLoading = true;
+  try {
+    const payload = await fetchJson("/api/music/home");
+    state.musicHomeSnapshot = payload && typeof payload === "object" ? payload : null;
+    state.musicHomeSnapshotLoaded = true;
+    if (Array.isArray(state.musicHomeSnapshot?.spotify_playlists)) {
+      state.spotifyPlaylistCards = state.musicHomeSnapshot.spotify_playlists;
+      state.spotifyPlaylistCardsLoaded = true;
+    }
+    if (render) {
+      renderMusicPlayerHome();
+      renderMusicLanding();
+    }
+    return state.musicHomeSnapshot;
+  } catch (err) {
+    state.musicHomeSnapshotLoaded = true;
+    homeMusicDebugLog("[MUSIC UI] home snapshot unavailable", { error: toUserErrorMessage(err) });
+    return state.musicHomeSnapshot;
+  } finally {
+    state.musicHomeSnapshotLoading = false;
+  }
+}
+
 function appendSpotifyPlaylistsSection(container, cards, { title = "Spotify Playlists", subtitle = "Public Spotify playlists Retreivr can parse and import without Spotify login." } = {}) {
-  const visibleCards = Array.isArray(cards) ? cards.filter((card) => card?.playlist_url && Number(card?.track_count || 0) > 0) : [];
+  const visibleCards = Array.isArray(cards) ? cards.filter((card) => card?.playlist_url && (Number(card?.track_count || 0) > 0 || card.cache === "seed" || card.cache === "stale")) : [];
   if (!container || !visibleCards.length) return null;
   const section = document.createElement("section");
   section.className = "music-mode-section music-mode-section-grid";
@@ -14511,18 +14559,28 @@ function renderMusicLanding() {
   if (artistInput || albumInput || trackInput) {
     return;
   }
+  if (!state.musicHomeSnapshot && !state.musicHomeSnapshotLoading) {
+    container.innerHTML = '<div class="home-results-empty">Loading music home...</div>';
+    loadMusicHomeSnapshot({ render: true }).catch(() => {});
+    return;
+  }
+  if (!state.musicHomeSnapshot && state.musicHomeSnapshotLoading) {
+    container.innerHTML = '<div class="home-results-empty">Loading music home...</div>';
+    return;
+  }
   state.homeMusicCurrentView = snapshotMusicResultsView({ landing_view: true }, "");
   state.homeMusicResultMap = {};
   const renderToken = ++state.homeMusicRenderToken;
   const thumbnailJobs = [];
   container.innerHTML = "";
   container.classList.add("music-discovery-landing", "music-home-landing");
+  const homeSnapshot = state.musicHomeSnapshot || {};
   const summary = state.playerLibrarySummary || { artists: [], albums: [], tracks: [] };
-  const libraryAlbums = Array.isArray(summary.albums) ? summary.albums : [];
-  const recentTracks = Array.isArray(state.playerHistory)
-    ? state.playerHistory.filter((item) => !item?.is_missing_local).slice(0, 4)
-    : [];
-  const recentArtistItems = getMusicLandingRecentArtists(6);
+  const libraryAlbums = Array.isArray(homeSnapshot.library_albums) ? homeSnapshot.library_albums : (Array.isArray(summary.albums) ? summary.albums : []);
+  const recentTracks = Array.isArray(homeSnapshot.continue_listening)
+    ? homeSnapshot.continue_listening
+    : (Array.isArray(state.playerHistory) ? state.playerHistory.filter((item) => !item?.is_missing_local).slice(0, 4) : []);
+  const recentArtistItems = Array.isArray(homeSnapshot.recent_artists) ? homeSnapshot.recent_artists : getMusicLandingRecentArtists(6);
   const recentSearches = loadRecentMusicSearches();
   const favoriteGenres = Array.isArray(state.musicPreferences?.favorite_genres)
     ? state.musicPreferences.favorite_genres
@@ -14542,19 +14600,15 @@ function renderMusicLanding() {
   const visibleFavoriteArtists = favoriteArtists.filter(
     (artist) => !hiddenArtistKeys.has(getHiddenMusicArtistKey(artist)) && !isBrowseSuppressedArtist(artist)
   );
+  const snapshotFavoriteArtists = Array.isArray(homeSnapshot.favorite_artists) ? homeSnapshot.favorite_artists : [];
+  const snapshotGenres = Array.isArray(homeSnapshot.genres) ? homeSnapshot.genres : [];
+  const snapshotGenreRecommendations = Array.isArray(homeSnapshot.genre_recommendations) ? homeSnapshot.genre_recommendations : [];
+  const snapshotSpotifyPlaylists = Array.isArray(homeSnapshot.spotify_playlists) ? homeSnapshot.spotify_playlists : state.spotifyPlaylistCards;
   const recentlyAdded = libraryAlbums.slice(0, 6);
   const newFromFavorites = recentlyAdded
     .filter((album) => isMusicArtistFavorited(String(album.artist || ""), String(album.artist_key || "")))
     .slice(0, 6);
   const topGenreSeeds = (favoriteGenres.length ? favoriteGenres : visiblePopularGenres).slice(0, favoriteGenres.length ? 4 : 8);
-
-  warmMusicGenreArtistCaches(topGenreSeeds, { limit: 24 });
-  if (visibleFavoriteArtists.length) {
-    prefetchMusicAlbumsForArtists(visibleFavoriteArtists, { limit: 6 });
-  }
-  if (recentArtistItems.length) {
-    prefetchMusicAlbumsForArtists(recentArtistItems, { limit: 4 });
-  }
 
   const intro = document.createElement("section");
   intro.className = "music-home-intro";
@@ -14602,12 +14656,13 @@ function renderMusicLanding() {
   } else if (recentlyAdded.length) {
     continueBody.className = "music-player-browser-grid music-home-compact-grid";
     recentlyAdded.slice(0, 4).forEach((album) => {
-      continueBody.appendChild(createMusicAlbumCard(album, thumbnailJobs, renderToken));
+      continueBody.appendChild(createMusicAlbumCard(album, thumbnailJobs, renderToken, { skipArtworkHydration: true }));
     });
   } else {
     continueBody.className = "music-meta-grid music-home-compact-grid";
-    visiblePopularGenres.slice(0, 4).forEach((genre) => {
-      continueBody.appendChild(createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible: true }));
+    const fallbackGenres = snapshotGenres.length ? snapshotGenres : visiblePopularGenres.slice(0, 4);
+    fallbackGenres.slice(0, 4).forEach((genre) => {
+      continueBody.appendChild(createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible: true, skipArtworkHydration: true }));
     });
   }
   continueModule.appendChild(continueBody);
@@ -14656,7 +14711,7 @@ function renderMusicLanding() {
     const artistGrid = document.createElement("div");
     artistGrid.className = "music-meta-grid music-home-compact-grid music-home-reentry-grid";
     reentryArtists.slice(0, 3).forEach((artist) => {
-      artistGrid.appendChild(createMusicArtistCard(artist, thumbnailJobs, renderToken, { dismissible: false }));
+      artistGrid.appendChild(createMusicArtistCard(artist, thumbnailJobs, renderToken, { dismissible: false, skipArtworkHydration: true }));
     });
     artistCluster.appendChild(artistGrid);
     jumpBackBody.appendChild(artistCluster);
@@ -14719,16 +14774,17 @@ function renderMusicLanding() {
       '<button class="button ghost small" type="button" data-action="music-go-library">Open Library</button>'
     );
     recentlyAdded.forEach((album) => {
-      libraryGrid.appendChild(createMusicAlbumCard(album, thumbnailJobs, renderToken));
+      libraryGrid.appendChild(createMusicAlbumCard(album, thumbnailJobs, renderToken, { skipArtworkHydration: true }));
     });
   }
 
-  appendSpotifyPlaylistsSection(container, state.spotifyPlaylistCards, {
-    title: "Spotify Playlists",
-    subtitle: "Public Spotify country playlists Retreivr can preview, import, or export without Spotify login.",
+  appendSpotifyPlaylistsSection(container, snapshotSpotifyPlaylists, {
+    title: "Spotify Playlists For You",
+    subtitle: "Rotating Spotify playlists from your Retreivr taste profile or a curated fallback set.",
   });
 
-  if (visibleFavoriteArtists.length) {
+  const favoriteArtistsToRender = snapshotFavoriteArtists.length ? snapshotFavoriteArtists : visibleFavoriteArtists;
+  if (favoriteArtistsToRender.length) {
     const favoriteArtistGrid = appendSection(
       "Jump back into favorite artists",
       "Artists you keep close for quick re-entry.",
@@ -14736,8 +14792,8 @@ function renderMusicLanding() {
       "grid",
       '<button class="button ghost small" type="button" data-action="music-go-favorites">Open Favorites</button>'
     );
-    visibleFavoriteArtists.slice(0, 6).forEach((artist) => {
-      favoriteArtistGrid.appendChild(createMusicArtistCard(artist, thumbnailJobs, renderToken, { dismissible: true }));
+    favoriteArtistsToRender.slice(0, 6).forEach((artist) => {
+      favoriteArtistGrid.appendChild(createMusicArtistCard(artist, thumbnailJobs, renderToken, { dismissible: true, skipArtworkHydration: true }));
     });
   }
 
@@ -14754,10 +14810,10 @@ function renderMusicLanding() {
     "grid",
     genreActions
   );
-  const genresToRender = favoriteGenres.length ? favoriteGenres : visiblePopularGenres;
+  const genresToRender = snapshotGenres.length ? snapshotGenres : (favoriteGenres.length ? favoriteGenres : visiblePopularGenres);
   if (genresToRender.length) {
     genresToRender.forEach((genre) => {
-      genreGrid.appendChild(createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible: !favoriteGenres.length }));
+      genreGrid.appendChild(createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible: !favoriteGenres.length, skipArtworkHydration: true }));
     });
   } else {
     updateSectionEmptyState(genreGrid, "No genres are visible right now.");
@@ -14771,7 +14827,19 @@ function renderMusicLanding() {
       "grid"
     );
     newFromFavorites.forEach((album) => {
-      newFavoritesGrid.appendChild(createMusicAlbumCard(album, thumbnailJobs, renderToken));
+      newFavoritesGrid.appendChild(createMusicAlbumCard(album, thumbnailJobs, renderToken, { skipArtworkHydration: true }));
+    });
+  } else if (snapshotGenreRecommendations.length) {
+    const recommendationsGrid = appendSection(
+      favoriteGenres.length ? "Popular in your top genres" : "Artists to start with",
+      favoriteGenres.length
+        ? `A broader pass through ${topGenreSeeds.slice(0, 2).join(" and ")}.`
+        : "A few strong artist starting points from the genres people reach for most often.",
+      "genre-recommendations",
+      "grid"
+    );
+    snapshotGenreRecommendations.slice(0, 8).forEach((artist) => {
+      recommendationsGrid.appendChild(createMusicArtistCard(artist, thumbnailJobs, renderToken, { dismissible: true, skipArtworkHydration: true }));
     });
   } else if (topGenreSeeds.length) {
     const recommendationsGrid = appendSection(
@@ -14782,7 +14850,8 @@ function renderMusicLanding() {
       "genre-recommendations",
       "grid"
     );
-    updateSectionEmptyState(recommendationsGrid, "Loading artist picks...");
+    updateSectionEmptyState(recommendationsGrid, "Artist picks will appear after the genre cache warms.");
+    warmMusicGenreArtistCaches(topGenreSeeds, { limit: 24 });
     (async () => {
       try {
         const responses = await Promise.all(
@@ -19565,6 +19634,9 @@ async function persistUiPreferences(partial = {}) {
     });
     state.config = state.config && typeof state.config === "object" ? state.config : {};
     state.config.ui_preferences = prefs;
+    if ("music_hidden_genres" in payload || "music_hidden_artists" in payload || "music_hide_suggested_genres" in payload) {
+      invalidateMusicHomeSnapshot();
+    }
   } catch (_err) {
     // Keep UI responsive even if preference persistence fails.
   }

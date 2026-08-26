@@ -132,7 +132,7 @@ def test_missing_track_number_enrichment_fills_metadata_and_path_builds(jq, monk
     )
     assert "Unknown Album" not in path
     assert "/Disc 1/" not in path
-    assert "/Track Name.mp3" in path
+    assert path.endswith("/07 - Track Name.mp3")
 
 
 def test_no_valid_release_raises_and_no_folder_created(jq, monkeypatch):

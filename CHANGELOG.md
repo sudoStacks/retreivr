@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.9 — Music Artwork Cache and Browse Stability
+
+### Added
+- Added `GET /api/music/home` so the Music Browse landing renders from a stable backend snapshot of Continue Listening, library albums, favorite artists, genres, recommendations, and Spotify playlist cards.
+- Added persistent browse-artwork file caching under Retreivr's artwork cache and a long-cache `/api/music/art/cache` route for locally served resized artwork.
+- Added broader rotating Spotify playlist seeds with genre/taste-aware selection before falling back to general curated playlists.
+
+### Changed
+- Music Browse now prefers local embedded/library artwork for Continue Listening, library albums, favorite artists, and genre collages before using cached remote artwork or stable fallbacks.
+- Initial Music Browse render no longer starts nested artist, genre, album, and artwork fetch chains for snapshot-provided cards, reducing flashing and late card image swaps.
+- Spotify playlist cards on the initial Browse screen use cached summaries or seed placeholders instead of live-resolving every playlist on page load.
+
+### Fixed
+- Genre cards and Popular in Your Genres now receive explicit artwork contracts from the backend, so missing remote artwork resolves to stable fallback state instead of blank cards.
+- Hidden genre and hidden artist preferences are respected by the backend Music home snapshot.
+
+### Release
+- Updated Python package metadata, Docker build defaults, Compose examples, runtime provenance tests, cache-busting frontend asset versions, README guidance, and upgrade notes for `v1.1.9`.
+
 ## v1.1.8 — Watcher Video Fallbacks and Notification Dedupe
 
 ### Changed

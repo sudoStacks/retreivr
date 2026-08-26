@@ -33,11 +33,11 @@ Retreivr is not intended to replace a full media server. It is the resolution an
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
-## 1.1.8 Highlights
-- YouTube video downloads retry with the Android player client when the default player path reports unavailable or format-only results
-- Watcher failure-only Telegram messages are deduped by YouTube video ID while later success notifications remain allowed
-- Completed downloads normalize final file permissions so host shares can read files written by a root-running container
-- YouTube `This video is not available` errors are classified as source-unavailable instead of generic download failures
+## 1.1.9 Highlights
+- Music Browse now renders from a backend home snapshot instead of launching nested artwork discovery during initial paint
+- Continue Listening, library, favorite artist, genre, and Spotify playlist cards now prefer local/cached artwork with stable fallbacks
+- Browse artwork metadata and resized image files are cached persistently under Retreivr-controlled routes
+- Spotify playlist Browse cards rotate from broader curated and taste-aware seeds instead of a fixed country-only set
 
 ## 1.1.0 Highlights
 - Persistent Music playback across navigation, with minimized controls, full-player video docking, authoritative queues, artist shuffle, and diverse genre radio
@@ -287,7 +287,7 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `1.1.8`, pull the latest image and restart:
+If you are upgrading to `1.1.9`, pull the latest image and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull

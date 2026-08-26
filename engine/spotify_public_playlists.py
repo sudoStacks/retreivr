@@ -73,6 +73,70 @@ class SpotifyResolvedPlaylist:
         }
 
 
+GENERAL_SPOTIFY_PLAYLIST_SEEDS: list[SpotifyPlaylistSeed] = [
+    SpotifyPlaylistSeed(
+        "Today's Top Hits",
+        "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+        "Current global pop and crossover tracks.",
+        genre="pop",
+    ),
+    SpotifyPlaylistSeed(
+        "RapCaviar",
+        "https://open.spotify.com/playlist/37i9dQZF1DX0XUsuxWHRQd",
+        "Current hip hop and rap tracks.",
+        genre="hip hop",
+    ),
+    SpotifyPlaylistSeed(
+        "All New Indie",
+        "https://open.spotify.com/playlist/37i9dQZF1DXdbXrPNafg9d",
+        "Recent indie releases and discoveries.",
+        genre="indie",
+    ),
+    SpotifyPlaylistSeed(
+        "Rock Classics",
+        "https://open.spotify.com/playlist/37i9dQZF1DWXRqgorJj26U",
+        "Familiar rock staples.",
+        genre="rock",
+    ),
+    SpotifyPlaylistSeed(
+        "mint",
+        "https://open.spotify.com/playlist/37i9dQZF1DX4dyzvuaRJ0n",
+        "Dance and electronic picks.",
+        genre="electronic",
+    ),
+    SpotifyPlaylistSeed(
+        "Jazz Classics",
+        "https://open.spotify.com/playlist/37i9dQZF1DXbITWG1ZJKYt",
+        "Classic jazz entry points.",
+        genre="jazz",
+    ),
+]
+
+
+GENRE_SPOTIFY_PLAYLIST_SEEDS: dict[str, list[SpotifyPlaylistSeed]] = {
+    "country": [
+        SpotifyPlaylistSeed(
+            "Hot Country",
+            "https://open.spotify.com/playlist/37i9dQZF1DX1lVhptIYRda",
+            "Today's top country hits.",
+            genre="country",
+        ),
+        SpotifyPlaylistSeed(
+            "New Boots",
+            "https://open.spotify.com/playlist/37i9dQZF1DX8S0uQvJ4gaa",
+            "Country discoveries and new releases.",
+            genre="country",
+        ),
+    ],
+    "pop": [GENERAL_SPOTIFY_PLAYLIST_SEEDS[0]],
+    "hip hop": [GENERAL_SPOTIFY_PLAYLIST_SEEDS[1]],
+    "indie": [GENERAL_SPOTIFY_PLAYLIST_SEEDS[2]],
+    "rock": [GENERAL_SPOTIFY_PLAYLIST_SEEDS[3]],
+    "electronic": [GENERAL_SPOTIFY_PLAYLIST_SEEDS[4]],
+    "jazz": [GENERAL_SPOTIFY_PLAYLIST_SEEDS[5]],
+}
+
+
 COUNTRY_SPOTIFY_PLAYLIST_SEEDS: list[SpotifyPlaylistSeed] = [
     SpotifyPlaylistSeed(
         "Hot Country",

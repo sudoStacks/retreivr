@@ -108,6 +108,7 @@ from engine.book_services import (
     search_book_catalogs,
 )
 from metadata.services.musicbrainz_service import get_musicbrainz_service
+from metadata.providers import artwork as artwork_provider
 from metadata.tag_repair import repair_music_library_tags
 
 from engine.core import (
@@ -245,6 +246,8 @@ from engine.import_pipeline import (
 from engine.import_m3u_builder import resolve_import_playlist_root, write_import_m3u_from_batch
 from engine.spotify_public_playlists import (
     COUNTRY_SPOTIFY_PLAYLIST_SEEDS,
+    GENERAL_SPOTIFY_PLAYLIST_SEEDS,
+    GENRE_SPOTIFY_PLAYLIST_SEEDS,
     SpotifyPlaylistResolver,
     SpotifyPublicPlaylistError,
     spotify_tracks_to_csv_bytes,
@@ -1988,6 +1991,396 @@ def _set_music_artwork_cache_entry(cache_kind: str, cache_key: str, payload: dic
             ),
         )
         conn.commit()
+
+
+MUSIC_HOME_ARTWORK_TTL_SECONDS = 7 * 24 * 60 * 60
+MUSIC_HOME_ARTWORK_NEGATIVE_TTL_SECONDS = 6 * 60 * 60
+MUSIC_HOME_SPOTIFY_TTL_SECONDS = 7 * 24 * 60 * 60
+
+
+def _music_browse_art_cache_dir() -> Path:
+    return DATA_DIR / "artwork_cache" / "music_browse"
+
+
+def _music_artwork_cache_public_url(local_path: str | None) -> str | None:
+    raw = str(local_path or "").strip()
+    if not raw:
+        return None
+    return f"/api/music/art/cache?path={quote(raw, safe='')}"
+
+
+def _music_local_art_public_url(local_path: str | None) -> str | None:
+    raw = str(local_path or "").strip()
+    if not raw:
+        return None
+    return f"/api/player/art/local?path={quote(raw, safe='')}"
+
+
+def _music_cache_is_fresh(entry: dict[str, Any] | None, ttl: int) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    updated_at = float(entry.get("updated_at") or 0)
+    return updated_at > 0 and (time.time() - updated_at) < ttl
+
+
+def _music_artwork_payload_from_entry(entry: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        return {"artwork_url": None, "artwork_source": "fallback", "artwork_status": "fallback"}
+    local_url = _music_artwork_cache_public_url(entry.get("local_path"))
+    source_url = str(entry.get("source_url") or entry.get("cover_url") or "").strip() or None
+    status = str(entry.get("status") or ("ok" if (local_url or source_url) else "fallback")).strip()
+    return {
+        "artwork_url": local_url or source_url,
+        "artwork_source": str(entry.get("source_provider") or entry.get("artwork_source") or "remote_cache"),
+        "artwork_status": status,
+        "artwork_original_url": source_url,
+        "artwork_updated_at": entry.get("updated_at"),
+    }
+
+
+def _cache_remote_music_artwork(
+    *,
+    cache_kind: str,
+    cache_key: str,
+    source_url: str | None,
+    source_provider: str,
+    ttl_seconds: int = MUSIC_HOME_ARTWORK_TTL_SECONDS,
+    max_size_px: int = 512,
+) -> dict[str, Any]:
+    key = str(cache_key or "").strip()
+    url = str(source_url or "").strip()
+    if not key:
+        return {"status": "fallback", "artwork_url": None}
+    existing = _get_music_artwork_cache_entry(cache_kind, key)
+    if existing:
+        status = str(existing.get("status") or "").strip()
+        ttl = MUSIC_HOME_ARTWORK_NEGATIVE_TTL_SECONDS if status == "missing" else ttl_seconds
+        if _music_cache_is_fresh(existing, ttl):
+            return _music_artwork_payload_from_entry(existing)
+    if not url or not _is_http_url(url):
+        payload = {
+            "status": "missing",
+            "source_url": url or None,
+            "source_provider": source_provider,
+            "failure_reason": "missing_source_url",
+        }
+        _set_music_artwork_cache_entry(cache_kind, key, payload)
+        return _music_artwork_payload_from_entry({**payload, "updated_at": time.time()})
+    digest = hashlib.sha256(f"{cache_kind}\0{key}\0{url}\0{int(max_size_px)}".encode("utf-8")).hexdigest()
+    suffix = "jpg"
+    local_path = _music_browse_art_cache_dir() / digest[:2] / f"{digest}.{suffix}"
+    if local_path.exists() and existing:
+        payload = {
+            **existing,
+            "status": "ok",
+            "source_url": url,
+            "local_path": str(local_path),
+            "source_provider": source_provider,
+        }
+        _set_music_artwork_cache_entry(cache_kind, key, payload)
+        return _music_artwork_payload_from_entry({**payload, "updated_at": time.time()})
+    artwork = artwork_provider.fetch_artwork_from_url(
+        url,
+        max_size_px=max_size_px,
+        timeout=5,
+        cache_enabled=True,
+    )
+    if artwork and artwork.get("data"):
+        try:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = local_path.with_suffix(".tmp")
+            tmp_path.write_bytes(bytes(artwork["data"]))
+            os.replace(tmp_path, local_path)
+            payload = {
+                "status": "ok",
+                "source_url": url,
+                "local_path": str(local_path),
+                "source_provider": source_provider,
+                "mime": artwork.get("mime") or "image/jpeg",
+                "size": len(bytes(artwork["data"])),
+            }
+            _set_music_artwork_cache_entry(cache_kind, key, payload)
+            return _music_artwork_payload_from_entry({**payload, "updated_at": time.time()})
+        except Exception as exc:
+            logging.debug("music browse artwork cache write failed key=%s", key, exc_info=True)
+            failure_reason = f"cache_write_failed:{exc}"
+    else:
+        failure_reason = "download_failed"
+    payload = {
+        "status": "missing",
+        "source_url": url,
+        "source_provider": source_provider,
+        "failure_reason": failure_reason,
+    }
+    _set_music_artwork_cache_entry(cache_kind, key, payload)
+    return _music_artwork_payload_from_entry({**payload, "updated_at": time.time()})
+
+
+DEFAULT_MUSIC_HOME_GENRES = [
+    "Rock",
+    "Pop",
+    "Hip Hop",
+    "Jazz",
+    "Electronic",
+    "Metal",
+    "Country",
+    "Folk",
+    "R&B",
+    "Classical",
+    "Christian",
+    "Indie",
+]
+
+
+def _music_home_apply_local_artwork(item: dict[str, Any]) -> dict[str, Any]:
+    artwork_local_path = str(item.get("artwork_local_path") or "").strip()
+    if artwork_local_path:
+        item["artwork_url"] = _music_local_art_public_url(artwork_local_path)
+        item["artwork_source"] = "local_embedded"
+        item["artwork_status"] = "ok"
+    else:
+        item.setdefault("artwork_url", None)
+        item.setdefault("artwork_source", "fallback")
+        item.setdefault("artwork_status", "fallback")
+    return item
+
+
+def _music_home_album_card(album: dict[str, Any]) -> dict[str, Any]:
+    card = dict(album or {})
+    card.setdefault("title", card.get("album"))
+    return _music_home_apply_local_artwork(card)
+
+
+def _music_home_track_card(track: dict[str, Any], summary: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    card = dict(track or {})
+    if not str(card.get("artwork_local_path") or "").strip():
+        album_key = str(card.get("album") or "").strip().lower()
+        artist_key = str(card.get("artist") or "").strip().lower()
+        for candidate in summary.get("albums", []):
+            if (
+                str(candidate.get("album") or candidate.get("album_key") or "").strip().lower() == album_key
+                and str(candidate.get("artist") or candidate.get("artist_key") or "").strip().lower() == artist_key
+                and str(candidate.get("artwork_local_path") or "").strip()
+            ):
+                card["artwork_local_path"] = candidate.get("artwork_local_path")
+                break
+    return _music_home_apply_local_artwork(card)
+
+
+def _music_home_artist_card(artist: dict[str, Any], summary: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    card = dict(artist or {})
+    name = str(card.get("name") or card.get("artist") or "").strip()
+    artist_key = str(card.get("artist_key") or name).strip().lower()
+    if not str(card.get("artwork_local_path") or "").strip():
+        for candidate in [*summary.get("artists", []), *summary.get("albums", []), *summary.get("tracks", [])]:
+            candidate_key = str(candidate.get("artist_key") or candidate.get("artist") or "").strip().lower()
+            if candidate_key == artist_key and str(candidate.get("artwork_local_path") or "").strip():
+                card["artwork_local_path"] = candidate.get("artwork_local_path")
+                break
+    card["name"] = name or str(card.get("artist") or "").strip()
+    card.setdefault("artist_mbid", None)
+    return _music_home_apply_local_artwork(card)
+
+
+def _music_home_genre_card(genre: str, summary: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    label = str(genre or "").strip()
+    key = _normalize_music_genre_key(label)
+    persisted = _get_music_artwork_cache_entry("genre", key) or {}
+    cached_urls = [
+        _music_artwork_cache_public_url(path)
+        for path in (persisted.get("local_paths") if isinstance(persisted.get("local_paths"), list) else [])
+    ]
+    cover_urls = [url for url in cached_urls if url]
+    if not cover_urls:
+        cover_urls = [
+            str(url or "").strip()
+            for url in (persisted.get("cover_urls") if isinstance(persisted.get("cover_urls"), list) else [])
+            if str(url or "").strip()
+        ][:4]
+    if not cover_urls:
+        seen: set[str] = set()
+        for candidate in [*summary.get("albums", []), *summary.get("tracks", [])]:
+            artist = str(candidate.get("artist") or "").strip().lower()
+            album = str(candidate.get("album") or "").strip().lower()
+            path = str(candidate.get("artwork_local_path") or "").strip()
+            dedupe = f"{artist}:{album}:{path}"
+            if not path or dedupe in seen:
+                continue
+            seen.add(dedupe)
+            cover_urls.append(_music_local_art_public_url(path) or "")
+            if len(cover_urls) >= 4:
+                break
+    cover_urls = [url for url in cover_urls if url][:4]
+    return {
+        "genre": label,
+        "name": label,
+        "artwork_urls": cover_urls,
+        "artwork_source": "genre_cache" if cover_urls else "generated",
+        "artwork_status": "ok" if cover_urls else "fallback",
+    }
+
+
+def _music_home_recent_artists(history_rows: list[dict[str, Any]], summary: dict[str, list[dict[str, Any]]], limit: int = 6) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    cards: list[dict[str, Any]] = []
+    for item in history_rows:
+        artist = str(item.get("artist") or "").strip()
+        key = artist.lower()
+        if not artist or key in seen:
+            continue
+        seen.add(key)
+        cards.append(_music_home_artist_card({"name": artist, "artist": artist, "artist_key": key, "disambiguation": "Recently played"}, summary))
+        if len(cards) >= limit:
+            break
+    return cards
+
+
+def _music_home_hidden_preferences(config: dict[str, Any]) -> tuple[set[str], set[str]]:
+    ui_preferences = config.get("ui_preferences") if isinstance(config.get("ui_preferences"), dict) else {}
+    hidden_genres = {
+        _normalize_music_genre_key(value)
+        for value in (ui_preferences.get("music_hidden_genres") if isinstance(ui_preferences.get("music_hidden_genres"), list) else [])
+        if _normalize_music_genre_key(value)
+    }
+    hidden_artists: set[str] = set()
+    raw_artists = ui_preferences.get("music_hidden_artists") if isinstance(ui_preferences.get("music_hidden_artists"), list) else []
+    for value in raw_artists:
+        if isinstance(value, dict):
+            key = str(value.get("artist_mbid") or value.get("name") or "").strip().lower()
+        else:
+            key = str(value or "").strip().lower()
+        if key:
+            hidden_artists.add(key)
+    return hidden_genres, hidden_artists
+
+
+def _music_home_spotify_seeds(preferences: dict[str, Any], limit: int = 6) -> tuple[list[Any], str]:
+    favorite_genres = [_normalize_music_genre_key(value) for value in preferences.get("favorite_genres", [])]
+    seeds = []
+    seen: set[str] = set()
+    for genre in favorite_genres:
+        for seed in GENRE_SPOTIFY_PLAYLIST_SEEDS.get(genre, []):
+            if seed.playlist_id and seed.playlist_id not in seen:
+                seen.add(seed.playlist_id)
+                seeds.append(seed)
+    source = "retreivr_taste" if seeds else "curated_fallback"
+    for seed in GENERAL_SPOTIFY_PLAYLIST_SEEDS:
+        if seed.playlist_id and seed.playlist_id not in seen:
+            seen.add(seed.playlist_id)
+            seeds.append(seed)
+    if not seeds:
+        for seed in COUNTRY_SPOTIFY_PLAYLIST_SEEDS:
+            if seed.playlist_id and seed.playlist_id not in seen:
+                seen.add(seed.playlist_id)
+                seeds.append(seed)
+    if seeds:
+        offset = int(time.time() // 86400) % len(seeds)
+        seeds = seeds[offset:] + seeds[:offset]
+    return seeds[:limit], source
+
+
+def _music_home_spotify_cards(config: dict[str, Any], preferences: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
+    seeds, recommendation_source = _music_home_spotify_seeds(preferences, limit=limit)
+    cards: list[dict[str, Any]] = []
+    for seed in seeds:
+        cache_key = seed.playlist_id
+        cached = _get_music_artwork_cache_entry("spotify_playlist", cache_key) or {}
+        if _music_cache_is_fresh(cached, MUSIC_HOME_SPOTIFY_TTL_SECONDS) and isinstance(cached.get("summary"), dict):
+            cards.append({**cached["summary"], "recommendation_source": recommendation_source, "cache": "persistent"})
+            continue
+        if isinstance(cached.get("summary"), dict):
+            summary = {**cached["summary"], "recommendation_source": recommendation_source, "cache": "stale"}
+        else:
+            summary = {
+                "playlist_id": seed.playlist_id,
+                "playlist_url": seed.playlist_url,
+                "title": seed.title,
+                "owner": None,
+                "description": seed.description,
+                "image_url": "assets/no_artwork.png",
+                "track_count": 0,
+                "total_tracks": 0,
+                "complete": False,
+                "genre": seed.genre,
+                "source": seed.source,
+                "recommendation_source": recommendation_source,
+                "tracks_preview": [],
+                "cache": "seed",
+            }
+        cards.append(summary)
+    return [card for card in cards if card.get("playlist_url")][:limit]
+
+async def _api_music_home_payload():
+    config = _read_config_or_404()
+    preferences = _normalized_music_preferences(config)
+    hidden_genres, hidden_artists = _music_home_hidden_preferences(config)
+    items = await anyio.to_thread.run_sync(
+        functools.partial(list_indexed_music, app.state.paths.db_path, limit=1000)
+    )
+    summary = summarize_library(items)
+    with sqlite3.connect(app.state.paths.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        history_rows = list_history(conn, limit=50)
+    recent_tracks = [_music_home_track_card(item, summary) for item in history_rows[:4]]
+    library_albums = [_music_home_album_card(album) for album in summary.get("albums", [])[:6]]
+    favorite_artists = [
+        _music_home_artist_card(artist, summary)
+        for artist in preferences.get("favorite_artists", [])[:6]
+        if str(artist.get("artist_mbid") or artist.get("name") or "").strip().lower() not in hidden_artists
+    ]
+    recent_artists = [
+        artist
+        for artist in _music_home_recent_artists(history_rows, summary, limit=6)
+        if str(artist.get("artist_mbid") or artist.get("name") or "").strip().lower() not in hidden_artists
+    ]
+    genres = [
+        genre
+        for genre in (preferences.get("favorite_genres") or DEFAULT_MUSIC_HOME_GENRES)
+        if _normalize_music_genre_key(genre) not in hidden_genres
+    ]
+    genre_cards = [_music_home_genre_card(genre, summary) for genre in genres[:12]]
+    recommendation_genres = genres[:2]
+    recommendation_artists: list[dict[str, Any]] = []
+    seen_artist_keys: set[str] = set()
+    for genre in recommendation_genres:
+        cache_key = f"{_normalize_music_genre_key(genre)}:12:0"
+        persisted = _get_music_artwork_cache_entry("genre_artists", cache_key) or {}
+        artists = persisted.get("artists") if isinstance(persisted.get("artists"), list) else []
+        for artist in artists:
+            key = str(artist.get("artist_mbid") or artist.get("name") or "").strip().lower()
+            if not key or key in seen_artist_keys:
+                continue
+            seen_artist_keys.add(key)
+            if key in hidden_artists:
+                continue
+            recommendation_artists.append(_music_home_artist_card(artist, summary))
+            if len(recommendation_artists) >= 8:
+                break
+        if len(recommendation_artists) >= 8:
+            break
+    return safe_json(
+        {
+            "snapshot_at": time.time(),
+            "summary": {
+                "album_count": len(summary.get("albums", [])),
+                "favorite_artist_count": len(favorite_artists),
+                "recent_track_count": len(recent_tracks),
+            },
+            "continue_listening": recent_tracks,
+            "library_albums": library_albums,
+            "recent_artists": recent_artists,
+            "favorite_artists": favorite_artists,
+            "genres": genre_cards,
+            "genre_recommendations": recommendation_artists,
+            "spotify_playlists": _music_home_spotify_cards(config, preferences, limit=6),
+            "artwork_contract": {
+                "local_first": True,
+                "persistent_url_cache": True,
+                "persistent_blob_cache": True,
+                "visible_first_frontend": True,
+            },
+        }
+    )
 
 
 def _parse_iso_datetime(value: str, *, field_name: str) -> datetime:
@@ -8528,6 +8921,11 @@ async def import_playlist_preflight(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"preflight_failed: {exc}") from exc
 
 
+@app.get("/api/music/home")
+async def api_music_home():
+    return await _api_music_home_payload()
+
+
 @app.get("/api/music/spotify/playlists")
 def list_spotify_playlist_cards(q: str | None = Query(None)):
     """Return parseable curated Spotify playlist cards for Music Browse/Search."""
@@ -12766,6 +13164,22 @@ def api_player_art_local(path: str = Query(...)):
         resolved,
         media_type=mimetypes.guess_type(str(resolved))[0] or "image/jpeg",
         headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/api/music/art/cache")
+def api_music_art_cache(path: str = Query(...)):
+    cfg = _current_loaded_config()
+    art_cache_root = _music_browse_art_cache_dir()
+    if not is_local_player_path_allowed(cfg, path, allowed_extensions=IMAGE_EXTENSIONS, extra_roots=[art_cache_root]):
+        raise HTTPException(status_code=403, detail={"error": "path_not_allowed"})
+    resolved = resolve_local_player_file(cfg, path, allowed_extensions=IMAGE_EXTENSIONS, extra_roots=[art_cache_root])
+    if resolved is None:
+        raise HTTPException(status_code=404, detail={"error": "file_not_found"})
+    return FileResponse(
+        resolved,
+        media_type=mimetypes.guess_type(str(resolved))[0] or "image/jpeg",
+        headers={"Cache-Control": "public, max-age=604800, immutable"},
     )
 
 

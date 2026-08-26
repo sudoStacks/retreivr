@@ -43,3 +43,19 @@ def test_music_thumbnail_jobs_start_after_track_cards_are_created():
     scheduler_index = render_source.index("runPrioritizedThumbnailJobs(thumbnailJobs, renderToken")
 
     assert track_card_index < scheduler_index
+
+
+def test_music_landing_uses_home_snapshot_without_initial_artwork_hydration():
+    source = APP_JS.read_text()
+    render_start = source.index("function renderMusicLanding")
+    render_end = source.index("function clearMusicResultsHistory", render_start)
+    render_source = source[render_start:render_end]
+
+    assert 'fetchJson("/api/music/home")' in source
+    assert "const homeSnapshot = state.musicHomeSnapshot || {}" in render_source
+    assert "skipArtworkHydration: true" in render_source
+    assert "Rotating Spotify playlists from your Retreivr taste profile" in render_source
+
+    warm_index = render_source.index("warmMusicGenreArtistCaches(topGenreSeeds")
+    snapshot_recs_index = render_source.index("snapshotGenreRecommendations.slice")
+    assert snapshot_recs_index < warm_index
