@@ -12,9 +12,18 @@ def test_closed_review_cards_do_not_create_media_requests() -> None:
     assert 'preview?.querySelector("audio, video")?.remove()' in _APP_JS
 
 
+def test_opening_review_preview_autoplays_media() -> None:
+    body = _APP_JS.split("function setReviewPreviewOpen(reviewId)", 1)[1].split(
+        "async function refreshReviewQueue", 1
+    )[0]
+    assert 'media.preload = "auto"' in body
+    assert "media.play?.().catch(() => {})" in body
+
+
 def test_unchanged_review_poll_does_not_rebuild_the_card_dom() -> None:
     assert 'const reviewChanged = nextSignature !== state.reviewItemsSignature' in _APP_JS
-    assert 'state.currentPage === "review" && (reviewChanged || !listEl?.children?.length)' in _APP_JS
+    assert '(state.currentPage === "music" && state.musicSection === "review")' in _APP_JS
+    assert "reviewChanged || !listEl?.children?.length" in _APP_JS
 
 
 def test_consequential_review_actions_require_confirmation() -> None:

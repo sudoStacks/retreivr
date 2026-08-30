@@ -163,3 +163,89 @@ def test_spotify_cards_reuse_persistent_summary_without_live_resolve(api_module,
 
     assert cards[0]["title"] == "Cached Playlist"
     assert cards[0]["cache"] == "persistent"
+
+
+def test_spotify_playlist_preflight_returns_album_view_sized_preview() -> None:
+    source = Path("api/main.py").read_text()
+    helper_start = source.index("def _resolve_spotify_playlist_for_import")
+    helper_end = source.index("def _trim_playlist_import_jobs_locked", helper_start)
+    helper_source = source[helper_start:helper_end]
+
+    assert "resolved.to_summary(preview_limit=100)" in helper_source
+
+
+def test_music_browse_index_table_persists_typed_rows(api_module) -> None:
+    api_module._set_music_browse_index_entry(
+        "genre_artists",
+        "rock:24:0",
+        {"artists": [{"name": "Artist One"}]},
+        source_provider="unit",
+        ttl_seconds=3600,
+        stale_seconds=600,
+    )
+
+    entry = api_module._get_music_browse_index_entry("genre_artists", "rock:24:0")
+
+    assert entry is not None
+    assert entry["artists"] == [{"name": "Artist One"}]
+    assert entry["source_provider"] == "unit"
+    assert entry["status"] == "ok"
+    assert api_module._music_browse_entry_is_usable(entry) is True
+    assert api_module._music_browse_entry_is_fresh(entry) is True
+
+
+def test_music_home_snapshot_uses_browse_index_without_rebuilding(api_module, monkeypatch) -> None:
+    api_module._set_music_browse_index_entry(
+        "home",
+        "v2",
+        {"payload": {"snapshot_at": 123, "genres": [], "spotify_playlists": []}},
+        source_provider="unit",
+        ttl_seconds=3600,
+        stale_seconds=600,
+    )
+
+    monkeypatch.setattr(api_module, "list_indexed_music", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("home should use browse snapshot")))
+
+    resp = TestClient(api_module.app).get("/api/music/home")
+
+    assert resp.status_code == 200
+    assert resp.json()["cache"] == "snapshot"
+    assert resp.json()["snapshot_at"] == 123
+
+
+def test_fast_album_search_returns_browse_index_and_schedules_refresh(api_module, monkeypatch) -> None:
+    api_module._set_music_browse_index_entry(
+        "artist_albums",
+        "artist one:24",
+        {"albums": [{"release_group_mbid": "rg-1", "title": "Cached Album"}]},
+        source_provider="unit",
+        ttl_seconds=3600,
+        stale_seconds=600,
+    )
+    monkeypatch.setattr(api_module, "_search_music_album_candidates", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fast cached path should not search")))
+
+    resp = TestClient(api_module.app).get(
+        "/api/music/albums/search",
+        params={"q": "Artist One", "limit": 24, "fast": "true"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == [{"release_group_mbid": "rg-1", "title": "Cached Album"}]
+
+
+def test_genre_artists_returns_browse_index_without_musicbrainz(api_module, monkeypatch) -> None:
+    api_module._set_music_browse_index_entry(
+        "genre_artists",
+        "rock:24:0",
+        {"artists": [{"name": "Cached Rock", "artist_mbid": "artist-1"}]},
+        source_provider="unit",
+        ttl_seconds=3600,
+        stale_seconds=600,
+    )
+    monkeypatch.setattr(api_module, "search_artists_by_genre", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cached genre path should not search")))
+
+    resp = TestClient(api_module.app).get("/api/music/genres/Rock/artists", params={"limit": 24})
+
+    assert resp.status_code == 200
+    assert resp.json()["cached"] is True
+    assert resp.json()["artists"] == [{"name": "Cached Rock", "artist_mbid": "artist-1"}]

@@ -2037,6 +2037,7 @@ body.topbar-hidden .topbar {
 .movies-tv-shell,
 .home-search-shell {
   min-width: 0;
+  order: 1;
 }
 
 .home-search-shell,
@@ -2762,6 +2763,47 @@ body.home-page .home-candidate-artwork[data-preview-enabled="true"] {
 .music-card-thumb-shell.loaded .music-card-thumb-placeholder {
   opacity: 0;
   visibility: hidden;
+}
+
+.music-card-thumb-shell.generated-artwork .music-card-thumb {
+  opacity: 1;
+  visibility: visible;
+}
+
+.music-browse-skeleton-section {
+  min-height: 420px;
+}
+
+.music-skeleton-card {
+  pointer-events: none;
+}
+
+.music-skeleton-line {
+  width: 70%;
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.12), rgba(148, 163, 184, 0.28), rgba(148, 163, 184, 0.12));
+  background-size: 220% 100%;
+  animation: musicSkeletonPulse 1.15s ease-in-out infinite;
+}
+
+.music-skeleton-line-title {
+  width: 88%;
+  height: 15px;
+}
+
+.music-skeleton-grid .music-card-thumb-placeholder {
+  opacity: 1;
+  visibility: visible;
+}
+
+@keyframes musicSkeletonPulse {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
 }
 
 .music-mode-section {
@@ -8250,20 +8292,35 @@ body.home-page .home-search-actions {
 }
 
 .music-section-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: center;
+  gap: 8px;
   margin: 0;
   width: auto;
   flex: 1 1 520px;
   min-width: 0;
 }
 
+.music-app-nav-with-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .music-nav-slot {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  flex: 0 1 160px;
+  flex: 0 0 100%;
   min-height: 38px;
   min-width: 0;
+  order: 3;
+}
+
+.music-nav-slot:empty {
+  display: none;
 }
 
 .music-toolbar-slot {
@@ -8275,6 +8332,7 @@ body.home-page .home-search-actions {
   min-height: 38px;
   min-width: 0;
   max-width: 100%;
+  order: 2;
 }
 
 @media (max-width: 1200px) {
@@ -8312,9 +8370,12 @@ body.home-page .home-search-actions {
 
 #music-browse-view,
 #music-library-view,
-#music-player-view {
+#music-player-view,
+#music-review-view,
+#music-import-view {
   display: grid;
   gap: 4px;
+  width: 100%;
   min-width: 0;
 }
 
@@ -8487,6 +8548,7 @@ body.music-player-dock-visible .layout {
 .music-player-main {
   display: grid;
   gap: 12px;
+  width: 100%;
   min-width: 0;
 }
 
@@ -8511,9 +8573,10 @@ body.music-player-dock-visible .layout {
 
 .music-player-now-top {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
+  grid-template-columns: 220px minmax(0, 1fr);
   gap: 18px;
   align-items: center;
+  min-width: 0;
 }
 
 .music-player-now-top.has-remote-video {
@@ -8596,6 +8659,7 @@ body.music-player-dock-visible .layout {
 .music-player-now-copy .panel-title {
   font-size: 1.95rem;
   line-height: 1.15;
+  overflow-wrap: anywhere;
 }
 
 .music-player-now-context {
@@ -9310,7 +9374,9 @@ body.music-player-dock-visible .layout {
 
 /* legacy list-style station card — kept for any fallback references */
 .music-player-station-card {
+  min-height: 100%;
   display: grid;
+  grid-template-rows: auto 1fr auto;
   gap: 10px;
 }
 
@@ -9326,6 +9392,74 @@ body.music-player-dock-visible .layout {
 
 body[data-page="music"] #music-panel .music-page-shell {
   margin-top: 0;
+}
+
+body.music-page #music-panel .music-page-shell,
+body.music-page #music-workspace,
+body.music-page .music-view,
+body.music-page #music-browse-view,
+body.music-page #music-library-view,
+body.music-page #music-player-view,
+body.music-page #music-review-view,
+body.music-page #music-import-view,
+body.music-page #music-results-container.music-results-region,
+body.music-page #music-library-section.media-library-section,
+body.music-page .music-player-main,
+body.music-page .music-import-shell,
+body.music-page #music-review-slot,
+body.music-page #music-review-slot #review-panel,
+body[data-page="music"] #music-panel .music-page-shell,
+body[data-page="music"] #music-workspace,
+body[data-page="music"] .music-view,
+body[data-page="music"] #music-browse-view,
+body[data-page="music"] #music-library-view,
+body[data-page="music"] #music-player-view,
+body[data-page="music"] #music-review-view,
+body[data-page="music"] #music-import-view,
+body[data-page="music"] #music-results-container.music-results-region,
+body[data-page="music"] #music-library-section.media-library-section,
+body[data-page="music"] .music-player-main,
+body[data-page="music"] .music-import-shell,
+body[data-page="music"] #music-review-slot,
+body[data-page="music"] #music-review-slot #review-panel {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+}
+
+body.music-page #music-review-slot #review-panel,
+body[data-page="music"] #music-review-slot #review-panel {
+  margin: 0;
+}
+
+body.music-page .music-player-full-video-slot,
+body.music-page #music-player-view .music-player-now-top.has-remote-video .music-player-now-copy,
+body[data-page="music"] .music-player-full-video-slot,
+body[data-page="music"] #music-player-view .music-player-now-top.has-remote-video .music-player-now-copy {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
+}
+
+body.music-page #music-player-view .music-player-library-layout,
+body.music-page #music-player-view .music-home-layout,
+body.music-page #music-player-view .music-radio-hero,
+body.music-page #music-player-view .music-shelf-grid,
+body.music-page #music-player-view .music-station-grid,
+body.music-page #music-player-stations,
+body.music-page #music-player-favorites,
+body.music-page #music-import-view .music-import-panel,
+body[data-page="music"] #music-player-view .music-player-library-layout,
+body[data-page="music"] #music-player-view .music-home-layout,
+body[data-page="music"] #music-player-view .music-radio-hero,
+body[data-page="music"] #music-player-view .music-shelf-grid,
+body[data-page="music"] #music-player-view .music-station-grid,
+body[data-page="music"] #music-player-stations,
+body[data-page="music"] #music-player-favorites,
+body[data-page="music"] #music-import-view .music-import-panel {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
 }
 
 @media (max-width: 980px) {

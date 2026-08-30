@@ -1159,7 +1159,7 @@ def _resolve_spotify_playlist_for_import(playlist_url: str) -> tuple[str, bytes,
         raise HTTPException(status_code=400, detail="Spotify playlist did not expose importable tracks")
     filename = f"{resolved.title or resolved.playlist_id}.csv"
     payload = spotify_tracks_to_csv_bytes(resolved.tracks)
-    return filename, payload, resolved.to_summary(preview_limit=10)
+    return filename, payload, resolved.to_summary(preview_limit=100)
 
 
 def _trim_playlist_import_jobs_locked() -> None:
@@ -1945,6 +1945,29 @@ def _ensure_music_artwork_cache_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_music_browse_index_table(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS music_browse_index (
+            browse_kind TEXT NOT NULL,
+            browse_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            source_provider TEXT,
+            status TEXT NOT NULL DEFAULT 'ok',
+            failure_reason TEXT,
+            refreshed_at REAL NOT NULL,
+            expires_at REAL NOT NULL DEFAULT 0,
+            stale_after REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (browse_kind, browse_key)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_music_browse_index_expires_at ON music_browse_index (expires_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_music_browse_index_stale_after ON music_browse_index (stale_after)")
+    conn.commit()
+
+
 def _get_music_artwork_cache_entry(cache_kind: str, cache_key: str) -> dict[str, Any] | None:
     db_path = app.state.paths.db_path
     with sqlite3.connect(db_path) as conn:
@@ -1993,9 +2016,107 @@ def _set_music_artwork_cache_entry(cache_kind: str, cache_key: str, payload: dic
         conn.commit()
 
 
+def _get_music_browse_index_entry(browse_kind: str, browse_key: str) -> dict[str, Any] | None:
+    db_path = app.state.paths.db_path
+    with sqlite3.connect(db_path) as conn:
+        _ensure_music_browse_index_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT payload_json, source_provider, status, failure_reason,
+                   refreshed_at, expires_at, stale_after
+            FROM music_browse_index
+            WHERE browse_kind=? AND browse_key=?
+            LIMIT 1
+            """,
+            (str(browse_kind or "").strip(), str(browse_key or "").strip()),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    payload_raw, source_provider, status, failure_reason, refreshed_at, expires_at, stale_after = row
+    try:
+        payload = json.loads(str(payload_raw or "{}"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.update(
+        {
+            "source_provider": source_provider,
+            "status": status,
+            "failure_reason": failure_reason,
+            "refreshed_at": float(refreshed_at or 0),
+            "expires_at": float(expires_at or 0),
+            "stale_after": float(stale_after or 0),
+            "updated_at": float(refreshed_at or 0),
+        }
+    )
+    return payload
+
+
+def _set_music_browse_index_entry(
+    browse_kind: str,
+    browse_key: str,
+    payload: dict[str, Any],
+    *,
+    source_provider: str = "retreivr",
+    status: str = "ok",
+    failure_reason: str | None = None,
+    ttl_seconds: int = MUSIC_BROWSE_STALE_GRACE_SECONDS if "MUSIC_BROWSE_STALE_GRACE_SECONDS" in globals() else 30 * 24 * 60 * 60,
+    stale_seconds: int = MUSIC_BROWSE_INDEX_TTL_SECONDS if "MUSIC_BROWSE_INDEX_TTL_SECONDS" in globals() else 7 * 24 * 60 * 60,
+) -> None:
+    db_path = app.state.paths.db_path
+    now_ts = time.time()
+    serialized = safe_json_dumps(payload if isinstance(payload, dict) else {}, sort_keys=True)
+    with sqlite3.connect(db_path) as conn:
+        _ensure_music_browse_index_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO music_browse_index (
+                browse_kind, browse_key, payload_json, source_provider, status,
+                failure_reason, refreshed_at, expires_at, stale_after
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(browse_kind, browse_key) DO UPDATE SET
+                payload_json=excluded.payload_json,
+                source_provider=excluded.source_provider,
+                status=excluded.status,
+                failure_reason=excluded.failure_reason,
+                refreshed_at=excluded.refreshed_at,
+                expires_at=excluded.expires_at,
+                stale_after=excluded.stale_after
+            """,
+            (
+                str(browse_kind or "").strip(),
+                str(browse_key or "").strip(),
+                serialized,
+                str(source_provider or "retreivr").strip(),
+                str(status or "ok").strip(),
+                failure_reason,
+                now_ts,
+                now_ts + max(1, int(ttl_seconds or 1)),
+                now_ts + max(1, int(stale_seconds or 1)),
+            ),
+        )
+        conn.commit()
+
+
+def _music_browse_entry_is_usable(entry: dict[str, Any] | None) -> bool:
+    return isinstance(entry, dict) and float(entry.get("expires_at") or 0) > time.time()
+
+
+def _music_browse_entry_is_fresh(entry: dict[str, Any] | None) -> bool:
+    return isinstance(entry, dict) and float(entry.get("stale_after") or 0) > time.time()
+
+
 MUSIC_HOME_ARTWORK_TTL_SECONDS = 7 * 24 * 60 * 60
 MUSIC_HOME_ARTWORK_NEGATIVE_TTL_SECONDS = 6 * 60 * 60
 MUSIC_HOME_SPOTIFY_TTL_SECONDS = 7 * 24 * 60 * 60
+MUSIC_BROWSE_SNAPSHOT_TTL_SECONDS = 20 * 60
+MUSIC_BROWSE_INDEX_TTL_SECONDS = 7 * 24 * 60 * 60
+MUSIC_BROWSE_STALE_GRACE_SECONDS = 30 * 24 * 60 * 60
 
 
 def _music_browse_art_cache_dir() -> Path:
@@ -2021,6 +2142,37 @@ def _music_cache_is_fresh(entry: dict[str, Any] | None, ttl: int) -> bool:
         return False
     updated_at = float(entry.get("updated_at") or 0)
     return updated_at > 0 and (time.time() - updated_at) < ttl
+
+
+def _music_cache_age_seconds(entry: dict[str, Any] | None) -> float:
+    if not isinstance(entry, dict):
+        return float("inf")
+    updated_at = float(entry.get("updated_at") or 0)
+    return (time.time() - updated_at) if updated_at > 0 else float("inf")
+
+
+def _music_background_once(key: str, target, *args, **kwargs) -> bool:
+    inflight = getattr(app.state, "music_background_refresh_inflight", None)
+    if not isinstance(inflight, set):
+        inflight = set()
+        app.state.music_background_refresh_inflight = inflight
+    normalized_key = str(key or "").strip()
+    if not normalized_key or normalized_key in inflight:
+        return False
+    inflight.add(normalized_key)
+
+    def _run() -> None:
+        try:
+            target(*args, **kwargs)
+        except Exception:
+            logging.debug("music background refresh failed key=%s", normalized_key, exc_info=True)
+        finally:
+            active = getattr(app.state, "music_background_refresh_inflight", None)
+            if isinstance(active, set):
+                active.discard(normalized_key)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
 
 
 def _music_artwork_payload_from_entry(entry: dict[str, Any] | None) -> dict[str, Any]:
@@ -2185,27 +2337,32 @@ def _music_home_artist_card(artist: dict[str, Any], summary: dict[str, list[dict
 def _music_home_genre_card(genre: str, summary: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     label = str(genre or "").strip()
     key = _normalize_music_genre_key(label)
-    persisted = _get_music_artwork_cache_entry("genre", key) or {}
-    cached_urls = [
-        _music_artwork_cache_public_url(path)
-        for path in (persisted.get("local_paths") if isinstance(persisted.get("local_paths"), list) else [])
+    genre_alias_keys = {_normalize_music_genre_key(alias) for alias in _music_genre_aliases(label)}
+    genre_alias_keys.add(key)
+    genre_matches = [
+        candidate
+        for candidate in [*summary.get("albums", []), *summary.get("tracks", [])]
+        if _normalize_music_genre_key(candidate.get("genre")) in genre_alias_keys
     ]
-    cover_urls = [url for url in cached_urls if url]
+    persisted = _get_music_artwork_cache_entry("genre", key) or {}
+    persisted_is_current = int(persisted.get("genre_seed_version") or 0) >= 2
+    cover_urls: list[str] = []
+    if persisted_is_current:
+        cached_urls = [
+            _music_artwork_cache_public_url(path)
+            for path in (persisted.get("local_paths") if isinstance(persisted.get("local_paths"), list) else [])
+        ]
+        cover_urls = [url for url in cached_urls if url]
     if not cover_urls:
         cover_urls = [
             str(url or "").strip()
-            for url in (persisted.get("cover_urls") if isinstance(persisted.get("cover_urls"), list) else [])
+            for url in ((persisted.get("cover_urls") if persisted_is_current else []) if isinstance(persisted.get("cover_urls"), list) else [])
             if str(url or "").strip()
         ][:4]
     if not cover_urls:
         seen: set[str] = set()
-        genre_matches = [
-            candidate
-            for candidate in [*summary.get("albums", []), *summary.get("tracks", [])]
-            if _normalize_music_genre_key(candidate.get("genre")) == key
-        ]
-        fallback_candidates = [*summary.get("albums", []), *summary.get("tracks", [])]
-        for candidate in [*genre_matches, *fallback_candidates]:
+        local_paths: list[str] = []
+        for candidate in genre_matches:
             artist = str(candidate.get("artist") or "").strip().lower()
             album = str(candidate.get("album") or "").strip().lower()
             path = str(candidate.get("artwork_local_path") or "").strip()
@@ -2213,9 +2370,23 @@ def _music_home_genre_card(genre: str, summary: dict[str, list[dict[str, Any]]])
             if not path or dedupe in seen:
                 continue
             seen.add(dedupe)
-            cover_urls.append(_music_local_art_public_url(path) or "")
+            public_url = _music_local_art_public_url(path) or ""
+            if public_url:
+                cover_urls.append(public_url)
+                local_paths.append(path)
             if len(cover_urls) >= 4:
                 break
+        if local_paths:
+            _set_music_artwork_cache_entry(
+                "genre",
+                key,
+                {
+                    "status": "ok",
+                    "local_paths": local_paths[:4],
+                    "source_provider": "local_library",
+                    "genre_seed_version": 2,
+                },
+            )
     cover_urls = [url for url in cover_urls if url][:4]
     return {
         "genre": label,
@@ -2224,6 +2395,74 @@ def _music_home_genre_card(genre: str, summary: dict[str, list[dict[str, Any]]])
         "artwork_source": "genre_cache" if cover_urls else "generated",
         "artwork_status": "ok" if cover_urls else "fallback",
     }
+
+
+def _music_local_genre_artist_cards(
+    genre: str,
+    summary: dict[str, list[dict[str, Any]]],
+    *,
+    limit: int = 24,
+) -> list[dict[str, Any]]:
+    key = _normalize_music_genre_key(genre)
+    alias_keys = {_normalize_music_genre_key(alias) for alias in _music_genre_aliases(genre)}
+    alias_keys.add(key)
+    ranked: dict[str, dict[str, Any]] = {}
+    for candidate in [*summary.get("artists", []), *summary.get("albums", []), *summary.get("tracks", [])]:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_genre = _normalize_music_genre_key(candidate.get("genre"))
+        if candidate_genre and candidate_genre not in alias_keys:
+            continue
+        name = str(candidate.get("name") or candidate.get("artist") or "").strip()
+        if not name:
+            continue
+        artist_key = str(candidate.get("artist_mbid") or candidate.get("artist_key") or name).strip().lower()
+        current = ranked.get(artist_key) or {
+            "name": name,
+            "artist": name,
+            "artist_key": str(candidate.get("artist_key") or name).strip().lower(),
+            "artist_mbid": str(candidate.get("artist_mbid") or "").strip() or None,
+            "genre": genre,
+            "source_score": 0,
+            "local_item_count": 0,
+        }
+        current["local_item_count"] = int(current.get("local_item_count") or 0) + 1
+        current["source_score"] = max(int(current.get("source_score") or 0), 70)
+        if not str(current.get("artwork_local_path") or "").strip() and str(candidate.get("artwork_local_path") or "").strip():
+            current["artwork_local_path"] = candidate.get("artwork_local_path")
+        ranked[artist_key] = current
+    artists = list(ranked.values())
+    artists.sort(key=lambda item: (int(item.get("local_item_count") or 0), str(item.get("name") or "").lower()), reverse=True)
+    return [_music_home_artist_card(artist, summary) for artist in artists[: max(1, min(60, int(limit or 24)))]]
+
+
+def _music_local_artist_album_cards(
+    artist: str,
+    summary: dict[str, list[dict[str, Any]]],
+    *,
+    limit: int = 24,
+) -> list[dict[str, Any]]:
+    artist_key = str(artist or "").strip().lower()
+    if not artist_key:
+        return []
+    albums: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for album in summary.get("albums", []):
+        if not isinstance(album, dict):
+            continue
+        candidate_artist = str(album.get("artist") or album.get("artist_key") or "").strip().lower()
+        if candidate_artist != artist_key:
+            continue
+        title = str(album.get("album") or album.get("title") or "").strip()
+        dedupe = str(album.get("album_key") or title).strip().lower()
+        if not title or dedupe in seen:
+            continue
+        seen.add(dedupe)
+        card = _music_home_album_card({**album, "title": title, "artist": album.get("artist") or artist})
+        albums.append(card)
+        if len(albums) >= max(1, min(50, int(limit or 24))):
+            break
+    return albums
 
 
 def _music_home_recent_artists(history_rows: list[dict[str, Any]], summary: dict[str, list[dict[str, Any]]], limit: int = 6) -> list[dict[str, Any]]:
@@ -2303,7 +2542,7 @@ def _music_home_spotify_cards(config: dict[str, Any], preferences: dict[str, Any
                 "title": seed.title,
                 "owner": None,
                 "description": seed.description,
-                "image_url": "assets/no_artwork.png",
+                "image_url": None,
                 "track_count": 0,
                 "total_tracks": 0,
                 "complete": False,
@@ -2316,7 +2555,45 @@ def _music_home_spotify_cards(config: dict[str, Any], preferences: dict[str, Any
         cards.append(summary)
     return [card for card in cards if card.get("playlist_url")][:limit]
 
+
+def _music_home_cached_spotify_summary(summary: dict[str, Any], seed: Any, recommendation_source: str | None = None) -> dict[str, Any]:
+    playlist_id = str(summary.get("playlist_id") or getattr(seed, "playlist_id", "") or "").strip()
+    image_url = str(summary.get("image_url") or summary.get("artwork_url") or "").strip()
+    if playlist_id and image_url:
+        cached_art = _cache_remote_music_artwork(
+            cache_kind="spotify_playlist_image",
+            cache_key=playlist_id,
+            source_url=image_url,
+            source_provider="spotify",
+            max_size_px=512,
+        )
+        local_artwork_url = cached_art.get("artwork_url")
+        if local_artwork_url:
+            summary["image_url"] = local_artwork_url
+            summary["artwork_original_url"] = image_url
+            summary["artwork_source"] = cached_art.get("artwork_source") or "spotify"
+            summary["artwork_status"] = cached_art.get("artwork_status") or "ok"
+    if playlist_id:
+        payload = dict(summary)
+        payload.setdefault("playlist_id", playlist_id)
+        payload.setdefault("seed_title", getattr(seed, "title", None))
+        payload.setdefault("genre", getattr(seed, "genre", None))
+        payload.setdefault("source", getattr(seed, "source", None))
+        if recommendation_source:
+            payload["recommendation_source"] = recommendation_source
+        _set_music_artwork_cache_entry(
+            "spotify_playlist",
+            playlist_id,
+            {"status": "ok", "summary": payload, "source_provider": "spotify"},
+        )
+    return summary
+
 async def _api_music_home_payload():
+    cached_home = _get_music_browse_index_entry("home", "v2") or {}
+    if isinstance(cached_home.get("payload"), dict) and _music_browse_entry_is_fresh(cached_home):
+        payload = dict(cached_home["payload"])
+        payload["cache"] = "snapshot"
+        return safe_json(payload)
     config = _read_config_or_404()
     preferences = _normalized_music_preferences(config)
     hidden_genres, hidden_artists = _music_home_hidden_preferences(config)
@@ -2350,7 +2627,7 @@ async def _api_music_home_payload():
     seen_artist_keys: set[str] = set()
     for genre in recommendation_genres:
         cache_key = f"{_normalize_music_genre_key(genre)}:12:0"
-        persisted = _get_music_artwork_cache_entry("genre_artists", cache_key) or {}
+        persisted = _get_music_browse_index_entry("genre_artists", cache_key) or {}
         artists = persisted.get("artists") if isinstance(persisted.get("artists"), list) else []
         for artist in artists:
             key = str(artist.get("artist_mbid") or artist.get("name") or "").strip().lower()
@@ -2364,8 +2641,7 @@ async def _api_music_home_payload():
                 break
         if len(recommendation_artists) >= 8:
             break
-    return safe_json(
-        {
+    payload = {
             "snapshot_at": time.time(),
             "summary": {
                 "album_count": len(summary.get("albums", [])),
@@ -2384,9 +2660,19 @@ async def _api_music_home_payload():
                 "persistent_url_cache": True,
                 "persistent_blob_cache": True,
                 "visible_first_frontend": True,
+                "foreground_network_discovery": False,
+                "stale_while_revalidate": True,
             },
         }
+    _set_music_browse_index_entry(
+        "home",
+        "v2",
+        {"payload": payload},
+        source_provider="local_library",
+        ttl_seconds=MUSIC_BROWSE_STALE_GRACE_SECONDS,
+        stale_seconds=MUSIC_BROWSE_SNAPSHOT_TTL_SECONDS,
     )
+    return safe_json(payload)
 
 
 def _parse_iso_datetime(value: str, *, field_name: str) -> datetime:
@@ -2719,7 +3005,7 @@ def _warm_single_music_genre_artist_cache(genre: str, *, limit: int = STARTUP_MU
     normalized_limit = max(1, min(24, int(limit or STARTUP_MUSIC_GENRE_PREWARM_LIMIT)))
     cache_key = f"{_normalize_music_genre_key(genre_value)}:{normalized_limit}:0"
     now = time.time()
-    persisted_payload = _get_music_artwork_cache_entry("genre_artists", cache_key) or {}
+    persisted_payload = _get_music_browse_index_entry("genre_artists", cache_key) or {}
     persisted_updated_at = float(persisted_payload.get("updated_at") or 0)
     persisted_items = persisted_payload.get("artists")
     if (
@@ -2768,14 +3054,42 @@ def _warm_single_music_genre_artist_cache(genre: str, *, limit: int = STARTUP_MU
             "cached_at": now,
             "artists": artists,
         }
-    _set_music_artwork_cache_entry(
+    _set_music_browse_index_entry(
         "genre_artists",
         cache_key,
         {
-            "updated_at": now,
             "artists": artists,
         },
+        source_provider="musicbrainz",
+        ttl_seconds=MUSIC_BROWSE_STALE_GRACE_SECONDS,
+        stale_seconds=MUSIC_BROWSE_INDEX_TTL_SECONDS,
     )
+
+
+def _refresh_music_artist_albums_cache(
+    *,
+    cache_key: str,
+    query_value: str,
+    artist_mbid_value: str,
+    normalized_limit: int,
+) -> list[dict[str, Any]]:
+    albums: list[dict[str, Any]] = []
+    if artist_mbid_value:
+        albums = _search_music_album_candidates_for_artist_mbid(artist_mbid_value, limit=normalized_limit)
+    elif query_value:
+        albums = _search_music_album_candidates(query_value, limit=normalized_limit)
+    if albums:
+        _set_music_browse_index_entry(
+            "artist_albums",
+            cache_key,
+            {
+                "albums": albums[:normalized_limit],
+            },
+            source_provider="musicbrainz",
+            ttl_seconds=MUSIC_BROWSE_STALE_GRACE_SECONDS,
+            stale_seconds=MUSIC_BROWSE_INDEX_TTL_SECONDS,
+        )
+    return albums[:normalized_limit]
 
 
 def _startup_prewarm_music_genres(config: dict | None) -> None:
@@ -4194,6 +4508,7 @@ async def startup():
     with sqlite3.connect(app.state.paths.db_path) as _conn:
         _ensure_run_summary_dispatch_table(_conn)
         _ensure_music_artwork_cache_table(_conn)
+        _ensure_music_browse_index_table(_conn)
         ensure_music_player_tables(_conn)
         ensure_music_library_index(_conn)
     _ensure_watch_tables(app.state.paths.db_path)
@@ -8939,7 +9254,15 @@ def list_spotify_playlist_cards(q: str | None = Query(None)):
     config = _read_config_or_404()
     resolver = _spotify_public_resolver(config)
     cards = []
-    for seed in COUNTRY_SPOTIFY_PLAYLIST_SEEDS:
+    preferences = _normalized_music_preferences(config)
+    seed_pool, recommendation_source = _music_home_spotify_seeds(preferences, limit=12)
+    if query:
+        seed_pool = [*GENRE_SPOTIFY_PLAYLIST_SEEDS.get(_normalize_music_genre_key(query), []), *GENERAL_SPOTIFY_PLAYLIST_SEEDS, *COUNTRY_SPOTIFY_PLAYLIST_SEEDS]
+    seen: set[str] = set()
+    for seed in seed_pool:
+        if seed.playlist_id in seen:
+            continue
+        seen.add(seed.playlist_id)
         haystack = " ".join([seed.title, seed.description, seed.genre]).lower()
         if query and query not in haystack:
             continue
@@ -8949,14 +9272,16 @@ def list_spotify_playlist_cards(q: str | None = Query(None)):
             continue
         if not resolved.tracks:
             continue
-        cards.append(
-            {
-                **resolved.to_summary(preview_limit=5),
-                "seed_title": seed.title,
-                "genre": seed.genre,
-                "source": seed.source,
-            }
-        )
+        summary = {
+            **resolved.to_summary(preview_limit=5),
+            "seed_title": seed.title,
+            "genre": seed.genre,
+            "source": seed.source,
+            "recommendation_source": recommendation_source,
+        }
+        cards.append(_music_home_cached_spotify_summary(summary, seed, recommendation_source))
+        if len(cards) >= 6:
+            break
     return {"section": "Spotify Playlists", "playlists": cards}
 
 
@@ -10116,15 +10441,84 @@ def music_albums_search(
     q: str = Query("", alias="q"),
     limit: int = Query(10, ge=1, le=50),
     artist_mbid: str = Query("", alias="artist_mbid"),
+    fast: bool = Query(False),
 ):
     artist_mbid_value = str(artist_mbid or "").strip()
-    if artist_mbid_value:
+    query_value = str(q or "").strip()
+    normalized_limit = int(limit)
+    cache_key_seed = artist_mbid_value or query_value.lower()
+    cache_key = f"{cache_key_seed}:{normalized_limit}"
+    can_use_album_cache = bool(getattr(getattr(app.state, "paths", None), "db_path", ""))
+    if not fast:
+        if artist_mbid_value:
+            try:
+                return _search_music_album_candidates_for_artist_mbid(artist_mbid_value, limit=normalized_limit)
+            except Exception:
+                logging.exception("music_albums_search artist-mbid lookup failed artist_mbid=%s", artist_mbid_value)
+                raise HTTPException(status_code=502, detail="musicbrainz_artist_album_search_failed")
+        return _search_music_album_candidates(query_value, limit=normalized_limit) if query_value else []
+    if cache_key_seed and can_use_album_cache:
+        cached_payload = _get_music_browse_index_entry("artist_albums", cache_key) or {}
+        cached_items = cached_payload.get("albums")
+        if isinstance(cached_items, list) and cached_items and _music_browse_entry_is_usable(cached_payload):
+            if not _music_browse_entry_is_fresh(cached_payload):
+                _music_background_once(
+                    f"artist_albums:{cache_key}",
+                    _refresh_music_artist_albums_cache,
+                    cache_key=cache_key,
+                    query_value=query_value,
+                    artist_mbid_value=artist_mbid_value,
+                    normalized_limit=normalized_limit,
+                )
+            return cached_items[:normalized_limit]
+    if query_value:
         try:
-            return _search_music_album_candidates_for_artist_mbid(artist_mbid_value, limit=int(limit))
+            items = list_indexed_music(app.state.paths.db_path, limit=5000)
+            local_albums = _music_local_artist_album_cards(query_value, summarize_library(items), limit=normalized_limit)
         except Exception:
-            logging.exception("music_albums_search artist-mbid lookup failed artist_mbid=%s", artist_mbid_value)
-            raise HTTPException(status_code=502, detail="musicbrainz_artist_album_search_failed")
-    return _search_music_album_candidates(str(q or ""), limit=int(limit))
+            local_albums = []
+        if local_albums:
+            if cache_key_seed and can_use_album_cache:
+                _set_music_browse_index_entry(
+                    "artist_albums",
+                    cache_key,
+                    {
+                        "albums": local_albums[:normalized_limit],
+                    },
+                    source_provider="local_library",
+                    ttl_seconds=MUSIC_BROWSE_STALE_GRACE_SECONDS,
+                    stale_seconds=MUSIC_BROWSE_INDEX_TTL_SECONDS,
+                )
+                _music_background_once(
+                    f"artist_albums:{cache_key}",
+                    _refresh_music_artist_albums_cache,
+                    cache_key=cache_key,
+                    query_value=query_value,
+                    artist_mbid_value=artist_mbid_value,
+                    normalized_limit=normalized_limit,
+                )
+            return local_albums[:normalized_limit]
+    if artist_mbid_value:
+        _music_background_once(
+            f"artist_albums:{cache_key}",
+            _refresh_music_artist_albums_cache,
+            cache_key=cache_key,
+            query_value=query_value,
+            artist_mbid_value=artist_mbid_value,
+            normalized_limit=normalized_limit,
+        )
+        return []
+    if not query_value:
+        return []
+    _music_background_once(
+        f"artist_albums:{cache_key}",
+        _refresh_music_artist_albums_cache,
+        cache_key=cache_key,
+        query_value=query_value,
+        artist_mbid_value=artist_mbid_value,
+        normalized_limit=normalized_limit,
+    )
+    return []
 
 
 @app.get("/api/music/albums/{release_group_mbid}/tracks")
@@ -10302,23 +10696,31 @@ def music_genre_artists(
         cache_key = f"{normalized_genre}:{normalized_limit}:{normalized_offset}"
         cache = getattr(app.state, "music_genre_artist_cache", None)
         now = time.time()
-        persisted_payload = _get_music_artwork_cache_entry("genre_artists", cache_key) or {}
+        persisted_payload = _get_music_browse_index_entry("genre_artists", cache_key) or {}
         persisted_updated_at = float(persisted_payload.get("updated_at") or 0)
         persisted_items = persisted_payload.get("artists")
         if (
             isinstance(persisted_items, list)
             and persisted_updated_at > 0
-            and (now - persisted_updated_at) < MUSIC_GENRE_ARTIST_CACHE_TTL_SECONDS
+            and _music_browse_entry_is_usable(persisted_payload)
         ):
             if isinstance(cache, dict):
                 cache[cache_key] = {
                     "cached_at": now,
                     "artists": persisted_items,
                 }
+            if not _music_browse_entry_is_fresh(persisted_payload):
+                _music_background_once(
+                    f"genre_artists:{cache_key}",
+                    _warm_single_music_genre_artist_cache,
+                    genre_value,
+                    limit=normalized_limit,
+                )
             return {
                 "genre": genre_value,
                 "artists": persisted_items,
                 "cached": True,
+                "refreshing": not _music_browse_entry_is_fresh(persisted_payload),
             }
         if isinstance(persisted_items, list) and persisted_items:
             stale_items = persisted_items
@@ -10335,6 +10737,66 @@ def music_genre_artists(
                     }
                 if isinstance(cached_items, list) and cached_items:
                     stale_items = cached_items
+        try:
+            items = list_indexed_music(app.state.paths.db_path, limit=5000)
+            local_artists = _music_local_genre_artist_cards(genre_value, summarize_library(items), limit=normalized_limit)
+        except Exception:
+            local_artists = []
+        if local_artists:
+            if isinstance(cache, dict):
+                cache[cache_key] = {
+                    "cached_at": now,
+                    "artists": local_artists,
+                }
+            _set_music_browse_index_entry(
+                "genre_artists",
+                cache_key,
+                {
+                    "artists": local_artists,
+                },
+                source_provider="local_library",
+                ttl_seconds=MUSIC_BROWSE_STALE_GRACE_SECONDS,
+                stale_seconds=MUSIC_BROWSE_INDEX_TTL_SECONDS,
+            )
+            _music_background_once(
+                f"genre_artists:{cache_key}",
+                _warm_single_music_genre_artist_cache,
+                genre_value,
+                limit=normalized_limit,
+            )
+            return {
+                "genre": genre_value,
+                "artists": local_artists,
+                "cached": True,
+                "refreshing": True,
+            }
+        if stale_items:
+            _music_background_once(
+                f"genre_artists:{cache_key}",
+                _warm_single_music_genre_artist_cache,
+                genre_value,
+                limit=normalized_limit,
+            )
+            return {
+                "genre": genre_value,
+                "artists": stale_items[:normalized_limit],
+                "cached": True,
+                "degraded": True,
+                "refreshing": True,
+            }
+        _music_background_once(
+            f"genre_artists:{cache_key}",
+            _warm_single_music_genre_artist_cache,
+            genre_value,
+            limit=normalized_limit,
+        )
+        return {
+            "genre": genre_value,
+            "artists": [],
+            "cached": False,
+            "degraded": True,
+            "refreshing": True,
+        }
         aliases = _music_genre_aliases(genre_value)[:MUSIC_GENRE_MAX_ALIAS_SEARCHES]
         per_alias_limit = max(
             8,
@@ -10386,13 +10848,15 @@ def music_genre_artists(
                 "cached_at": now,
                 "artists": artists,
             }
-        _set_music_artwork_cache_entry(
+        _set_music_browse_index_entry(
             "genre_artists",
             cache_key,
             {
-                "updated_at": now,
                 "artists": artists,
             },
+            source_provider="musicbrainz",
+            ttl_seconds=MUSIC_BROWSE_STALE_GRACE_SECONDS,
+            stale_seconds=MUSIC_BROWSE_INDEX_TTL_SECONDS,
         )
         return {
             "genre": genre_value,
@@ -10414,6 +10878,45 @@ def music_genre_artists(
             "cached": False,
             "degraded": True,
         }
+
+
+@app.post("/api/music/browse/warm")
+def music_browse_warm(payload: dict = Body(default={})):
+    data = payload if isinstance(payload, dict) else {}
+    kind = str(data.get("kind") or "home").strip().lower()
+    if kind == "home":
+        _music_background_once("browse_home:v2", lambda: anyio.run(_api_music_home_payload))
+        return {"status": "accepted", "kind": "home"}
+    if kind == "genre_artists":
+        genre = str(data.get("genre") or "").strip()
+        if not genre:
+            raise HTTPException(status_code=400, detail="genre required")
+        limit = max(1, min(60, int(data.get("limit") or 24)))
+        _music_background_once(
+            f"genre_artists:{_normalize_music_genre_key(genre)}:{limit}:0",
+            _warm_single_music_genre_artist_cache,
+            genre,
+            limit=limit,
+        )
+        return {"status": "accepted", "kind": "genre_artists", "genre": genre}
+    if kind == "artist_albums":
+        artist = str(data.get("artist") or data.get("name") or "").strip()
+        artist_mbid = str(data.get("artist_mbid") or "").strip()
+        if not artist and not artist_mbid:
+            raise HTTPException(status_code=400, detail="artist or artist_mbid required")
+        limit = max(1, min(50, int(data.get("limit") or 24)))
+        cache_key_seed = artist_mbid or artist.lower()
+        cache_key = f"{cache_key_seed}:{limit}"
+        _music_background_once(
+            f"artist_albums:{cache_key}",
+            _refresh_music_artist_albums_cache,
+            cache_key=cache_key,
+            query_value=artist,
+            artist_mbid_value=artist_mbid,
+            normalized_limit=limit,
+        )
+        return {"status": "accepted", "kind": "artist_albums", "artist": artist, "artist_mbid": artist_mbid}
+    raise HTTPException(status_code=400, detail="unsupported browse warm kind")
 
 
 @app.post("/api/music/video/availability")
@@ -10939,16 +11442,126 @@ def music_album_art(album_id: str):
 
 
 @app.get("/api/music/artist/art/{artist_mbid}")
-def music_artist_art(artist_mbid: str):
+def music_artist_art(artist_mbid: str, resolve: bool = Query(False)):
     artist_key = str(artist_mbid or "").strip()
     if not artist_key:
         raise HTTPException(status_code=400, detail="artist_mbid is required")
     payload = _get_music_artwork_cache_entry("artist", artist_key) or {}
+    cached_url = str(payload.get("cover_url") or "").strip()
+    if cached_url and _is_http_url(cached_url):
+        return {
+            "status": "ok",
+            "cover_url": cached_url,
+            "updated_at": payload.get("updated_at"),
+            "cache": "persistent",
+        }
+
+    updated_at = float(payload.get("updated_at") or 0)
+    if (
+        str(payload.get("status") or "").strip() == "miss"
+        and updated_at > 0
+        and (time.time() - updated_at) < COVER_ART_NEGATIVE_CACHE_TTL_SECONDS
+    ):
+        return {
+            "status": "ok",
+            "cover_url": None,
+            "updated_at": payload.get("updated_at"),
+            "cache": "negative",
+        }
+
+    if not resolve:
+        return {
+            "status": "ok",
+            "cover_url": None,
+            "updated_at": payload.get("updated_at"),
+            "cache": "miss",
+        }
+
+    try:
+        is_mbid = bool(re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", artist_key))
+        albums = (
+            _bounded_call(6.0, lambda: _search_music_album_candidates_for_artist_mbid(artist_key, limit=8))
+            if is_mbid
+            else _search_music_album_candidates(artist_key, limit=8)
+        )
+    except concurrent.futures.TimeoutError:
+        logging.warning("music_artist_art album lookup timed out artist_key=%s", artist_key)
+        albums = []
+    except Exception:
+        logging.exception("music_artist_art album lookup failed artist_key=%s", artist_key)
+        albums = []
+
+    cover_url: str | None = None
+    for album in (albums if isinstance(albums, list) else [])[:2]:
+        release_group_id = str(
+            album.get("release_group_mbid")
+            or album.get("release_group_id")
+            or album.get("album_id")
+            or ""
+        ).strip()
+        if not release_group_id:
+            continue
+        art_payload = music_album_art(release_group_id)
+        candidate_url = str(art_payload.get("cover_url") or "").strip() if isinstance(art_payload, dict) else ""
+        if candidate_url and _is_http_url(candidate_url):
+            cover_url = candidate_url
+            break
+
+    if cover_url:
+        _set_music_artwork_cache_entry("artist", artist_key, {"cover_url": cover_url})
+        return {
+            "status": "ok",
+            "cover_url": cover_url,
+            "cache": "network",
+        }
+
+    _set_music_artwork_cache_entry("artist", artist_key, {"cover_url": None, "status": "miss"})
     return {
         "status": "ok",
-        "cover_url": payload.get("cover_url"),
-        "updated_at": payload.get("updated_at"),
+        "cover_url": None,
+        "cache": "miss",
     }
+
+
+@app.post("/api/music/artist/art/{artist_mbid}/warm")
+def music_artist_art_warm(artist_mbid: str):
+    artist_key = str(artist_mbid or "").strip()
+    if not artist_key:
+        raise HTTPException(status_code=400, detail="artist_mbid is required")
+    payload = _get_music_artwork_cache_entry("artist", artist_key) or {}
+    cached_url = str(payload.get("cover_url") or "").strip()
+    if cached_url and _is_http_url(cached_url):
+        return {"status": "ok", "cover_url": cached_url, "cache": "persistent"}
+
+    updated_at = float(payload.get("updated_at") or 0)
+    if (
+        str(payload.get("status") or "").strip() == "miss"
+        and updated_at > 0
+        and (time.time() - updated_at) < COVER_ART_NEGATIVE_CACHE_TTL_SECONDS
+    ):
+        return {"status": "accepted", "cache": "negative"}
+
+    in_flight = getattr(app.state, "music_artist_art_warm_inflight", None)
+    if not isinstance(in_flight, set):
+        in_flight = set()
+        app.state.music_artist_art_warm_inflight = in_flight
+    if artist_key in in_flight:
+        return {"status": "accepted", "cache": "in_flight"}
+
+    in_flight.add(artist_key)
+
+    def _warm_artist_art() -> None:
+        try:
+            music_artist_art(artist_key, resolve=True)
+        except Exception:
+            logging.exception("music_artist_art background warm failed artist_key=%s", artist_key)
+        finally:
+            active = getattr(app.state, "music_artist_art_warm_inflight", None)
+            if isinstance(active, set):
+                active.discard(artist_key)
+
+    threading.Thread(target=_warm_artist_art, daemon=True).start()
+    return {"status": "accepted", "cache": "warming"}
 
 
 @app.put("/api/music/artist/art/{artist_mbid}")

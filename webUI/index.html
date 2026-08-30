@@ -386,21 +386,15 @@
               <button class="button ghost small music-app-nav active" data-music-section="browse" type="button">Browse</button>
               <button class="button ghost small music-app-nav" data-music-section="library" type="button">Library</button>
               <button class="button ghost small music-app-nav" data-music-section="favorites" type="button">Favorites</button>
-              <button class="button ghost small music-app-nav" data-music-section="playlists" type="button">Playlists</button>
               <button class="button ghost small music-app-nav" data-music-section="player" type="button">Player</button>
               <button class="button ghost small music-app-nav" data-music-section="radio" type="button">Radio</button>
+              <button class="button ghost small music-app-nav music-app-nav-with-count" data-music-section="review" type="button">Review <span id="music-review-nav-badge" class="nav-count-badge hidden">0</span></button>
               <button class="button ghost small music-app-nav" data-music-section="import" type="button">Import</button>
             </div>
             <div id="music-toolbar-slot" class="music-toolbar-slot"></div>
           </div>
           <div id="music-page-message-region">
             <div id="music-page-message" class="notice hidden" role="status"></div>
-          </div>
-          <div id="music-page-review-region">
-            <div id="music-page-review-alert" class="notice review-home-alert hidden" role="status">
-              <span id="music-page-review-alert-text">Items are waiting for review.</span>
-              <button id="music-page-review-alert-open" class="button ghost small" type="button">Open Review Queue</button>
-            </div>
           </div>
           <div id="music-workspace" class="music-workspace">
             <section id="music-browse-view" class="music-view active">
@@ -597,6 +591,9 @@
                   <div id="music-import-history" class="music-import-history"></div>
                 </section>
               </div>
+            </section>
+            <section id="music-review-view" class="music-view hidden">
+              <div id="music-review-slot"></div>
             </section>
           </div>
       </div>
