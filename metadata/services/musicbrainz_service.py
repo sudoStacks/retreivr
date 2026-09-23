@@ -315,6 +315,27 @@ class MusicBrainzService:
             return None
         return f"https://coverartarchive.org/release/{rid}/front"
 
+    def discover_artists(self, text, *, genre=False, limit=20):
+        """Bounded provider lookup using the existing shared throttle/retries."""
+        field = "tag" if genre else "artist"
+        query = f'{field}:"{self._lucene_escape(text)}"'
+        key = f"discovery_artists:{query}:{limit}"
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        result = self._call_with_retry(lambda: musicbrainzngs.search_artists(query=query, limit=min(50, max(1, limit))))
+        rows = result.get("artist-list", [])
+        self._cache.set(key, rows)
+        return rows
+
+    def browse_artist_groups(self, artist_id, *, offset=0, limit=100):
+        return self._call_with_retry(lambda: musicbrainzngs.browse_release_groups(
+            artist=artist_id, limit=min(100, limit), offset=offset)).get("release-group-list", [])
+
+    def recordings_by_isrc(self, isrc):
+        result = self._call_with_retry(lambda: musicbrainzngs.get_recordings_by_isrc(isrc))
+        return (result.get("isrc") or {}).get("recording-list", [])
+
     def search_recordings(self, artist, title, *, album=None, limit=5):
         key = f"search_recordings:{artist}|{title}|{album or ''}|{int(limit or 5)}"
         cached = self._cache.get(key)

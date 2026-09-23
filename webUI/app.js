@@ -2835,6 +2835,13 @@ function setMusicSection(section) {
   const libraryView = $("#music-library-view");
   const playerView = $("#music-player-view");
   const importView = $("#music-import-view");
+  const discoveryView = $("#music-discovery-view");
+  if (discoveryView) {
+    discoveryView.classList.toggle("hidden", effective !== "discovery");
+    discoveryView.classList.toggle("active", effective === "discovery");
+    if (effective === "discovery") window.retreivrDiscovery?.refresh();
+  }
+
   const reviewView = $("#music-review-view");
   const showPlayerHost = effective === "favorites" || effective === "player" || effective === "radio";
   if (browseView) {
@@ -19474,6 +19481,9 @@ function renderConfig(cfg) {
   $("#cfg-arr-qbittorrent-download-dir").value = arrQbit.download_dir ?? "";
   $("#cfg-arr-jellyfin-base-url").value = arrJellyfin.base_url ?? "";
   $("#cfg-arr-jellyfin-api-key").value = arrJellyfin.api_key ?? "";
+  $("#cfg-arr-jellyfin-access-token").value = arrJellyfin.access_token ?? "";
+  $("#cfg-arr-jellyfin-user-id").value = arrJellyfin.user_id ?? "";
+  $("#cfg-arr-jellyfin-library-id").value = arrJellyfin.library_id ?? "";
   $("#cfg-arr-vpn-enabled").checked = !!arrVpn.enabled;
   $("#cfg-arr-vpn-provider").value = arrVpn.provider ?? "gluetun";
   $("#cfg-arr-vpn-control-url").value = arrVpn.control_url ?? "";
@@ -20400,6 +20410,9 @@ function buildConfigFromForm() {
   arr.qbittorrent.download_dir = $("#cfg-arr-qbittorrent-download-dir").value.trim();
   arr.jellyfin.base_url = $("#cfg-arr-jellyfin-base-url").value.trim();
   arr.jellyfin.api_key = $("#cfg-arr-jellyfin-api-key").value.trim();
+  arr.jellyfin.access_token = $("#cfg-arr-jellyfin-access-token").value.trim();
+  arr.jellyfin.user_id = $("#cfg-arr-jellyfin-user-id").value.trim();
+  arr.jellyfin.library_id = $("#cfg-arr-jellyfin-library-id").value.trim();
   arr.vpn.enabled = !!$("#cfg-arr-vpn-enabled").checked;
   arr.vpn.provider = $("#cfg-arr-vpn-provider").value.trim() || "gluetun";
   arr.vpn.control_url = $("#cfg-arr-vpn-control-url").value.trim();

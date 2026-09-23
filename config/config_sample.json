@@ -198,7 +198,10 @@
     },
     "jellyfin": {
       "base_url": "",
-      "api_key": ""
+      "api_key": "",
+      "access_token": "",
+      "user_id": "",
+      "library_id": ""
     },
     "vpn": {
       "provider": "gluetun",
@@ -281,5 +284,9 @@
     "external_player_url_template": "",
     "plex_base_url": ""
   },
-  "custom_search_adapters_file": "config/custom_search_adapters.yaml"
+  "custom_search_adapters_file": "config/custom_search_adapters.yaml",
+  "music_discovery": {
+    "interval_seconds": 10,
+    "max_attempts": 3
+  }
 }

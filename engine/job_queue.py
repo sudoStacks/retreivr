@@ -3546,6 +3546,7 @@ class DownloadWorkerEngine:
                     track_disambiguation=track_disambiguation,
                     mb_youtube_urls=mb_youtube_urls,
                     recording_mbid=recording_mbid,
+                    release_mbid=release_mbid,
                     is_ep_release=is_ep_release,
                     prefer_music_video=str(getattr(job, "media_type", "") or "").strip().lower() == "video",
                     excluded_candidate_ids=blocked_candidate_ids,

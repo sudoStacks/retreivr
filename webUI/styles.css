@@ -10143,3 +10143,14 @@ body[data-page="music"] #music-import-view .music-import-panel {
     width: 100%;
   }
 }
+
+/* Discovery reuses the existing Music panels and button styles. */
+.discovery-row { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; padding: .8rem 0; border-bottom: 1px solid var(--border-color, #ffffff18); }
+.discovery-row > span:first-child { flex: 1 1 240px; }
+.discovery-row > details { flex-basis: 100%; }
+.discovery-row select { max-width: 100%; flex: 1 1 300px; }
+.discovery-track-list { max-height: 65vh; overflow: auto; }
+#discovery-root label { display: inline-flex; align-items: center; gap: .5rem; }
+#discovery-root input, #discovery-root select { max-width: 100%; }
+#discovery-playlists { min-width: 180px; }
+@media (max-width: 640px) { #discovery-root .row { flex-wrap: wrap; } #discovery-root input[type=file] { width: 100%; } }

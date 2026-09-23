@@ -4633,6 +4633,24 @@ async def startup():
     )
     app.state.worker_thread.start()
 
+    from engine.discovery import DiscoveryService
+    from engine.discovery_store import DiscoveryStore
+    from engine.discovery_worker import DiscoveryWorker
+    discovery_cfg = startup_cfg.get("music_discovery") or {}
+    discovery_store = DiscoveryStore(app.state.paths.db_path)
+    # Recover interrupted membership updates by reading Jellyfin before any write.
+    discovery_store.execute("UPDATE jellyfin_playlist_links SET state='uncertain' WHERE state IN ('syncing','creating')")
+    discovery_service = DiscoveryService(discovery_store, get_musicbrainz_service(),
+        config=startup_cfg)  # No acquisition capability in the background discovery worker.
+    # Separate resolver avoids sharing mutable per-search diagnostics with acquisition.
+    discovery_resolver = SearchResolutionService(search_db_path=app.state.search_db_path,
+        queue_db_path=app.state.paths.db_path, config=startup_cfg, paths=app.state.paths, resolution_only=True)
+    app.state.discovery_worker = DiscoveryWorker(discovery_service, discovery_resolver,
+        interval=discovery_cfg.get("interval_seconds", 10), max_attempts=discovery_cfg.get("max_attempts", 3))
+    app.state.discovery_thread = threading.Thread(target=app.state.discovery_worker.run,
+        name="music-discovery", daemon=True)
+    app.state.discovery_thread.start()
+
     if community_publish_worker_enabled(startup_cfg if isinstance(startup_cfg, dict) else {}):
         app.state.scheduler.add_job(
             _community_publish_schedule_tick,
@@ -4720,6 +4738,13 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     _log_transition("APP_SHUTDOWN", phase="begin")
+    discovery_worker = getattr(app.state, "discovery_worker", None)
+    if discovery_worker:
+        discovery_worker.stop.set()
+    discovery_thread = getattr(app.state, "discovery_thread", None)
+    if discovery_thread:
+        discovery_thread.join(timeout=5)
+
     if app.state.running:
         app.state.stop_event.set()
         task = app.state.run_task
@@ -15193,6 +15218,9 @@ def api_browse(
         "entries": entries,
     }
 
+
+from api.music_discovery import create_router as create_music_discovery_router
+app.include_router(create_music_discovery_router(app, get_loaded_config))
 
 if os.path.isdir(WEBUI_DIR):
     app.mount("/", StaticFiles(directory=WEBUI_DIR, html=True), name="webui")

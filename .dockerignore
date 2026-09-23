@@ -64,3 +64,6 @@ config/config.json
 .vscode
 .idea
 *.swp
+
+# Local playlist analysis exports
+apple_xml_remaining_not_queued.csv

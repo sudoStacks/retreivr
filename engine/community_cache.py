@@ -30,7 +30,6 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
-from concurrent.futures import ThreadPoolExecutor
 
 import requests
 import sqlite3
@@ -202,19 +201,31 @@ def extract_best_candidate(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not sources:
         return None
 
-    sources_sorted = sorted(
-        sources,
-        key=lambda s: s.get("confidence", 0),
-        reverse=True,
-    )
-
-    best = sources_sorted[0]
-
-    # Basic sanity checks
-    if "video_id" not in best:
-        return None
-
-    return best
+    now = datetime.now(timezone.utc)
+    eligible = []
+    for source in sources:
+        if not isinstance(source, dict) or not source.get("video_id"):
+            continue
+        if source.get("invalid") or source.get("dead") or source.get("verification_status") in {"dead", "invalid", "rejected"}:
+            continue
+        try:
+            confidence = float(source.get("confidence") or 0)
+            if confidence > 1:
+                confidence /= 100
+            if confidence < .78:
+                continue
+            verified = source.get("last_verified_at") or source.get("verified_at")
+            if verified:
+                timestamp = datetime.fromisoformat(str(verified).replace("Z", "+00:00"))
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                if (now-timestamp).total_seconds() > 90*86400:
+                    continue
+            # Legacy undated entries remain hints, still probed and scored by SearchResolutionService.
+            eligible.append({**source, "confidence": confidence})
+        except (ValueError, TypeError):
+            continue
+    return max(eligible, key=lambda s: s["confidence"]) if eligible else None
 
 
 def _candidate_score(candidate: Dict[str, Any]) -> tuple[float, str]:
@@ -354,30 +365,31 @@ def cached_lookup(
 
     result: Optional[Dict[str, Any]] = None
     try:
-        local_candidate = None
+        local_candidate = lookup_recording_local(mbid, dataset_root=dataset_root)
         remote_candidate = None
-        if allow_remote:
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                local_future = pool.submit(lookup_recording_local, mbid, dataset_root=dataset_root)
-                remote_future = pool.submit(fetch_community_record, mbid)
-                try:
-                    local_candidate = local_future.result(timeout=REQUEST_TIMEOUT + 0.2)
-                except Exception:
-                    local_candidate = None
-                try:
-                    remote_raw = remote_future.result(timeout=REQUEST_TIMEOUT + 0.5)
-                except Exception:
-                    remote_raw = None
+        # Fresh verified local mappings are preferred; legacy hints still pass resolver gates.
+        local_verified = (local_candidate or {}).get("last_verified_at")
+        trust_local = False
+        if local_verified and _candidate_score(local_candidate)[0] >= .94:
+            try:
+                stamp = datetime.fromisoformat(str(local_verified).replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                trust_local = 0 <= (datetime.now(timezone.utc)-stamp).total_seconds() <= 30*86400
+            except (ValueError, TypeError):
+                pass
+        if allow_remote and not trust_local:
+            remote_raw = fetch_community_record(mbid)
             if isinstance(remote_raw, dict):
                 remote_best = extract_best_candidate(remote_raw)
                 if isinstance(remote_best, dict):
                     remote_candidate = _normalize_candidate(remote_best, provider="remote_github")
                 try:
-                    persist_local_community_record(mbid, remote_raw, dataset_root=dataset_root)
+                    # Do not overwrite a stronger local mapping while refreshing from community.
+                    if remote_candidate and (not local_candidate or _candidate_score(remote_candidate) >= _candidate_score(local_candidate)):
+                        persist_local_community_record(mbid, remote_raw, dataset_root=dataset_root)
                 except Exception:
                     logger.debug("community_cache_local_persist_failed recording_mbid=%s", mbid, exc_info=True)
-        else:
-            local_candidate = lookup_recording_local(mbid, dataset_root=dataset_root)
         result = _pick_better_candidate(local_candidate, remote_candidate)
     finally:
         with _CACHE_LOCK:
