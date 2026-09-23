@@ -89,3 +89,23 @@ jobs:
         run: |
           echo "Image: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "Digest: \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify packaged application without external network access
+        env:
+          IMAGE: ${{ steps.image.outputs.tag }}
+        run: |
+          docker pull "$IMAGE"
+          trap 'docker rm -f retreivr-preview-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name retreivr-preview-smoke --network none "$IMAGE"
+          READY=0
+          for ATTEMPT in $(seq 1 60); do
+            if docker exec retreivr-preview-smoke python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()" >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$READY" != 1 ]; then
+            docker logs --tail 100 retreivr-preview-smoke
+            exit 1
+          fi
+          docker exec retreivr-preview-smoke python -c "import json, os, urllib.request; get=lambda path: json.load(urllib.request.urlopen('http://127.0.0.1:8000'+path, timeout=10)); version=get('/api/version'); assert version['app_version']==os.environ['RETREIVR_VERSION'], version; state=get('/api/music/discovery/state'); assert 'musicbrainz_genre' in state['providers']; assert state['playlists']==[] and state['subscriptions']==[]; print('Image startup, version, discovery API and empty-state migrations verified')"
