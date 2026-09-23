@@ -3074,8 +3074,30 @@ def _refresh_music_artist_albums_cache(
     normalized_limit: int,
 ) -> list[dict[str, Any]]:
     albums: list[dict[str, Any]] = []
-    if artist_mbid_value:
-        albums = _search_music_album_candidates_for_artist_mbid(artist_mbid_value, limit=normalized_limit)
+    resolved_artist_mbid = str(artist_mbid_value or "").strip()
+    if not resolved_artist_mbid and query_value:
+        try:
+            artist_results = search_music_metadata(
+                artist=query_value,
+                album="",
+                track="",
+                mode="artist",
+                offset=0,
+                limit=5,
+            )
+            artists = artist_results.get("artists", []) if isinstance(artist_results, dict) else []
+            for artist in artists:
+                if not isinstance(artist, dict):
+                    continue
+                artist_name = str(artist.get("name") or "").strip()
+                candidate_mbid = str(artist.get("artist_mbid") or "").strip()
+                if candidate_mbid and artist_name.lower() == query_value.lower():
+                    resolved_artist_mbid = candidate_mbid
+                    break
+        except Exception:
+            logging.debug("music_artist_album_warm artist identity lookup failed query=%s", query_value, exc_info=True)
+    if resolved_artist_mbid:
+        albums = _search_music_album_candidates_for_artist_mbid(resolved_artist_mbid, limit=normalized_limit)
     elif query_value:
         albums = _search_music_album_candidates(query_value, limit=normalized_limit)
     if albums:

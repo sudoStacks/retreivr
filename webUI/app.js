@@ -43,6 +43,7 @@ const state = {
   musicHomeSnapshot: null,
   musicHomeSnapshotLoading: false,
   musicHomeSnapshotLoaded: false,
+  musicLandingRenderSignature: "",
   homeMusicRenderToken: 0,
   homeMusicResultMap: {},
   homeMusicCurrentView: null,
@@ -14147,11 +14148,18 @@ function createMusicArtistCard(artistItem, thumbnailJobs, renderToken, { dismiss
         { limit: 24, bypassInFlight: false, bypassCache: false }
       );
       renderMusicModeResults(
-        { artists: [], albums, tracks: [], mode_used: "album" },
+        { artists: [], albums, tracks: [], mode_used: "album", browse_artist: nextQuery },
         nextQuery,
         { pushHistory: false }
       );
       setMusicPageNotice(`Loaded ${albums.length} album candidates for ${nextQuery}.`, false);
+      if (albums.length < 12) {
+        scheduleArtistAlbumRefreshAfterWarm(
+          { name: nextQuery, artist_mbid: nextArtistMbid },
+          nextQuery,
+          { limit: 24, minimumCount: 12 }
+        );
+      }
     } catch (err) {
       button.disabled = false;
       button.textContent = previousLabel;
@@ -14919,10 +14927,6 @@ function renderMusicLanding() {
   }
   state.homeMusicCurrentView = snapshotMusicResultsView({ landing_view: true }, "");
   state.homeMusicResultMap = {};
-  const renderToken = ++state.homeMusicRenderToken;
-  const thumbnailJobs = [];
-  container.innerHTML = "";
-  container.classList.add("music-discovery-landing", "music-home-landing");
   const homeSnapshot = state.musicHomeSnapshot || {};
   const summary = state.playerLibrarySummary || { artists: [], albums: [], tracks: [] };
   const libraryAlbums = Array.isArray(homeSnapshot.library_albums) ? homeSnapshot.library_albums : (Array.isArray(summary.albums) ? summary.albums : []);
@@ -14951,6 +14955,30 @@ function renderMusicLanding() {
   const snapshotSpotifyPlaylists = Array.isArray(homeSnapshot.spotify_playlists) ? homeSnapshot.spotify_playlists : state.spotifyPlaylistCards;
   const recentlyAdded = libraryAlbums.slice(0, 6);
   const topGenreSeeds = (favoriteGenres.length ? favoriteGenres : visiblePopularGenres).slice(0, favoriteGenres.length ? 4 : 8);
+  const favoriteArtistsToRender = snapshotFavoriteArtists.length ? snapshotFavoriteArtists : visibleFavoriteArtists;
+  const genresToRender = snapshotGenres.length ? snapshotGenres : (favoriteGenres.length ? favoriteGenres : visiblePopularGenres);
+  const renderSignature = JSON.stringify({
+    snapshot_at: homeSnapshot.snapshot_at || null,
+    cache: homeSnapshot.cache || null,
+    albums: recentlyAdded.map((item) => item?.album_key || item?.album || item?.title || ""),
+    genres: genresToRender.map((item) => typeof item === "object" ? (item?.genre || item?.name || "") : String(item || "")),
+    artists: favoriteArtistsToRender.slice(0, 6).map((item) => item?.artist_mbid || item?.name || ""),
+    recommendations: snapshotGenreRecommendations.slice(0, 8).map((item) => item?.artist_mbid || item?.name || ""),
+    spotify: snapshotSpotifyPlaylists.slice(0, 6).map((item) => item?.playlist_id || item?.playlist_url || ""),
+  });
+  if (
+    state.musicLandingRenderSignature === renderSignature
+    && container.classList.contains("music-home-landing")
+    && container.childElementCount > 0
+  ) {
+    warmMusicBrowseIndex({ kind: "home" });
+    return;
+  }
+  state.musicLandingRenderSignature = renderSignature;
+  const renderToken = ++state.homeMusicRenderToken;
+  const thumbnailJobs = [];
+  container.innerHTML = "";
+  container.classList.add("music-discovery-landing", "music-home-landing");
 
   const intro = document.createElement("section");
   intro.className = "music-home-intro";
@@ -15063,7 +15091,6 @@ function renderMusicLanding() {
     subtitle: "Rotating Spotify playlists from your Retreivr taste profile or a curated fallback set.",
   });
 
-  const favoriteArtistsToRender = snapshotFavoriteArtists.length ? snapshotFavoriteArtists : visibleFavoriteArtists;
   if (favoriteArtistsToRender.length) {
     const favoriteArtistGrid = appendSection(
       "Favorite artists",
@@ -15090,7 +15117,6 @@ function renderMusicLanding() {
     "grid",
     genreActions
   );
-  const genresToRender = snapshotGenres.length ? snapshotGenres : (favoriteGenres.length ? favoriteGenres : visiblePopularGenres);
   if (genresToRender.length) {
     genresToRender.forEach((genre) => {
       genreGrid.appendChild(createMusicGenreCard(genre, thumbnailJobs, renderToken, { dismissible: !favoriteGenres.length, skipArtworkHydration: true }));
@@ -16271,6 +16297,42 @@ async function fetchMusicAlbumsByArtist(artist, { limit = 32, bypassInFlight = f
       delete state.musicArtistAlbumsInFlight[cacheKey];
     }
   }
+}
+
+function scheduleArtistAlbumRefreshAfterWarm(artist, query, { limit = 24, minimumCount = 12 } = {}) {
+  const attempts = [900, 2200, 4500, 8000];
+  const artistName = typeof artist === "object" && artist !== null
+    ? String(artist.name || "").trim()
+    : String(artist || "").trim();
+  const expectedQuery = String(query || artistName || "").trim();
+  if (!artistName && !expectedQuery) return;
+  attempts.forEach((delayMs) => {
+    window.setTimeout(async () => {
+      const currentQuery = String(state.homeMusicCurrentView?.query || "").trim();
+      const currentArtist = String(state.homeMusicCurrentView?.response?.browse_artist || "").trim();
+      if (currentQuery !== expectedQuery && currentArtist !== expectedQuery) return;
+      try {
+        const albums = await fetchMusicAlbumsByArtist(artist, {
+          limit,
+          bypassInFlight: true,
+          bypassCache: true,
+        });
+        if (!Array.isArray(albums) || !albums.length) return;
+        const currentAlbums = Array.isArray(state.homeMusicCurrentView?.response?.albums)
+          ? state.homeMusicCurrentView.response.albums
+          : [];
+        if (albums.length <= currentAlbums.length && currentAlbums.length >= minimumCount) return;
+        renderMusicModeResults(
+          { artists: [], albums, tracks: [], mode_used: "album", browse_artist: expectedQuery },
+          expectedQuery,
+          { pushHistory: false }
+        );
+        setMusicPageNotice(`Loaded ${albums.length} album candidates for ${expectedQuery}.`, false);
+      } catch (_err) {
+        // Background refresh is best effort; the initial fast view remains usable.
+      }
+    }, delayMs);
+  });
 }
 
 async function fetchMusicTracksByAlbum({ artist = "", album = "", releaseGroupMbid = "", limit = 1000 } = {}) {
