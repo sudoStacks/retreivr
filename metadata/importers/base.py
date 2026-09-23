@@ -17,6 +17,10 @@ class TrackIntent:
     release_date: str | None = None
     genre: str | None = None
     duration_ms: int | None = None
+    persistent_id: str | None = None
+    apple_music_id: str | None = None
+    recording_mbid: str | None = None
+    isrc: str | None = None
 
 
 class BaseImporter(ABC):

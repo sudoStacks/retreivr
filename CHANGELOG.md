@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented here.
 
+## Unreleased — Music discovery and playlist synchronization
+
+- Add reviewable playlist identities, Apple XML membership/order, Jellyfin API playlist synchronization, persistent artist subscriptions and bounded MusicBrainz genre/discography previews.
+- Reuse the existing acquisition queue and canonical release metadata; ambiguous matches require review.
+- Add persistent resolver-only cache jobs with retry/backoff, release-scoped evidence and no acquisition capability.
+- Prefer fresh trusted local cache evidence before external search, retain scoring/transport gates, and prevent weaker community mappings from replacing local evidence.
+- Benchmark: 41/42 tracks (97.62%), +0.12 percentage points versus configured baseline; zero wrong-variant flags (delta 0). Regression gate passed.
+
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 
 ### Added

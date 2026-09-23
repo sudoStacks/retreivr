@@ -9,12 +9,16 @@ class AppleXMLImporter(BaseImporter):
     SOURCE_FORMAT = "apple_xml"
 
     def parse(self, file_bytes: bytes) -> list[TrackIntent]:
+        playlists = self.parse_playlists(file_bytes)
+        return [track for playlist in playlists for track in playlist["tracks"]]
+
+    def parse_playlists(self, file_bytes: bytes) -> list[dict]:
         root = ET.fromstring(file_bytes)
         plist_value = _parse_plist_node(root)
         tracks_container = _extract_tracks_container(plist_value)
 
-        intents: list[TrackIntent] = []
-        for _, track_data in tracks_container.items():
+        tracks = {}
+        for track_id, track_data in tracks_container.items():
             if not isinstance(track_data, dict):
                 continue
             artist = _clean(track_data.get("Artist"))
@@ -23,12 +27,11 @@ class AppleXMLImporter(BaseImporter):
             album_artist = _clean(track_data.get("Album Artist"))
             track_number = _safe_int(track_data.get("Track Number"))
             disc_number = _safe_int(track_data.get("Disc Number"))
-            release_date = _clean(track_data.get("Year")) or _clean(track_data.get("Date Added"))
+            release_date = _clean(track_data.get("Year"))
             genre = _clean(track_data.get("Genre"))
             total_time = _safe_int(track_data.get("Total Time"))
             raw_line = " | ".join(part for part in (artist, title, album) if part) or ""
-            intents.append(
-                TrackIntent(
+            tracks[str(track_id)] = TrackIntent(
                     artist=artist,
                     title=title,
                     album=album,
@@ -40,9 +43,22 @@ class AppleXMLImporter(BaseImporter):
                     release_date=release_date,
                     genre=genre,
                     duration_ms=total_time,
+                    persistent_id=_clean(track_data.get("Persistent ID")),
+                    apple_music_id=_clean(track_data.get("Apple Music Track ID") or track_data.get("Store ID")),
+                    recording_mbid=_clean(track_data.get("MusicBrainz Recording Id")),
+                    isrc=_clean(track_data.get("ISRC")),
                 )
-            )
-        return intents
+        playlists = []
+        for playlist in plist_value.get("Playlists", []) if isinstance(plist_value, dict) else []:
+            if not isinstance(playlist, dict) or playlist.get("Master") or playlist.get("Folder"):
+                continue
+            members = [tracks.get(str(item.get("Track ID"))) or TrackIntent(
+                artist=None, title=None, album=None, raw_line=str(item.get("Track ID") or ""),
+                source_format=self.SOURCE_FORMAT)
+                for item in playlist.get("Playlist Items", []) if isinstance(item, dict)]
+            playlists.append({"name": _clean(playlist.get("Name")) or "Imported playlist",
+                              "source_id": _clean(playlist.get("Playlist Persistent ID")), "tracks": members})
+        return playlists or [{"name": "Imported playlist", "source_id": None, "tracks": list(tracks.values())}]
 
 
 def _extract_tracks_container(parsed: object) -> dict:

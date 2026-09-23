@@ -249,3 +249,35 @@ def test_genre_artists_returns_browse_index_without_musicbrainz(api_module, monk
     assert resp.status_code == 200
     assert resp.json()["cached"] is True
     assert resp.json()["artists"] == [{"name": "Cached Rock", "artist_mbid": "artist-1"}]
+
+
+def test_artist_album_warmer_resolves_artist_identity_before_album_text_search(api_module, monkeypatch) -> None:
+    calls = {"loose": 0, "strict": None}
+
+    monkeypatch.setattr(
+        api_module,
+        "search_music_metadata",
+        lambda **_kwargs: {"artists": [{"name": "Dolly Parton", "artist_mbid": "dolly-mbid"}]},
+    )
+
+    def _strict(artist_mbid: str, *, limit: int):
+        calls["strict"] = artist_mbid
+        return [{"release_group_id": "rg-discography", "title": "Real Album"}]
+
+    def _loose(*_args, **_kwargs):  # pragma: no cover - should not run for exact artist identity
+        calls["loose"] += 1
+        return [{"release_group_id": "rg-name-match", "title": "Dolly Parton"}]
+
+    monkeypatch.setattr(api_module, "_search_music_album_candidates_for_artist_mbid", _strict)
+    monkeypatch.setattr(api_module, "_search_music_album_candidates", _loose)
+
+    albums = api_module._refresh_music_artist_albums_cache(
+        cache_key="dolly parton:24",
+        query_value="Dolly Parton",
+        artist_mbid_value="",
+        normalized_limit=24,
+    )
+
+    assert calls["strict"] == "dolly-mbid"
+    assert calls["loose"] == 0
+    assert albums == [{"release_group_id": "rg-discography", "title": "Real Album"}]

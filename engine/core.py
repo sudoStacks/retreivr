@@ -532,6 +532,15 @@ def validate_config(config):
         return ["config must be a JSON object"]
     config = apply_config_defaults(config)
 
+    discovery = config.get("music_discovery", {})
+    if not isinstance(discovery, dict):
+        errors.append("music_discovery must be an object")
+    else:
+        for key, low, high in (("interval_seconds", 2, 3600), ("max_attempts", 1, 5)):
+            value = discovery.get(key, low)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+                errors.append(f"music_discovery.{key} must be between {low} and {high}")
+
     accounts = config.get("accounts")
     if accounts is not None and not isinstance(accounts, dict):
         errors.append("accounts must be an object")

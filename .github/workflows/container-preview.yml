@@ -1,0 +1,111 @@
+name: Container preview
+
+on:
+  pull_request:
+    paths:
+      - 'api/**'
+      - 'engine/**'
+      - 'metadata/**'
+      - 'webUI/**'
+      - 'config/**'
+      - 'docker/**'
+      - 'requirements.txt'
+      - 'tests/**'
+      - '.github/workflows/container-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-build:
+    # Publishing is limited to branches in this repository; fork PRs have no package write access.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt pytest pytest-asyncio httpx
+      - name: Validate source
+        run: |
+          python -m pytest -q
+          node --check webUI/app.js
+          node --check webUI/discovery.js
+          python -m compileall -q api engine metadata scripts/music_cache_builder.py
+          git diff --check
+          python -m benchmarks.music_search_benchmark_runner --dataset benchmarks/music_search_album_dataset.json --output-json /tmp/benchmark.json --gate-config benchmarks/music_search_benchmark_gate.json --enforce-gate
+      - name: Name immutable preview image
+        id: image
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          SHA="$(git rev-parse HEAD)"
+          REPO="${REPOSITORY,,}"
+          echo "tag=ghcr.io/${REPO}:preview-${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          echo "revision=${SHA}" >> "$GITHUB_OUTPUT"
+      - name: Prepare clean build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/retreivr-context"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/retreivr-context"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish Linux production preview
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ runner.temp }}/retreivr-context
+          file: ${{ runner.temp }}/retreivr-context/docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.tag }}
+          build-args: RETREIVR_VERSION=1.1.9-discovery-${{ steps.image.outputs.revision }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.image.outputs.revision }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Record deployment artifact
+        env:
+          IMAGE: ${{ steps.image.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "Image: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Digest: \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify packaged application without external network access
+        env:
+          IMAGE: ${{ steps.image.outputs.tag }}
+        run: |
+          docker pull "$IMAGE"
+          trap 'docker rm -f retreivr-preview-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name retreivr-preview-smoke --network none "$IMAGE"
+          READY=0
+          for ATTEMPT in $(seq 1 60); do
+            if docker exec retreivr-preview-smoke python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()" >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$READY" != 1 ]; then
+            docker logs --tail 100 retreivr-preview-smoke
+            exit 1
+          fi
+          docker exec retreivr-preview-smoke python -c "import json, os, urllib.request; get=lambda path: json.load(urllib.request.urlopen('http://127.0.0.1:8000'+path, timeout=10)); version=get('/api/version'); assert version['app_version']==os.environ['RETREIVR_VERSION'], version; state=get('/api/music/discovery/state'); assert 'musicbrainz_genre' in state['providers']; assert state['playlists']==[] and state['subscriptions']==[]; print('Image startup, version, discovery API and empty-state migrations verified')"

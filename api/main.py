@@ -3074,8 +3074,30 @@ def _refresh_music_artist_albums_cache(
     normalized_limit: int,
 ) -> list[dict[str, Any]]:
     albums: list[dict[str, Any]] = []
-    if artist_mbid_value:
-        albums = _search_music_album_candidates_for_artist_mbid(artist_mbid_value, limit=normalized_limit)
+    resolved_artist_mbid = str(artist_mbid_value or "").strip()
+    if not resolved_artist_mbid and query_value:
+        try:
+            artist_results = search_music_metadata(
+                artist=query_value,
+                album="",
+                track="",
+                mode="artist",
+                offset=0,
+                limit=5,
+            )
+            artists = artist_results.get("artists", []) if isinstance(artist_results, dict) else []
+            for artist in artists:
+                if not isinstance(artist, dict):
+                    continue
+                artist_name = str(artist.get("name") or "").strip()
+                candidate_mbid = str(artist.get("artist_mbid") or "").strip()
+                if candidate_mbid and artist_name.lower() == query_value.lower():
+                    resolved_artist_mbid = candidate_mbid
+                    break
+        except Exception:
+            logging.debug("music_artist_album_warm artist identity lookup failed query=%s", query_value, exc_info=True)
+    if resolved_artist_mbid:
+        albums = _search_music_album_candidates_for_artist_mbid(resolved_artist_mbid, limit=normalized_limit)
     elif query_value:
         albums = _search_music_album_candidates(query_value, limit=normalized_limit)
     if albums:
@@ -4611,6 +4633,24 @@ async def startup():
     )
     app.state.worker_thread.start()
 
+    from engine.discovery import DiscoveryService
+    from engine.discovery_store import DiscoveryStore
+    from engine.discovery_worker import DiscoveryWorker
+    discovery_cfg = startup_cfg.get("music_discovery") or {}
+    discovery_store = DiscoveryStore(app.state.paths.db_path)
+    # Recover interrupted membership updates by reading Jellyfin before any write.
+    discovery_store.execute("UPDATE jellyfin_playlist_links SET state='uncertain' WHERE state IN ('syncing','creating')")
+    discovery_service = DiscoveryService(discovery_store, get_musicbrainz_service(),
+        config=startup_cfg)  # No acquisition capability in the background discovery worker.
+    # Separate resolver avoids sharing mutable per-search diagnostics with acquisition.
+    discovery_resolver = SearchResolutionService(search_db_path=app.state.search_db_path,
+        queue_db_path=app.state.paths.db_path, config=startup_cfg, paths=app.state.paths, resolution_only=True)
+    app.state.discovery_worker = DiscoveryWorker(discovery_service, discovery_resolver,
+        interval=discovery_cfg.get("interval_seconds", 10), max_attempts=discovery_cfg.get("max_attempts", 3))
+    app.state.discovery_thread = threading.Thread(target=app.state.discovery_worker.run,
+        name="music-discovery", daemon=True)
+    app.state.discovery_thread.start()
+
     if community_publish_worker_enabled(startup_cfg if isinstance(startup_cfg, dict) else {}):
         app.state.scheduler.add_job(
             _community_publish_schedule_tick,
@@ -4698,6 +4738,13 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     _log_transition("APP_SHUTDOWN", phase="begin")
+    discovery_worker = getattr(app.state, "discovery_worker", None)
+    if discovery_worker:
+        discovery_worker.stop.set()
+    discovery_thread = getattr(app.state, "discovery_thread", None)
+    if discovery_thread:
+        discovery_thread.join(timeout=5)
+
     if app.state.running:
         app.state.stop_event.set()
         task = app.state.run_task
@@ -15171,6 +15218,9 @@ def api_browse(
         "entries": entries,
     }
 
+
+from api.music_discovery import create_router as create_music_discovery_router
+app.include_router(create_music_discovery_router(app, get_loaded_config))
 
 if os.path.isdir(WEBUI_DIR):
     app.mount("/", StaticFiles(directory=WEBUI_DIR, html=True), name="webui")

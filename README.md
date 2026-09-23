@@ -321,3 +321,7 @@ Use this section as a build list for the final polished README assets.
 ## License
 Retreivr is licensed under the GNU Affero General Public License v3.0 (AGPLv3).
 See the [LICENSE](LICENSE) file for full details.
+
+### Music discovery and Jellyfin playlists
+
+Music → **Discover & Sync** adds staged playlist review, persistent Jellyfin playlists, artist subscriptions, genre discovery, and a resolver-only community cache builder. It reuses the normal acquisition queue. See the [workflow, configuration, upgrade and validation guide](docs/music-discovery.md).

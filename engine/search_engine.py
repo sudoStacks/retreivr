@@ -1,3 +1,4 @@
+from pathlib import Path
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 MAX_PARALLEL_ADAPTERS = 4
 
@@ -1216,7 +1217,7 @@ class SearchJobStore:
 
 
 class SearchResolutionService:
-    def __init__(self, *, search_db_path, queue_db_path, adapters=None, config=None, paths=None, canonical_resolver=None):
+    def __init__(self, *, search_db_path, queue_db_path, adapters=None, config=None, paths=None, canonical_resolver=None, resolution_only=False):
         self.search_db_path = search_db_path
         self.queue_db_path = queue_db_path
         self.config = config or {}
@@ -1229,8 +1230,10 @@ class SearchResolutionService:
         self.paths = paths
         self.store = SearchJobStore(search_db_path)
         self.store.ensure_schema()
-        self.queue_store = DownloadJobStore(queue_db_path)
-        self._ensure_queue_schema()
+        self.resolution_only = bool(resolution_only)
+        self.queue_store = None if self.resolution_only else DownloadJobStore(queue_db_path)
+        if not self.resolution_only:
+            self._ensure_queue_schema()
         self.canonical_resolver = canonical_resolver or CanonicalMetadataResolver(config=self.config)
         self._album_coherence_families = {}
         self._album_mb_injection_success = {}
@@ -1578,6 +1581,7 @@ class SearchResolutionService:
         track=None,
         album=None,
         expected_duration_ms=None,
+        release_mbid=None,
     ):
         if not bool(self.community_cache_lookup_enabled):
             return [], {}
@@ -1586,11 +1590,19 @@ class SearchResolutionService:
             return [], {"community_seeded_failed_no_recording_mbid": 1}
 
         try:
-            record = community_cache.cached_lookup(
-                normalized_mbid,
-                dataset_root=self._community_dataset_root(),
-                allow_remote=True,
-            )
+            record = None
+            evidence_path = getattr(self, "queue_db_path", None)
+            if evidence_path and Path(evidence_path).is_file():
+                from engine.discovery_store import DiscoveryStore
+                from engine.resolution_evidence import EvidenceCache
+                record = EvidenceCache(DiscoveryStore(evidence_path)).lookup({
+                    "recording_mbid": normalized_mbid, "release_mbid": release_mbid})
+            if record is None:
+                record = community_cache.cached_lookup(
+                    normalized_mbid,
+                    dataset_root=self._community_dataset_root(),
+                    allow_remote=True,
+                )
         except Exception as exc:
             _log_event(
                 logging.WARNING,
@@ -1603,6 +1615,9 @@ class SearchResolutionService:
         if not isinstance(record, dict):
             _log_event(logging.INFO, "community_cache_miss", recording_mbid=normalized_mbid)
             return [], {"community_seeded_failed_unavailable": 1}
+        scoped_release = record.get("release_mbid") or (record.get("identity") or {}).get("release_mbid")
+        if scoped_release and scoped_release != release_mbid:
+            return [], {"community_seeded_failed_release_scope": 1}
         _log_event(logging.INFO, "community_cache_hit", recording_mbid=normalized_mbid)
 
         video_id = extract_video_id(record.get("video_id")) or str(record.get("video_id") or "").strip()
@@ -3008,6 +3023,7 @@ class SearchResolutionService:
         track_disambiguation=None,
         mb_youtube_urls=None,
         recording_mbid=None,
+        release_mbid=None,
         is_ep_release=False,
         prefer_music_video=False,
         excluded_candidate_ids=None,
@@ -3087,6 +3103,7 @@ class SearchResolutionService:
             track=track,
             album=album,
             expected_duration_ms=duration_ms,
+            release_mbid=release_mbid,
         )
         community_seeded_rejections = dict(community_seeded_probe_rejections or {})
         community_seeded_selected = False
@@ -3124,17 +3141,29 @@ class SearchResolutionService:
                 "track_disambiguation": normalized_disambiguation,
                 "prefer_music_video": bool(prefer_music_video),
             }
-            candidates = self.retrieve_candidates(
-                {
-                    "query": query,
-                    "limit": limit,
-                    "query_label": query_label,
-                    "rung": rung,
-                    "first_rung": first_rung,
-                    "mb_injected_candidates": mb_injected_candidates,
-                    "community_seeded_candidates": community_seeded_candidates,
-                }
-            )
+            trusted_seeds = [candidate for candidate in (community_seeded_candidates or [])
+                             if float(candidate.get("community_confidence") or 0) >= .94
+                             and str(candidate.get("candidate_id") or "") not in excluded_ids]
+            seed_result = None
+            if rung == first_rung and trusted_seeds:
+                seed_result = self.rank_and_gate({
+                    "expected_base": expected_base, "coherence_key": coherence_key,
+                    "query_label": query_label, "rung": rung, "recording_mbid": recording_mbid,
+                }, trusted_seeds)
+            if seed_result is not None and seed_result.selected is not None:
+                candidates = trusted_seeds
+            else:
+                candidates = self.retrieve_candidates(
+                    {
+                        "query": query,
+                        "limit": limit,
+                        "query_label": query_label,
+                        "rung": rung,
+                        "first_rung": first_rung,
+                        "mb_injected_candidates": mb_injected_candidates,
+                        "community_seeded_candidates": community_seeded_candidates,
+                    }
+                )
             if excluded_ids:
                 filtered = []
                 excluded_this_rung = 0
@@ -4066,6 +4095,8 @@ class SearchResolutionService:
         return request_id
 
     def enqueue_item_candidate(self, item_id, candidate_id, *, final_format_override=None):
+        if self.resolution_only:
+            raise ValueError("Acquisition is disabled in resolver-only mode")
         item = self.store.get_item(item_id)
         if not item:
             return None

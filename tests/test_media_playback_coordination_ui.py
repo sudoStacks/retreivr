@@ -55,6 +55,12 @@ def test_view_albums_cannot_reuse_partial_warmup_cache() -> None:
     fetcher = APP_SOURCE[APP_SOURCE.index("async function fetchMusicAlbumsByArtist"):]
     fetcher = fetcher[:fetcher.index("async function fetchMusicTracksByAlbum")]
 
-    assert "{ limit: 48, bypassInFlight: true, bypassCache: true }" in artist_card
+    assert "{ limit: 24, bypassInFlight: false, bypassCache: false }" in artist_card
+    assert "scheduleArtistAlbumRefreshAfterWarm(" in artist_card
+    refresher = APP_SOURCE[APP_SOURCE.index("function scheduleArtistAlbumRefreshAfterWarm"):]
+    refresher = refresher[:refresher.index("async function fetchMusicTracksByAlbum")]
+    assert "bypassInFlight: true" in refresher
+    assert "bypassCache: true" in refresher
+    assert "currentQuery !== expectedQuery && currentArtist !== expectedQuery" in refresher
     assert "getMusicArtistAlbumsCacheKey(artist, cappedLimit)" in fetcher
     assert "if (!bypassCache && cacheKey" in fetcher
