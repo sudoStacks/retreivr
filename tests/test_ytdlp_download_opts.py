@@ -44,6 +44,8 @@ if "metadata.queue" not in sys.modules:
 if "musicbrainzngs" not in sys.modules:
     sys.modules["musicbrainzngs"] = types.ModuleType("musicbrainzngs")
 
+from yt_dlp.postprocessor import MetadataParserPP
+
 from engine.job_queue import build_ytdlp_opts, _enforce_video_codec_container_rules
 
 
@@ -82,6 +84,78 @@ class YtdlpDownloadOptsTests(unittest.TestCase):
         for key in ("download", "skip_download", "extract_flat"):
             self.assertNotIn(key, opts)
         self.assertEqual(opts.get("socket_timeout"), 10)
+
+    def test_replace_in_metadata_builds_metadata_parser_postprocessor(self):
+        # `replace_in_metadata` has no meaning to yt_dlp.YoutubeDL() on its own --
+        # it only does anything once translated into a MetadataParser postprocessor.
+        # A bare passthrough (`opts["replace_in_metadata"] = value`) would make this
+        # test pass trivially without the feature actually working; assert on the
+        # postprocessor shape instead, and that the inert key isn't left behind.
+        context = {
+            "operation": "download",
+            "audio_mode": False,
+            "final_format": None,
+            "audio_only": False,
+            "config": {},
+            "overrides": {
+                "replace_in_metadata": [["title", r"^\d+ views\s*", ""]],
+            },
+        }
+        opts = build_ytdlp_opts(context)
+        self.assertNotIn("replace_in_metadata", opts)
+        postprocessors = [pp for pp in opts.get("postprocessors") or [] if pp.get("key") == "MetadataParser"]
+        self.assertEqual(len(postprocessors), 1)
+        self.assertEqual(postprocessors[0]["when"], "pre_process")
+        self.assertEqual(
+            postprocessors[0]["actions"],
+            [(MetadataParserPP.Actions.REPLACE, "title", r"^\d+ views\s*", "")],
+        )
+
+    def test_replace_in_metadata_strips_facebook_view_count_prefix_end_to_end(self):
+        # Reproduces the actual Facebook title format (e.g. "4.8M views · 2.2K
+        # reactions Very accurate ... It's FOSS") and proves the configured regex
+        # really does strip it, by running the built postprocessor the way yt-dlp
+        # itself would -- not just checking that config plumbing holds a value.
+        rule = ["title", r"^\d+(?:\.\d+)?[KMB]? views · \d+(?:\.\d+)?[KMB]? reactions\s*", ""]
+        context = {
+            "operation": "download",
+            "audio_mode": False,
+            "final_format": None,
+            "audio_only": False,
+            "config": {},
+            "overrides": {"replace_in_metadata": [rule]},
+        }
+        opts = build_ytdlp_opts(context)
+        actions = next(pp["actions"] for pp in opts["postprocessors"] if pp["key"] == "MetadataParser")
+
+        info = {"title": "4.8M views · 2.2K reactions Very accurate ☠️\U0001f602 It's FOSS"}
+        MetadataParserPP(None, actions).run(info)
+
+        self.assertEqual(info["title"], "Very accurate ☠️\U0001f602 It's FOSS")
+
+    def test_replace_in_metadata_drops_malformed_rules(self):
+        context = {
+            "operation": "download",
+            "audio_mode": False,
+            "final_format": None,
+            "audio_only": False,
+            "config": {},
+            "overrides": {
+                "replace_in_metadata": [
+                    ["title", "only-two-elements"],
+                    ["title", "(unbalanced", "x"],
+                    ["title", r"\s+$", ""],
+                ],
+            },
+        }
+        with self.assertLogs(level="WARNING"):
+            opts = build_ytdlp_opts(context)
+        postprocessors = [pp for pp in opts.get("postprocessors") or [] if pp.get("key") == "MetadataParser"]
+        self.assertEqual(len(postprocessors), 1)
+        self.assertEqual(
+            postprocessors[0]["actions"],
+            [(MetadataParserPP.Actions.REPLACE, "title", r"\s+$", "")],
+        )
 
     def test_video_mp4_target_sets_postprocess_conversion(self):
         context = {

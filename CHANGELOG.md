@@ -10,6 +10,9 @@ All notable changes to this project will be documented here.
 - Prefer fresh trusted local cache evidence before external search, retain scoring/transport gates, and prevent weaker community mappings from replacing local evidence.
 - Benchmark: 41/42 tracks (97.62%), +0.12 percentage points versus configured baseline; zero wrong-variant flags (delta 0). Regression gate passed.
 
+### Fixed
+- `replace_in_metadata` in `yt_dlp_opts` now actually works. It was allowlisted for pass-through, but was set verbatim on the `YoutubeDL()` params as a bare `replace_in_metadata` key, which yt-dlp doesn't recognize outside its own CLI-to-postprocessor translation — so it was silently ignored and metadata (e.g. stripping Facebook's "X views · Y reactions" title prefix) was never rewritten despite being configured. It's now translated into a `MetadataParser` postprocessor, matching what yt-dlp's `--replace-in-metadata` flag does internally.
+
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 
 ### Added

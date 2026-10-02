@@ -24,6 +24,7 @@ from uuid import uuid4
 
 import requests
 from yt_dlp import YoutubeDL
+from yt_dlp.postprocessor import MetadataParserPP
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dumps
@@ -170,6 +171,7 @@ _YTDLP_DOWNLOAD_ALLOWLIST = {
     "noproxy",
     "proxy",
     "ratelimit",
+    "replace_in_metadata",
     "retries",
     "sleep_interval",
     "socket_timeout",
@@ -6626,8 +6628,55 @@ def _merge_overrides(opts, overrides, *, operation, lock_format=False):
             continue
         if lock_format and key in {"format", "merge_output_format", "recodevideo"}:
             continue
+        if key == "replace_in_metadata":
+            _apply_replace_in_metadata(opts, value)
+            continue
         opts[key] = value
     return opts
+
+
+def _apply_replace_in_metadata(opts, rules):
+    """Wire a `replace_in_metadata` config override into yt-dlp's actual
+    metadata-rewriting mechanism.
+
+    `replace_in_metadata` has no meaning to `yt_dlp.YoutubeDL()` by itself --
+    it's a CLI-only convenience. `yt_dlp/__init__.py` translates
+    `--replace-in-metadata FIELDS REGEX REPLACE` into a `MetadataParser`
+    postprocessor entry before a params dict is ever built; the library has
+    no code path that reads a bare `replace_in_metadata` key. Setting it
+    directly on `opts` (a plain passthrough) is a silent no-op -- the title
+    (or whichever field) is never actually rewritten.
+
+    `rules` is `[[fields, regex, replacement], ...]`, where `fields` may be a
+    comma-separated list of metadata field names (matching yt-dlp's own
+    `--replace-in-metadata` argument shape).
+    """
+    if not isinstance(rules, list):
+        return
+    actions = []
+    for rule in rules:
+        if not (isinstance(rule, (list, tuple)) and len(rule) == 3):
+            logging.warning("Dropping malformed replace_in_metadata rule: %r", rule)
+            continue
+        fields, regex, replacement = rule
+        for field in str(fields).split(","):
+            field = field.strip()
+            if not field:
+                continue
+            action = (MetadataParserPP.Actions.REPLACE, field, regex, replacement)
+            try:
+                MetadataParserPP.validate_action(*action)
+            except Exception:
+                logging.warning("Dropping invalid replace_in_metadata rule: %r", rule)
+                continue
+            actions.append(action)
+    if not actions:
+        return
+    opts.setdefault("postprocessors", []).append({
+        "key": "MetadataParser",
+        "actions": actions,
+        "when": "pre_process",
+    })
 
 
 
