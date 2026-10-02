@@ -10,6 +10,9 @@ All notable changes to this project will be documented here.
 - Prefer fresh trusted local cache evidence before external search, retain scoring/transport gates, and prevent weaker community mappings from replacing local evidence.
 - Benchmark: 41/42 tracks (97.62%), +0.12 percentage points versus configured baseline; zero wrong-variant flags (delta 0). Regression gate passed.
 
+### Fixed
+- Clicking "download" on a direct-URL/transient search result (e.g. a pasted social-media share link) no longer shows a spurious `Failed to refresh results: 404 {"detail":"Search request not found"}` toast after the download already queued successfully. The download button's click handler unconditionally refreshed `/api/search/requests/{id}` afterward; for a transient result there's no real search request, so `state.homeSearchRequestId` is empty and the request hit `/api/search/requests/null`. The sibling "preview modal" download handler already guarded this; the main result-card handler now does too.
+
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 
 ### Added
