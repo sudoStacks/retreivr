@@ -6336,6 +6336,8 @@ def resolve_source(url):
         return "youtube_music"
     if "youtube.com" in host or "youtu.be" in host:
         return "youtube"
+    if "facebook.com" in host or "fb.watch" in host:
+        return "facebook"
     return "unknown"
 
 

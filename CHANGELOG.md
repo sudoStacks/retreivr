@@ -10,6 +10,9 @@ All notable changes to this project will be documented here.
 - Prefer fresh trusted local cache evidence before external search, retain scoring/transport gates, and prevent weaker community mappings from replacing local evidence.
 - Benchmark: 41/42 tracks (97.62%), +0.12 percentage points versus configured baseline; zero wrong-variant flags (delta 0). Regression gate passed.
 
+### Fixed
+- `resolve_source()` now recognizes `facebook.com` and `fb.watch` URLs (including the `/share/r/...` reel-share link shape). Previously any non-YouTube URL fell through to `"unknown"`, which the web UI rendered as "Open in Unknown" / "Source: Unknown" for every Facebook result.
+
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 
 ### Added
