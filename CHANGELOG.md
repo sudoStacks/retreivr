@@ -10,6 +10,9 @@ All notable changes to this project will be documented here.
 - Prefer fresh trusted local cache evidence before external search, retain scoring/transport gates, and prevent weaker community mappings from replacing local evidence.
 - Benchmark: 41/42 tracks (97.62%), +0.12 percentage points versus configured baseline; zero wrong-variant flags (delta 0). Regression gate passed.
 
+### Fixed
+- File downloads (`/api/files/{id}/download`, `/api/deliveries/{id}/download`) and Spotify playlist exports (`/api/music/spotify/playlist/export`) no longer 500 when the filename contains characters outside Latin-1 (emoji, e.g. a Facebook video title or a Spotify playlist name). The `Content-Disposition` header is now built with an RFC 6266 `filename*=UTF-8''...` parameter plus an ASCII `filename=` fallback instead of embedding the raw name directly, which crashed with `UnicodeEncodeError` once the response was sent — after the file had already downloaded successfully.
+
 ## v1.1.9 — Music Artwork Cache and Browse Stability
 
 ### Added

@@ -4911,6 +4911,21 @@ def _safe_filename(name):
     return cleaned or "download"
 
 
+def _content_disposition(filename: str, disposition: str = "attachment") -> str:
+    """Build a Content-Disposition header value that can't crash the response.
+
+    ASGI/Starlette encodes header values as latin-1; a filename with
+    characters outside that range (emoji in a Facebook video title, a
+    Spotify playlist name, etc.) raises UnicodeEncodeError when the response
+    is sent -- turning what should be a successful download into a 500 after
+    the file was already fully resolved. RFC 6266's filename* parameter
+    carries the full UTF-8 name percent-encoded (itself plain ASCII), with an
+    ASCII-only filename= fallback for clients that don't support it.
+    """
+    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii").strip() or "download"
+    return f"{disposition}; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
 def _resolve_direct_url_mode(
     *,
     media_type: str | None,
@@ -9415,14 +9430,14 @@ def export_spotify_playlist_url(playlist_url: str = Query(...), format: str = Qu
         return StreamingResponse(
             iter([spotify_tracks_to_m3u(resolved.tracks).encode("utf-8")]),
             media_type="audio/x-mpegurl",
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}.m3u"'},
+            headers={"Content-Disposition": _content_disposition(f"{safe_name}.m3u")},
         )
     if requested_format != "csv":
         raise HTTPException(status_code=400, detail="format must be csv or m3u")
     return StreamingResponse(
         iter([csv_payload]),
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}.csv"'},
+        headers={"Content-Disposition": _content_disposition(f"{safe_name}.csv")},
     )
 
 
@@ -15062,7 +15077,7 @@ def api_file_download(file_id: str):
 
     filename = _safe_filename(os.path.basename(candidate))
     content_type, _ = mimetypes.guess_type(candidate)
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    headers = {"Content-Disposition": _content_disposition(filename)}
     return StreamingResponse(_iter_file(candidate), media_type=content_type or "application/octet-stream", headers=headers)
 
 
@@ -15099,7 +15114,7 @@ def api_delivery_download(delivery_id: str):
 
     filename = _safe_filename(entry.get("filename") or os.path.basename(candidate))
     content_type, _ = mimetypes.guess_type(candidate)
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    headers = {"Content-Disposition": _content_disposition(filename)}
     logging.info("HTTP client download started delivery_id=%s", delivery_id)
 
     def stream():
