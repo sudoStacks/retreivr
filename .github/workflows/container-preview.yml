@@ -51,7 +51,7 @@ jobs:
           python -m pytest -q
           node --check webUI/app.js
           node --check webUI/discovery.js
-          node --test webUI/tests
+          node --test "webUI/tests/**/*.test.js"
           python -m compileall -q api engine metadata scripts/music_cache_builder.py
           git diff --check
           python -m benchmarks.music_search_benchmark_runner --dataset benchmarks/music_search_album_dataset.json --output-json /tmp/benchmark.json --gate-config benchmarks/music_search_benchmark_gate.json --enforce-gate
