@@ -129,7 +129,6 @@ def _run_adapter_search(
 import json
 import hashlib
 import logging
-import os
 import re
 import sqlite3
 import threading
@@ -138,6 +137,7 @@ import urllib.parse
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import uuid4
 from yt_dlp import YoutubeDL
 

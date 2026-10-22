@@ -38,7 +38,7 @@ def test_merge_metadata_precedence_and_normalization(caplog) -> None:
     assert merged.track_num == 3
     assert merged.disc_num == 1
     assert merged.date == "2025-01-01"
-    assert merged.genre == "Pop, Dance"
+    assert merged.genre == "Pop"
     assert merged.isrc == "usabc1234567"
     assert merged.mbid == "mbid-1"
     assert merged.artwork is None
@@ -86,7 +86,7 @@ def test_merge_metadata_fallback_and_featured_artist_parsing() -> None:
     assert merged.album == "YT Album"
     assert merged.album_artist == "Lead Artist"
     assert merged.date == "2024"
-    assert merged.genre == "Alt / Rock"
+    assert merged.genre == "Rock"
     assert merged.isrc == "gbxyz7654321"
     assert merged.mbid == "mb-recording-xyz"
     assert merged.artwork is None

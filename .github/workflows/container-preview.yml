@@ -10,6 +10,7 @@ on:
       - 'config/**'
       - 'docker/**'
       - 'requirements.txt'
+      - 'pyproject.toml'
       - 'tests/**'
       - '.github/workflows/container-preview.yml'
   workflow_dispatch:
@@ -41,11 +42,16 @@ jobs:
           node-version: '22'
       - name: Install test dependencies
         run: python -m pip install -r requirements.txt pytest pytest-asyncio httpx
+      - name: Lint
+        run: |
+          python -m pip install ruff==0.17.1
+          ruff check --select F,E9 api engine metadata media benchmarks scripts
       - name: Validate source
         run: |
           python -m pytest -q
           node --check webUI/app.js
           node --check webUI/discovery.js
+          node --test webUI/tests
           python -m compileall -q api engine metadata scripts/music_cache_builder.py
           git diff --check
           python -m benchmarks.music_search_benchmark_runner --dataset benchmarks/music_search_album_dataset.json --output-json /tmp/benchmark.json --gate-config benchmarks/music_search_benchmark_gate.json --enforce-gate

@@ -3213,6 +3213,11 @@ function getSetupKeyDiscoveryScopeFromDraft(draft = state.setupWizard?.draft || 
   ].filter(Boolean);
 }
 
+function canUseSetupKeyDiscovery(draft, service) {
+  if (!draft || !draft.key_discovery_enabled) return false;
+  return getSetupKeyDiscoveryScopeFromDraft(draft).includes(String(service || "").toLowerCase());
+}
+
 function buildSetupExistingConnectPayload(draft = state.setupWizard?.draft || buildSetupWizardDraft(), { previewOnly = false } = {}) {
   return {
     ...(previewOnly ? { preview_only: true } : {}),
@@ -3361,8 +3366,7 @@ function getSetupWizardStepState(step, draft = state.setupWizard?.draft || build
     return { tone: "pending", label: "Choose one", message: "Choose whether Retreivr should manage the bundled services directly on this device." };
   }
   if (step.id === "arr-existing-services") {
-    const discoveryScope = new Set(getSetupKeyDiscoveryScopeFromDraft(draft));
-    const canUseDiscovery = (service) => !!draft.key_discovery_enabled && discoveryScope.has(String(service || "").toLowerCase());
+    const canUseDiscovery = (service) => canUseSetupKeyDiscovery(draft, service);
     const enabled = [
       draft.existing_radarr_enabled,
       draft.existing_sonarr_enabled,
@@ -3468,6 +3472,7 @@ function validateSetupWizardStep(step, draft = state.setupWizard?.draft || build
     return "Choose whether Retreivr should manage the bundled services directly on this device.";
   }
   if (step.id === "arr-existing-services") {
+    const canUseDiscovery = (service) => canUseSetupKeyDiscovery(draft, service);
     const enabled = [
       draft.existing_radarr_enabled,
       draft.existing_sonarr_enabled,
