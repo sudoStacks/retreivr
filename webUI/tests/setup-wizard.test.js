@@ -253,6 +253,22 @@ test("a skipped optional service reads as skipped rather than pending", () => {
   assert.equal(app.validateSetupWizardStep(step, draft), null);
 });
 
+test("the Next handler validates inside the try block", () => {
+  const source = fs.readFileSync(APP_JS, "utf8");
+  const handlerStart = source.indexOf("if (navButton) {");
+  assert.ok(handlerStart > -1, "the wizard navigation handler was not found");
+  const handlerEnd = source.indexOf("const choiceButton", handlerStart);
+  const handler = source.slice(handlerStart, handlerEnd);
+  const tryIndex = handler.indexOf("try {");
+  const validateIndex = handler.indexOf("validateSetupWizardStep(currentStep)");
+  assert.ok(tryIndex > -1, "the wizard navigation handler has no try block");
+  assert.ok(validateIndex > -1, "the wizard navigation handler does not validate the current step");
+  assert.ok(
+    tryIndex < validateIndex,
+    "validation runs outside the try block, so a throw leaves the Next button dead",
+  );
+});
+
 test("the summary lists the mode, the services and the file roots", () => {
   const draft = useDraft(
     draftWith({

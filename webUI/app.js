@@ -22870,17 +22870,17 @@ function bindEvents() {
           advanceSetupWizardStep(-1);
         } else {
           const currentStep = getSetupWizardSteps()[Math.max(0, Number(state.setupWizard?.stepIndex || 0))];
-          const validationError = validateSetupWizardStep(currentStep);
-          if (validationError) {
-            state.setupWizard.feedback = {
-              stepId: currentStep?.id || "",
-              tone: "error",
-              text: validationError,
-            };
-            renderSetupWizard();
-            return;
-          }
           try {
+            const validationError = validateSetupWizardStep(currentStep);
+            if (validationError) {
+              state.setupWizard.feedback = {
+                stepId: currentStep?.id || "",
+                tone: "error",
+                text: validationError,
+              };
+              renderSetupWizard();
+              return;
+            }
             setNotice(messageEl, "Saving your progress...", false);
             await saveSetupWizardProgress();
             state.setupWizard.feedback = null;
