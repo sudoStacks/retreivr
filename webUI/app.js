@@ -17325,6 +17325,17 @@ async function refreshHomeJobStatuses(requestId) {
           job = { status: "completed", last_error: "" };
         } else if (runData.running || runData.state === "running") {
           job = { status: "downloading", last_error: "" };
+        } else if (runData.finished_at && String(runData.run_id || "") === String(candidate.run_id)) {
+          // A finished run goes back to state "idle"; the server never reports "completed".
+          // /api/status ignores the run_id query and returns the latest run, so only trust it
+          // when the run_id matches this candidate's run.
+          const failures = statusPayload.run_failures || [];
+          const successes = statusPayload.run_successes || [];
+          if (failures.length && !successes.length) {
+            job = { status: "failed", last_error: statusPayload.last_error_message || "" };
+          } else {
+            job = { status: "completed", last_error: "" };
+          }
         }
       } catch (_err) {}
     }
