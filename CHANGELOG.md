@@ -14,6 +14,62 @@ All notable changes to this project will be documented here.
 - `docs/external-media-assistants.md` documents the controller contract and
   safety boundary for optional LLM/bot integrations.
 
+### Fixed
+
+- Direct-URL jobs now publish their completed state to the Home card without a
+  page refresh.
+- Download filename limiting is byte-safe, including Unicode titles, and
+  download responses no longer fail when a filename cannot be represented in
+  Latin-1 `Content-Disposition`.
+- Facebook source detection and configured yt-dlp metadata replacements now
+  reach the real download path and metadata probe.
+- Guided Setup validation no longer references a helper outside its scope.
+
+### Release
+
+- Added focused video-preview, direct-URL, filename, source-resolution, and
+  setup-wizard tests; CI also lints common undefined-name and unused-import
+  failures.
+
+## v1.1.11 — YouTube OAuth Reconnect Alerts
+
+### Added
+
+- Playlist automation persists YouTube OAuth reconnect state, exposes it in
+  `/api/status`, and presents a reconnect notification in the web UI.
+- Retreivr sends a Telegram reconnect alert for affected playlist accounts,
+  rate-limited to at most once every seven days.
+
+### Changed
+
+- Watcher OAuth failures evict the affected cached YouTube client so a
+  repaired token is used on the next polling cycle.
+
+### Release
+
+- Updated package metadata, Docker build defaults, runtime provenance tests,
+  and cache-busted web assets for `v1.1.11`.
+
+## v1.1.10 — Independent Media Worker Lanes
+
+### Added
+
+- The download worker schedules separate `music`, `video`, and `other` lanes,
+  with independent bounded concurrency and lane-level runtime metrics.
+- Long-term retry scheduling supports bounded deterministic jitter, preventing
+  a backlog from retrying in one synchronized burst.
+
+### Changed
+
+- Lane selection is determined by media type and intent rather than provider,
+  so a music request sourced from YouTube uses music capacity instead of
+  competing with video work.
+
+### Release
+
+- Updated package metadata, Docker build defaults, and queue-integrity and
+  runtime-provenance coverage for `v1.1.10`.
+
 ## Unreleased — Test baseline and CI guard rails
 
 ### Fixed

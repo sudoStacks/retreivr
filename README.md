@@ -33,6 +33,20 @@ Retreivr is not intended to replace a full media server. It is the resolution an
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
+## 1.1.12 Highlights
+- Queue-free video-search previews provide bounded YouTube candidates for external assistants; a controller must explicitly submit the selected URL through Retreivr's normal direct-video flow
+- Direct-URL downloads now surface completion in Home without requiring a refresh, preserve Unicode-safe filenames and `Content-Disposition` responses, and enforce filesystem byte limits
+- Source detection and yt-dlp metadata replacement are applied consistently on actual downloads, so supported sources and configured title cleanup behave as expected
+- Guided Setup validation and the release CI baseline are covered by focused browser tests and lint guardrails
+
+## 1.1.11 Highlights
+- Playlist automation detects missing or expired YouTube OAuth early, exposes reconnect-required state through the status API and UI, and sends a rate-limited Telegram reconnect alert
+- OAuth-failed watcher clients are evicted from the cache so a repaired token can be used on the next polling cycle
+
+## 1.1.10 Highlights
+- Music and video downloads run in independent worker lanes, so one media class cannot consume the other’s configured capacity
+- Long-term retries use bounded deterministic jitter, avoiding synchronized retry bursts while retaining queue and retry history
+
 ## 1.1.9 Highlights
 - Music Browse now renders from a backend home snapshot instead of launching nested artwork discovery during initial paint
 - Continue Listening, library, favorite artist, genre, and Spotify playlist cards now prefer local/cached artwork with stable fallbacks
