@@ -19,12 +19,8 @@ from engine.job_queue import DownloadJobStore, build_download_job_payload
 from engine.canonical_ids import build_music_track_canonical_id
 from engine.job_queue import (
     JOB_STATUS_CANCELLED,
-    JOB_STATUS_CLAIMED,
     JOB_STATUS_COMPLETED,
-    JOB_STATUS_DOWNLOADING,
     JOB_STATUS_FAILED,
-    JOB_STATUS_POSTPROCESSING,
-    JOB_STATUS_QUEUED,
 )
 from engine.download_defaults import resolve_effective_download_settings
 

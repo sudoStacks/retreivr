@@ -25,7 +25,6 @@ from engine.job_queue import (
     DownloadWorkerEngine,
     DownloadJobStore,
     build_download_job_payload,
-    build_output_template,
     ensure_download_jobs_table,
     ensure_long_term_retry_table,
     preview_direct_url,
@@ -2218,7 +2217,6 @@ def download_with_ytdlp_native(url, temp_dir, *, paths=None, config=None, **kwar
     Returns the downloaded file path string on success, or None on failure.
     Callers must not inject format/extractor overrides — this is the "pure" path.
     """
-    cfg = config if isinstance(config, dict) else {}
     ytdlp_temp = str(getattr(paths, "ytdlp_temp_dir", temp_dir) or temp_dir)
     opts = {
         "outtmpl": f"{temp_dir}/%(id)s.%(ext)s",
@@ -2244,7 +2242,6 @@ def download_with_ytdlp_native(url, temp_dir, *, paths=None, config=None, **kwar
 
 def download_with_ytdlp_hardened(url, temp_dir, *, paths=None, config=None, **kwargs):
     """Fallback yt-dlp download with more permissive settings."""
-    cfg = config if isinstance(config, dict) else {}
     opts = {
         "outtmpl": f"{temp_dir}/%(id)s.%(ext)s",
         "format": "bestvideo*+bestaudio/best",

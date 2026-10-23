@@ -1,4 +1,3 @@
-import os
 import sys
 
 from yt_dlp.version import __version__ as ytdlp_version

@@ -152,7 +152,7 @@ def test_music_player_loads_partial_data_and_preferences_independently() -> None
     assert "Promise.allSettled(requests)" in function_source
     assert "renderMusicLanding();" in function_source
     assert "Indexing music library" in function_source
-    assert 'if (requestedMusicSection === "browse")' in source
+    assert 'if (effective === "browse")' in source
     for status in ("loading", "loaded", "empty", "failed", "stale"):
         assert f'"{status}"' in function_source or f'"{status}"' in source
     assert 'musicDatasetCountLabel("favorites"' in source

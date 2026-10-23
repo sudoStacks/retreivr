@@ -64,21 +64,21 @@ from api.intent_queue import IntentQueueAdapter
 from engine.job_queue import (
     DownloadJobStore,
     DownloadWorkerEngine,
-    atomic_move,
+    atomic_move as atomic_move,
     build_download_job_payload,
-    build_output_filename,
+    build_output_filename as build_output_filename,
     ensure_mb_bound_music_track,
-    enqueue_media_metadata,
+    enqueue_media_metadata as enqueue_media_metadata,
     finalize_download_artifact,
     preview_direct_url,
     canonicalize_url,
     download_with_ytdlp,
-    embed_metadata,
+    embed_metadata as embed_metadata,
     extract_meta,
     resolve_source,
     resolve_media_intent,
     resolve_media_type,
-    resolve_collision_path,
+    resolve_collision_path as resolve_collision_path,
     extract_video_id,
     is_music_media_type,
     _normalize_audio_format,
@@ -87,7 +87,7 @@ from engine.job_queue import (
 from engine.json_utils import json_sanity_check, safe_json, safe_json_dump, safe_json_dumps
 from engine.search_engine import SearchJobStore, SearchResolutionService, resolve_search_db_path
 from engine.musicbrainz_binding import resolve_best_mb_pair, search_artists_by_genre, search_music_metadata
-from engine.canonical_ids import build_music_track_canonical_id, extract_external_track_canonical_id
+from engine.canonical_ids import build_music_track_canonical_id
 from engine.search_adapters import YouTubeAdapter, youtube_fast_search
 import engine.community_cache as community_cache
 from engine.spotify_playlist_importer import (
@@ -208,7 +208,6 @@ from engine.stack_setup import (
     apply_managed_service_defaults,
     build_stack_apply_summary,
     build_stack_preflight,
-    build_compose_command,
     build_connections_status,
     build_existing_status,
     build_managed_status,
@@ -230,7 +229,6 @@ from db.playlist_snapshots import PlaylistSnapshotStore
 from db.saved_titles import SavedTitleStore
 from scheduler.jobs.spotify_playlist_watch import (
     normalize_spotify_playlist_identifier,
-    playlist_watch_job,
     spotify_liked_songs_watch_job,
     spotify_playlists_watch_job,
     spotify_saved_albums_watch_job,
@@ -2057,6 +2055,14 @@ def _get_music_browse_index_entry(browse_kind: str, browse_key: str) -> dict[str
     return payload
 
 
+MUSIC_HOME_ARTWORK_TTL_SECONDS = 7 * 24 * 60 * 60
+MUSIC_HOME_ARTWORK_NEGATIVE_TTL_SECONDS = 6 * 60 * 60
+MUSIC_HOME_SPOTIFY_TTL_SECONDS = 7 * 24 * 60 * 60
+MUSIC_BROWSE_SNAPSHOT_TTL_SECONDS = 20 * 60
+MUSIC_BROWSE_INDEX_TTL_SECONDS = 7 * 24 * 60 * 60
+MUSIC_BROWSE_STALE_GRACE_SECONDS = 30 * 24 * 60 * 60
+
+
 def _set_music_browse_index_entry(
     browse_kind: str,
     browse_key: str,
@@ -2065,8 +2071,8 @@ def _set_music_browse_index_entry(
     source_provider: str = "retreivr",
     status: str = "ok",
     failure_reason: str | None = None,
-    ttl_seconds: int = MUSIC_BROWSE_STALE_GRACE_SECONDS if "MUSIC_BROWSE_STALE_GRACE_SECONDS" in globals() else 30 * 24 * 60 * 60,
-    stale_seconds: int = MUSIC_BROWSE_INDEX_TTL_SECONDS if "MUSIC_BROWSE_INDEX_TTL_SECONDS" in globals() else 7 * 24 * 60 * 60,
+    ttl_seconds: int = MUSIC_BROWSE_STALE_GRACE_SECONDS,
+    stale_seconds: int = MUSIC_BROWSE_INDEX_TTL_SECONDS,
 ) -> None:
     db_path = app.state.paths.db_path
     now_ts = time.time()
@@ -2111,14 +2117,6 @@ def _music_browse_entry_is_usable(entry: dict[str, Any] | None) -> bool:
 
 def _music_browse_entry_is_fresh(entry: dict[str, Any] | None) -> bool:
     return isinstance(entry, dict) and float(entry.get("stale_after") or 0) > time.time()
-
-
-MUSIC_HOME_ARTWORK_TTL_SECONDS = 7 * 24 * 60 * 60
-MUSIC_HOME_ARTWORK_NEGATIVE_TTL_SECONDS = 6 * 60 * 60
-MUSIC_HOME_SPOTIFY_TTL_SECONDS = 7 * 24 * 60 * 60
-MUSIC_BROWSE_SNAPSHOT_TTL_SECONDS = 20 * 60
-MUSIC_BROWSE_INDEX_TTL_SECONDS = 7 * 24 * 60 * 60
-MUSIC_BROWSE_STALE_GRACE_SECONDS = 30 * 24 * 60 * 60
 
 
 def _music_browse_art_cache_dir() -> Path:
@@ -8298,7 +8296,7 @@ async def _watcher_supervisor():
             consecutive_no_change = watch.get("consecutive_no_change") or 0
             current_interval = watch.get("current_interval_min")
             if not isinstance(current_interval, int):
-                current_interval = min_interval_minutes
+                current_interval = policy.get("min_interval_minutes") or 5
             _write_watch_state(
                 app.state.paths.db_path,
                 playlist_id,
@@ -9331,6 +9329,36 @@ def api_direct_url_resolve(request: DirectUrlResolveRequest):
     preview["url"] = str(preview.get("url") or url).strip() or url
     payload = _build_home_direct_resolve_payload(url=url, preview=preview)
     return safe_json({"result_type": "home_result", "preview": preview, **payload})
+
+
+@app.post("/api/video/search/preview")
+def api_video_search_preview(payload: dict = Body(...)):
+    """Return bounded YouTube candidates without creating queue state."""
+    query = str((payload or {}).get("query") or "").strip()
+    if not query or len(query) > 300:
+        raise HTTPException(status_code=400, detail="query must be 1-300 characters")
+    try:
+        limit = int((payload or {}).get("limit", 3))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="limit must be an integer") from None
+    limit = max(1, min(limit, 10))
+    candidates = []
+    for row in youtube_fast_search(query, limit=limit):
+        if not isinstance(row, dict):
+            continue
+        video_id = str(row.get("video_id") or "").strip()
+        url = str(row.get("url") or "").strip()
+        if not video_id or not url:
+            continue
+        candidates.append({
+            "video_id": video_id,
+            "title": str(row.get("title") or "YouTube Video").strip(),
+            "channel": str(row.get("channel") or "YouTube").strip(),
+            "url": url,
+            "thumbnail_url": str(row.get("thumbnail_url") or "").strip() or None,
+            "published_label": str(row.get("posted_label") or "").strip() or None,
+        })
+    return {"status": "ok", "query": query, "candidates": candidates}
 
 @app.post("/api/cancel")
 def api_cancel():
@@ -10405,8 +10433,6 @@ def download_full_album(data: dict):
         release_secondary_types = []
 
     queue = _IntentQueueAdapter()
-    engine = getattr(app.state, "worker_engine", None)
-    store = getattr(engine, "store", None) if engine is not None else None
     tracks_considered = 0
     tracks_enqueued = 0
     duplicate_tracks_count = 0
@@ -10508,16 +10534,6 @@ def download_full_album(data: dict):
                     "release_primary_type": release_primary_type or None,
                     "release_secondary_types": release_secondary_types or [],
                 }
-                canonical_id = _build_music_track_canonical_id(
-                    payload.get("artist"),
-                    payload.get("album"),
-                    payload.get("track_number"),
-                    payload.get("track"),
-                    recording_mbid=payload.get("recording_mbid") or payload.get("mb_recording_id"),
-                    mb_release_id=payload.get("mb_release_id") or payload.get("release_id"),
-                    mb_release_group_id=payload.get("mb_release_group_id") or payload.get("release_group_id"),
-                    disc_number=payload.get("disc_number"),
-                )
                 queue_result = queue.enqueue(payload)
                 created = bool(queue_result.get("created")) if isinstance(queue_result, dict) else True
                 dedupe_reason = str(queue_result.get("dedupe_reason") or "").strip() if isinstance(queue_result, dict) else ""
@@ -13738,7 +13754,7 @@ def api_player_create_station(payload: dict = Body(...)):
     with sqlite3.connect(app.state.paths.db_path) as conn:
         conn.row_factory = sqlite3.Row
         station = create_station(conn, name=name, seed_type=seed_type, seed_value=seed_value, station_mode=station_mode, seed_identity=seed_identity)
-        station = get_station_detail(conn, cfg := _current_loaded_config(), station_id=int(station.get("id") or 0), preview_limit=10) or station
+        station = get_station_detail(conn, _current_loaded_config(), station_id=int(station.get("id") or 0), preview_limit=10) or station
     return safe_json({"station": station})
 
 

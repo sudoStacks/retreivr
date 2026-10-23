@@ -12,7 +12,6 @@ from engine.job_queue import _fetch_release_enrichment
 from engine.musicbrainz_binding import resolve_best_mb_pair
 from library.reconcile import (
     _SUPPORTED_AUDIO_EXTENSIONS,
-    _coerce_tag_value,
     _lookup_tag,
     _normalize_index,
     _should_skip_reconcile_path,

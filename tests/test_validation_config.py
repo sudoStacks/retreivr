@@ -17,12 +17,13 @@ class _MockDownloader:
         return str(path)
 
 
-def _job() -> SimpleNamespace:
+def _job(library_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         payload={
             "playlist_id": "playlist-1",
             "spotify_track_id": "track-1",
             "resolved_media": {"media_url": "https://example.test/audio"},
+            "music": {"library_path": str(library_path)},
             "music_metadata": {
                 "title": "Track",
                 "artist": "Artist",
@@ -33,7 +34,7 @@ def _job() -> SimpleNamespace:
     )
 
 
-def test_duration_tolerance_config_changes_validation_outcome(monkeypatch) -> None:
+def test_duration_tolerance_config_changes_validation_outcome(monkeypatch, tmp_path: Path) -> None:
     recorded: list[tuple[str, str, str]] = []
 
     monkeypatch.setattr("download.worker.ENABLE_DURATION_VALIDATION", True)
@@ -54,21 +55,21 @@ def test_duration_tolerance_config_changes_validation_outcome(monkeypatch) -> No
 
     # Baseline tolerance: passes.
     monkeypatch.setattr("download.worker.SPOTIFY_DURATION_TOLERANCE_SECONDS", 0.30)
-    first_job = _job()
+    first_job = _job(tmp_path)
     worker.process_job(first_job)
     assert first_job.status == JOB_STATUS_COMPLETED
     assert len(recorded) == 1
 
     # Very small tolerance: same track now fails validation.
     monkeypatch.setattr("download.worker.SPOTIFY_DURATION_TOLERANCE_SECONDS", 0.05)
-    second_job = _job()
+    second_job = _job(tmp_path)
     worker.process_job(second_job)
     assert second_job.status == JOB_STATUS_VALIDATION_FAILED
     assert len(recorded) == 1
 
     # Increased tolerance again: track passes.
     monkeypatch.setattr("download.worker.SPOTIFY_DURATION_TOLERANCE_SECONDS", 0.30)
-    third_job = _job()
+    third_job = _job(tmp_path)
     worker.process_job(third_job)
     assert third_job.status == JOB_STATUS_COMPLETED
     assert len(recorded) == 2
