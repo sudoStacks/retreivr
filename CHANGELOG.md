@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented here.
 
+## v1.1.12 — External Conversational Video Preview
+
+### Added
+
+- `POST /api/video/search/preview` provides a bounded, queue-free YouTube
+  candidate contract for external conversational controllers. Clients receive
+  canonical title, channel, thumbnail, published-label and URL fields, then
+  must explicitly submit a selected URL through Retreivr's existing direct
+  video flow.
+- `docs/external-media-assistants.md` documents the controller contract and
+  safety boundary for optional LLM/bot integrations.
+
 ## Unreleased — Test baseline and CI guard rails
 
 ### Fixed
@@ -13,11 +25,6 @@ All notable changes to this project will be documented here.
 - The metadata merge and music page lifecycle tests follow the current genre canonicalization policy and the current music player load path.
 
 ### Added
-- `POST /api/video/search/preview` provides a bounded, queue-free YouTube
-  candidate contract for external conversational controllers. Clients receive
-  canonical title, channel, thumbnail, published-label and URL fields, then
-  must explicitly submit a selected URL through Retreivr's existing direct
-  video flow.
 - `ruff` linting of undefined names, redefinitions and unused imports (`F`, `E9`) over `api`, `engine`, `metadata`, `media`, `benchmarks` and `scripts` runs in CI, configured through `pyproject.toml`.
 - A Node test suite covers the guided setup wizard's step list, per-step validation, status and summary functions.
 
