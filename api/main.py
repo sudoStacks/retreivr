@@ -9315,6 +9315,36 @@ def api_direct_url_resolve(request: DirectUrlResolveRequest):
     payload = _build_home_direct_resolve_payload(url=url, preview=preview)
     return safe_json({"result_type": "home_result", "preview": preview, **payload})
 
+
+@app.post("/api/video/search/preview")
+def api_video_search_preview(payload: dict = Body(...)):
+    """Return bounded YouTube candidates without creating queue state."""
+    query = str((payload or {}).get("query") or "").strip()
+    if not query or len(query) > 300:
+        raise HTTPException(status_code=400, detail="query must be 1-300 characters")
+    try:
+        limit = int((payload or {}).get("limit", 3))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="limit must be an integer") from None
+    limit = max(1, min(limit, 10))
+    candidates = []
+    for row in youtube_fast_search(query, limit=limit):
+        if not isinstance(row, dict):
+            continue
+        video_id = str(row.get("video_id") or "").strip()
+        url = str(row.get("url") or "").strip()
+        if not video_id or not url:
+            continue
+        candidates.append({
+            "video_id": video_id,
+            "title": str(row.get("title") or "YouTube Video").strip(),
+            "channel": str(row.get("channel") or "YouTube").strip(),
+            "url": url,
+            "thumbnail_url": str(row.get("thumbnail_url") or "").strip() or None,
+            "published_label": str(row.get("posted_label") or "").strip() or None,
+        })
+    return {"status": "ok", "query": query, "candidates": candidates}
+
 @app.post("/api/cancel")
 def api_cancel():
     logging.info("Cancel requested by user")
