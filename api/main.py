@@ -10296,11 +10296,87 @@ def _select_release_with_tracks(mb, release_group_mbid: str, release_dicts: list
     raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
 
 
+def _music_credit_name(artist_credit: object) -> str:
+    """Render MusicBrainz artist-credit fields without inventing an artist."""
+    if not isinstance(artist_credit, list):
+        return ""
+    parts = []
+    for item in artist_credit:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        artist_obj = item.get("artist") if isinstance(item.get("artist"), dict) else {}
+        name = str(item.get("name") or artist_obj.get("name") or "").strip()
+        if name:
+            parts.append(name)
+        parts.append(str(item.get("joinphrase") or ""))
+    return "".join(parts).strip()
+
+
+@app.post("/api/music/album/preview")
+def preview_music_album_release(data: dict):
+    """Resolve one official US MusicBrainz release for a queue-free card."""
+    release_group_mbid = str((data or {}).get("release_group_mbid") or "").strip()
+    if not release_group_mbid:
+        raise HTTPException(status_code=400, detail="release_group_mbid required")
+    mb = _mb_service()
+    try:
+        group_payload = mb._call_with_retry(  # noqa: SLF001
+            lambda: _mb_get_release_group_by_id_raw(release_group_mbid, includes=["releases"])
+        )
+    except Exception:
+        logger.exception("[MUSIC] album preview release-group fetch failed release_group=%s", release_group_mbid)
+        raise HTTPException(status_code=502, detail="musicbrainz_release_group_fetch_failed")
+    group = group_payload.get("release-group", {}) if isinstance(group_payload, dict) else {}
+    releases = group.get("release-list", []) if isinstance(group, dict) else []
+    us_official = [
+        item for item in releases
+        if isinstance(item, dict)
+        and str(item.get("status") or "").strip().lower() == "official"
+        and str(item.get("country") or "").strip().upper() == "US"
+    ]
+    if not us_official:
+        raise HTTPException(status_code=404, detail="musicbrainz_us_release_not_found")
+    selected, release = _select_release_with_tracks(mb, release_group_mbid, us_official)
+    release_mbid = str(selected.get("id") or "").strip()
+    if not release_mbid:
+        raise HTTPException(status_code=502, detail="musicbrainz_release_selection_failed")
+    media = release.get("medium-list", []) if isinstance(release, dict) else []
+    track_count = sum(
+        len(item.get("track-list") or []) for item in media
+        if isinstance(item, dict) and isinstance(item.get("track-list"), list)
+    )
+    artwork_url = None
+    try:
+        artwork_url = mb.fetch_release_group_cover_art_url(release_group_mbid, timeout=8)
+    except Exception:
+        pass
+    if not artwork_url:
+        try:
+            artwork_url = mb.cover_art_url(release_mbid)
+        except Exception:
+            pass
+    return {
+        "status": "ok",
+        "release_group_mbid": release_group_mbid,
+        "release_mbid": release_mbid,
+        "title": str(release.get("title") or group.get("title") or "").strip(),
+        "artist": _music_credit_name(release.get("artist-credit")) or _music_credit_name(selected.get("artist-credit")),
+        "country": "US",
+        "date": str(release.get("date") or selected.get("date") or "").strip() or None,
+        "track_count": track_count or None,
+        "artwork_url": artwork_url,
+    }
+
+
 @app.post("/api/music/album/download")
 def download_full_album(data: dict):
     release_group_mbid = str((data or {}).get("release_group_mbid") or "").strip()
     if not release_group_mbid:
         raise HTTPException(status_code=400, detail="release_group_mbid required")
+    requested_release_mbid = str((data or {}).get("release_mbid") or "").strip()
     force_redownload = bool((data or {}).get("force_redownload"))
     destination = str((data or {}).get("destination") or (data or {}).get("destination_dir") or "").strip() or None
     final_format = str((data or {}).get("final_format") or "").strip() or None
@@ -10336,6 +10412,16 @@ def download_full_album(data: dict):
     release_dicts = [rel for rel in releases if isinstance(rel, dict)]
     if not release_dicts:
         raise HTTPException(status_code=404, detail="musicbrainz_release_group_has_no_releases")
+    if requested_release_mbid:
+        release_dicts = [item for item in release_dicts if str(item.get("id") or "").strip() == requested_release_mbid]
+        if not release_dicts:
+            raise HTTPException(status_code=400, detail="release_mbid_not_in_release_group")
+        selected = release_dicts[0]
+        if not (
+            str(selected.get("status") or "").strip().lower() == "official"
+            and str(selected.get("country") or "").strip().upper() == "US"
+        ):
+            raise HTTPException(status_code=400, detail="release_mbid_must_be_official_us_release")
 
     selected_release, release_obj = _select_release_with_tracks(
         mb,
