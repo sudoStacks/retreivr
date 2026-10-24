@@ -10431,6 +10431,9 @@ def preview_music_intent(data: dict):
                 item for item in releases if isinstance(item, dict)
                 and str(item.get("status") or "").casefold() == "official"
                 and str(item.get("country") or "").upper() == "US"
+                and _music_intent_title_score(album, {
+                    "title": str(item.get("title") or group.get("title") or ""),
+                }) > 0
             ]
             if not us_official:
                 continue
@@ -10438,10 +10441,11 @@ def preview_music_intent(data: dict):
             release_mbid = str(selected.get("id") or "").strip()
             if not release_mbid:
                 continue
+            selected_title = str(selected.get("title") or group.get("title") or "").strip()
             preview = {
                 "status": "ok", "release_group_mbid": group["release_group_id"],
                 "release_mbid": release_mbid,
-                "title": str(selected.get("title") or group.get("title") or "").strip(),
+                "title": selected_title,
                 "artist": _music_credit_name(selected.get("artist-credit")) or str(group.get("artist_credit") or "").strip(),
                 "country": "US", "date": str(selected.get("date") or "").strip() or None,
                 "track_count": None, "artwork_url": _mb_service().cover_art_url(release_mbid),
