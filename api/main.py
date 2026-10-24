@@ -10409,7 +10409,30 @@ def preview_music_intent(data: dict):
     preview_target = offset + requested_limit + 1
     for group in ranked[:15]:
         try:
-            preview = preview_music_album_release({"release_group_mbid": group["release_group_id"]})
+            group_payload = _mb_service()._call_with_retry(  # noqa: SLF001
+                lambda rgid=group["release_group_id"]: _mb_get_release_group_by_id_raw(rgid, includes=["releases"])
+            )
+            release_group = group_payload.get("release-group", {}) if isinstance(group_payload, dict) else {}
+            releases = release_group.get("release-list", []) if isinstance(release_group, dict) else []
+            us_official = [
+                item for item in releases if isinstance(item, dict)
+                and str(item.get("status") or "").casefold() == "official"
+                and str(item.get("country") or "").upper() == "US"
+            ]
+            if not us_official:
+                continue
+            selected = min(us_official, key=lambda item: str(item.get("date") or "9999-99-99"))
+            release_mbid = str(selected.get("id") or "").strip()
+            if not release_mbid:
+                continue
+            preview = {
+                "status": "ok", "release_group_mbid": group["release_group_id"],
+                "release_mbid": release_mbid,
+                "title": str(selected.get("title") or group.get("title") or "").strip(),
+                "artist": _music_credit_name(selected.get("artist-credit")) or str(group.get("artist_credit") or "").strip(),
+                "country": "US", "date": str(selected.get("date") or "").strip() or None,
+                "track_count": None, "artwork_url": _mb_service().cover_art_url(release_mbid),
+            }
         except HTTPException as exc:
             if exc.status_code == 404:
                 continue

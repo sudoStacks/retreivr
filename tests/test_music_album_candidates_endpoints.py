@@ -234,16 +234,7 @@ def test_music_intent_preview_returns_only_verified_us_candidates(monkeypatch) -
         ],
     )
 
-    def _preview(data: dict) -> dict:
-        if data["release_group_mbid"] == "bootleg":
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404, detail="musicbrainz_us_release_not_found")
-        return {
-            "status": "ok", "release_group_mbid": "official", "release_mbid": "us-release",
-            "title": "International Superhits!", "artist": "Green Day", "country": "US",
-        }
-
-    monkeypatch.setattr(module, "preview_music_album_release", _preview)
+    monkeypatch.setattr(module, "_mb_get_release_group_by_id_raw", lambda rgid, includes: {"release-group": {"release-list": [] if rgid == "bootleg" else [{"id": "us-release", "status": "Official", "country": "US", "title": "International Superhits!", "artist-credit": [{"name": "Green Day"}]}]}})
     resp = client.post(
         "/api/music/intent/preview",
         json={"media_intent": "music_album", "intent": "download album of Greatest Hits of Green Day"},
@@ -251,8 +242,7 @@ def test_music_intent_preview_returns_only_verified_us_candidates(monkeypatch) -
 
     assert resp.status_code == 200
     assert resp.json()["candidates"] == [{
-        "status": "ok", "release_group_mbid": "official", "release_mbid": "us-release",
-        "title": "International Superhits!", "artist": "Green Day", "country": "US",
+        "status": "ok", "release_group_mbid": "official", "release_mbid": "us-release", "title": "International Superhits!", "artist": "Green Day", "country": "US", "date": None, "track_count": None, "artwork_url": "https://coverartarchive.org/release/us-release/front",
         "intent": {"artist": "Green Day", "album": "Greatest Hits"},
     }]
 
@@ -271,10 +261,7 @@ def test_music_intent_preview_pages_verified_candidates(monkeypatch) -> None:
             for idx in range(4)
         ],
     )
-    monkeypatch.setattr(
-        module, "preview_music_album_release",
-        lambda data: {"status": "ok", "release_group_mbid": data["release_group_mbid"], "release_mbid": f"us-{data['release_group_mbid']}"},
-    )
+    monkeypatch.setattr(module, "_mb_get_release_group_by_id_raw", lambda rgid, includes: {"release-group": {"release-list": [{"id": f"us-{rgid}", "status": "Official", "country": "US"}]}})
     resp = client.post(
         "/api/music/intent/preview",
         json={"media_intent": "music_album", "intent": "download album of Greatest Hits of Artist", "limit": 2, "offset": 2},
