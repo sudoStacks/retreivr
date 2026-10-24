@@ -269,3 +269,40 @@ def test_music_intent_preview_pages_verified_candidates(monkeypatch) -> None:
     assert resp.status_code == 200
     assert [item["release_group_mbid"] for item in resp.json()["candidates"]] == ["rg-2", "rg-3"]
     assert resp.json()["next_offset"] is None
+
+
+@pytest.mark.parametrize("intent, expected", [
+    ("download album of Greatest Hits of Green Day", ("Greatest Hits", "Green Day")),
+    ("Please get me the album Dookie by Green Day", ("Dookie", "Green Day")),
+    ("Green Day's album Dookie", ("Dookie", "Green Day")),
+    ("Green Day - Dookie", ("Dookie", "Green Day")),
+])
+def test_music_intent_parser_common_wording(monkeypatch, intent, expected) -> None:
+    _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+    assert module._parse_music_album_intent(intent) == expected
+
+
+def test_music_intent_preview_rejects_unrelated_alternatives(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+    monkeypatch.setattr(module, "search_music_metadata", lambda **kwargs: {"artists": [{"name": "Green Day", "artist_mbid": "green-day"}]})
+    monkeypatch.setattr(module, "_search_music_album_candidates_for_artist_mbid", lambda artist_mbid, *, limit: [
+        {"release_group_id": "hits", "title": "Greatest Hits: God's Favorite Band", "secondary_types": ["Compilation"]},
+        {"release_group_id": "video", "title": "International Supervideos!", "secondary_types": ["Video"]},
+        {"release_group_id": "sessions", "title": "BBC Sessions", "secondary_types": ["Live"]},
+    ])
+    looked_up = []
+
+    def release_group(rgid, includes):
+        looked_up.append(rgid)
+        return {"release-group": {"release-list": [{"id": "us-" + rgid, "status": "Official", "country": "US"}]}}
+
+    monkeypatch.setattr(module, "_mb_get_release_group_by_id_raw", release_group)
+    resp = client.post("/api/music/intent/preview", json={
+        "media_intent": "music_album", "artist": "Green Day", "album": "Greatest Hits", "limit": 3,
+    })
+    assert resp.status_code == 200
+    assert [item["release_group_mbid"] for item in resp.json()["candidates"]] == ["hits"]
+    assert resp.json()["next_offset"] is None
+    assert looked_up == ["hits"]

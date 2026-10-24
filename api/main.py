@@ -10321,25 +10321,49 @@ def _music_credit_name(artist_credit: object) -> str:
 
 
 def _parse_music_album_intent(intent: object) -> tuple[str, str]:
-    """Parse deliberately narrow album-acquisition phrasing without guessing."""
+    """Extract a stated album and artist without turning a vague request into a guess."""
     text = re.sub(r"\s+", " ", str(intent or "").strip())
-    lowered = text.casefold()
-    prefixes = (
-        "download album of ", "download the album ", "download album ",
-        "get album of ", "get the album ", "get album ",
-        "find album of ", "find album ",
-    )
-    remainder = next((text[len(prefix):] for prefix in prefixes if lowered.startswith(prefix)), "")
-    if not remainder:
-        raise HTTPException(status_code=422, detail="music_album_intent_requires_album_and_artist")
+    text = re.sub(r"^(?:please\s+)?(?:can you\s+|could you\s+|i(?:'d| would) like\s+|i want\s+)?(?:download|get|find)\s+(?:me\s+)?(?:the\s+)?", "", text, flags=re.I)
+    text = re.sub(r"^album\s+(?:of\s+)?", "", text, flags=re.I)
+    possessive = re.match(r"^(?P<artist>.+?)[’']s\s+(?:album\s+)?(?P<album>.+?)[?.!]*$", text, re.I)
+    if possessive:
+        return possessive.group("album").strip(), possessive.group("artist").strip()
     for separator in (" by ", " of "):
-        position = remainder.casefold().rfind(separator)
+        position = text.casefold().rfind(separator)
         if position > 0:
-            album = remainder[:position].strip(" -–—")
-            artist = remainder[position + len(separator):].strip(" -–—")
+            album, artist = text[:position].strip(" -–—"), text[position + len(separator):].strip(" -–—?.!")
             if album and artist:
                 return album, artist
+    if re.match(r"^.+?\s+[-–—]\s+.+$", text):
+        artist, album = re.split(r"\s+[-–—]\s+", text, maxsplit=1)
+        if artist and album:
+            return album.strip(), artist.strip()
     raise HTTPException(status_code=422, detail="music_album_intent_requires_album_and_artist")
+
+
+def _music_intent_title_score(album: str, group: dict) -> int:
+    """Only admit release groups that describe the requested album/concept."""
+    title = str(group.get("title") or "").casefold()
+    secondary = {str(value).casefold() for value in (group.get("secondary_types") or [])}
+    if "video" in secondary or "video" in title:
+        return 0
+    words = set(re.findall(r"[a-z0-9]+", album.casefold()))
+    title_words = set(re.findall(r"[a-z0-9]+", title))
+    if not words or not title_words:
+        return 0
+    normalized_album = "".join(sorted(words))
+    normalized_title = "".join(sorted(title_words))
+    if normalized_album == normalized_title:
+        return 1000
+    hits_terms = {"greatest", "hits", "hit", "best", "collection"}
+    hits_request = bool(words.intersection(hits_terms))
+    hits_title = bool(title_words.intersection(hits_terms)) or "superhits" in title
+    if hits_request and hits_title:
+        return 300 + (100 if "compilation" in secondary else 0) + 10 * len(words.intersection(title_words))
+    overlap = len(words.intersection(title_words))
+    if overlap == len(words) or (len(words) >= 2 and overlap / len(words) >= 0.75):
+        return 100 + 10 * overlap
+    return 0
 
 
 @app.post("/api/music/intent/preview")
@@ -10356,7 +10380,10 @@ def preview_music_intent(data: dict):
     country = str((data or {}).get("country") or "US").strip().upper()
     if country != "US":
         raise HTTPException(status_code=400, detail="only_us_music_releases_supported")
-    album, artist = _parse_music_album_intent((data or {}).get("intent"))
+    album = str((data or {}).get("album") or "").strip()
+    artist = str((data or {}).get("artist") or "").strip()
+    if not album or not artist:
+        album, artist = _parse_music_album_intent((data or {}).get("intent"))
     def normalized(value: object) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
 
@@ -10380,27 +10407,13 @@ def preview_music_intent(data: dict):
         logger.exception("[MUSIC] intent preview search failed artist=%s album=%s", artist, album)
         raise HTTPException(status_code=502, detail="musicbrainz_album_search_failed")
 
-    title_terms = set(re.findall(r"[a-z0-9]+", album.casefold()))
-    is_hits_request = {"greatest", "hit", "hits", "best", "collection"}.intersection(title_terms)
-
-    def rank(group: dict) -> tuple[int, str]:
-        title = str(group.get("title") or "")
-        normalized_title = normalized(title)
-        candidate_terms = set(re.findall(r"[a-z0-9]+", title.casefold()))
-        overlap = len(title_terms.intersection(candidate_terms))
-        secondary = {str(item).casefold() for item in (group.get("secondary_types") or [])}
-        score = overlap * 100
-        if normalized_title == normalized(album):
-            score += 1000
-        if is_hits_request and "compilation" in secondary:
-            score += 300
-        if is_hits_request and {"hit", "hits", "superhits", "best"}.intersection(candidate_terms):
-            score += 150
-        return (-score, title.casefold())
-
     ranked = sorted(
-        (group for group in groups if isinstance(group, dict) and str(group.get("release_group_id") or "").strip()),
-        key=rank,
+        (
+            group for group in groups if isinstance(group, dict)
+            and str(group.get("release_group_id") or "").strip()
+            and _music_intent_title_score(album, group) > 0
+        ),
+        key=lambda group: (-_music_intent_title_score(album, group), str(group.get("title") or "").casefold()),
     )
     previews: list[dict] = []
     # Only resolve the requested page and one sentinel for ``See Others``.
