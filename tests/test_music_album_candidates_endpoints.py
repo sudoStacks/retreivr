@@ -214,3 +214,71 @@ def test_album_search_by_artist_name_falls_back_to_strict_artist_mbid(monkeypatc
 
     assert resp.status_code == 200
     assert resp.json() == [{"release_group_id": "rg-strict", "title": "Strict Album"}]
+
+
+def test_music_intent_preview_returns_only_verified_us_candidates(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+
+    monkeypatch.setattr(
+        module,
+        "search_music_metadata",
+        lambda **kwargs: {"artists": [{"name": "Green Day", "artist_mbid": "green-day"}]},
+    )
+    monkeypatch.setattr(
+        module,
+        "_search_music_album_candidates_for_artist_mbid",
+        lambda artist_mbid, *, limit: [
+            {"release_group_id": "bootleg", "title": "Greatest Hits", "secondary_types": []},
+            {"release_group_id": "official", "title": "International Superhits!", "secondary_types": ["Compilation"]},
+        ],
+    )
+
+    def _preview(data: dict) -> dict:
+        if data["release_group_mbid"] == "bootleg":
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="musicbrainz_us_release_not_found")
+        return {
+            "status": "ok", "release_group_mbid": "official", "release_mbid": "us-release",
+            "title": "International Superhits!", "artist": "Green Day", "country": "US",
+        }
+
+    monkeypatch.setattr(module, "preview_music_album_release", _preview)
+    resp = client.post(
+        "/api/music/intent/preview",
+        json={"media_intent": "music_album", "intent": "download album of Greatest Hits of Green Day"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["candidates"] == [{
+        "status": "ok", "release_group_mbid": "official", "release_mbid": "us-release",
+        "title": "International Superhits!", "artist": "Green Day", "country": "US",
+        "intent": {"artist": "Green Day", "album": "Greatest Hits"},
+    }]
+
+
+def test_music_intent_preview_pages_verified_candidates(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+    monkeypatch.setattr(
+        module, "search_music_metadata",
+        lambda **kwargs: {"artists": [{"name": "Artist", "artist_mbid": "artist"}]},
+    )
+    monkeypatch.setattr(
+        module, "_search_music_album_candidates_for_artist_mbid",
+        lambda artist_mbid, *, limit: [
+            {"release_group_id": f"rg-{idx}", "title": f"Greatest Hits {idx}", "secondary_types": ["Compilation"]}
+            for idx in range(4)
+        ],
+    )
+    monkeypatch.setattr(
+        module, "preview_music_album_release",
+        lambda data: {"status": "ok", "release_group_mbid": data["release_group_mbid"], "release_mbid": f"us-{data['release_group_mbid']}"},
+    )
+    resp = client.post(
+        "/api/music/intent/preview",
+        json={"media_intent": "music_album", "intent": "download album of Greatest Hits of Artist", "limit": 2, "offset": 2},
+    )
+    assert resp.status_code == 200
+    assert [item["release_group_mbid"] for item in resp.json()["candidates"]] == ["rg-2", "rg-3"]
+    assert resp.json()["next_offset"] is None
