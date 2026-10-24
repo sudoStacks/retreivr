@@ -247,6 +247,27 @@ def test_music_intent_preview_returns_only_verified_us_candidates(monkeypatch) -
     }]
 
 
+def test_music_intent_preview_rejects_unrelated_selected_release_title(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+    monkeypatch.setattr(module, "search_music_metadata", lambda **kwargs: {
+        "artists": [{"name": "Green Day", "artist_mbid": "green-day"}],
+    })
+    monkeypatch.setattr(module, "_search_music_album_candidates_for_artist_mbid", lambda artist_mbid, *, limit: [
+        {"release_group_id": "matching-group", "title": "Greatest Hits: God's Favorite Band", "secondary_types": ["Compilation"]},
+        {"release_group_id": "mismatched-release", "title": "International Superhits!", "secondary_types": ["Compilation"]},
+    ])
+    monkeypatch.setattr(module, "_mb_get_release_group_by_id_raw", lambda rgid, includes: {"release-group": {"release-list": [{
+        "id": f"release-{rgid}", "status": "Official", "country": "US", "artist-credit": [{"name": "Green Day"}],
+        "title": "International Supervideos!" if rgid == "mismatched-release" else "Greatest Hits: God's Favorite Band",
+    }]}})
+    resp = client.post("/api/music/intent/preview", json={
+        "media_intent": "music_album", "artist": "Green Day", "album": "Greatest Hits", "country": "US", "limit": 3,
+    })
+    assert resp.status_code == 200
+    assert [item["release_group_mbid"] for item in resp.json()["candidates"]] == ["matching-group"]
+
+
 def test_music_intent_preview_pages_verified_candidates(monkeypatch) -> None:
     client = _build_client(monkeypatch)
     module = importlib.import_module("api.main")
