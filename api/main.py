@@ -10315,6 +10315,109 @@ def _music_credit_name(artist_credit: object) -> str:
     return "".join(parts).strip()
 
 
+def _parse_music_album_intent(intent: object) -> tuple[str, str]:
+    """Parse deliberately narrow album-acquisition phrasing without guessing."""
+    text = re.sub(r"\s+", " ", str(intent or "").strip())
+    lowered = text.casefold()
+    prefixes = (
+        "download album of ", "download the album ", "download album ",
+        "get album of ", "get the album ", "get album ",
+        "find album of ", "find album ",
+    )
+    remainder = next((text[len(prefix):] for prefix in prefixes if lowered.startswith(prefix)), "")
+    if not remainder:
+        raise HTTPException(status_code=422, detail="music_album_intent_requires_album_and_artist")
+    for separator in (" by ", " of "):
+        position = remainder.casefold().rfind(separator)
+        if position > 0:
+            album = remainder[:position].strip(" -–—")
+            artist = remainder[position + len(separator):].strip(" -–—")
+            if album and artist:
+                return album, artist
+    raise HTTPException(status_code=422, detail="music_album_intent_requires_album_and_artist")
+
+
+@app.post("/api/music/intent/preview")
+def preview_music_intent(data: dict):
+    """Resolve a typed music-album intent to previewable official US releases.
+
+    This deliberately resolves the artist first, then checks each candidate via
+    ``preview_music_album_release``.  A loose phrase such as "Greatest Hits of
+    Green Day" is therefore allowed to find an official compilation without
+    ever returning a similarly named non-US or bootleg release.
+    """
+    if str((data or {}).get("media_intent") or "").strip() != "music_album":
+        raise HTTPException(status_code=400, detail="music_album_intent_required")
+    country = str((data or {}).get("country") or "US").strip().upper()
+    if country != "US":
+        raise HTTPException(status_code=400, detail="only_us_music_releases_supported")
+    album, artist = _parse_music_album_intent((data or {}).get("intent"))
+    def normalized(value: object) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+    requested_limit = max(1, min(int((data or {}).get("limit") or 3), 3))
+    offset = max(0, int((data or {}).get("offset") or 0))
+    wanted_artist = normalized(artist)
+    try:
+        metadata = search_music_metadata(
+            artist=artist, album="", track="", mode="artist", offset=0, limit=5,
+        )
+        artists = metadata.get("artists", []) if isinstance(metadata, dict) else []
+        exact_artist = next((
+            row for row in artists if isinstance(row, dict)
+            and normalized(row.get("name")) == wanted_artist
+            and str(row.get("artist_mbid") or "").strip()
+        ), None)
+        groups = _search_music_album_candidates_for_artist_mbid(
+            exact_artist["artist_mbid"], limit=100,
+        ) if exact_artist else _search_music_album_candidates(f"{artist} {album}", limit=50)
+    except Exception:
+        logger.exception("[MUSIC] intent preview search failed artist=%s album=%s", artist, album)
+        raise HTTPException(status_code=502, detail="musicbrainz_album_search_failed")
+
+    title_terms = set(re.findall(r"[a-z0-9]+", album.casefold()))
+    is_hits_request = {"greatest", "hit", "hits", "best", "collection"}.intersection(title_terms)
+
+    def rank(group: dict) -> tuple[int, str]:
+        title = str(group.get("title") or "")
+        normalized_title = normalized(title)
+        candidate_terms = set(re.findall(r"[a-z0-9]+", title.casefold()))
+        overlap = len(title_terms.intersection(candidate_terms))
+        secondary = {str(item).casefold() for item in (group.get("secondary_types") or [])}
+        score = overlap * 100
+        if normalized_title == normalized(album):
+            score += 1000
+        if is_hits_request and "compilation" in secondary:
+            score += 300
+        if is_hits_request and {"hit", "hits", "superhits", "best"}.intersection(candidate_terms):
+            score += 150
+        return (-score, title.casefold())
+
+    ranked = sorted(
+        (group for group in groups if isinstance(group, dict) and str(group.get("release_group_id") or "").strip()),
+        key=rank,
+    )
+    previews: list[dict] = []
+    for group in ranked[:30]:
+        try:
+            preview = preview_music_album_release({"release_group_mbid": group["release_group_id"]})
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                continue
+            raise
+        preview["intent"] = {"artist": artist, "album": album}
+        previews.append(preview)
+    page = previews[offset:offset + requested_limit]
+    if not page:
+        raise HTTPException(status_code=404, detail="musicbrainz_us_release_not_found")
+    return {
+        "status": "ok",
+        "intent": {"artist": artist, "album": album},
+        "candidates": page,
+        "next_offset": offset + len(page) if offset + len(page) < len(previews) else None,
+    }
+
+
 @app.post("/api/music/album/preview")
 def preview_music_album_release(data: dict):
     """Resolve one official US MusicBrainz release for a queue-free card."""
