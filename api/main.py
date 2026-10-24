@@ -10315,6 +10315,58 @@ def _music_credit_name(artist_credit: object) -> str:
     return "".join(parts).strip()
 
 
+def _parse_music_album_intent(intent: object) -> tuple[str, str]:
+    """Parse deliberately narrow album-acquisition phrasing without guessing."""
+    text = re.sub(r"\s+", " ", str(intent or "").strip())
+    lowered = text.casefold()
+    prefixes = (
+        "download album of ", "download the album ", "download album ",
+        "get album of ", "get the album ", "get album ",
+        "find album of ", "find album ",
+    )
+    remainder = next((text[len(prefix):] for prefix in prefixes if lowered.startswith(prefix)), "")
+    if not remainder:
+        raise HTTPException(status_code=422, detail="music_album_intent_requires_album_and_artist")
+    for separator in (" by ", " of "):
+        position = remainder.casefold().rfind(separator)
+        if position > 0:
+            album = remainder[:position].strip(" -–—")
+            artist = remainder[position + len(separator):].strip(" -–—")
+            if album and artist:
+                return album, artist
+    raise HTTPException(status_code=422, detail="music_album_intent_requires_album_and_artist")
+
+
+@app.post("/api/music/intent/preview")
+def preview_music_intent(data: dict):
+    """Resolve a typed music-album intent to one exact official US release."""
+    if str((data or {}).get("media_intent") or "").strip() != "music_album":
+        raise HTTPException(status_code=400, detail="music_album_intent_required")
+    country = str((data or {}).get("country") or "US").strip().upper()
+    if country != "US":
+        raise HTTPException(status_code=400, detail="only_us_music_releases_supported")
+    album, artist = _parse_music_album_intent((data or {}).get("intent"))
+    try:
+        groups = _mb_service().search_release_groups(f"{artist} {album}", limit=10)
+    except Exception:
+        logger.exception("[MUSIC] intent preview search failed artist=%s album=%s", artist, album)
+        raise HTTPException(status_code=502, detail="musicbrainz_album_search_failed")
+    def normalized(value: object) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+    wanted_album = normalized(album)
+    wanted_artist = normalized(artist)
+    matches = [
+        group for group in groups if isinstance(group, dict)
+        and normalized(group.get("title")) == wanted_album
+        and wanted_artist in normalized(group.get("artist_credit"))
+    ]
+    if not matches:
+        raise HTTPException(status_code=404, detail="musicbrainz_album_intent_not_found")
+    preview = preview_music_album_release({"release_group_mbid": matches[0].get("release_group_id")})
+    preview["intent"] = {"artist": artist, "album": album}
+    return preview
+
+
 @app.post("/api/music/album/preview")
 def preview_music_album_release(data: dict):
     """Resolve one official US MusicBrainz release for a queue-free card."""
