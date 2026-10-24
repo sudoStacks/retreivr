@@ -1689,6 +1689,11 @@ def _search_music_album_candidates_for_artist_mbid(artist_mbid: str, *, limit: i
             if group_id:
                 seen_ids.add(group_id)
             groups.append(group)
+        # The caller asked for a bounded candidate set.  One overfetched page
+        # is enough to survive primary-type filtering without turning an intent
+        # preview into a full artist-discography crawl.
+        if len(groups) >= max(requested_limit * 3, 25):
+            break
         if len(page_groups) < page_size:
             break
     candidates: list[dict] = []
@@ -10398,7 +10403,11 @@ def preview_music_intent(data: dict):
         key=rank,
     )
     previews: list[dict] = []
-    for group in ranked[:30]:
+    # Only resolve the requested page and one sentinel for ``See Others``.
+    # Each preview makes a MusicBrainz release lookup, so scanning an entire
+    # discography here would leave a Telegram request waiting unnecessarily.
+    preview_target = offset + requested_limit + 1
+    for group in ranked[:15]:
         try:
             preview = preview_music_album_release({"release_group_mbid": group["release_group_id"]})
         except HTTPException as exc:
@@ -10407,6 +10416,8 @@ def preview_music_intent(data: dict):
             raise
         preview["intent"] = {"artist": artist, "album": album}
         previews.append(preview)
+        if len(previews) >= preview_target:
+            break
     page = previews[offset:offset + requested_limit]
     if not page:
         raise HTTPException(status_code=404, detail="musicbrainz_us_release_not_found")
