@@ -10360,10 +10360,42 @@ def _music_intent_title_score(album: str, group: dict) -> int:
     hits_title = bool(title_words.intersection(hits_terms)) or "superhits" in title
     if hits_request and hits_title:
         return 300 + (100 if "compilation" in secondary else 0) + 10 * len(words.intersection(title_words))
+    # A one-word title such as "Dookie" should not silently become a
+    # different album called "Dookie Demos".
+    if len(words) == 1:
+        return 0
     overlap = len(words.intersection(title_words))
     if overlap == len(words) or (len(words) >= 2 and overlap / len(words) >= 0.75):
         return 100 + 10 * overlap
     return 0
+
+
+def _music_intent_targeted_groups(artist_mbid: str, album: str) -> list[dict]:
+    """Ask MusicBrainz for this artist/title, not an arbitrary discography page."""
+    safe_album = re.sub(r"[^\w\s]", " ", album, flags=re.UNICODE).strip()
+    if not safe_album:
+        return []
+    payload = _mb_search_release_groups_raw(
+        query=f'arid:{artist_mbid} AND releasegroup:"{safe_album}"', limit=25,
+    )
+    rows = payload.get("release-group-list", []) if isinstance(payload, dict) else []
+    candidates = []
+    for row in rows:
+        if not isinstance(row, dict) or not _is_allowed_album_release_group_type(row.get("primary-type")):
+            continue
+        credits = row.get("artist-credit") or []
+        credited_ids = {
+            str(item.get("artist", {}).get("id") or "").strip()
+            for item in credits if isinstance(item, dict) and isinstance(item.get("artist"), dict)
+        }
+        if credited_ids and artist_mbid not in credited_ids:
+            continue
+        candidates.append({
+            "release_group_id": row.get("id"), "title": row.get("title"),
+            "artist_credit": _music_credit_name(credits),
+            "secondary_types": row.get("secondary-type-list") or [],
+        })
+    return candidates
 
 
 @app.post("/api/music/intent/preview")
@@ -10400,9 +10432,23 @@ def preview_music_intent(data: dict):
             and normalized(row.get("name")) == wanted_artist
             and str(row.get("artist_mbid") or "").strip()
         ), None)
-        groups = _search_music_album_candidates_for_artist_mbid(
-            exact_artist["artist_mbid"], limit=100,
-        ) if exact_artist else _search_music_album_candidates(f"{artist} {album}", limit=50)
+        if exact_artist:
+            artist_mbid = exact_artist["artist_mbid"]
+            try:
+                targeted = _music_intent_targeted_groups(artist_mbid, album)
+            except Exception:
+                logger.warning("[MUSIC] targeted intent lookup failed; trying artist fallback", exc_info=True)
+                targeted = []
+            broad = _search_music_album_candidates_for_artist_mbid(artist_mbid, limit=100)
+            groups = []
+            seen_group_ids = set()
+            for row in targeted + broad:
+                group_id = str(row.get("release_group_id") or "") if isinstance(row, dict) else ""
+                if group_id and group_id not in seen_group_ids:
+                    groups.append(row)
+                    seen_group_ids.add(group_id)
+        else:
+            groups = _search_music_album_candidates(f"{artist} {album}", limit=50)
     except Exception:
         logger.exception("[MUSIC] intent preview search failed artist=%s album=%s", artist, album)
         raise HTTPException(status_code=502, detail="musicbrainz_album_search_failed")
