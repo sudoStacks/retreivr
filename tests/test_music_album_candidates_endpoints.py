@@ -17,6 +17,7 @@ def _build_client(monkeypatch) -> TestClient:
     module = importlib.import_module("api.main")
     module.app.router.on_startup.clear()
     module.app.router.on_shutdown.clear()
+    monkeypatch.setattr(module, "_music_intent_targeted_groups", lambda artist_mbid, album: [])
     return TestClient(module.app)
 
 
@@ -266,6 +267,39 @@ def test_music_intent_preview_rejects_unrelated_selected_release_title(monkeypat
     })
     assert resp.status_code == 200
     assert [item["release_group_mbid"] for item in resp.json()["candidates"]] == ["matching-group"]
+
+
+def test_music_intent_targeted_lookup_recovers_exact_album_from_broad_miss(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    module = importlib.import_module("api.main")
+    monkeypatch.setattr(module, "search_music_metadata", lambda **kwargs: {
+        "artists": [{"name": "Green Day", "artist_mbid": "green-day"}],
+    })
+    monkeypatch.setattr(module, "_music_intent_targeted_groups", lambda artist_mbid, album: [{
+        "release_group_id": "dookie-group", "title": "Dookie", "secondary_types": [],
+    }])
+    monkeypatch.setattr(module, "_search_music_album_candidates_for_artist_mbid", lambda artist_mbid, *, limit: [])
+    monkeypatch.setattr(module, "_mb_get_release_group_by_id_raw", lambda rgid, includes: {"release-group": {"release-list": [{
+        "id": "us-dookie", "title": "Dookie", "status": "Official", "country": "US",
+        "artist-credit": [{"name": "Green Day"}],
+    }]}})
+    resp = client.post("/api/music/intent/preview", json={
+        "media_intent": "music_album", "artist": "Green Day", "album": "Dookie", "country": "US",
+    })
+    assert resp.status_code == 200
+    assert [item["title"] for item in resp.json()["candidates"]] == ["Dookie"]
+
+
+def test_music_intent_targeted_query_uses_artist_and_title(monkeypatch) -> None:
+    module = importlib.import_module("api.main")
+    calls = []
+    monkeypatch.setattr(module, "_mb_search_release_groups_raw", lambda **kwargs: calls.append(kwargs) or {
+        "release-group-list": [{"id": "dookie-group", "title": "Dookie", "primary-type": "Album",
+                                "artist-credit": [{"artist": {"id": "green-day"}, "name": "Green Day"}]}],
+    })
+    assert module._music_intent_targeted_groups("green-day", "Dookie")[0]["release_group_id"] == "dookie-group"
+    assert calls[0]["query"] == 'arid:green-day AND releasegroup:"Dookie"'
+    assert module._music_intent_title_score("Dookie", {"title": "Dookie Demos"}) == 0
 
 
 def test_music_intent_preview_pages_verified_candidates(monkeypatch) -> None:
