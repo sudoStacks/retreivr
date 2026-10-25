@@ -10583,6 +10583,7 @@ def download_full_album(data: dict):
     requested_media_mode = str((data or {}).get("media_mode") or "").strip().lower()
     if requested_media_mode not in {"music", "music_video"}:
         requested_media_mode = "music"
+    fast_enqueue = bool((data or {}).get("fast_enqueue"))
 
     cfg = _read_config_or_404()
     threshold_raw = (cfg or {}).get("music_mb_binding_threshold", 0.78)
@@ -10760,32 +10761,33 @@ def download_full_album(data: dict):
 
             try:
                 resolved = None
-                try:
-                    resolved = resolve_best_mb_pair(
-                        mb,
-                        artist=artist or None,
-                        track=title,
-                        album=release_title,
-                        duration_ms=duration_ms_int,
-                        threshold=binding_threshold,
-                        max_duration_delta_ms=album_duration_delta_limit_ms,
-                    )
-                except Exception as resolve_exc:
-                    logger.info(
-                        "[MUSIC] album track resolver_enrichment_failed recording=%s track=%s reason=%s",
-                        recording_mbid,
-                        title,
-                        str(resolve_exc) or "resolver_failed",
-                    )
+                if not fast_enqueue:
+                    try:
+                        resolved = resolve_best_mb_pair(
+                            mb,
+                            artist=artist or None,
+                            track=title,
+                            album=release_title,
+                            duration_ms=duration_ms_int,
+                            threshold=binding_threshold,
+                            max_duration_delta_ms=album_duration_delta_limit_ms,
+                        )
+                    except Exception as resolve_exc:
+                        logger.info(
+                            "[MUSIC] album track resolver_enrichment_failed recording=%s track=%s reason=%s",
+                            recording_mbid,
+                            title,
+                            str(resolve_exc) or "resolver_failed",
+                        )
 
-                if not resolved:
-                    reasons = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
-                    logger.info(
-                        "[MUSIC] album track using_release_metadata recording=%s track=%s resolver_reasons=%s",
-                        recording_mbid,
-                        title,
-                        reasons,
-                    )
+                    if not resolved:
+                        reasons = getattr(resolve_best_mb_pair, "last_failure_reasons", [])
+                        logger.info(
+                            "[MUSIC] album track using_release_metadata recording=%s track=%s resolver_reasons=%s",
+                            recording_mbid,
+                            title,
+                            reasons,
+                        )
 
                 payload = {
                     "origin": "music_album",

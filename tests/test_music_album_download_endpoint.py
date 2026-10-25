@@ -45,7 +45,8 @@ def _build_client(monkeypatch) -> TestClient:
     return TestClient(module.app)
 
 
-def test_album_download_queues_tracks_when_resolver_enrichment_fails(monkeypatch) -> None:
+@pytest.mark.parametrize("fast_enqueue", [False, True])
+def test_album_download_queues_tracks_when_resolver_enrichment_fails(monkeypatch, fast_enqueue) -> None:
     client = _build_client(monkeypatch)
     module = importlib.import_module("api.main")
 
@@ -107,7 +108,10 @@ def test_album_download_queues_tracks_when_resolver_enrichment_fails(monkeypatch
         },
     )
 
+    resolver_calls = []
+
     def _fake_resolve(_mb, *, artist=None, track=None, album=None, duration_ms=None, threshold=None, max_duration_delta_ms=None, **kwargs):
+        resolver_calls.append(track)
         _ = artist, album, duration_ms, threshold, max_duration_delta_ms, kwargs
         if track == "Track B":
             raise RuntimeError("forced_track_failure")
@@ -134,7 +138,7 @@ def test_album_download_queues_tracks_when_resolver_enrichment_fails(monkeypatch
 
     response = client.post(
         "/api/music/album/download",
-        json={"release_group_mbid": "rg-1"},
+        json={"release_group_mbid": "rg-1", "fast_enqueue": fast_enqueue},
     )
 
     assert response.status_code == 200
@@ -145,6 +149,7 @@ def test_album_download_queues_tracks_when_resolver_enrichment_fails(monkeypatch
     assert len(enqueued) == 2
     assert {item["recording_mbid"] for item in enqueued} == {"rec-1", "rec-2"}
     assert enqueued[0].get("genre") is None
+    assert resolver_calls == ([] if fast_enqueue else ["Track A", "Track B"])
 
 
 def test_album_download_queues_tracks_when_resolver_returns_none(monkeypatch) -> None:
