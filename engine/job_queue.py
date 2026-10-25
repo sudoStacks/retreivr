@@ -6166,12 +6166,12 @@ def resolve_media_intent(origin, media_type, *, playlist_entry=None):
     return "episode"
 
 
-def build_output_template(config, *, playlist_entry=None, destination=None, base_dir=None):
+def build_output_template(config, *, playlist_entry=None, destination=None, base_dir=None, media_mode=None, media_type=None):
     base_dir = base_dir or "."
     config = config or {}
     entry = playlist_entry if isinstance(playlist_entry, dict) else {}
-    entry_media_mode = str(entry.get("media_mode") or "").strip().lower()
-    entry_media_type = str(entry.get("media_type") or entry.get("media") or "").strip().lower()
+    entry_media_mode = str(media_mode or entry.get("media_mode") or "").strip().lower()
+    entry_media_type = str(media_type or entry.get("media_type") or entry.get("media") or "").strip().lower()
     effective_defaults = resolve_effective_download_settings(
         config,
         media_mode=normalize_download_media_mode(entry_media_mode, media_type=entry_media_type),
@@ -6192,6 +6192,7 @@ def build_output_template(config, *, playlist_entry=None, destination=None, base
     music_final_format = (
         entry.get("music_final_format")
         or entry.get("audio_final_format")
+        or (effective_defaults.get("final_format") if effective_defaults.get("media_mode") == "music" else None)
         or config.get("music_final_format")
         or config.get("audio_final_format")
         or "mp3"
@@ -6473,6 +6474,7 @@ def build_download_job_payload(
     origin_id,
     media_type,
     media_intent,
+    media_mode=None,
     source,
     url,
     input_url=None,
@@ -6494,6 +6496,8 @@ def build_download_job_payload(
         playlist_entry=playlist_entry,
         destination=destination,
         base_dir=base_dir,
+        media_mode=media_mode,
+        media_type=media_type,
     )
 
     canonical_metadata = resolved_metadata if isinstance(resolved_metadata, dict) else None
