@@ -37,6 +37,14 @@ action and preserves the deterministic MusicBrainz metadata pathway.
 5. Backend fetches tracklist for that release and enqueues one `music_track` job per track.
 6. Worker resolves playable audio for each track using normal adapters and existing postprocessing/tagging.
 
+External assistants can use `POST /api/music/intent/preview` with a structured
+`music_album` intent to display official US releases without queueing. A
+confirmed `POST /api/music/album/download` should include both the selected
+release-group and release MBIDs, `media_mode: "music"`, and optionally
+`fast_enqueue: true`. Unless explicitly overridden, album jobs inherit the
+configured music destination and home format. Enabled music exports occur
+after finalization.
+
 ## Album Candidate API
 
 - Canonical route: `GET /api/music/albums/search?q=<query>&limit=<n>`

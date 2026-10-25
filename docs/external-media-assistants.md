@@ -5,7 +5,7 @@ Telegram bot, Home Assistant automation, n8n workflow, or LLM agent. The
 controller is optional: Retreivr remains responsible for discovery,
 metadata, destinations, queueing, downloads and notifications.
 
-## Contract
+## Video contract
 
 1. A controller calls `POST /api/video/search/preview` with `query` and an
    optional `limit` (1–10; use 3 for chat).
@@ -19,6 +19,25 @@ metadata, destinations, queueing, downloads and notifications.
 
 For direct URLs, call `POST /api/direct-url/resolve` first and show the
 returned preview before calling `/api/run`.
+
+## Music album contract
+
+1. Resolve an album and artist with `POST /api/music/intent/preview` using
+   `media_intent: "music_album"`, `country: "US"`, and bounded `limit`/`offset`.
+   This returns previewable official US MusicBrainz releases without queueing.
+2. Display the returned release title, artist, artwork, release page and exact
+   release MBID. If a title is ambiguous, let the owner choose a different
+   candidate; do not silently substitute a release.
+3. Only after the owner selects Download, submit the selected
+   `release_group_mbid` and `release_mbid` to `POST /api/music/album/download`
+   with `media_mode: "music"` and `fast_enqueue: true`. This creates normal
+   music jobs, using the configured music destination, home format and enabled
+   post-finalization exports. Do not override `destination` or `final_format`
+   unless the owner explicitly asks for it.
+
+Music and video preview routes do not infer each other's intent. The external
+controller should classify ordinary chat text or ask for clarification before
+calling a route; the download action always requires explicit confirmation.
 
 ## Safety recommendations
 

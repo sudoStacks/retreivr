@@ -84,7 +84,7 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.image.outputs.tag }}
-          build-args: RETREIVR_VERSION=1.1.9-discovery-${{ steps.image.outputs.revision }}
+          build-args: RETREIVR_VERSION=1.1.18-preview-${{ steps.image.outputs.revision }}
           labels: |
             org.opencontainers.image.revision=${{ steps.image.outputs.revision }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}

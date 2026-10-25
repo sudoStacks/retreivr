@@ -33,6 +33,11 @@ Retreivr is not intended to replace a full media server. It is the resolution an
 - Web UI and API for operations, recovery, and automation
 - Built for intentional local ownership, not algorithmic consumption
 
+## 1.1.18 Highlights
+- Confirmed music album downloads now honor the configured music destination and home audio format; enabled music exports still run after finalization
+- External assistants can preview official US MusicBrainz releases, show artwork and release links, and queue only the explicitly selected release; video search remains a separate queue-free preview path
+- Existing media is not moved or rewritten by this release; check the configured music and export paths before starting new album downloads
+
 ## 1.1.12 Highlights
 - Queue-free video-search previews provide bounded YouTube candidates for external assistants; a controller must explicitly submit the selected URL through Retreivr's normal direct-video flow
 - Direct-URL downloads now surface completion in Home without requiring a refresh, preserve Unicode-safe filenames and `Content-Disposition` responses, and enforce filesystem byte limits
@@ -301,7 +306,8 @@ If `upstream_base_url` is blank, local cache sync should remain disabled.
 - Runtime starter bundle notes: [README-runtime.md](README-runtime.md)
 
 ## Upgrade Notes
-If you are upgrading to `1.1.9`, pull the latest image and restart:
+If you are upgrading to `v1.1.18`, pin the Compose service to
+`ghcr.io/sudostacks/retreivr:v1.1.18`, then pull and restart:
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
