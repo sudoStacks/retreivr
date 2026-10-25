@@ -25,6 +25,38 @@ def _build_adapter(*, store, config=None):
     return IntentQueueAdapter(state=state, config_loader=lambda _path: dict(config or {}))
 
 
+def test_album_music_mode_uses_music_destination_and_format_not_video_defaults() -> None:
+    captured = []
+
+    class _Store:
+        def enqueue_job(self, **kwargs):
+            captured.append(kwargs)
+            return ("album-job", True, None)
+
+    adapter = _build_adapter(store=_Store(), config={
+        "single_download_folder": "Videos/YouTube-Downloads",
+        "home_music_download_folder": "Music",
+        "home_music_final_format": "m4a",
+        "music_final_format": "mp3",
+        "final_format": "mkv",
+    })
+    adapter.enqueue({
+        "origin": "music_album", "origin_id": "album-run", "media_mode": "music",
+        "media_intent": "music_track", "artist": "Green Day", "album": "Dookie",
+        "track": "Burnout", "recording_mbid": "0f8d07a7-e873-4cd8-a64c-72356db8e771",
+        "mb_release_id": "3efb7564-6b7c-4bc3-9f10-f0f5b8f5ee61",
+        "mb_release_group_id": "af2f9e70-a752-4bd2-b817-a8ac4769dcab",
+    })
+
+    assert len(captured) == 1
+    job = captured[0]
+    assert job["media_type"] == "music"
+    assert job["output_template"]["output_dir"] == "/tmp/downloads/Music"
+    assert job["resolved_destination"] == "/tmp/downloads/Music"
+    assert job["output_template"]["music_final_format"] == "m4a"
+    assert job["output_template"]["audio_mode"] is True
+
+
 def test_intent_queue_adapter_enqueues_resolved_media_payload() -> None:
     captured = []
 
