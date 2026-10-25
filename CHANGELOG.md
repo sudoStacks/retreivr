@@ -73,6 +73,7 @@ All notable changes to this project will be documented here.
 ## Unreleased — Test baseline and CI guard rails
 
 ### Fixed
+- Music album-intent jobs now carry their music mode into output-default resolution, so the configured music library destination and home music format are used instead of the video's default download directory and format. Enabled music exports still run after finalization.
 - Guided setup no longer throws a `ReferenceError` while validating the "existing services" step. `validateSetupWizardStep` called a `canUseDiscovery` helper that was only defined inside `getSetupWizardStepState`, so a service enabled without an API key aborted the wizard instead of showing its validation message.
 - The playlist duration-validation test no longer creates its canonical music folder inside the repository root; the test now points the canonical library path at a temporary directory.
 
