@@ -11508,8 +11508,23 @@ function getHomeCandidateSourcePriority(candidate) {
   return index >= 0 ? index : HOME_VIDEO_SOURCE_PRIORITY.length;
 }
 
-function getSortedHomeCandidates(candidates = []) {
-  const results = Array.isArray(candidates) ? [...candidates] : [];
+function getHomeVideoResultsLimitValue() {
+  const parsed = Number.parseInt(String(state.homeVideoResultsLimit || 0), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+// Per-source fetch budget for a video search. The Results dropdown controls how
+// many results are shown overall, so every source may return up to that many
+// candidates and the top matches across all sources are what get displayed.
+function getHomeVideoCandidatePoolBudget() {
+  const limit = getHomeVideoResultsLimitValue();
+  if (limit > 0) {
+    return Math.max(10, Math.min(100, limit));
+  }
+  return 50;
+}
+
+function getHomeCandidateComparator() {
   const sortMode = String(state.homeVideoSort || UI_DEFAULTS.home_video_sort);
   const byBestMatch = (a, b) => {
     const scoreDiff = Number(b?.final_score || 0) - Number(a?.final_score || 0);
@@ -11521,27 +11536,75 @@ function getSortedHomeCandidates(candidates = []) {
     return String(a?.title || "").localeCompare(String(b?.title || ""));
   };
   if (sortMode === "newest") {
-    return results.sort((a, b) => {
+    return (a, b) => {
       const postedDiff = getHomeCandidatePostedValue(b) - getHomeCandidatePostedValue(a);
       if (postedDiff !== 0) return postedDiff;
       return byBestMatch(a, b);
-    });
+    };
   }
   if (sortMode === "source_priority") {
-    return results.sort((a, b) => {
+    return (a, b) => {
       const sourceDiff = getHomeCandidateSourcePriority(a) - getHomeCandidateSourcePriority(b);
       if (sourceDiff !== 0) return sourceDiff;
       return byBestMatch(a, b);
-    });
+    };
   }
   if (sortMode === "title_asc") {
-    return results.sort((a, b) => {
+    return (a, b) => {
       const titleDiff = String(a?.title || "").localeCompare(String(b?.title || ""));
       if (titleDiff !== 0) return titleDiff;
       return byBestMatch(a, b);
-    });
+    };
   }
-  return results.sort(byBestMatch);
+  return byBestMatch;
+}
+
+function getSortedHomeCandidates(candidates = []) {
+  const results = Array.isArray(candidates) ? [...candidates] : [];
+  return results.sort(getHomeCandidateComparator());
+}
+
+// Picks the candidates that fit inside the Results dropdown limit, ranked across
+// every source so top matches win regardless of which source returned them.
+function getHomeVisibleCandidateIdsByItem() {
+  const entries = Object.entries(state.homeCandidatesByItem || {});
+  const visible = new Map();
+  entries.forEach(([itemId, entry]) => {
+    const ids = new Set();
+    (entry?.candidates || []).forEach((candidate) => {
+      if (candidate?.id) ids.add(candidate.id);
+    });
+    visible.set(itemId, ids);
+  });
+
+  const limit = getHomeVideoResultsLimitValue();
+  if (!limit) {
+    return visible;
+  }
+
+  const compare = getHomeCandidateComparator();
+  const pooled = [];
+  entries.forEach(([itemId, entry]) => {
+    (entry?.candidates || []).forEach((candidate) => {
+      if (candidate?.id) pooled.push({ itemId, candidate });
+    });
+  });
+  pooled.sort((a, b) => compare(a.candidate, b.candidate));
+
+  const keep = new Set();
+  pooled.slice(0, limit).forEach((entry) => {
+    keep.add(`${entry.itemId}::${entry.candidate.id}`);
+  });
+
+  const capped = new Map();
+  entries.forEach(([itemId, entry]) => {
+    const ids = new Set();
+    (entry?.candidates || []).forEach((candidate) => {
+      if (candidate?.id && keep.has(`${itemId}::${candidate.id}`)) ids.add(candidate.id);
+    });
+    capped.set(itemId, ids);
+  });
+  return capped;
 }
 
 function getMusicItemYearValue(item) {
@@ -11987,7 +12050,7 @@ function buildHomeSearchPayload(autoEnqueue, rawQuery = "") {
     media_mode: state.homeMediaMode || "video",
     final_format: formatOverride || null,
     source_priority: sources && sources.length ? sources : null,
-    max_candidates_per_source: 10,
+    max_candidates_per_source: treatAsMusic ? 10 : getHomeVideoCandidatePoolBudget(),
   };
 }
 
@@ -17471,11 +17534,17 @@ function scheduleHomeCandidateRefresh(item, container) {
 function renderHomeCandidatesIntoContainer(item, container, candidates = []) {
   if (!container) return;
   container.textContent = "";
-  const sortedCandidates = getSortedHomeCandidates(candidates);
+  const visibleIds = getHomeVisibleCandidateIdsByItem().get(item?.id);
+  const scoped = visibleIds
+    ? candidates.filter((candidate) => visibleIds.has(candidate?.id))
+    : candidates;
+  const sortedCandidates = getSortedHomeCandidates(scoped);
   if (!sortedCandidates.length) {
     const placeholder = document.createElement("div");
     placeholder.className = "home-results-empty";
-    placeholder.textContent = "Searching…";
+    placeholder.textContent = candidates.length
+      ? "Lower-ranked results hidden by the Results limit."
+      : "Searching…";
     container.appendChild(placeholder);
     return;
   }
@@ -17509,9 +17578,10 @@ function renderHomeCandidatesIntoContainer(item, container, candidates = []) {
   }
 }
 
-function rerenderAllHomeCandidateLists() {
+function rerenderAllHomeCandidateLists(excludeItemId = null) {
   Object.entries(state.homeCandidatesByItem || {}).forEach(([itemId, entry]) => {
     if (!entry?.item || !Array.isArray(entry?.candidates)) return;
+    if (excludeItemId && itemId === excludeItemId) return;
     const selector = `.home-result-card[data-item-id="${CSS.escape(itemId)}"] .home-candidate-list`;
     const container = document.querySelector(selector);
     if (!container) return;
@@ -17647,6 +17717,9 @@ async function loadHomeCandidates(item, container, preloadedCandidates = null) {
     state.homeCandidatesByItem[item.id] = { item, candidates: [...candidates] };
     setHomeResultsState({ hasResults: true, terminal: false });
     renderHomeCandidatesIntoContainer(item, container, candidates);
+    // The Results limit is applied across every source, so other item lists can
+    // change when new candidates arrive.
+    rerenderAllHomeCandidateLists(item.id);
     // Enrich job-state asynchronously so rendering is never blocked.
     Promise.resolve()
       .then(async () => {
@@ -18641,6 +18714,24 @@ async function submitHomeSearch(autoEnqueue) {
     setHomeResultsState({ hasResults: false, terminal: true });
     setHomeSearchActive(false);
   }
+}
+
+// Raising the Results dropdown can ask for more results than the previous search
+// collected, so re-run the search (search only) to refill the candidate pool.
+function refillHomeResultsForRaisedLimit() {
+  const limit = getHomeVideoResultsLimitValue();
+  if (!limit) return;
+  if (state.currentPage !== "video" || state.homeMediaMode === "music") return;
+  if (!state.homeSearchRequestId) return;
+  if (!state.homeSearchControlsEnabled) return;
+  const query = $("#home-search-input")?.value?.trim() || "";
+  if (!query) return;
+  const poolSize = Object.values(state.homeCandidatesByItem || {}).reduce(
+    (total, entry) => total + (entry?.candidates?.length || 0),
+    0
+  );
+  if (poolSize >= limit) return;
+  void submitHomeSearch(false);
 }
 
 async function importHomePlaylistFile() {
@@ -22177,6 +22268,7 @@ function bindEvents() {
       state.homeVideoResultsLimit = Math.max(0, Number.parseInt(homeVideoResultsLimit.value, 10) || UI_DEFAULTS.home_video_results_limit);
       persistUiPreferences({ home_video_results_limit: state.homeVideoResultsLimit });
       rerenderHomeResultCards();
+      refillHomeResultsForRaisedLimit();
     });
   }
   const moviesTvResults = $("#movies-tv-results-list");

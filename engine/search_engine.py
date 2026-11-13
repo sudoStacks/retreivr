@@ -2,6 +2,11 @@ from pathlib import Path
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 MAX_PARALLEL_ADAPTERS = 4
 
+# Upper bound on how many candidates a single source may contribute to a
+# video/generic search. Results across sources are ranked together, so each
+# source may return up to the requested result limit.
+VIDEO_MAX_CANDIDATES_PER_SOURCE = 100
+
 # Helper to run one adapter safely
 def _run_adapter_search(
     adapter,
@@ -621,7 +626,8 @@ class SearchJobStore:
         now = _utc_now()
         source_priority = _normalize_source_priority(payload.get("source_priority"))
         min_match_score = float(payload.get("min_match_score") or 0.92)
-        max_candidates = int(payload.get("max_candidates_per_source") or 5)
+        # 0 means "no explicit per-source cap"; the resolver picks the default.
+        max_candidates = int(payload.get("max_candidates_per_source") or 0)
         destination_dir = payload.get("destination_dir")
         if destination_dir is not None:
             destination_dir = str(destination_dir).strip() or None
@@ -3538,9 +3544,16 @@ class SearchResolutionService:
                     )
 
             source_priority = _parse_source_priority(request_row.get("source_priority_json"))
-            max_candidates = int(request_row.get("max_candidates_per_source") or 5)
+            max_candidates = int(request_row.get("max_candidates_per_source") or 0)
             if request_media_type in {"generic", "video"}:
-                max_candidates = min(max_candidates, int(self.discovery_max_candidates_per_source))
+                # Video/generic discovery ranks one merged candidate pool across
+                # every source, so each source may contribute up to the requested
+                # limit and the top matches overall are what get shown.
+                if max_candidates <= 0:
+                    max_candidates = int(self.discovery_max_candidates_per_source)
+                max_candidates = max(1, min(max_candidates, VIDEO_MAX_CANDIDATES_PER_SOURCE))
+            else:
+                max_candidates = max_candidates or 5
             scored = []
 
             def _is_blank(value):

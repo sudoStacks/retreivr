@@ -4176,7 +4176,8 @@ class SearchRequestPayload(BaseModel):
     media_mode: str | None = None
     auto_enqueue: bool = True
     source_priority: list[str] | str | None = None
-    max_candidates_per_source: int = 5
+    # 0 means the resolver picks the per-source default for the media type.
+    max_candidates_per_source: int = 0
 
 
 def _purge_oauth_sessions():

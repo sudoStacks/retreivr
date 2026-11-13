@@ -50,6 +50,17 @@ class StubAdapter:
 
 
 
+class RecordingAdapter(StubAdapter):
+    """Adapter that records the per-source candidate limit it was asked for."""
+
+    def __init__(self):
+        self.limits = []
+
+    def search_track(self, artist, track, album=None, limit=5):
+        self.limits.append(limit)
+        return super().search_track(artist, track, album=album, limit=limit)
+
+
 class StubCanonicalResolver:
     def resolve_track(self, artist, track, *, album=None):
         return None
@@ -538,6 +549,52 @@ class SearchResolutionTests(unittest.TestCase):
         )
         self.assertEqual(len(seeded), 1)
         self.assertEqual(seeded[0].get("url"), "https://example.test/media/hello")
+
+    def _make_service(self, *, config=None, adapters=None):
+        return SearchResolutionService(
+            search_db_path=self.search_db,
+            queue_db_path=self.queue_db,
+            adapters=adapters or {"stub": StubAdapter()},
+            config=config or {},
+            paths=self.paths,
+            canonical_resolver=StubCanonicalResolver(),
+        )
+
+    def test_video_search_honors_requested_per_source_limit(self):
+        adapter = RecordingAdapter()
+        service = self._make_service(adapters={"stub": adapter})
+        request_id = service.create_search_request(
+            {
+                "intent": "track",
+                "media_type": "generic",
+                "artist": "Example Artist",
+                "track": "Example Track",
+                "source_priority": ["stub"],
+                "max_candidates_per_source": 24,
+                "auto_enqueue": False,
+            }
+        )
+        service.run_search_resolution_once(request_id=request_id)
+        self.assertEqual(adapter.limits, [24])
+
+    def test_video_search_falls_back_to_discovery_default(self):
+        adapter = RecordingAdapter()
+        service = self._make_service(
+            config={"discovery_max_candidates_per_source": 12},
+            adapters={"stub": adapter},
+        )
+        request_id = service.create_search_request(
+            {
+                "intent": "track",
+                "media_type": "generic",
+                "artist": "Example Artist",
+                "track": "Example Track",
+                "source_priority": ["stub"],
+                "auto_enqueue": False,
+            }
+        )
+        service.run_search_resolution_once(request_id=request_id)
+        self.assertEqual(adapter.limits, [12])
 
 
 if __name__ == "__main__":
