@@ -11513,6 +11513,16 @@ function getHomeVideoResultsLimitValue() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+// 0 is a valid choice ("All"); only a missing or unreadable value falls back
+// to the default.
+function parseHomeVideoResultsLimit(value) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return UI_DEFAULTS.home_video_results_limit;
+  }
+  return parsed;
+}
+
 // Per-source fetch budget for a video search. The Results dropdown controls how
 // many results are shown overall, so every source may return up to that many
 // candidates and the top matches across all sources are what get displayed.
@@ -18718,9 +18728,9 @@ async function submitHomeSearch(autoEnqueue) {
 
 // Raising the Results dropdown can ask for more results than the previous search
 // collected, so re-run the search (search only) to refill the candidate pool.
+// "All" uses the largest pool budget, so it refills too.
 function refillHomeResultsForRaisedLimit() {
-  const limit = getHomeVideoResultsLimitValue();
-  if (!limit) return;
+  const budget = getHomeVideoCandidatePoolBudget();
   if (state.currentPage !== "video" || state.homeMediaMode === "music") return;
   if (!state.homeSearchRequestId) return;
   if (!state.homeSearchControlsEnabled) return;
@@ -18730,7 +18740,7 @@ function refillHomeResultsForRaisedLimit() {
     (total, entry) => total + (entry?.candidates?.length || 0),
     0
   );
-  if (poolSize >= limit) return;
+  if (poolSize >= budget) return;
   void submitHomeSearch(false);
 }
 
@@ -19527,8 +19537,8 @@ function renderConfig(cfg) {
     ? Math.max(UI_HOME_VIDEO_CARD_SIZE_MIN, Math.min(UI_HOME_VIDEO_CARD_SIZE_MAX, Number(uiPrefs.home_video_card_size)))
     : UI_DEFAULTS.home_video_card_size;
   state.homeVideoSort = String(uiPrefs.home_video_sort || UI_DEFAULTS.home_video_sort);
-  state.homeVideoResultsLimit = Number.isFinite(Number(uiPrefs.home_video_results_limit))
-    ? Math.max(0, Number.parseInt(uiPrefs.home_video_results_limit, 10))
+  state.homeVideoResultsLimit = "home_video_results_limit" in uiPrefs
+    ? parseHomeVideoResultsLimit(uiPrefs.home_video_results_limit)
     : UI_DEFAULTS.home_video_results_limit;
   state.musicCardSize = Number.isFinite(Number(uiPrefs.music_card_size))
     ? Math.max(UI_CARD_SIZE_MIN, Math.min(UI_CARD_SIZE_MAX, Number(uiPrefs.music_card_size)))
@@ -20139,10 +20149,7 @@ async function persistUiPreferences(partial = {}) {
     payload.home_video_sort = String(partial.home_video_sort || UI_DEFAULTS.home_video_sort);
   }
   if ("home_video_results_limit" in partial) {
-    payload.home_video_results_limit = Math.max(
-      0,
-      Number.parseInt(partial.home_video_results_limit, 10) || UI_DEFAULTS.home_video_results_limit
-    );
+    payload.home_video_results_limit = parseHomeVideoResultsLimit(partial.home_video_results_limit);
   }
   if ("music_card_size" in partial) {
     payload.music_card_size = Math.max(
@@ -22265,7 +22272,7 @@ function bindEvents() {
   const homeVideoResultsLimit = $("#home-video-results-limit");
   if (homeVideoResultsLimit) {
     homeVideoResultsLimit.addEventListener("change", () => {
-      state.homeVideoResultsLimit = Math.max(0, Number.parseInt(homeVideoResultsLimit.value, 10) || UI_DEFAULTS.home_video_results_limit);
+      state.homeVideoResultsLimit = parseHomeVideoResultsLimit(homeVideoResultsLimit.value);
       persistUiPreferences({ home_video_results_limit: state.homeVideoResultsLimit });
       rerenderHomeResultCards();
       refillHomeResultsForRaisedLimit();

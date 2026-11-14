@@ -13242,6 +13242,7 @@ def api_put_ui_preferences(payload: dict = Body(...)):
     for key in (
         "home_video_card_size",
         "home_video_sort",
+        "home_video_results_limit",
         "music_card_size",
         "music_sort",
         "music_hide_suggested_genres",

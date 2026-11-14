@@ -40,6 +40,7 @@ function makeStub(label) {
 }
 
 function loadApp() {
+  const fetchCalls = [];
   const sandbox = {
     console,
     setTimeout,
@@ -51,7 +52,10 @@ function loadApp() {
     URLSearchParams,
     TextEncoder,
     TextDecoder,
-    fetch: () => Promise.resolve({ ok: true, status: 200, json: async () => ({}), text: async () => "" }),
+    fetch: (url, options) => {
+      fetchCalls.push({ url: String(url), options: options || {} });
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}), text: async () => "" });
+    },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {}, clear() {} },
     MutationObserver: class {
       observe() {}
@@ -81,6 +85,17 @@ function loadApp() {
     innerWidth: 1280,
     innerHeight: 800,
     devicePixelRatio: 1,
+    Headers: class {
+      constructor(init) {
+        this.values = new Map(Object.entries(init || {}));
+      }
+      set(name, value) {
+        this.values.set(name, value);
+      }
+      get(name) {
+        return this.values.get(name);
+      }
+    },
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
@@ -99,10 +114,13 @@ function loadApp() {
   const read = (expression) => vm.runInContext(expression, context);
   return {
     context,
+    fetchCalls,
     state: read("state"),
     getHomeVisibleCandidateIdsByItem: read("getHomeVisibleCandidateIdsByItem"),
     getHomeVideoResultsLimitValue: read("getHomeVideoResultsLimitValue"),
     getHomeVideoCandidatePoolBudget: read("getHomeVideoCandidatePoolBudget"),
+    parseHomeVideoResultsLimit: read("parseHomeVideoResultsLimit"),
+    persistUiPreferences: read("persistUiPreferences"),
   };
 }
 
@@ -164,6 +182,23 @@ test("All results keeps every candidate", () => {
 
   const visible = app.getHomeVisibleCandidateIdsByItem().get("item-1");
   assert.equal(visible.size, 40);
+});
+
+test("the All option parses to 0 instead of the default", () => {
+  assert.equal(app.parseHomeVideoResultsLimit("0"), 0);
+  assert.equal(app.parseHomeVideoResultsLimit(0), 0);
+  assert.equal(app.parseHomeVideoResultsLimit("24"), 24);
+  assert.equal(app.parseHomeVideoResultsLimit("72"), 72);
+  assert.equal(app.parseHomeVideoResultsLimit(""), 24);
+  assert.equal(app.parseHomeVideoResultsLimit(undefined), 24);
+});
+
+test("All is persisted as 0 so it survives a reload", async () => {
+  app.fetchCalls.length = 0;
+  await app.persistUiPreferences({ home_video_results_limit: 0 });
+  const call = app.fetchCalls.find((entry) => entry.url.includes("/api/config/ui-preferences"));
+  assert.ok(call, "expected a ui-preferences request");
+  assert.equal(JSON.parse(call.options.body).home_video_results_limit, 0);
 });
 
 test("the per-source fetch budget follows the dropdown", () => {
