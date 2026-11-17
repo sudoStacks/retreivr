@@ -76,6 +76,11 @@ services:
       OPENVPN_PASSWORD: ${GLUETUN_OPENVPN_PASSWORD:-}
       WIREGUARD_PRIVATE_KEY: ${GLUETUN_WIREGUARD_PRIVATE_KEY:-}
       SERVER_COUNTRIES: ${GLUETUN_SERVER_COUNTRIES:-}
+      # Health targets must be IPs: a hostname target needs DNS, and a DNS
+      # failure would make gluetun restart the VPN mid-connection.
+      HEALTH_TARGET_ADDRESSES: "1.1.1.1:443,9.9.9.9:443"
+      DNS_UPSTREAM_RESOLVER_TYPE: "plain"
+      DNS_UPSTREAM_PLAIN_ADDRESSES: "1.1.1.1:53,1.0.0.1:53"
     volumes:
       - type: bind
         source: ${GLUETUN_WIREGUARD_CONFIG:-/dev/null}
